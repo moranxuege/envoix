@@ -50,6 +50,20 @@ fn offer_inventories() -> &'static Mutex<HashMap<i64, Vec<OfferEntry>>> {
     OFFER_INVENTORIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn register_manifest_cancel(
+    cancels: &mut HashMap<i64, TransferCancelToken>,
+    id: i64,
+    token: TransferCancelToken,
+) -> bool {
+    match cancels.entry(id) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(token);
+            true
+        }
+        std::collections::hash_map::Entry::Occupied(_) => false,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CompressionChoice {
@@ -190,7 +204,6 @@ struct AndroidAuthentication {
     rotation: Option<(Vec<u8>, u64)>,
     invitation_consumption: Option<InvitationConsumption>,
     authenticated: AtomicBool,
-    persisted: AtomicBool,
 }
 
 impl AndroidAuthentication {
@@ -207,7 +220,6 @@ impl AndroidAuthentication {
             rotation: None,
             invitation_consumption,
             authenticated: AtomicBool::new(false),
-            persisted: AtomicBool::new(false),
         }
     }
 
@@ -224,16 +236,11 @@ impl AndroidAuthentication {
             rotation: Some((opaque_credential, next_generation)),
             invitation_consumption: None,
             authenticated: AtomicBool::new(false),
-            persisted: AtomicBool::new(false),
         }
     }
 
     fn authenticated(&self) -> bool {
         self.authenticated.load(Ordering::Acquire)
-    }
-
-    fn persisted(&self) -> bool {
-        self.persisted.load(Ordering::Acquire)
     }
 }
 
@@ -265,9 +272,16 @@ impl AuthenticationHandler for AndroidAuthentication {
                 "protected remembered credential could not be persisted".into(),
             ));
         }
-        self.persisted.store(true, Ordering::Release);
         Ok(())
     }
+}
+
+fn should_stop_remembered_generation_fallback(
+    succeeded: bool,
+    authenticated: bool,
+    cancelled: bool,
+) -> bool {
+    succeeded || authenticated || cancelled
 }
 
 impl AndroidEvents {
@@ -504,6 +518,28 @@ pub extern "system" fn Java_dev_envoix_app_Native_listManifestV2PreparingJobs(
     json_result(&mut env, result)
 }
 
+/// Freezes one prepared job before durable ownership moves to a room outbox.
+///
+/// Repeating the call after a lost response is safe: an already-sealed job is
+/// validated and persisted again without changing its job/generation identity.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_sealManifestV2Job(
+    mut env: JNIEnv,
+    _class: JClass,
+    store_directory: JString,
+    job_id: JString,
+) -> jstring {
+    let store_directory = jstr(&mut env, &store_directory);
+    let job_id = jstr(&mut env, &job_id);
+    let result = runtime().block_on(async {
+        require_directory(&store_directory, "job store")?;
+        let store = TransferJobStore::new(&store_directory);
+        let job = seal_job_for_send(&store, &job_id).await?;
+        Ok::<_, String>(job_snapshot(&job))
+    });
+    json_result(&mut env, result)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_prepareManifestV2Job(
     mut env: JNIEnv,
@@ -691,7 +727,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_startManifestV2Session(
         emit_failed_manifest(&vm, &callback, "Manifest v2 registry unavailable", id);
         return;
     };
-    if cancels.insert(id, token.clone()).is_some() {
+    if !register_manifest_cancel(&mut cancels, id, token.clone()) {
         emit_failed_manifest(&vm, &callback, "Manifest v2 session is already active", id);
         return;
     }
@@ -1157,7 +1193,11 @@ async fn send_remembered(
             &authentication,
         )
         .await;
-        if result.is_ok() || authentication.persisted() || cancel.is_cancelled() {
+        if should_stop_remembered_generation_fallback(
+            result.is_ok(),
+            authentication.authenticated(),
+            cancel.is_cancelled(),
+        ) {
             return result;
         }
         last_error = result.err();
@@ -1217,7 +1257,11 @@ async fn receive_remembered(
         } else {
             receive.await
         };
-        if result.is_ok() || authentication.persisted() || cancel.is_cancelled() {
+        if should_stop_remembered_generation_fallback(
+            result.is_ok(),
+            authentication.authenticated(),
+            cancel.is_cancelled(),
+        ) {
             return result;
         }
         last_error = result.err();
@@ -1560,6 +1604,20 @@ async fn load_job(store: &TransferJobStore, encoded: &str) -> Result<CanonicalTr
         .ok_or_else(|| "Manifest v2 job was not found".into())
 }
 
+async fn seal_job_for_send(
+    store: &TransferJobStore,
+    encoded: &str,
+) -> Result<CanonicalTransferJob, String> {
+    let mut job = load_job(store, encoded).await?;
+    if job.lifecycle() != JobLifecycle::Sealed {
+        job.seal_for_send().map_err(|error| error.to_string())?;
+    }
+    // TransferJobStore::save validates the complete durable record before the
+    // outbox is allowed to take ownership of this identity.
+    store.save(&job).await.map_err(|error| error.to_string())?;
+    Ok(job)
+}
+
 fn decode_job_id(encoded: &str) -> Result<JobIdV2, String> {
     if encoded.len() != 32 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("job_id must contain exactly 32 hexadecimal characters".into());
@@ -1682,15 +1740,18 @@ struct FailureFact {
 }
 
 fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
-    let (cause, detail) = match error {
+    let (projected_error, invitation_consumed) = match error {
+        CoreError::InvitationConsumed(source) => (source.as_ref(), true),
+        error => (error, false),
+    };
+    let (cause, mut detail) = match projected_error {
         CoreError::Cause { cause, detail } => (cause.code(), detail.clone()),
-        CoreError::Rendezvous { cause, .. } => (cause.code(), error.to_string()),
+        CoreError::Rendezvous { cause, .. } => (cause.code(), projected_error.to_string()),
         CoreError::Cancelled => ("user_canceled", "operation cancelled".into()),
         CoreError::InvalidInput(detail) => ("unsupported_feature", detail.clone()),
         CoreError::Transport(detail) => ("transport", detail.clone()),
         CoreError::Protocol(detail) => ("protocol_or_integrity_failure", detail.clone()),
         CoreError::Crypto(detail) => ("authentication_failed", detail.clone()),
-        CoreError::InvitationConsumed(detail) => ("authentication_failed", detail.clone()),
         CoreError::Io(detail) | CoreError::Storage(detail) if direction == "send" => {
             ("sender_source_unavailable", detail.clone())
         }
@@ -1699,8 +1760,17 @@ fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
         }
         CoreError::Discovery(detail) => ("discovery", detail.clone()),
         CoreError::Transfer(detail) => ("transfer", detail.clone()),
+        CoreError::InvitationConsumed(_) => unreachable!("consumed invitation was unwrapped"),
     };
-    let (retryable, recovery_action) = failure_recovery(cause);
+    if invitation_consumed {
+        detail = error.to_string();
+    }
+    let (retryable, default_recovery_action) = failure_recovery(cause);
+    let recovery_action = if invitation_consumed && retryable {
+        "re_pair"
+    } else {
+        default_recovery_action
+    };
     FailureFact {
         cause,
         detail,
@@ -1760,6 +1830,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn seal_job_for_send_is_durable_and_idempotent() {
+        let temporary = tempfile::tempdir().expect("temporary manifest job store");
+        let source = temporary.path().join("source.txt");
+        std::fs::write(&source, b"remembered room payload").expect("write source");
+        let store = TransferJobStore::new(temporary.path().join("jobs"));
+
+        runtime().block_on(async {
+            let mut job =
+                CanonicalTransferJob::new(CompressionPolicyV2::Smart).expect("create job");
+            job.add_provider_path(
+                source,
+                "source.txt".into(),
+                LocalSourceOrigin::ContentUriStaging,
+                Vec::new(),
+            )
+            .await
+            .expect("prepare source");
+            assert_eq!(job.lifecycle(), JobLifecycle::ReadyToSend);
+            store.save(&job).await.expect("save prepared job");
+            let encoded = encode_job_id(job.job_id());
+
+            let sealed = seal_job_for_send(&store, &encoded)
+                .await
+                .expect("seal prepared job");
+            assert_eq!(sealed.lifecycle(), JobLifecycle::Sealed);
+
+            let repeated = seal_job_for_send(&store, &encoded)
+                .await
+                .expect("repeat lost-response seal");
+            assert_eq!(repeated.lifecycle(), JobLifecycle::Sealed);
+            assert_eq!(repeated.job_id(), sealed.job_id());
+            assert_eq!(repeated.generation(), sealed.generation());
+
+            let restored = load_job(&store, &encoded)
+                .await
+                .expect("restore sealed job");
+            assert_eq!(restored.lifecycle(), JobLifecycle::Sealed);
+            assert!(restored.manifest().is_some());
+        });
+    }
+
+    #[test]
+    fn duplicate_native_id_does_not_replace_the_live_cancel_token() {
+        let original = TransferCancelToken::new();
+        let duplicate = TransferCancelToken::new();
+        let mut cancels = HashMap::new();
+
+        assert!(register_manifest_cancel(&mut cancels, 7, original.clone()));
+        assert!(!register_manifest_cancel(
+            &mut cancels,
+            7,
+            duplicate.clone()
+        ));
+        cancels.get(&7).expect("original registration").cancel();
+
+        assert!(original.is_cancelled());
+        assert!(!duplicate.is_cancelled());
+    }
+
+    #[test]
+    fn authenticated_remembered_attempt_never_falls_back_to_another_generation() {
+        assert!(should_stop_remembered_generation_fallback(
+            false, true, false,
+        ));
+        assert!(should_stop_remembered_generation_fallback(
+            true, false, false,
+        ));
+        assert!(should_stop_remembered_generation_fallback(
+            false, false, true,
+        ));
+        assert!(!should_stop_remembered_generation_fallback(
+            false, false, false,
+        ));
+    }
+
+    #[test]
     fn android_path_projection_never_contains_endpoint_details() {
         let direct = DataPath::Direct {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 4242),
@@ -1803,9 +1949,12 @@ mod tests {
                 "re_pair",
             ),
             (
-                CoreError::InvitationConsumed("connection lost".into()),
+                CoreError::InvitationConsumed(Box::new(CoreError::Cause {
+                    cause: TransferCause::ReceiverSaveFailed,
+                    detail: "destination contended".into(),
+                })),
                 "send",
-                "authentication_failed",
+                "receiver_save_failed",
                 true,
                 "re_pair",
             ),

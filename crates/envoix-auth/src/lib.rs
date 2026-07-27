@@ -44,7 +44,11 @@ const REMEMBERED_CREDENTIAL_VERSION: u8 = 1;
 const REMEMBERED_CREDENTIAL_LEN: usize = 4 + 1 + 32;
 const REMEMBERED_ROOM_ID_LABEL: &[u8] = b"envoix room id";
 const REMEMBERED_ROOM_AUTH_LABEL: &[u8] = b"envoix room auth";
+const REMEMBERED_PRESENCE_TAG_LABEL: &[u8] = b"envoix presence tag";
 const REMEMBERED_DATA_AUTH_LABEL: &[u8] = b"envoix remembered data auth";
+
+pub const REMEMBERED_PRESENCE_TAG_PREFIX: &str = "p1_";
+pub const REMEMBERED_PRESENCE_TAG_LEN: usize = REMEMBERED_PRESENCE_TAG_PREFIX.len() + 43;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -132,6 +136,20 @@ impl RememberedCredential {
             ),
             room_auth,
         }
+    }
+
+    /// Derive a generation-scoped presence tag safe to publish on an
+    /// untrusted local discovery carrier.
+    ///
+    /// The tag is domain-separated from the hidden broker locator and
+    /// authenticator. It proves no identity or room ownership by itself.
+    pub fn derive_presence_tag(&self, generation: u64) -> String {
+        let tag =
+            derive_remembered_value(&self.secret, generation, REMEMBERED_PRESENCE_TAG_LABEL, &[]);
+        format!(
+            "{REMEMBERED_PRESENCE_TAG_PREFIX}{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tag)
+        )
     }
 }
 
@@ -890,6 +908,27 @@ mod tests {
         assert_ne!(current.room_auth, next.room_auth);
         assert_ne!(&current.room_id["r1_".len()..], current.control_password());
         assert_eq!(current.room_id.len(), 46);
+    }
+
+    #[test]
+    fn presence_tags_are_bounded_and_separated_by_generation_and_credential() {
+        let credential = credential();
+        let current = credential.derive_presence_tag(7);
+        let next = credential.derive_presence_tag(8);
+        let other = RememberSecret([0x5b; 32])
+            .into_credential()
+            .derive_presence_tag(7);
+
+        assert_eq!(current.len(), REMEMBERED_PRESENCE_TAG_LEN);
+        assert!(current.starts_with(REMEMBERED_PRESENCE_TAG_PREFIX));
+        assert!(
+            current
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        );
+        assert_ne!(current, next);
+        assert_ne!(current, other);
+        assert_ne!(current, credential.derive_session(7).room_id());
     }
 
     #[tokio::test]

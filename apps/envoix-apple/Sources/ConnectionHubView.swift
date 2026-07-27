@@ -11,6 +11,9 @@ struct ConnectionHubView: View {
     let roomInvitation: RoomControlInvitation?
     let roomInvitationIsRevealed: Bool
     let roomInvitationIsStarting: Bool
+    let rememberedRooms: [RememberedPeerSummary]
+    let rememberedRoomStatus: (String) -> RememberedRoomConnectionStatus
+    let incomingRememberedRelationshipID: String?
     let onScanQRCode: () -> Void
     let onEnterCode: () -> Void
     let onRevealRoomInvitation: () -> Void
@@ -19,6 +22,7 @@ struct ConnectionHubView: View {
     let onCancelRoomInvitation: () -> Void
     let onSetVisibility: (NearbyVisibilityMode) -> Void
     let onRename: (String) -> Bool
+    let onSelectRememberedRoom: (String) -> Void
     let onSelectPeer: (NearbyPairingSelection) -> Void
 
     @State private var isNameEditorPresented = false
@@ -30,6 +34,7 @@ struct ConnectionHubView: View {
                 roomInvitationCard
                 connectionMethods
                 identityAndVisibility
+                rememberedRoomsSection
                 nearbyHeader
 
                 if coordinator.state.statuses[.bluetooth]?.availability == .permissionRequired {
@@ -159,6 +164,140 @@ struct ConnectionHubView: View {
         }
     }
 
+    @ViewBuilder
+    private var rememberedRoomsSection: some View {
+        if !rememberedRooms.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text(AppText.value("Rooms", "房间", language: language))
+                        .font(.headline.weight(.semibold))
+                    Spacer()
+                    Text(AppText.value(
+                        "\(rememberedRooms.count) saved",
+                        "已保存 \(rememberedRooms.count) 个",
+                        language: language
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(Theme.muted)
+                }
+
+                ForEach(rememberedRooms) { room in
+                    let hasIncomingOffer =
+                        incomingRememberedRelationshipID == room.relationshipID
+                    Button {
+                        onSelectRememberedRoom(room.relationshipID)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: rememberedRoomIcon(
+                                rememberedRoomStatus(room.relationshipID)
+                            ))
+                            .font(.title3)
+                            .foregroundStyle(rememberedRoomTint(
+                                rememberedRoomStatus(room.relationshipID)
+                            ))
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(room.label)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.text)
+                                    .lineLimit(1)
+                                Text(hasIncomingOffer
+                                     ? AppText.value(
+                                         "Incoming files",
+                                         "收到文件邀请",
+                                         language: language
+                                     )
+                                     : rememberedRoomStatusText(
+                                         rememberedRoomStatus(room.relationshipID)
+                                     ))
+                                .font(.caption)
+                                .foregroundStyle(
+                                    hasIncomingOffer ? Theme.accentStrong : Theme.muted
+                                )
+                                .lineLimit(1)
+                            }
+                            Spacer()
+                            if hasIncomingOffer {
+                                Text(AppText.value(
+                                    "Open",
+                                    "查看",
+                                    language: language
+                                ))
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(Theme.accentStrong)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    Theme.accentSoft,
+                                    in: Capsule()
+                                )
+                                .accessibilityHidden(true)
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Theme.muted)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(hasIncomingOffer
+                        ? AppText.value(
+                            "Incoming files waiting for your decision",
+                            "有文件邀请等待处理",
+                            language: language
+                        )
+                        : rememberedRoomStatusText(
+                            rememberedRoomStatus(room.relationshipID)
+                        ))
+                    .accessibilityIdentifier("remembered_room_\(room.relationshipID)")
+                }
+            }
+            .card(padding: 14)
+            .accessibilityIdentifier("remembered_rooms")
+        }
+    }
+
+    private func rememberedRoomStatusText(
+        _ status: RememberedRoomConnectionStatus
+    ) -> String {
+        switch status {
+        case .offline:
+            return AppText.value("Available when both apps are open", "双方打开应用时可连接", language: language)
+        case .connecting:
+            return AppText.value("Connecting…", "正在连接…", language: language)
+        case .waiting:
+            return AppText.value("Available to the other device…", "正在等待另一台设备…", language: language)
+        case .connected:
+            return AppText.value("Connected", "已连接", language: language)
+        case .needsRepair:
+            return AppText.value("Pair again to reconnect", "请重新配对后连接", language: language)
+        }
+    }
+
+    private func rememberedRoomIcon(
+        _ status: RememberedRoomConnectionStatus
+    ) -> String {
+        switch status {
+        case .offline: return "bubble.left.and.bubble.right"
+        case .connecting: return "arrow.triangle.2.circlepath"
+        case .waiting: return "antenna.radiowaves.left.and.right"
+        case .connected: return "checkmark.circle.fill"
+        case .needsRepair: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func rememberedRoomTint(
+        _ status: RememberedRoomConnectionStatus
+    ) -> Color {
+        switch status {
+        case .connected: return Theme.success
+        case .connecting, .waiting: return Theme.accentStrong
+        case .needsRepair: return Theme.danger
+        case .offline: return Theme.muted
+        }
+    }
+
     private var roomInvitationCard: some View {
         VStack(spacing: 14) {
             ZStack {
@@ -259,7 +398,7 @@ struct ConnectionHubView: View {
     }
 
     private var roomCodeText: String {
-        roomInvitation?.code ?? "R000000-ROOM-CODE"
+        roomInvitation?.code ?? "R000000-xxxx-xxxx"
     }
 
     private var connectionMethods: some View {

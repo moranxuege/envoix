@@ -6,8 +6,10 @@
 -keep class dev.envoix.app.EventCallback { *; }
 -keep class dev.envoix.app.ManifestV2Callback { *; }
 -keep class dev.envoix.app.RoomControlCallback { *; }
+-keep class dev.envoix.app.NearbyInviteCallback { *; }
 -keep class dev.envoix.app.LogCallback { *; }
 -keepclassmembers class * implements dev.envoix.app.EventCallback { *; }
 -keepclassmembers class * implements dev.envoix.app.ManifestV2Callback { *; }
 -keepclassmembers class * implements dev.envoix.app.RoomControlCallback { *; }
+-keepclassmembers class * implements dev.envoix.app.NearbyInviteCallback { *; }
 -keepclassmembers class * implements dev.envoix.app.LogCallback { *; }

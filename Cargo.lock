@@ -986,6 +986,7 @@ dependencies = [
  "ndk-context",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1056,6 +1057,7 @@ version = "0.2.0"
 dependencies = [
  "base64",
  "envoix-client",
+ "envoix-error",
  "envoix-qr",
  "envoix-rendezvous-iroh",
  "envoix-types",
@@ -1191,6 +1193,7 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "n0-error",
  "n0-future",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

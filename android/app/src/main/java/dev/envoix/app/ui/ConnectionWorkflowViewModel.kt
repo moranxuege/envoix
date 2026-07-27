@@ -7,7 +7,6 @@ import dev.envoix.app.InviteCodec
 import dev.envoix.app.ParsedInvite
 import dev.envoix.app.Settings
 import dev.envoix.app.SettingsStore
-import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,7 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Navigation and direct InviteV2 adapter around one foreground room-control
+ * Navigation and direct InviteV2 adapter around one live room-control
  * workflow. File-transfer lifetime remains owned by TransferRepository.
  */
 internal class ConnectionWorkflowViewModel(
@@ -217,19 +216,72 @@ internal class ConnectionWorkflowViewModel(
         openUtilityScreen(WorkflowScreen.Activity)
     }
 
+    fun openRooms() {
+        if (transferDecisionPending()) return
+        discardTransferDraft()
+        _uiState.value =
+            _uiState.value.copy(
+                screen = WorkflowScreen.Rooms,
+                returnScreen = WorkflowScreen.Hub,
+                selectedRememberedRelationshipId = null,
+                transferDraft = null,
+            )
+    }
+
+    fun openRememberedRoom(relationshipId: String) {
+        if (relationshipId.isBlank() || transferDecisionPending()) return
+        discardTransferDraft()
+        _uiState.value =
+            _uiState.value.copy(
+                screen = WorkflowScreen.RememberedRoom,
+                returnScreen = WorkflowScreen.Rooms,
+                selectedRememberedRelationshipId = relationshipId,
+                transferDraft = null,
+            )
+    }
+
     fun openSettings() {
         openUtilityScreen(WorkflowScreen.Settings)
     }
 
     fun navigateBack() {
         val state = _uiState.value
-        if ((state.screen == WorkflowScreen.Activity || state.screen == WorkflowScreen.Settings) &&
-            state.returnScreen == WorkflowScreen.Room &&
-            state.room != null
-        ) {
-            _uiState.value = state.copy(screen = WorkflowScreen.Room)
-        } else {
-            _uiState.value = state.copy(screen = WorkflowScreen.Hub, returnScreen = WorkflowScreen.Hub)
+        when (state.screen) {
+            WorkflowScreen.RememberedRoom ->
+                _uiState.value =
+                    state.copy(
+                        screen = WorkflowScreen.Rooms,
+                        returnScreen = WorkflowScreen.Hub,
+                        selectedRememberedRelationshipId = null,
+                    )
+            WorkflowScreen.Rooms ->
+                _uiState.value =
+                    state.copy(
+                        screen = WorkflowScreen.Hub,
+                        returnScreen = WorkflowScreen.Hub,
+                        selectedRememberedRelationshipId = null,
+                    )
+            WorkflowScreen.Activity, WorkflowScreen.Settings -> {
+                val destination =
+                    when (state.returnScreen) {
+                        WorkflowScreen.Room ->
+                            WorkflowScreen.Room.takeIf { state.room != null }
+                        WorkflowScreen.RememberedRoom ->
+                            WorkflowScreen.RememberedRoom.takeIf {
+                                state.selectedRememberedRelationshipId != null
+                            }
+                        WorkflowScreen.Rooms -> WorkflowScreen.Rooms
+                        else -> WorkflowScreen.Hub
+                    } ?: WorkflowScreen.Hub
+                _uiState.value = state.copy(screen = destination)
+            }
+            else ->
+                _uiState.value =
+                    state.copy(
+                        screen = WorkflowScreen.Hub,
+                        returnScreen = WorkflowScreen.Hub,
+                        selectedRememberedRelationshipId = null,
+                    )
         }
     }
 
@@ -334,32 +386,32 @@ internal class ConnectionWorkflowViewModel(
             return
         }
         if (_uiState.value.incomingOfferBusy) return
+        val attempt = ++incomingOfferAttempt
+        setIncomingOfferAcceptance(busy = true, error = null)
         val invitation =
             runCatching { parseInvitation(offer.transferInvite) }
                 .getOrNull()
         val transferReference = invitation?.reference
         if (invitation == null || transferReference.isNullOrBlank()) {
-            setIncomingOfferAcceptance(
-                busy = false,
-                error =
-                    AppText.value(
-                        "This file invitation is invalid or expired.",
-                        "此文件邀请无效或已过期。",
-                        currentSettings().language,
-                    ),
+            rejectUnusableIncomingOffer(
+                offer,
+                AppText.value(
+                    "This file invitation is invalid or expired.",
+                    "此文件邀请无效或已过期。",
+                    currentSettings().language,
+                ),
             )
             return
         }
         val roomEndpoint = _uiState.value.control.endpoint
         if (roomEndpoint == null) {
-            setIncomingOfferAcceptance(
-                busy = false,
-                error =
-                    AppText.value(
-                        "The room route is unavailable. Reconnect before receiving files.",
-                        "房间连接地址不可用，请重新连接后再接收文件。",
-                        currentSettings().language,
-                    ),
+            rejectUnusableIncomingOffer(
+                offer,
+                AppText.value(
+                    "The room route is unavailable. Reconnect before receiving files.",
+                    "房间连接地址不可用，请重新连接后再接收文件。",
+                    currentSettings().language,
+                ),
             )
             return
         }
@@ -367,19 +419,16 @@ internal class ConnectionWorkflowViewModel(
             invitation.broker == roomEndpoint.broker &&
                 invitation.relay.orEmpty() == roomEndpoint.relay
         if (!belongsToRoom) {
-            setIncomingOfferAcceptance(
-                busy = false,
-                error =
-                    AppText.value(
-                        "This file offer does not belong to the current room.",
-                        "此文件邀请不属于当前房间。",
-                        currentSettings().language,
-                    ),
+            rejectUnusableIncomingOffer(
+                offer,
+                AppText.value(
+                    "This file offer does not belong to the current room.",
+                    "此文件邀请不属于当前房间。",
+                    currentSettings().language,
+                ),
             )
             return
         }
-        val attempt = ++incomingOfferAttempt
-        setIncomingOfferAcceptance(busy = true, error = null)
         var receiveCompletionInvoked = false
         val receiveCompletion = receiveCompletion@{ receiveId: Long, startError: String? ->
             receiveCompletionInvoked = true
@@ -391,7 +440,7 @@ internal class ConnectionWorkflowViewModel(
             }
             if (startError != null) {
                 if (receiveId >= 0L) onCancelReceive(receiveId)
-                setIncomingOfferAcceptance(busy = false, error = startError)
+                rejectUnusableIncomingOffer(offer, startError)
                 return@receiveCompletion
             }
             confirmIncomingRoomOffer(
@@ -413,12 +462,25 @@ internal class ConnectionWorkflowViewModel(
             )
         }.onFailure { error ->
             if (!receiveCompletionInvoked && attempt == incomingOfferAttempt) {
-                setIncomingOfferAcceptance(
-                    busy = false,
-                    error = error.message ?: "The receiver could not start",
+                rejectUnusableIncomingOffer(
+                    offer,
+                    error.message ?: "The receiver could not start",
                 )
             }
         }
+    }
+
+    private fun rejectUnusableIncomingOffer(
+        offer: RoomTransferOffer,
+        message: String,
+    ) {
+        controlWorkflow.respondToOffer(
+            offerId = offer.id,
+            accept = false,
+            completion = { responseError ->
+                controlWorkflow.showError(responseError ?: message)
+            },
+        )
     }
 
     private fun setIncomingOfferAcceptance(
@@ -497,10 +559,10 @@ internal class ConnectionWorkflowViewModel(
     fun setForeground(foreground: Boolean) {
         this.foreground = foreground
         if (foreground) return
+        // The authenticated room survives backgrounding, but its invitation is
+        // still a secret and must not remain visible in task snapshots or
+        // behind an external picker.
         controlWorkflow.setInviteRevealed(false)
-        if (externalActivityLeases == 0 && controlWorkflow.state.live) {
-            controlWorkflow.close(RoomCloseReason.Backgrounded)
-        }
     }
 
     fun setExternalActivityActive(active: Boolean) {
@@ -509,9 +571,7 @@ internal class ConnectionWorkflowViewModel(
             return
         }
         externalActivityLeases = (externalActivityLeases - 1).coerceAtLeast(0)
-        if (externalActivityLeases == 0 && !foreground && controlWorkflow.state.live) {
-            controlWorkflow.close(RoomCloseReason.Backgrounded)
-        }
+        if (externalActivityLeases == 0 && !foreground) controlWorkflow.setInviteRevealed(false)
     }
 
     fun acceptIncomingOffer(offer: NearbyRendezvousOffer): Boolean {
@@ -646,7 +706,7 @@ internal class ConnectionWorkflowViewModel(
             NearbyPairingSelection(
                 discoveryPeerKey = offer.senderPeerKey,
                 displayName = offer.senderDisplayName,
-                sources = setOf(DiscoverySource.Bluetooth),
+                sources = setOf(offer.source),
             )
         val currentRoom = _uiState.value.room
         if (_uiState.value.screen == WorkflowScreen.Room &&
@@ -693,7 +753,11 @@ internal class ConnectionWorkflowViewModel(
         val state = _uiState.value
         val returnScreen =
             when (state.screen) {
-                WorkflowScreen.Hub, WorkflowScreen.Room -> state.screen
+                WorkflowScreen.Hub,
+                WorkflowScreen.Room,
+                WorkflowScreen.Rooms,
+                WorkflowScreen.RememberedRoom,
+                -> state.screen
                 WorkflowScreen.Activity, WorkflowScreen.Settings -> state.returnScreen
             }
         _uiState.value =
@@ -713,6 +777,7 @@ internal class ConnectionWorkflowViewModel(
                 screen = WorkflowScreen.Hub,
                 returnScreen = WorkflowScreen.Hub,
                 room = null,
+                selectedRememberedRelationshipId = null,
                 transferDraft = null,
             )
     }

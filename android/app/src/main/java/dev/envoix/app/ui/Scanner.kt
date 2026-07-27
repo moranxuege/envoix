@@ -287,7 +287,9 @@ private fun CameraPreview(
     onQr: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     val disposed = remember { AtomicBoolean(false) }
     var provider: ProcessCameraProvider? by remember { mutableStateOf(null) }
@@ -323,7 +325,16 @@ private fun CameraPreview(
                         .Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
-                        .also { it.setAnalyzer(executor, QrAnalyzer(onQr)) }
+                        .also {
+                            it.setAnalyzer(
+                                executor,
+                                QrAnalyzer { value ->
+                                    mainExecutor.execute {
+                                        if (!disposed.get()) onQr(value)
+                                    }
+                                },
+                            )
+                        }
                 runCatching {
                     cameraProvider.unbind(previewUseCase, analysisUseCase)
                     cameraProvider.bindToLifecycle(

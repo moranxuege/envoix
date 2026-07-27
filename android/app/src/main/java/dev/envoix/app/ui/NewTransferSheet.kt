@@ -26,7 +26,6 @@ import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
@@ -37,7 +36,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -65,8 +63,6 @@ import dev.envoix.app.ManifestV2StageResult
 import dev.envoix.app.Native
 import dev.envoix.app.PreparedManifestV2Source
 import dev.envoix.app.R
-import dev.envoix.app.RememberedPeerStore
-import dev.envoix.app.RememberedPeerSummary
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.TransferService
 import dev.envoix.app.discovery.DiscoverySource
@@ -85,6 +81,15 @@ internal typealias PrepareReceiveBeforeDecision = (
     qrPayload: String?,
     copyApproved: Boolean,
     completion: (id: Long, error: String?) -> Unit,
+) -> Unit
+
+internal typealias QueuePreparedSend = (
+    jobId: String,
+    rootNames: List<String>,
+    itemCount: Int,
+    directoryCount: Int,
+    totalBytes: Long,
+    completion: (String?) -> Unit,
 ) -> Unit
 
 /**
@@ -131,6 +136,7 @@ internal fun NewTransferSheet(
     onPrepareReceiveBeforeDecision: PrepareReceiveBeforeDecision? = null,
     onCancelPreparedReceive: (Long) -> Unit = {},
     onPreparedReceiveCommitted: (String) -> Unit = {},
+    onQueuePreparedSend: QueuePreparedSend? = null,
 ) {
     val colors = Envoix.colors
     val context = LocalContext.current
@@ -175,8 +181,6 @@ internal fun NewTransferSheet(
     var rendezvousError by preparation.rendezvousError
     var initialPairingInputApplied by preparation.initialPairingInputApplied
     var startSubmitted by preparation.startSubmitted
-    val rememberedPeers = remember { mutableStateListOf<RememberedPeerSummary>() }
-    var selectedRememberedPeer by remember { mutableStateOf<RememberedPeerSummary?>(null) }
     var rememberAfterPairing by remember { mutableStateOf(false) }
     var rememberLabel by remember { mutableStateOf("") }
 
@@ -187,14 +191,6 @@ internal fun NewTransferSheet(
         onDispose {
             if (preparationState == null) preparation.discard()
         }
-    }
-
-    LaunchedEffect(Unit) {
-        rememberedPeers.clear()
-        rememberedPeers +=
-            withContext(Dispatchers.IO) {
-                RememberedPeerStore.get(context).peers()
-            }
     }
 
     fun addSources(sources: List<ManifestV2Source>) {
@@ -466,10 +462,10 @@ internal fun NewTransferSheet(
             !rendezvousBusy &&
             (!requiresNearbyDelivery || nearbyDeliveryAvailable) &&
             (
-                selectedRememberedPeer != null ||
-                    (if (joining) invitationInput != null || roomCodeValid else generated != null)
+                onQueuePreparedSend != null ||
+                    if (joining) invitationInput != null || roomCodeValid else generated != null
             ) &&
-            (!rememberAfterPairing || selectedRememberedPeer != null || rememberLabel.trim().isNotEmpty()) &&
+            (!rememberAfterPairing || rememberLabel.trim().isNotEmpty()) &&
             when (role) {
                 "send" ->
                     preparedSources.isNotEmpty() &&
@@ -564,19 +560,31 @@ internal fun NewTransferSheet(
                     appString(R.string.add_files),
                     appString(R.string.add_files_hint),
                     placeholder = preparedSources.isEmpty(),
-                ) {
-                    onExternalActivityChanged(true)
-                    filePicker.launch(arrayOf("*/*"))
-                }
+                    onClick =
+                        if (startSubmitted) {
+                            null
+                        } else {
+                            {
+                                onExternalActivityChanged(true)
+                                filePicker.launch(arrayOf("*/*"))
+                            }
+                        },
+                )
                 Spacer(Modifier.height(8.dp))
                 PathRow(
                     appString(R.string.add_folder),
                     appString(R.string.add_folder_hint),
                     placeholder = false,
-                ) {
-                    onExternalActivityChanged(true)
-                    sourceFolderPicker.launch(null)
-                }
+                    onClick =
+                        if (startSubmitted) {
+                            null
+                        } else {
+                            {
+                                onExternalActivityChanged(true)
+                                sourceFolderPicker.launch(null)
+                            }
+                        },
+                )
                 preparedSources.forEach { prepared ->
                     Row(
                         Modifier
@@ -629,7 +637,7 @@ internal fun NewTransferSheet(
                                 modifier =
                                     Modifier
                                         .clip(RoundedCornerShape(7.dp))
-                                        .clickable {
+                                        .clickable(enabled = !startSubmitted) {
                                             sourceAwaitingReauthorization = prepared
                                             onExternalActivityChanged(true)
                                             sourceReauthorizationPicker.launch(null)
@@ -644,7 +652,7 @@ internal fun NewTransferSheet(
                                     modifier =
                                         Modifier
                                             .clip(RoundedCornerShape(7.dp))
-                                            .clickable { approvePartial(prepared) }
+                                            .clickable(enabled = !startSubmitted) { approvePartial(prepared) }
                                             .padding(horizontal = 7.dp, vertical = 5.dp),
                                 )
                             }
@@ -660,7 +668,7 @@ internal fun NewTransferSheet(
                             modifier =
                                 Modifier
                                     .clip(CircleShape)
-                                    .clickable { removeSource(prepared) }
+                                    .clickable(enabled = !startSubmitted) { removeSource(prepared) }
                                     .padding(7.dp)
                                     .size(17.dp),
                         )
@@ -741,66 +749,6 @@ internal fun NewTransferSheet(
                 )
                 Spacer(Modifier.height(6.dp))
 
-                if (rememberedPeers.isNotEmpty()) {
-                    rememberedPeers.forEach { peer ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(
-                                    if (selectedRememberedPeer?.relationshipId == peer.relationshipId) {
-                                        colors.accentSoft
-                                    } else {
-                                        colors.surface
-                                    },
-                                ).clickable {
-                                    selectedRememberedPeer =
-                                        peer.takeUnless {
-                                            selectedRememberedPeer?.relationshipId == peer.relationshipId
-                                        }
-                                    if (selectedRememberedPeer != null) {
-                                        invitationInput = null
-                                        typed = ""
-                                        topMode = "closed"
-                                        rememberAfterPairing = false
-                                    }
-                                }.padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                peer.label,
-                                color = colors.text,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Icon(
-                                Icons.Default.Delete,
-                                contentDescription = text("Forget device", "忘记设备"),
-                                tint = colors.danger,
-                                modifier =
-                                    Modifier
-                                        .clip(CircleShape)
-                                        .clickable {
-                                            preparationScope.launch {
-                                                withContext(Dispatchers.IO) {
-                                                    RememberedPeerStore
-                                                        .get(context)
-                                                        .delete(peer.relationshipId)
-                                                }
-                                                rememberedPeers.remove(peer)
-                                                if (selectedRememberedPeer == peer) {
-                                                    selectedRememberedPeer = null
-                                                }
-                                            }
-                                        }.padding(6.dp)
-                                        .size(18.dp),
-                            )
-                        }
-                        Spacer(Modifier.height(6.dp))
-                    }
-                    Spacer(Modifier.height(6.dp))
-                }
-
                 // ---- top pane: show my QR vs scan one ----
                 Row(
                     Modifier
@@ -811,11 +759,9 @@ internal fun NewTransferSheet(
                         .padding(3.dp),
                 ) {
                     SegTab(appString(R.string.show_qr), topMode == "show", Modifier.weight(1f)) {
-                        selectedRememberedPeer = null
                         topMode = "show"
                     }
                     SegTab(appString(R.string.scan_qr), topMode == "scan", Modifier.weight(1f)) {
-                        selectedRememberedPeer = null
                         topMode = "scan"
                     }
                 }
@@ -883,7 +829,6 @@ internal fun NewTransferSheet(
                     value = typed,
                     onValueChange = {
                         val value = it.trim()
-                        selectedRememberedPeer = null
                         if (value.startsWith("envoix:")) {
                             applyScanned(value)
                         } else {
@@ -898,29 +843,27 @@ internal fun NewTransferSheet(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                if (selectedRememberedPeer == null) {
-                    Spacer(Modifier.height(12.dp))
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { rememberAfterPairing = !rememberAfterPairing },
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = rememberAfterPairing,
-                            onCheckedChange = { rememberAfterPairing = it },
-                        )
-                        Text(text("Remember this device", "记住此设备"), color = colors.text)
-                    }
-                    if (rememberAfterPairing) {
-                        OutlinedTextField(
-                            value = rememberLabel,
-                            onValueChange = { rememberLabel = it },
-                            placeholder = { Text(text("Device label", "设备名称")) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { rememberAfterPairing = !rememberAfterPairing },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(
+                        checked = rememberAfterPairing,
+                        onCheckedChange = { rememberAfterPairing = it },
+                    )
+                    Text(text("Remember this device", "记住此设备"), color = colors.text)
+                }
+                if (rememberAfterPairing) {
+                    OutlinedTextField(
+                        value = rememberLabel,
+                        onValueChange = { rememberLabel = it },
+                        placeholder = { Text(text("Device label", "设备名称")) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }
@@ -936,29 +879,28 @@ internal fun NewTransferSheet(
                 .background(colors.accent.copy(alpha = if (ready) 1f else 0.4f))
                 .clickable(enabled = ready) {
                     startSubmitted = true
-
-                    selectedRememberedPeer?.let { peer ->
-                        if (preparation.transferOwnership()) {
-                            if (role == "send") {
-                                onSend(
-                                    peer.label,
-                                    peer.broker,
-                                    peer.relay,
-                                    preparedJobId!!,
-                                    null,
-                                    null,
-                                    peer.relationshipId,
-                                )
-                            } else {
-                                onReceive(
-                                    peer.label,
-                                    peer.broker,
-                                    peer.relay,
-                                    null,
-                                    true,
-                                    null,
-                                    peer.relationshipId,
-                                )
+                    if (role == "send" && onQueuePreparedSend != null) {
+                        val jobId = preparedJobId
+                        val summary = preparationSummary
+                        if (jobId == null || summary == null || !preparation.transferOwnership()) {
+                            startSubmitted = false
+                            return@clickable
+                        }
+                        rendezvousBusy = true
+                        rendezvousError = null
+                        onQueuePreparedSend(
+                            jobId,
+                            preparedSources.map { it.source.displayName }.take(3),
+                            summary.optInt("file_count") +
+                                summary.optInt("directory_count"),
+                            summary.optInt("directory_count"),
+                            summary.optLong("total"),
+                        ) { error ->
+                            rendezvousBusy = false
+                            if (error != null) {
+                                preparation.rollbackTransferredOwnership()
+                                rendezvousError = error
+                                startSubmitted = false
                             }
                         }
                         return@clickable
@@ -1108,7 +1050,10 @@ internal fun NewTransferSheet(
                 when {
                     rendezvousBusy && role == "receive" ->
                         text("Preparing receiver…", "正在准备接收…")
+                    rendezvousBusy && onQueuePreparedSend != null ->
+                        text("Queueing files…", "正在加入队列…")
                     rendezvousBusy -> text("Delivering invite…", "正在发送邀请…")
+                    onQueuePreparedSend != null -> text("Queue files", "加入发送队列")
                     roomMode && role == "send" -> text("Offer files", "发送文件")
                     roomMode -> text("Receive", "接收")
                     role == "send" -> text("Send", "发送")
@@ -1192,6 +1137,9 @@ private fun NearbyPairingContext(
                     DiscoverySource.WifiAware -> "Wi-Fi Aware"
                 }
             }
+    val secureLocalDelivery =
+        DiscoverySource.Mdns in selection.sources &&
+            selection.nearbyInviteRoute != null
     Column(
         Modifier
             .fillMaxWidth()
@@ -1210,10 +1158,15 @@ private fun NearbyPairingContext(
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            if (DiscoverySource.Bluetooth in selection.sources && !nearbyDeliveryAvailable) {
+            if (!nearbyDeliveryAvailable) {
                 text(
                     "This device is not visible right now. Keep this sheet open; offering files becomes available after it reappears.",
                     "当前无法发现此设备。请保持此页面打开；设备重新出现后即可发送文件。",
+                )
+            } else if (secureLocalDelivery) {
+                text(
+                    "The room invitation will be encrypted to the selected local-network endpoint. The public device name is still unverified.",
+                    "房间邀请将加密发送到所选局域网端点；公开的设备名称仍未经验证。",
                 )
             } else if (DiscoverySource.Bluetooth in selection.sources) {
                 text(

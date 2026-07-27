@@ -38,7 +38,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Transfer
-import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.discovery.NearbyRendezvousOffer
 import dev.envoix.app.isTerminal
@@ -148,8 +147,14 @@ internal fun DeviceRoomScreen(
             }
         }
     val nearbyAvailable =
-        draft.nearbySelection?.discoveryPeerKey?.let { selectedKey ->
-            discoveryState.peers.any { it.peerKey == selectedKey }
+        draft.nearbySelection?.let { selection ->
+            discoveryState.peers.any { peer ->
+                peer.peerKey == selection.discoveryPeerKey &&
+                    (
+                        selection.nearbyInviteRoute == null ||
+                            peer.nearbyInviteRoute == selection.nearbyInviteRoute
+                    )
+            }
         }
     var confirmEnd by remember { mutableStateOf(false) }
 
@@ -337,11 +342,10 @@ internal fun DeviceRoomScreen(
                         connectedRoom && role == "send" -> onOfferRoomTransfer
                         else ->
                             nearbySelection
-                                ?.takeIf { DiscoverySource.Bluetooth in it.sources }
                                 ?.let { selection ->
                                     { offer, completion ->
                                         discoveryViewModel.offerInvite(
-                                            selection.discoveryPeerKey,
+                                            selection,
                                             offer.transferInvite,
                                             completion,
                                         )

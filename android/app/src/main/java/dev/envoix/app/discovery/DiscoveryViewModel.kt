@@ -195,20 +195,28 @@ internal class DiscoveryViewModel(
     }
 
     fun offerInvite(
-        peerKey: String,
+        selection: NearbyPairingSelection,
         invite: String,
         completion: (error: String?) -> Unit,
     ) {
-        val provider = providers.filterIsInstance<NearbyRendezvousProvider>().firstOrNull()
+        val preferredSource =
+            preferredRendezvousSource(
+                selection = selection,
+                roomInvitation = RoomControlInviteFormat.looksLikeRoomInvite(invite),
+            )
+        val provider =
+            providers
+                .filterIsInstance<NearbyRendezvousProvider>()
+                .firstOrNull { it.source == preferredSource }
         if (!started || provider == null) {
-            completion("Experimental Bluetooth pairing is not available")
+            completion("Nearby invitation delivery is not available for this device")
             return
         }
         val activeGeneration = generation
-        provider.offerInvite(peerKey, invite) { error ->
+        provider.offerInvite(selection, invite) { error ->
             viewModelScope.launch {
                 if (!started || generation != activeGeneration) {
-                    completion("Bluetooth discovery stopped")
+                    completion("Nearby discovery stopped")
                 } else {
                     completion(error)
                 }
@@ -281,7 +289,7 @@ internal class DiscoveryViewModel(
                     if (InviteCodec.parseForRouting(offer.invite) == null &&
                         !RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)
                     ) {
-                        OpLog.add("DISCOVERY provider=bluetooth state=invalid_offer")
+                        OpLog.add("DISCOVERY provider=${offer.source.logName()} state=invalid_offer")
                         return@launch
                     }
                     if (requestedMode == DiscoveryMode.SelectedPeer && offer.senderPeerKey != selectedPeerKey) {
@@ -295,7 +303,12 @@ internal class DiscoveryViewModel(
     private fun createProviders(): List<DiscoveryProvider> =
         listOf(
             BluetoothDiscoveryProvider(getApplication(), identity, advertisingAllowed()),
-            MdnsDiscoveryProvider(getApplication(), identity, advertisingAllowed()),
+            MdnsDiscoveryProvider(
+                getApplication(),
+                identity,
+                advertisingAllowed(),
+                SettingsStore.settings.value.relay,
+            ),
             WifiAwareDiscoveryProvider(),
         )
 
@@ -333,3 +346,23 @@ private data class PresenceSettings(
     val visibility: NearbyVisibility,
     val expiresAtEpochMs: Long,
 )
+
+internal fun preferredRendezvousSource(
+    selection: NearbyPairingSelection,
+    roomInvitation: Boolean = true,
+): DiscoverySource? =
+    when {
+        roomInvitation &&
+            selection.nearbyInviteRoute?.let {
+                NearbyInviteRoute.normalized(
+                    endpointId = it.endpointId,
+                    relayUrl = it.relayUrl,
+                    directAddresses = it.directAddresses,
+                )
+            } != null &&
+            DiscoverySource.Mdns in selection.sources ->
+            DiscoverySource.Mdns
+        DiscoverySource.Bluetooth in selection.sources ->
+            DiscoverySource.Bluetooth
+        else -> null
+    }

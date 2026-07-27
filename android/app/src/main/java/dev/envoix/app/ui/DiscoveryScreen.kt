@@ -197,8 +197,8 @@ internal fun DiscoveryScreen(
             item {
                 Text(
                     appText(
-                        "Bluetooth invitation handoff is disabled. Use the selected device context, then scan a QR code or enter a Room Code.",
-                        "蓝牙邀请交接已禁用。选择设备后，请扫描二维码或输入房间码。",
+                        "Local-network devices can receive a room invitation directly. QR and Room Code remain available.",
+                        "局域网设备可直接接收房间邀请；二维码和房间码仍然可用。",
                     ),
                     color = colors.muted,
                     fontSize = 12.sp,
@@ -222,10 +222,15 @@ internal fun DiscoveryScreen(
                 nearbySelection = selection,
                 initialPairingInput = initialPairingInput,
                 onOfferInvite =
-                    if (DiscoverySource.Bluetooth in selection.sources && initialPairingInput == null) {
+                    if (initialPairingInput == null &&
+                        (
+                            selection.nearbyInviteRoute != null ||
+                                DiscoverySource.Bluetooth in selection.sources
+                        )
+                    ) {
                         { offer, completion ->
                             discoveryViewModel.offerInvite(
-                                selection.discoveryPeerKey,
+                                selection,
                                 offer.transferInvite,
                                 completion,
                             )
@@ -287,8 +292,8 @@ internal fun DiscoveryScreen(
                 text = {
                     Text(
                         appText(
-                            "Review this unverified experimental Bluetooth invitation before continuing.",
-                            "继续前，请检查此未经验证的实验性蓝牙邀请。",
+                            "Review this nearby invitation before continuing. The device name is not a verified identity.",
+                            "继续前请检查此附近邀请；设备名称不代表已验证身份。",
                         ),
                     )
                 },
@@ -299,7 +304,7 @@ internal fun DiscoveryScreen(
                                 NearbyPairingSelection(
                                     discoveryPeerKey = offer.senderPeerKey,
                                     displayName = offer.senderDisplayName,
-                                    sources = setOf(DiscoverySource.Bluetooth),
+                                    sources = setOf(offer.source),
                                 )
                             initialPairingInput = offer.invite
                             discoveryViewModel.consumeRendezvousOffer(offer.requestId)

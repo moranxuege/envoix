@@ -3,7 +3,7 @@ import CoreBluetooth
 import Foundation
 import OSLog
 
-final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, NearbyRendezvousProvider,
+final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
     NearbyAdvertisingConfigurable {
     let source = NearbyDiscoverySource.bluetooth
 
@@ -123,13 +123,13 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
     }
 
     func offerInvite(
-        peerKey: String,
+        to selection: NearbyPairingSelection,
         invite: String,
         completion: @escaping (String?) -> Void
     ) {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
-                self?.offerInvite(peerKey: peerKey, invite: invite, completion: completion)
+                self?.offerInvite(to: selection, invite: invite, completion: completion)
             }
             return
         }
@@ -137,7 +137,9 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
             completion("Experimental Bluetooth pairing is not ready")
             return
         }
-        guard let normalizedPeerKey = NearbyDiscoveryPeerRegistry.normalizePeerKey(peerKey),
+        guard let normalizedPeerKey = NearbyDiscoveryPeerRegistry.normalizePeerKey(
+                  selection.discoveryPeerKey
+              ),
               let peripheral = discoveredPeripherals[normalizedPeerKey] else {
             completion("The selected device is no longer available over Bluetooth")
             return
@@ -165,6 +167,16 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
         }
         outboundTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.outboundTimeoutSeconds, execute: timeout)
+    }
+
+    func canOfferInvite(to selection: NearbyPairingSelection) -> Bool {
+        guard active,
+              let peerKey = NearbyDiscoveryPeerRegistry.normalizePeerKey(
+                  selection.discoveryPeerKey
+              ) else {
+            return false
+        }
+        return discoveredPeripherals[peerKey] != nil
     }
 
     func setAdvertisingEnabled(_ enabled: Bool) {
@@ -229,6 +241,8 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
             requestID: invite.requestID,
             senderPeerKey: invite.senderPeerKey,
             senderDisplayName: invite.senderDisplayName,
+            source: source,
+            senderInboxEndpointID: nil,
             invite: invite.invite
         )))
     }

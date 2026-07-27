@@ -100,16 +100,30 @@ final class NearbyDiscoveryTests: XCTestCase {
     }
 
     func testBonjourRecordMatchesAndroidKeysAndBoundsName() throws {
+        let inboxEndpointID = "2cfu7vzc7zhqv6w3k7m2kkwqvwzppmzvv53lmst6xm7ubjx5qnya"
+        let relayURL = "https://relay.example.test"
+        let directAddresses = ["192.0.2.10:4242", "[2001:db8::10]:4242"]
         let record = try XCTUnwrap(NearbyDiscoveryBonjourRecord(dictionary: [
             "v": "1",
             "id": "AABBCCDDEEFF0011",
             "name": "  test   device  ",
+            "ibox": inboxEndpointID,
+            "irelay": relayURL,
+            "iaddr0": directAddresses[0],
+            "iaddr1": directAddresses[1],
         ]))
 
         XCTAssertEqual(record.peerKey, "aabbccddeeff0011")
         XCTAssertEqual(record.displayName, "test device")
+        XCTAssertEqual(record.inviteRoute?.endpointID, inboxEndpointID)
+        XCTAssertEqual(record.inviteRoute?.relayURL, relayURL)
+        XCTAssertEqual(record.inviteRoute?.directAddresses, directAddresses)
         XCTAssertEqual(record.dictionary["v"], "1")
         XCTAssertEqual(record.dictionary["id"], "aabbccddeeff0011")
+        XCTAssertEqual(record.dictionary["ibox"], inboxEndpointID)
+        XCTAssertEqual(record.dictionary["irelay"], relayURL)
+        XCTAssertEqual(record.dictionary["iaddr0"], directAddresses[0])
+        XCTAssertEqual(record.dictionary["iaddr1"], directAddresses[1])
         XCTAssertNil(NearbyDiscoveryBonjourRecord(dictionary: ["v": "2", "id": record.peerKey]))
 
         let longName = String(repeating: "x", count: 60)
@@ -117,6 +131,58 @@ final class NearbyDiscoveryTests: XCTestCase {
             NearbyDiscoveryBonjourRecord(dictionary: ["v": "1", "id": record.peerKey, "name": longName])?
                 .displayName?.count,
             NearbyDiscoveryPeerRegistry.maximumDisplayNameLength
+        )
+
+        let legacy = try XCTUnwrap(NearbyDiscoveryBonjourRecord(dictionary: [
+            "v": "1",
+            "id": record.peerKey,
+        ]))
+        XCTAssertNil(legacy.inviteRoute)
+        let malformedInbox = try XCTUnwrap(NearbyDiscoveryBonjourRecord(dictionary: [
+            "v": "1",
+            "id": record.peerKey,
+            "ibox": "not an endpoint",
+            "iaddr0": directAddresses[0],
+        ]))
+        XCTAssertNil(malformedInbox.inviteRoute)
+        XCTAssertNil(malformedInbox.dictionary["ibox"])
+    }
+
+    func testBonjourRouteRequiresCoordinatesAndRejectsAmbiguousRecords() throws {
+        let endpointID = "2cfu7vzc7zhqv6w3k7m2kkwqvwzppmzvv53lmst6xm7ubjx5qnya"
+        let base = ["v": "1", "id": "aabbccddeeff0011", "ibox": endpointID]
+
+        let endpointOnly = try XCTUnwrap(NearbyDiscoveryBonjourRecord(dictionary: base))
+        XCTAssertNil(endpointOnly.inviteRoute)
+
+        var validDictionary = base
+        validDictionary["iaddr0"] = "192.0.2.10:4242"
+        let valid = try XCTUnwrap(NearbyDiscoveryBonjourRecord(dictionary: validDictionary))
+        XCTAssertNotNil(valid.inviteRoute)
+        XCTAssertEqual(
+            NearbyDiscoveryBonjourRecord.consistentInviteRoute(in: [valid, valid]),
+            valid.inviteRoute
+        )
+
+        var changedDictionary = validDictionary
+        changedDictionary["iaddr0"] = "192.0.2.11:4242"
+        let changed = try XCTUnwrap(
+            NearbyDiscoveryBonjourRecord(dictionary: changedDictionary)
+        )
+        XCTAssertNil(
+            NearbyDiscoveryBonjourRecord.consistentInviteRoute(in: [valid, changed])
+        )
+        XCTAssertNil(
+            NearbyDiscoveryBonjourRecord.consistentInviteRoute(in: [valid, endpointOnly])
+        )
+
+        var oversizedDictionary = base
+        oversizedDictionary["iaddr0"] = String(
+            repeating: "x",
+            count: NearbyInviteRoute.maximumDirectAddressUTF8Bytes + 1
+        )
+        XCTAssertNil(
+            NearbyDiscoveryBonjourRecord(dictionary: oversizedDictionary)?.inviteRoute
         )
     }
 
@@ -132,7 +198,8 @@ final class NearbyDiscoveryTests: XCTestCase {
             peerKey: "0011223344556677",
             source: .mdns,
             seenAtMilliseconds: 5_000,
-            displayName: "Phone"
+            displayName: "Phone",
+            inviteRoute: testInviteRoute()
         )))
 
         var peers = registry.peers(nowMilliseconds: 10_000)
@@ -140,11 +207,13 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertEqual(peers[0].sources, [.bluetooth, .mdns])
         XCTAssertEqual(peers[0].displayName, "Phone")
         XCTAssertEqual(peers[0].rssi, -51)
+        XCTAssertEqual(peers[0].inviteRoute, testInviteRoute())
 
         peers = registry.peers(nowMilliseconds: 20_001)
         XCTAssertEqual(peers.count, 1)
         XCTAssertEqual(peers[0].sources, [.mdns])
         XCTAssertNil(peers[0].rssi)
+        XCTAssertEqual(peers[0].inviteRoute, testInviteRoute())
 
         XCTAssertTrue(registry.peers(nowMilliseconds: 25_001).isEmpty)
     }
@@ -359,19 +428,158 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertEqual(coordinator.state.peers.map(\.peerKey), ["1111222233334444"])
     }
 
-    func testPairingSelectionCarriesOnlyUntrustedDisplayContext() {
+    func testCoordinatorPrefersSecureMdnsRendezvousWhenPeerAdvertisesInbox() {
+        let bluetooth = RoutingNearbyDiscoveryProvider(source: .bluetooth, canOffer: true)
+        let mdns = RoutingNearbyDiscoveryProvider(source: .mdns, canOffer: true)
+        let coordinator = NearbyDiscoveryCoordinator(
+            identity: LocalNearbyDiscoveryIdentity(
+                peerKey: "0011223344556677",
+                displayName: "iPhone"
+            ),
+            providerFactory: { _ in [bluetooth, mdns] }
+        )
+        coordinator.start()
+
+        var result: String?
+        coordinator.offerInvite(
+            to: routingSelection(),
+            invite: "envoix://room/R123456-a1b2-c3d4"
+        ) { result = $0 }
+
+        XCTAssertNil(result)
+        XCTAssertEqual(mdns.offeredPeerKeys, ["8899aabbccddeeff"])
+        XCTAssertTrue(bluetooth.offeredPeerKeys.isEmpty)
+    }
+
+    func testCoordinatorKeepsDirectInviteV2OffRoomOnlyMdnsInbox() {
+        let bluetooth = RoutingNearbyDiscoveryProvider(source: .bluetooth, canOffer: true)
+        let mdns = RoutingNearbyDiscoveryProvider(source: .mdns, canOffer: true)
+        let coordinator = NearbyDiscoveryCoordinator(
+            identity: LocalNearbyDiscoveryIdentity(
+                peerKey: "0011223344556677",
+                displayName: "iPhone"
+            ),
+            providerFactory: { _ in [bluetooth, mdns] }
+        )
+        coordinator.start()
+
+        var result: String?
+        coordinator.offerInvite(
+            to: routingSelection(),
+            invite: "envoix://invite/v2/opaque"
+        ) { result = $0 }
+
+        XCTAssertNil(result)
+        XCTAssertEqual(bluetooth.offeredPeerKeys, ["8899aabbccddeeff"])
+        XCTAssertTrue(mdns.offeredPeerKeys.isEmpty)
+    }
+
+    func testCoordinatorDoesNotUseRoomOnlyMdnsAsDirectInviteFallback() {
+        let mdns = RoutingNearbyDiscoveryProvider(source: .mdns, canOffer: true)
+        let coordinator = NearbyDiscoveryCoordinator(
+            identity: LocalNearbyDiscoveryIdentity(
+                peerKey: "0011223344556677",
+                displayName: "iPhone"
+            ),
+            providerFactory: { _ in [mdns] }
+        )
+        coordinator.start()
+
+        var result: String?
+        coordinator.offerInvite(
+            to: routingSelection(),
+            invite: "envoix://invite/v2/opaque"
+        ) { result = $0 }
+
+        XCTAssertEqual(
+            result,
+            "Nearby invitation delivery is not available for this device"
+        )
+        XCTAssertTrue(mdns.offeredPeerKeys.isEmpty)
+    }
+
+    func testCoordinatorDoesNotDowngradeFailedSecureMdnsDeliveryToBluetooth() {
+        let bluetooth = RoutingNearbyDiscoveryProvider(source: .bluetooth, canOffer: true)
+        let mdns = RoutingNearbyDiscoveryProvider(
+            source: .mdns,
+            canOffer: false,
+            deliveryError: "secure mDNS delivery failed"
+        )
+        let coordinator = NearbyDiscoveryCoordinator(
+            identity: LocalNearbyDiscoveryIdentity(
+                peerKey: "0011223344556677",
+                displayName: "iPhone"
+            ),
+            providerFactory: { _ in [bluetooth, mdns] }
+        )
+        coordinator.start()
+
+        var result: String?
+        coordinator.offerInvite(
+            to: routingSelection(),
+            invite: "envoix://room/R123456-a1b2-c3d4"
+        ) { result = $0 }
+
+        XCTAssertEqual(result, "secure mDNS delivery failed")
+        XCTAssertEqual(mdns.offeredPeerKeys, ["8899aabbccddeeff"])
+        XCTAssertTrue(bluetooth.offeredPeerKeys.isEmpty)
+    }
+
+    func testCoordinatorUsesBluetoothWhenMdnsPeerHasNoInboxCapability() {
+        let bluetooth = RoutingNearbyDiscoveryProvider(source: .bluetooth, canOffer: true)
+        let mdns = RoutingNearbyDiscoveryProvider(source: .mdns, canOffer: false)
+        let coordinator = NearbyDiscoveryCoordinator(
+            identity: LocalNearbyDiscoveryIdentity(
+                peerKey: "0011223344556677",
+                displayName: "iPhone"
+            ),
+            providerFactory: { _ in [bluetooth, mdns] }
+        )
+        coordinator.start()
+
+        coordinator.offerInvite(
+            to: routingSelection(hasInviteRoute: false),
+            invite: "envoix://room/R123456-a1b2-c3d4"
+        ) { _ in }
+
+        XCTAssertEqual(bluetooth.offeredPeerKeys, ["8899aabbccddeeff"])
+        XCTAssertTrue(mdns.offeredPeerKeys.isEmpty)
+    }
+
+    func testPairingSelectionFreezesCompleteUntrustedRouteWithoutTreatingItAsCredential() {
+        let route = testInviteRoute()
         let selection = NearbyPairingSelection(peer: NearbyDiscoveredPeer(
             peerKey: "0011223344556677",
             displayName: "Nearby phone",
             sources: [.bluetooth, .mdns],
             lastSeenAtMilliseconds: 42,
             rssi: -36,
-            endpoint: "192.0.2.10:4242"
+            inviteRoute: route
         ))
 
         XCTAssertEqual(selection.discoveryPeerKey, "0011223344556677")
         XCTAssertEqual(selection.displayName, "Nearby phone")
         XCTAssertEqual(selection.sources, [.bluetooth, .mdns])
+        XCTAssertEqual(selection.nearbyInviteRoute, route)
+    }
+
+    private func routingSelection(
+        hasInviteRoute: Bool = true
+    ) -> NearbyPairingSelection {
+        NearbyPairingSelection(
+            discoveryPeerKey: "8899aabbccddeeff",
+            displayName: "Nearby phone",
+            sources: [.bluetooth, .mdns],
+            nearbyInviteRoute: hasInviteRoute ? testInviteRoute() : nil
+        )
+    }
+
+    private func testInviteRoute() -> NearbyInviteRoute {
+        NearbyInviteRoute(
+            endpointID: "2cfu7vzc7zhqv6w3k7m2kkwqvwzppmzvv53lmst6xm7ubjx5qnya",
+            relayURL: "https://relay.example.test",
+            directAddresses: ["192.0.2.10:4242"]
+        )!
     }
 }
 
@@ -403,5 +611,41 @@ private final class CountingNearbyDiscoveryProvider: NearbyDiscoveryProvider {
 
     func emitAfterStop(_ event: NearbyDiscoveryEvent) {
         lastSink?(event)
+    }
+}
+
+private final class RoutingNearbyDiscoveryProvider: NearbyRendezvousProvider {
+    let source: NearbyDiscoverySource
+    private let canOffer: Bool
+    private let deliveryError: String?
+    private(set) var offeredPeerKeys: [String] = []
+
+    init(
+        source: NearbyDiscoverySource,
+        canOffer: Bool,
+        deliveryError: String? = nil
+    ) {
+        self.source = source
+        self.canOffer = canOffer
+        self.deliveryError = deliveryError
+    }
+
+    func start(sink: @escaping (NearbyDiscoveryEvent) -> Void) {}
+    func stop() {}
+
+    func canOfferInvite(to selection: NearbyPairingSelection) -> Bool {
+        canOffer
+            && NearbyDiscoveryPeerRegistry.normalizePeerKey(
+                selection.discoveryPeerKey
+            ) != nil
+    }
+
+    func offerInvite(
+        to selection: NearbyPairingSelection,
+        invite: String,
+        completion: @escaping (String?) -> Void
+    ) {
+        offeredPeerKeys.append(selection.discoveryPeerKey)
+        completion(deliveryError)
     }
 }

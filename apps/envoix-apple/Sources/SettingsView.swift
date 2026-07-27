@@ -12,8 +12,6 @@ struct SettingsStageView: View {
     @AppStorage("envoix.relayURL") private var relayURL = ""
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
-    @AppStorage("envoix.useRoom") private var useRoom = true
-    @AppStorage("envoix.useMdns") private var useMdns = true
     @AppStorage("envoix.compressionPolicy") private var compressionPolicy = "smart"
     @AppStorage("envoix.developerMode") private var developerMode = false
     @AppStorage("envoix.verboseLog") private var verboseLog = false
@@ -62,18 +60,6 @@ struct SettingsStageView: View {
                         AppText.value("Avoid Tailscale addresses", "避开 Tailscale 地址", language: language),
                         subtitle: AppText.value("Prefer the real WAN or relay path instead of 100.x candidates.", "不广播 100.x 候选地址，优先使用真实网络或中继。", language: language),
                         isOn: avoidTailscaleBinding
-                    )
-                    Divider().overlay(Theme.line.opacity(0.5))
-                    settingToggle(
-                        AppText.value("Internet pairing", "互联网配对", language: language),
-                        subtitle: AppText.value("Use the rendezvous broker for Room pairing.", "通过配对服务器建立 Room。", language: language),
-                        isOn: $useRoom
-                    )
-                    Divider().overlay(Theme.line.opacity(0.5))
-                    settingToggle(
-                        AppText.value("Local Wi-Fi pairing", "本地 Wi‑Fi 配对", language: language),
-                        subtitle: AppText.value("Also try mDNS on the same network.", "同时尝试同一网络内的 mDNS。", language: language),
-                        isOn: $useMdns
                     )
                 }
                 .card(padding: 14)

@@ -105,7 +105,7 @@ pub enum CoreError {
         retry_after: Option<u64>,
     },
     #[error("one-time invitation was consumed after authentication: {0}")]
-    InvitationConsumed(String),
+    InvitationConsumed(#[source] Box<CoreError>),
     #[error("operation cancelled")]
     Cancelled,
 }

@@ -39,6 +39,25 @@ class NearbyRendezvousOfferQueueTest {
         assertEquals(listOf(third), queue.snapshot(nowMs = 3))
     }
 
+    @Test
+    fun `transport-authenticated endpoints do not collide on a claimed peer key`() {
+        val queue = NearbyRendezvousOfferQueue(maxSize = 4, ttlMs = 1_000)
+        val first =
+            offer("request-1", "peer-a", "invite-a").copy(
+                senderEndpointId = "endpoint-a",
+                source = DiscoverySource.Mdns,
+            )
+        val second =
+            offer("request-2", "peer-a", "invite-a").copy(
+                senderEndpointId = "endpoint-b",
+                source = DiscoverySource.Mdns,
+            )
+
+        assertTrue(queue.add(first, nowMs = 0))
+        assertTrue(queue.add(second, nowMs = 1))
+        assertEquals(listOf(first, second), queue.snapshot(nowMs = 1))
+    }
+
     private fun offer(
         requestId: String,
         peerKey: String,

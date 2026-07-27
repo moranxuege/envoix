@@ -1,10 +1,12 @@
 #if os(iOS)
+import QuickLook
 import SwiftUI
 
 struct OneTimeRoomView: View {
     @Environment(\.appLanguage) private var language
-    @Environment(\.openURL) private var openURL
     @AppStorage("envoix.outputDirDisplayName") private var outputDirDisplayName = ""
+    @State private var previewFileURL: URL?
+    @State private var receivedItemsPresentation: ReceivedItemsPresentation?
 
     let room: OneTimeRoomSession
     let records: [TransferActivityRecord]
@@ -45,6 +47,10 @@ struct OneTimeRoomView: View {
         }
         .background(Theme.bg)
         .accessibilityIdentifier("one_time_room")
+        .quickLookPreview($previewFileURL)
+        .sheet(item: $receivedItemsPresentation) { presentation in
+            ReceivedItemsSheet(urls: presentation.urls)
+        }
     }
 
     private var roomHeader: some View {
@@ -264,9 +270,7 @@ struct OneTimeRoomView: View {
                     Spacer(minLength: 8)
 
                     Button {
-                        if let first = urls.first {
-                            openURL(first)
-                        }
+                        openReceivedItems(urls)
                     } label: {
                         Text(AppText.value("Open", "打开", language: language))
                             .font(.caption.weight(.semibold))
@@ -285,6 +289,15 @@ struct OneTimeRoomView: View {
         }
         .padding(.vertical, 5)
         .accessibilityIdentifier("room_activity_\(record.activityId)")
+    }
+
+    private func openReceivedItems(_ urls: [URL]) {
+        guard let first = urls.first else { return }
+        if urls.count == 1, isRegularFileURL(first) {
+            previewFileURL = first
+        } else {
+            receivedItemsPresentation = ReceivedItemsPresentation(urls: urls)
+        }
     }
 
     private func endedNotice(_ message: String) -> some View {
@@ -366,6 +379,10 @@ struct OneTimeRoomView: View {
             return AppText.value("Waiting for another device", "正在等待另一台设备", language: language)
         case .joining:
             return AppText.value("Joining room", "正在加入房间", language: language)
+        case .connectingRemembered:
+            return AppText.value("Connecting", "正在连接", language: language)
+        case .waitingRemembered:
+            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
         case .connected:
             return AppText.value("Connected for this room", "已连接此房间", language: language)
         case .ended:
@@ -397,7 +414,8 @@ struct OneTimeRoomView: View {
     private var statusColor: Color {
         switch controlPhase {
         case .connected: return Theme.success
-        case .hosting, .joining: return Theme.warning
+        case .hosting, .joining, .connectingRemembered, .waitingRemembered:
+            return Theme.warning
         case .ended, .failed: return Theme.danger
         case .idle: break
         }
@@ -433,7 +451,7 @@ struct OneTimeRoomView: View {
         switch controlPhase {
         case .ended, .failed:
             return AppText.value("Room closed", "房间已关闭", language: language)
-        case .idle, .hosting, .joining, .connected:
+        case .idle, .hosting, .joining, .connectingRemembered, .waitingRemembered, .connected:
             break
         }
         if lifetimePolicy == .untilForegroundEnds {
@@ -458,7 +476,7 @@ struct OneTimeRoomView: View {
         switch controlPhase {
         case .ended, .failed:
             return AppText.value("Close room", "关闭房间", language: language)
-        case .idle, .hosting, .joining, .connected:
+        case .idle, .hosting, .joining, .connectingRemembered, .waitingRemembered, .connected:
             return AppText.value("End room", "结束房间", language: language)
         }
     }

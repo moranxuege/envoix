@@ -2,13 +2,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use envoix_client::api::{
-    Client, IdentityConfig, RoomCloseReason, RoomControlEvent, RoomControlInvite,
-    RoomControlSession, RoomLifetimePolicy, RoomLifetimeState, RoomOfferRejection,
-    RoomTransferOffer, TransferCancelToken, TransferOptions, connect_room_control,
+    Client, IdentityConfig, RememberedCredentialRef, RememberedRoomControlConnectError,
+    RememberedRoomControlRole, RendezvousCause, RoomCloseReason, RoomControlEvent,
+    RoomControlInvite, RoomControlSession, RoomLifetimePolicy, RoomLifetimeState,
+    RoomOfferRejection, RoomTransferOffer, SessionError, TransferCancelToken, TransferOptions,
+    acquire_remembered_credential, connect_remembered_room_control, connect_room_control,
 };
 
 use crate::{
-    DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, EnvoixError, non_empty, op_err,
+    DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, EnvoixError, FfiFailureCode, non_empty, op_err,
     spawn_on_ffi_runtime,
 };
 
@@ -25,6 +27,28 @@ pub struct FfiRoomControlInvite {
 pub enum FfiRoomConnectMode {
     Host,
     Join,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiRememberedRoomConnectMode {
+    Connector,
+    Responder,
+}
+
+/// A failed single-generation attempt. Generation fallback is safe only when
+/// `peer_authenticated` is false.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum FfiRememberedRoomConnectError {
+    #[error("{reason}")]
+    Failed {
+        reason: String,
+        peer_authenticated: bool,
+        /// Stable broker cause for recovery policy. Diagnostics must not be parsed.
+        failure_code: Option<FfiFailureCode>,
+        /// Broker-supplied delay, when present. RoomExpired is identified by
+        /// `failure_code`; the broker currently does not transmit its tombstone TTL.
+        retry_after_seconds: Option<u64>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -94,6 +118,7 @@ pub struct FfiRoomControlEvent {
 pub struct FfiRoomControlSnapshot {
     pub peer_name: String,
     pub creator: bool,
+    pub remembered_generation: Option<u64>,
     pub lifetime: FfiRoomLifetimeState,
 }
 
@@ -131,6 +156,7 @@ impl FfiRoomControlSession {
         FfiRoomControlSnapshot {
             peer_name: self.session.peer_name().to_string(),
             creator: self.session.is_creator(),
+            remembered_generation: self.session.remembered_generation(),
             lifetime: ffi_lifetime(self.session.lifetime_state()),
         }
     }
@@ -308,6 +334,127 @@ pub async fn connect_room_control_session(
     .await
 }
 
+/// Derives a generation-scoped, URL-safe presence tag for an untrusted local
+/// discovery carrier. The tag is not a room identifier or ownership claim.
+#[uniffi::export]
+pub fn derive_remembered_presence_tag(
+    remembered_credential_ref: String,
+    remembered_generation: u64,
+) -> Result<String, EnvoixError> {
+    let credential_ref = non_empty(&remembered_credential_ref)
+        .ok_or_else(|| op_err("remembered credential reference is missing"))?;
+    acquire_remembered_credential(&RememberedCredentialRef::from_process_handle(
+        credential_ref.to_string(),
+    ))
+    .map(|credential| credential.derive_presence_tag(remembered_generation))
+    .map_err(op_err)
+}
+
+/// Authenticates one remembered generation and opens an equal-member room.
+///
+/// Availability, current/previous generation scheduling, generation rotation,
+/// and simultaneous-attempt deduplication remain caller responsibilities.
+#[allow(clippy::too_many_arguments)]
+#[uniffi::export]
+pub async fn connect_remembered_room_control_session(
+    remembered_credential_ref: String,
+    remembered_generation: u64,
+    display_name: String,
+    mode: FfiRememberedRoomConnectMode,
+    identity_path: String,
+    broker: String,
+    relay: String,
+    cancellation: Arc<FfiRoomControlCancellation>,
+) -> Result<Arc<FfiRoomControlSession>, FfiRememberedRoomConnectError> {
+    spawn_on_ffi_runtime(async move {
+        let credential_ref = non_empty(&remembered_credential_ref).ok_or_else(|| {
+            remembered_connect_err("remembered credential reference is missing", false)
+        })?;
+        let credential = acquire_remembered_credential(
+            &RememberedCredentialRef::from_process_handle(credential_ref.to_string()),
+        )
+        .map_err(|error| remembered_connect_err(error, false))?;
+        let broker = non_empty(&broker)
+            .unwrap_or(DEFAULT_RENDEZVOUS_BROKER)
+            .to_string();
+        let relay = non_empty(&relay)
+            .or(Some(DEFAULT_RELAY_URL))
+            .map(str::to_string);
+        let mut client = Client::default();
+        if let Some(path) = non_empty(&identity_path) {
+            client.identity = IdentityConfig::Persistent(PathBuf::from(path));
+        }
+        let mut options = TransferOptions::default();
+        options.relay = relay.clone();
+        let role = match mode {
+            FfiRememberedRoomConnectMode::Connector => RememberedRoomControlRole::Connector,
+            FfiRememberedRoomConnectMode::Responder => RememberedRoomControlRole::Responder,
+        };
+        let session = connect_remembered_room_control(
+            credential.derive_session(remembered_generation),
+            broker,
+            relay,
+            display_name,
+            role,
+            client.session_config(&options),
+            &cancellation.token,
+        )
+        .await
+        .map_err(remembered_session_connect_err)?;
+        Ok(Arc::new(FfiRoomControlSession {
+            session: Arc::new(session),
+        }))
+    })
+    .await
+}
+
+fn remembered_connect_err(
+    error: impl std::fmt::Display,
+    peer_authenticated: bool,
+) -> FfiRememberedRoomConnectError {
+    FfiRememberedRoomConnectError::Failed {
+        reason: error.to_string(),
+        peer_authenticated,
+        failure_code: None,
+        retry_after_seconds: None,
+    }
+}
+
+fn remembered_session_connect_err(
+    error: RememberedRoomControlConnectError,
+) -> FfiRememberedRoomConnectError {
+    let peer_authenticated = error.peer_authenticated();
+    let (failure_code, retry_after_seconds) = remembered_connect_metadata(error.error());
+    FfiRememberedRoomConnectError::Failed {
+        reason: error.to_string(),
+        peer_authenticated,
+        failure_code,
+        retry_after_seconds,
+    }
+}
+
+fn remembered_connect_metadata(error: &SessionError) -> (Option<FfiFailureCode>, Option<u64>) {
+    match error {
+        SessionError::Rendezvous { cause, retry_after } => (
+            Some(match cause {
+                RendezvousCause::RoomNotFound => FfiFailureCode::RoomNotFound,
+                RendezvousCause::RoomExpired => FfiFailureCode::RoomExpired,
+                RendezvousCause::RoomFull => FfiFailureCode::RoomFull,
+                RendezvousCause::RoomRateLimited => FfiFailureCode::RoomRateLimited,
+                RendezvousCause::RoomUnderAttack => FfiFailureCode::RoomUnderAttack,
+                RendezvousCause::EndpointRateLimited => FfiFailureCode::EndpointRateLimited,
+                RendezvousCause::IpRateLimited => FfiFailureCode::IpRateLimited,
+                RendezvousCause::ServerBusy => FfiFailureCode::ServerBusy,
+                RendezvousCause::MalformedJoin => FfiFailureCode::MalformedJoin,
+                RendezvousCause::UnsupportedVersion => FfiFailureCode::UnsupportedRendezvousVersion,
+            }),
+            *retry_after,
+        ),
+        SessionError::InvitationConsumed(source) => remembered_connect_metadata(source),
+        _ => (None, None),
+    }
+}
+
 fn project_invite(invite: RoomControlInvite) -> FfiRoomControlInvite {
     FfiRoomControlInvite {
         code: invite.code().to_string(),
@@ -450,7 +597,7 @@ mod tests {
     #[test]
     fn invite_projection_uses_epoch_milliseconds() {
         let invite = RoomControlInvite::parse(
-            "envoix://room/R123456-amber-comet?broker=test&expires=42",
+            "envoix://room/R123456-a1b2-c3d4?broker=test&expires=42",
             "fallback",
             None,
         )
@@ -461,7 +608,7 @@ mod tests {
     #[test]
     fn human_room_code_uses_configured_fallback_endpoints() {
         let invite = parse_room_control_invite(
-            "R123456-amber-comet".into(),
+            "R123456-a1b2-c3d4".into(),
             "https://broker.example.test".into(),
             "https://relay.example.test".into(),
         )
@@ -525,13 +672,71 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v4_ffi_v9() {
+    fn remembered_connect_error_preserves_authenticated_phase() {
+        assert!(matches!(
+            remembered_connect_err("control hello failed", true),
+            FfiRememberedRoomConnectError::Failed {
+                reason,
+                peer_authenticated: true,
+                failure_code: None,
+                retry_after_seconds: None,
+            } if reason == "control hello failed"
+        ));
+    }
+
+    #[test]
+    fn remembered_connect_error_exposes_typed_rendezvous_cause_and_retry_delay() {
+        let expired = SessionError::Rendezvous {
+            cause: RendezvousCause::RoomExpired,
+            retry_after: None,
+        };
+        assert_eq!(
+            remembered_connect_metadata(&expired),
+            (Some(FfiFailureCode::RoomExpired), None)
+        );
+
+        let busy = SessionError::Rendezvous {
+            cause: RendezvousCause::ServerBusy,
+            retry_after: Some(17),
+        };
+        assert_eq!(
+            remembered_connect_metadata(&busy),
+            (Some(FfiFailureCode::ServerBusy), Some(17))
+        );
+    }
+
+    #[test]
+    fn remembered_presence_tag_uses_registered_credential_without_exposing_it() {
+        let mut opaque = b"ENVR".to_vec();
+        opaque.push(1);
+        opaque.extend_from_slice(&[0x6a; 32]);
+        let reference =
+            crate::register_protected_remembered_credential(opaque).expect("register credential");
+
+        let current =
+            derive_remembered_presence_tag(reference.clone(), 7).expect("current presence tag");
+        let next = derive_remembered_presence_tag(reference, 8).expect("next presence tag");
+
+        assert_eq!(
+            current.len(),
+            envoix_client::api::REMEMBERED_PRESENCE_TAG_LEN
+        );
+        assert_ne!(current, next);
+    }
+
+    #[test]
+    fn core_info_advertises_room_control_v4_ffi_v11() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 9);
+        assert_eq!(info.ffi_api_version, 11);
         assert!(
             info.capabilities
                 .iter()
                 .any(|capability| capability == "foreground_room_control_v4")
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == "remembered_room_control_v1")
         );
     }
 }

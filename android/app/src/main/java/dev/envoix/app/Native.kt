@@ -22,6 +22,10 @@ interface RoomControlCallback {
     fun onEvent(json: String)
 }
 
+interface NearbyInviteCallback {
+    fun onEvent(json: String)
+}
+
 /** Sink for the core's `tracing` log lines. */
 interface LogCallback {
     fun log(
@@ -90,6 +94,21 @@ object Native {
 
     external fun cancelRoomControlSession(id: Long)
 
+    external fun startNearbyInviteInbox(
+        id: Long,
+        paramsJson: String,
+        callback: NearbyInviteCallback,
+    )
+
+    external fun sendNearbyInvite(
+        id: Long,
+        requestId: String,
+        routeJson: String,
+        invite: String,
+    ): String
+
+    external fun stopNearbyInviteInbox(id: Long)
+
     /** Validate a complete invitation or Room Code for an active flow. */
     external fun parseInviteForRole(
         input: String,
@@ -117,6 +136,14 @@ object Native {
         storeDirectory: String,
         jobId: String,
         rootsJson: String,
+    ): String
+
+    /** Idempotently seal and persist a prepared job before an outbox assumes
+     * ownership. The returned snapshot is the same canonical job projection
+     * used by preparation. */
+    external fun sealManifestV2Job(
+        storeDirectory: String,
+        jobId: String,
     ): String
 
     /** Cancel an unstarted job before its room-scoped staging is discarded. */

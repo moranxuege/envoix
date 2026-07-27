@@ -34,6 +34,40 @@ struct RoomControlTransferOffer: Equatable, Identifiable {
     let totalBytes: UInt64
 }
 
+enum RememberedRoomConnectMode: Equatable {
+    case connector
+    case responder
+}
+
+struct RememberedRoomConnectAttempt: Equatable {
+    let credentialReference: String
+    let generation: UInt64
+    let endpoint: RoomControlEndpoint
+    let displayName: String
+    let identityPath: String
+}
+
+struct RememberedRoomConnectFailure: LocalizedError, Equatable {
+    let reason: String
+    let peerAuthenticated: Bool
+    let failureCode: FfiFailureCode?
+    let retryAfterSeconds: UInt64?
+
+    init(
+        reason: String,
+        peerAuthenticated: Bool,
+        failureCode: FfiFailureCode? = nil,
+        retryAfterSeconds: UInt64? = nil
+    ) {
+        self.reason = reason
+        self.peerAuthenticated = peerAuthenticated
+        self.failureCode = failureCode
+        self.retryAfterSeconds = retryAfterSeconds
+    }
+
+    var errorDescription: String? { reason }
+}
+
 enum RoomControlLifetimePolicy: Equatable {
     case idleFifteenMinutes
     case untilForegroundEnds
@@ -91,6 +125,13 @@ protocol RoomControlGateway: AnyObject {
         identityPath: String,
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws
+    func connectRemembered(
+        attempt: RememberedRoomConnectAttempt,
+        mode: RememberedRoomConnectMode,
+        timeout: TimeInterval?,
+        beforeConnected: @escaping (_ authenticatedGeneration: UInt64) throws -> Void,
+        onEvent: @escaping (RoomControlEvent) -> Void
+    ) async throws
     func offerTransfer(_ offer: RoomControlTransferOffer) async throws -> RoomControlLifetimeState?
     func acceptOffer(id: String) async throws -> RoomControlLifetimeState?
     func rejectOffer(id: String) async throws -> RoomControlLifetimeState?
@@ -137,6 +178,16 @@ final class UnavailableRoomControlGateway: RoomControlGateway {
         invitation: RoomControlInvitation,
         displayName: String,
         identityPath: String,
+        onEvent: @escaping (RoomControlEvent) -> Void
+    ) async throws {
+        throw RoomControlUnavailableError()
+    }
+
+    func connectRemembered(
+        attempt: RememberedRoomConnectAttempt,
+        mode: RememberedRoomConnectMode,
+        timeout: TimeInterval?,
+        beforeConnected: @escaping (UInt64) throws -> Void,
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws {
         throw RoomControlUnavailableError()
@@ -229,6 +280,116 @@ final class LiveRoomControlGateway: RoomControlGateway {
             identityPath: identityPath,
             onEvent: onEvent
         )
+    }
+
+    func connectRemembered(
+        attempt: RememberedRoomConnectAttempt,
+        mode: RememberedRoomConnectMode,
+        timeout: TimeInterval?,
+        beforeConnected: @escaping (UInt64) throws -> Void,
+        onEvent: @escaping (RoomControlEvent) -> Void
+    ) async throws {
+        cancellation?.cancel()
+        let token = FfiRoomControlCancellation()
+        cancellation = token
+        let timeoutTask = timeout.map { timeout in
+            Task { @MainActor in
+                guard timeout > 0 else {
+                    token.cancel()
+                    return
+                }
+                try? await Task.sleep(
+                    nanoseconds: UInt64(timeout * 1_000_000_000)
+                )
+                guard !Task.isCancelled else { return }
+                token.cancel()
+            }
+        }
+        defer { timeoutTask?.cancel() }
+
+        do {
+            let connectedSession: FfiRoomControlSession
+            do {
+                connectedSession = try await connectRememberedRoomControlSession(
+                    rememberedCredentialRef: attempt.credentialReference,
+                    rememberedGeneration: attempt.generation,
+                    displayName: attempt.displayName,
+                    mode: ffiRememberedMode(mode),
+                    identityPath: attempt.identityPath,
+                    broker: attempt.endpoint.broker,
+                    relay: attempt.endpoint.relay,
+                    cancellation: token
+                )
+            } catch let error as FfiRememberedRoomConnectError {
+                if Task.isCancelled {
+                    throw CancellationError()
+                }
+                switch error {
+                case let .Failed(
+                    reason,
+                    peerAuthenticated,
+                    failureCode,
+                    retryAfterSeconds
+                ):
+                    throw RememberedRoomConnectFailure(
+                        reason: reason,
+                        peerAuthenticated: peerAuthenticated,
+                        failureCode: failureCode,
+                        retryAfterSeconds: retryAfterSeconds
+                    )
+                }
+            }
+            timeoutTask?.cancel()
+            guard cancellation === token, !Task.isCancelled else {
+                token.cancel()
+                try? await connectedSession.close(reason: .userEnded)
+                clearIfCurrent(token)
+                return
+            }
+            let snapshot = connectedSession.snapshot()
+            guard snapshot.creator == false,
+                  snapshot.rememberedGeneration == attempt.generation else {
+                token.cancel()
+                try? await connectedSession.close(reason: .protocolFailure)
+                clearIfCurrent(token)
+                throw RememberedRoomConnectFailure(
+                    reason: "Remembered-room authentication returned inconsistent state.",
+                    peerAuthenticated: true
+                )
+            }
+            do {
+                try beforeConnected(attempt.generation)
+            } catch {
+                token.cancel()
+                try? await connectedSession.close(reason: .protocolFailure)
+                clearIfCurrent(token)
+                throw error
+            }
+            session = connectedSession
+            onEvent(.connected(
+                peerDisplayName: snapshot.peerName,
+                creator: false,
+                lifetime: project(snapshot.lifetime)
+            ))
+            do {
+                try await runEventLoop(
+                    connectedSession,
+                    token: token,
+                    onEvent: onEvent
+                )
+            } catch {
+                if Task.isCancelled {
+                    throw CancellationError()
+                }
+                token.cancel()
+                clearIfCurrent(token)
+                onEvent(.closed(.networkLost))
+            }
+        } catch {
+            token.cancel()
+            clearIfCurrent(token)
+            throw error
+        }
     }
 
     func offerTransfer(
@@ -334,25 +495,36 @@ final class LiveRoomControlGateway: RoomControlGateway {
                 creator: snapshot.creator,
                 lifetime: project(snapshot.lifetime)
             ))
-
-            while cancellation === token, !Task.isCancelled {
-                let event = try await connectedSession.nextEvent()
-                if let projected = project(event) {
-                    onEvent(projected)
-                    if case .closed = projected {
-                        clearIfCurrent(token)
-                        return
-                    }
-                }
-            }
-            token.cancel()
-            try? await connectedSession.close(reason: .userEnded)
-            clearIfCurrent(token)
+            try await runEventLoop(
+                connectedSession,
+                token: token,
+                onEvent: onEvent
+            )
         } catch {
             token.cancel()
             clearIfCurrent(token)
             throw error
         }
+    }
+
+    private func runEventLoop(
+        _ connectedSession: FfiRoomControlSession,
+        token: FfiRoomControlCancellation,
+        onEvent: @escaping (RoomControlEvent) -> Void
+    ) async throws {
+        while cancellation === token, !Task.isCancelled {
+            let event = try await connectedSession.nextEvent()
+            if let projected = project(event) {
+                onEvent(projected)
+                if case .closed = projected {
+                    clearIfCurrent(token)
+                    return
+                }
+            }
+        }
+        token.cancel()
+        try? await connectedSession.close(reason: .userEnded)
+        clearIfCurrent(token)
     }
 
     private func clearIfCurrent(_ token: FfiRoomControlCancellation) {
@@ -406,6 +578,15 @@ final class LiveRoomControlGateway: RoomControlGateway {
         switch policy {
         case .idleFifteenMinutes: return .idle15Minutes
         case .untilForegroundEnds: return .untilForegroundEnds
+        }
+    }
+
+    private func ffiRememberedMode(
+        _ mode: RememberedRoomConnectMode
+    ) -> FfiRememberedRoomConnectMode {
+        switch mode {
+        case .connector: return .connector
+        case .responder: return .responder
         }
     }
 
@@ -517,6 +698,19 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
             creator: false,
             lifetime: lifetime
         ))
+    }
+
+    func connectRemembered(
+        attempt: RememberedRoomConnectAttempt,
+        mode: RememberedRoomConnectMode,
+        timeout: TimeInterval?,
+        beforeConnected: @escaping (UInt64) throws -> Void,
+        onEvent: @escaping (RoomControlEvent) -> Void
+    ) async throws {
+        throw RememberedRoomConnectFailure(
+            reason: "Remembered-room fixtures are unavailable.",
+            peerAuthenticated: false
+        )
     }
 
     func offerTransfer(

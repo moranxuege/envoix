@@ -18,8 +18,10 @@ struct ReceiveView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @AppStorage("envoix.destinationSaveMode") private var destinationSaveMode = "direct"
     @State private var mode: PairingMode = .room
+    #if os(macOS)
     @State private var rememberedPeers: [RememberedPeerSummary] = []
     @State private var selectedRememberedPeer: RememberedPeerSummary?
+    #endif
     @State private var rememberAfterPairing = false
     @State private var rememberLabel = ""
     @State private var roomCode = newRoomCode() ?? ""
@@ -129,7 +131,6 @@ struct ReceiveView: View {
             }
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
-        .onAppear(perform: refreshRememberedPeers)
         .onDisappear(perform: cancelNearbyInviteDelivery)
         #else
         VStack(spacing: 0) {
@@ -193,9 +194,11 @@ struct ReceiveView: View {
 
     @ViewBuilder private var connectionSection: some View {
         VStack(alignment: .leading, spacing: 12) {
+            #if os(macOS)
             if !rememberedPeers.isEmpty {
                 rememberedPeerSection
             }
+            #endif
             if mode == .invite {
                 inviteSection
             } else if mode == .room {
@@ -212,6 +215,7 @@ struct ReceiveView: View {
         }
     }
 
+    #if os(macOS)
     private var rememberedPeerSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(AppText.value("Remembered devices", "已记住的设备", language: uiLanguage))
@@ -236,12 +240,17 @@ struct ReceiveView: View {
                         Image(systemName: "trash")
                     }
                     .disabled(viewModel.isBusy)
-                    .accessibilityLabel(AppText.value("Forget device", "忘记设备", language: uiLanguage))
+                    .accessibilityLabel(AppText.value(
+                        "Forget device",
+                        "忘记设备",
+                        language: uiLanguage
+                    ))
                 }
             }
         }
         .card(padding: 14)
     }
+    #endif
 
     private var rememberConsentSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -750,7 +759,11 @@ struct ReceiveView: View {
         case .token:
             return token.trimmed.count >= minTokenLength
         case .remembered:
+            #if os(macOS)
             return selectedRememberedPeer != nil
+            #else
+            return false
+            #endif
         }
     }
 
@@ -834,8 +847,7 @@ struct ReceiveView: View {
         let input = value.trimmed
         do {
             if input.lowercased().hasPrefix("envoix:") {
-                let parsed = try parsePairingInviteForRole(input: input, localRole: .receive)
-                applyRuntimeSettings(from: parsed)
+                _ = try parsePairingInviteForRole(input: input, localRole: .receive)
                 joiningInvite = input
                 joinRoomCode = ""
                 mode = .invite
@@ -889,15 +901,6 @@ struct ReceiveView: View {
         primaryAction()
     }
 
-    private func applyRuntimeSettings(from parsed: FfiPairingInvite) {
-        if !parsed.broker.trimmed.isEmpty {
-            serverURL = parsed.broker.trimmed
-        }
-        if let relay = parsed.relayUrls.first, !relay.trimmed.isEmpty {
-            relayURL = relay.trimmed
-        }
-    }
-
     private func updateRoomQRCode(for payload: String) {
         guard roomQRCodePayload != payload else { return }
         roomQRCodePayload = payload
@@ -925,22 +928,15 @@ struct ReceiveView: View {
     }
 
     private func startRoomControlReceive() {
+        #if os(iOS)
         guard let roomControlAccept else { return }
         do {
             let prepared = try prepareOutputDir()
-            let settings = try RuntimeSettingsProvider.make(
-                concurrentTransfers: concurrentTransfers,
-                language: language,
-                serverURL: serverURL,
-                relayURL: relayURL,
-                candidatesAllow: candidatesAllow,
-                candidatesDeny: candidatesDeny,
-                speedLimit: speedLimit
-            )
             isAcceptingRoomOffer = true
+            let parsed: FfiPairingInvite
             switch mode {
             case .invite:
-                _ = try parsePairingInviteForRole(
+                parsed = try parsePairingInviteForRole(
                     input: joiningInvite,
                     localRole: .receive
                 )
@@ -951,6 +947,7 @@ struct ReceiveView: View {
                     language: uiLanguage
                 ))
             }
+            let settings = try runtimeSettings(for: parsed)
             Task { @MainActor in
                 let result = await RoomOfferAcceptanceCoordinator.startReceiverThenAccept(
                     startReceiver: {
@@ -986,6 +983,9 @@ struct ReceiveView: View {
             isAcceptingRoomOffer = false
             viewModel.handleFailed(error.localizedDescription)
         }
+        #else
+        viewModel.handleFailed("Room control receive is unavailable on this platform.")
+        #endif
     }
 
     /// Starts (or restarts, for "Regenerate") the receive session.
@@ -998,7 +998,11 @@ struct ReceiveView: View {
         case .token:
             startReceiveWithToken()
         case .remembered:
+            #if os(macOS)
             startReceiveWithRememberedPeer()
+            #else
+            return
+            #endif
         }
     }
 
@@ -1071,17 +1075,12 @@ struct ReceiveView: View {
 
     private func startReceiveWithInvite() {
         do {
-            _ = try parsePairingInviteForRole(input: joiningInvite, localRole: .receive)
-            let prepared = try prepareOutputDir()
-            let settings = try RuntimeSettingsProvider.make(
-                concurrentTransfers: concurrentTransfers,
-                language: language,
-                serverURL: serverURL,
-                relayURL: relayURL,
-                candidatesAllow: candidatesAllow,
-                candidatesDeny: candidatesDeny,
-                speedLimit: speedLimit
+            let parsed = try parsePairingInviteForRole(
+                input: joiningInvite,
+                localRole: .receive
             )
+            let prepared = try prepareOutputDir()
+            let settings = try runtimeSettings(for: parsed)
             viewModel.startReceivingWithInvite(
                 outputDir: prepared.url.path,
                 invite: joiningInvite,
@@ -1094,6 +1093,18 @@ struct ReceiveView: View {
         }
     }
 
+    private func runtimeSettings(for parsed: FfiPairingInvite) throws -> EnvoixRuntimeSettings {
+        return try RuntimeSettingsProvider.make(
+            transferInvitation: parsed,
+            concurrentTransfers: concurrentTransfers,
+            language: language,
+            candidatesAllow: candidatesAllow,
+            candidatesDeny: candidatesDeny,
+            speedLimit: speedLimit
+        )
+    }
+
+    #if os(macOS)
     private func startReceiveWithRememberedPeer() {
         guard let peer = selectedRememberedPeer else { return }
         do {
@@ -1126,6 +1137,7 @@ struct ReceiveView: View {
             if mode == .remembered { mode = .room }
         }
     }
+    #endif
 
     #if os(macOS)
     /// A raw ~/Downloads path is not durable authorization. Require a valid

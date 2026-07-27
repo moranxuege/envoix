@@ -82,7 +82,7 @@ internal class TransferDraftPreparationState(
 
     /** Prevents queued picker work from recreating staging after disposition. */
     @Synchronized
-    fun acceptsPreparationChanges(): Boolean = disposition == DraftDisposition.Active
+    fun acceptsPreparationChanges(): Boolean = disposition == DraftDisposition.Active && !startSubmitted.value
 
     /** Schedules exact, serialized cleanup once. Started drafts are retained. */
     fun discard(): Boolean {

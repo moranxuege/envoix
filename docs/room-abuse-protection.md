@@ -12,9 +12,13 @@ do not reproduce the broker's counters.
   creator. Every later result has already consumed that attempt.
 - Malformed joins, incompatible joins, and pre-match disconnects consume source
   rate capacity, but not Room attempts.
-- Creator reconnects retain the Room's original expiry, attempts, and rate
-  state. An exhausted Room returns `room_under_attack`; users create a fresh
-  Room Code.
+- Human-code Creator reconnects retain the Room's original expiry, attempts,
+  and rate state. An exhausted Room returns `room_under_attack`; users create a
+  fresh Room Code.
+- An unpaired remembered-device Creator that disconnects releases its live,
+  high-entropy Room state immediately. A later foreground scheduling slice can
+  recreate that locator with a fresh Room lifetime; naturally expired
+  remembered Rooms still retain the configured tombstone.
 - Attempt budgets apply only to six-digit human Room locators. High-entropy
   remembered-device locators still receive source, concurrency, frame, and
   global resource enforcement.

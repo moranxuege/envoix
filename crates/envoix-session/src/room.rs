@@ -10,7 +10,9 @@ use envoix_invite::{
     BootstrapKind, InvitationBootstrap, InvitationError, InvitationSide, TransferRole,
 };
 use envoix_protocol::manifest_v2_frames::JobGenerationV2;
-use envoix_rendezvous::{BrokerOutcome, BrokerRejection, Join, RENDEZVOUS_PROTOCOL_VERSION};
+use envoix_rendezvous::{
+    BrokerOutcome, BrokerRejection, Join, RENDEZVOUS_PROTOCOL_VERSION, RendezvousError,
+};
 use envoix_rendezvous_iroh::{
     AuthenticatedControl, BrokerSession, RoomPairing, authenticate_invitation,
     build_endpoint_with_dns, join_invitation,
@@ -75,7 +77,7 @@ async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, Session
     .map_err(|error| CoreError::Transport(error.to_string()))
 }
 
-async fn join_broker_with_retry(
+pub(crate) async fn join_broker_with_retry(
     endpoint: &Endpoint,
     broker: &EndpointAddr,
     join: Join,
@@ -86,7 +88,7 @@ async fn join_broker_with_retry(
             Ok(session) => return Ok(session),
             Err(error) => {
                 let Some(rejection) = error.downcast_ref::<BrokerRejection>() else {
-                    return Err(CoreError::Transport(error.to_string()));
+                    return Err(unstructured_broker_error(&error));
                 };
                 let core_error = broker_rejection(rejection);
                 let Some(retry_after) = broker_retry_delay(rejection, retry, policy) else {
@@ -97,6 +99,26 @@ async fn join_broker_with_retry(
         }
     }
     unreachable!("server retry loop always returns")
+}
+
+fn unstructured_broker_error(error: &anyhow::Error) -> CoreError {
+    match error.downcast_ref::<RendezvousError>() {
+        // V1 Paired replies do not carry the bootstrap method required by the
+        // strict directional V2 protocol. Report that deployment mismatch as
+        // a stable, terminal cause without weakening the client with fallback.
+        Some(RendezvousError::BadMessage(message))
+            if message.contains("selected_bootstrap_method") =>
+        {
+            CoreError::Rendezvous {
+                cause: RendezvousCause::UnsupportedVersion,
+                retry_after: None,
+            }
+        }
+        Some(RendezvousError::BadMessage(_)) => {
+            CoreError::Protocol("rendezvous broker returned a malformed control message".into())
+        }
+        _ => CoreError::Transport(error.to_string()),
+    }
 }
 
 fn retryable_broker_outcome(outcome: BrokerOutcome) -> bool {
@@ -804,7 +826,7 @@ fn invitation_error(error: InvitationError) -> SessionError {
 fn invitation_consumed(error: SessionError) -> SessionError {
     match error {
         SessionError::InvitationConsumed(_) => error,
-        error => SessionError::InvitationConsumed(error.to_string()),
+        error => SessionError::InvitationConsumed(Box::new(error)),
     }
 }
 

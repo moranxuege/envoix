@@ -2,29 +2,28 @@ package dev.envoix.app.ui
 
 import android.content.Context
 import dev.envoix.app.Native
+import dev.envoix.app.OpLog
 import dev.envoix.app.RoomControlCallback
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.receiveAsFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 internal class NativeRoomControlGateway(
     context: Context,
+    rememberedRelationshipId: String? = null,
 ) : RoomControlGateway {
     override val available: Boolean = true
-    private val mutableEvents =
-        MutableSharedFlow<GeneratedRoomControlEvent>(
-            extraBufferCapacity = 64,
-            onBufferOverflow = BufferOverflow.DROP_OLDEST,
-        )
+    private val eventChannel = Channel<GeneratedRoomControlEvent>(Channel.UNLIMITED)
     override val events: Flow<RoomControlEvent> =
-        mutableEvents.mapNotNull { generated ->
+        eventChannel.receiveAsFlow().mapNotNull { generated ->
             synchronized(sessionLock) {
                 val terminal =
                     generated.event is RoomControlEvent.Closed ||
@@ -37,8 +36,7 @@ internal class NativeRoomControlGateway(
         }
 
     private val identityPath =
-        File(context.filesDir, "room-control/identity.json").absolutePath
-    private val nextSessionId = AtomicLong(1L)
+        roomControlIdentityPath(context.filesDir, rememberedRelationshipId)
     private val sessionLock = Any()
 
     @Volatile
@@ -93,6 +91,34 @@ internal class NativeRoomControlGateway(
             fallbackRelay = settings.relay,
             endpoint = invite.endpoint,
             initialEvent = RoomControlEvent.Joining(invite.endpoint),
+        )
+    }
+
+    override suspend fun connectRemembered(
+        credentialReference: String,
+        generation: Long,
+        displayName: String,
+        role: RememberedRoomConnectRole,
+        broker: String,
+        relay: String,
+    ) {
+        require(credentialReference.isNotBlank()) { "Remembered credential reference is missing" }
+        require(generation >= 0) { "Remembered generation must be non-negative" }
+        hostSettings = null
+        startSession(
+            mode =
+                when (role) {
+                    RememberedRoomConnectRole.Connector -> "remembered_connector"
+                    RememberedRoomConnectRole.Responder -> "remembered_responder"
+                },
+            input = "",
+            displayName = displayName,
+            fallbackBroker = broker,
+            fallbackRelay = relay,
+            endpoint = RoomControlEndpoint(broker, relay),
+            initialEvent = null,
+            rememberedCredentialReference = credentialReference,
+            rememberedGeneration = generation,
         )
     }
 
@@ -201,7 +227,9 @@ internal class NativeRoomControlGateway(
         fallbackBroker: String,
         fallbackRelay: String,
         endpoint: RoomControlEndpoint,
-        initialEvent: RoomControlEvent,
+        initialEvent: RoomControlEvent?,
+        rememberedCredentialReference: String? = null,
+        rememberedGeneration: Long? = null,
     ) = synchronized(sessionLock) {
         cancelCurrentLocked()
         val id = nextSessionId.getAndIncrement()
@@ -209,7 +237,7 @@ internal class NativeRoomControlGateway(
         latestSessionId = id
         connected = false
         localCloseReason = null
-        emit(id, initialEvent)
+        initialEvent?.let { emit(id, it) }
         val params =
             JSONObject()
                 .put("mode", mode)
@@ -218,6 +246,12 @@ internal class NativeRoomControlGateway(
                 .put("identity_path", identityPath)
                 .put("fallback_broker", fallbackBroker)
                 .put("fallback_relay", fallbackRelay)
+                .apply {
+                    rememberedCredentialReference?.let {
+                        put("remembered_credential_ref", it)
+                    }
+                    rememberedGeneration?.let { put("remembered_generation", it) }
+                }
         Native.startRoomControlSession(
             id,
             params.toString(),
@@ -265,6 +299,8 @@ internal class NativeRoomControlGateway(
         val value =
             runCatching { JSONObject(json) }
                 .getOrElse {
+                    cancelGenerationLocked(id)
+                    OpLog.add("ROOM_CONTROL state=failed cause=invalid_event")
                     emit(id, RoomControlEvent.Failed("Room control returned an invalid event"))
                     return@synchronized
                 }
@@ -277,6 +313,7 @@ internal class NativeRoomControlGateway(
                             return@synchronized
                         }
                 connected = true
+                OpLog.add("ROOM_CONTROL state=connected")
                 emit(
                     id,
                     RoomControlEvent.Connected(
@@ -284,6 +321,10 @@ internal class NativeRoomControlGateway(
                         creator = value.optBoolean("creator"),
                         endpoint = endpoint,
                         lifetime = lifetime,
+                        rememberedGeneration =
+                            value
+                                .takeIf { it.has("remembered_generation") && !it.isNull("remembered_generation") }
+                                ?.getLong("remembered_generation"),
                     ),
                 )
             }
@@ -291,6 +332,8 @@ internal class NativeRoomControlGateway(
                 val offer = value.optJSONObject("offer")
                 val parsedOffer = offer?.let { runCatching { it.roomOffer() }.getOrNull() }
                 if (parsedOffer == null) {
+                    cancelGenerationLocked(id)
+                    OpLog.add("ROOM_CONTROL state=failed cause=invalid_offer")
                     emit(id, RoomControlEvent.Failed("Room control returned an invalid file offer"))
                 } else {
                     emit(id, RoomControlEvent.IncomingOffer(parsedOffer))
@@ -367,6 +410,7 @@ internal class NativeRoomControlGateway(
                 val localReason = localCloseReason
                 localCloseReason = null
                 val nativeReason = value.optString("reason").roomCloseReason()
+                OpLog.add("ROOM_CONTROL state=closed reason=${nativeReason.name}")
                 emit(
                     id,
                     RoomControlEvent.Closed(
@@ -380,16 +424,34 @@ internal class NativeRoomControlGateway(
                 )
             }
             "failed" -> {
+                val message =
+                    value.optString("message").ifBlank { "Room connection failed" }
                 failPendingResponses(
-                    value.optString("message").ifBlank { "Room connection failed" },
+                    message,
                 )
                 connected = false
                 activeSessionId = null
                 Native.cancelRoomControlSession(id)
+                OpLog.add("ROOM_CONTROL state=failed message=$message")
                 emit(
                     id,
                     RoomControlEvent.Failed(
-                        value.optString("message").ifBlank { "Room connection failed" },
+                        message,
+                        peerAuthenticated = value.optBoolean("peer_authenticated"),
+                        attemptedRememberedGeneration =
+                            value
+                                .takeIf {
+                                    it.has("attempted_remembered_generation") &&
+                                        !it.isNull("attempted_remembered_generation")
+                                }?.getLong("attempted_remembered_generation"),
+                        failureCode =
+                            value.optString("failure_code").takeIf(String::isNotBlank),
+                        retryAfterSeconds =
+                            value
+                                .takeIf {
+                                    it.has("retry_after_seconds") &&
+                                        !it.isNull("retry_after_seconds")
+                                }?.getLong("retry_after_seconds"),
                     ),
                 )
             }
@@ -425,7 +487,7 @@ internal class NativeRoomControlGateway(
         sessionId: Long,
         event: RoomControlEvent,
     ) {
-        mutableEvents.tryEmit(GeneratedRoomControlEvent(sessionId, event))
+        eventChannel.trySend(GeneratedRoomControlEvent(sessionId, event))
     }
 
     private fun failPendingResponses(message: String) {
@@ -469,6 +531,39 @@ internal class NativeRoomControlGateway(
         val broker: String,
         val relay: String,
     )
+
+    private companion object {
+        val nextSessionId = AtomicLong(1L)
+    }
+}
+
+/**
+ * Every concurrently live Iroh endpoint needs a distinct transport identity.
+ * Reusing one endpoint ID lets the newest relay connection steal packets from
+ * an already connected room. Keep the existing one-time identity for
+ * continuity, and assign each remembered relationship a stable private path.
+ */
+internal fun roomControlIdentityPath(
+    filesDirectory: File,
+    rememberedRelationshipId: String?,
+): String {
+    val relativePath =
+        if (rememberedRelationshipId == null) {
+            "room-control/identity.json"
+        } else {
+            require(rememberedRelationshipId.isNotBlank()) {
+                "Remembered relationship ID is required"
+            }
+            val digest =
+                MessageDigest
+                    .getInstance("SHA-256")
+                    .digest(rememberedRelationshipId.toByteArray(Charsets.UTF_8))
+                    .joinToString(separator = "") { byte ->
+                        "%02x".format(byte.toInt() and 0xff)
+                    }
+            "room-control/remembered/$digest/identity.json"
+        }
+    return File(filesDirectory, relativePath).absolutePath
 }
 
 private fun JSONObject.roomOffer(): RoomTransferOffer {

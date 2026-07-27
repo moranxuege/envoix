@@ -65,6 +65,7 @@ import dev.envoix.app.discovery.NearbyVisibility
 @Composable
 internal fun ConnectionHubAppBar(
     onActivity: () -> Unit,
+    onRooms: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val colors = Envoix.colors
@@ -81,12 +82,21 @@ internal fun ConnectionHubAppBar(
             fontWeight = FontWeight.ExtraBold,
             modifier = Modifier.align(Alignment.Center),
         )
-        Box(Modifier.align(Alignment.CenterStart)) {
+        Row(
+            Modifier.align(Alignment.CenterStart),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             HubUtilityButton(
                 icon = Icons.Default.History,
                 description = appText("Activity", "活动"),
                 testTag = "hub_activity",
                 onClick = onActivity,
+            )
+            HubUtilityButton(
+                icon = Icons.Default.Smartphone,
+                description = appText("Rooms", "房间"),
+                testTag = "hub_rooms",
+                onClick = onRooms,
             )
         }
         Box(Modifier.align(Alignment.CenterEnd)) {
@@ -522,7 +532,7 @@ internal fun EnterRoomCodeDialog(
                     onValueChange = { typed = it },
                     singleLine = true,
                     label = { Text(appText("Room code", "房间码")) },
-                    placeholder = { Text("R123456-word-word") },
+                    placeholder = { Text("R123456-a1b2-c3d4") },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 error?.let {

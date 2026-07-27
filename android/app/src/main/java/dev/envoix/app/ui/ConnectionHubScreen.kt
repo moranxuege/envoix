@@ -34,7 +34,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.discovery.DiscoveredPeer
 import dev.envoix.app.discovery.DiscoveryPermissions
-import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
@@ -56,6 +55,7 @@ internal fun ConnectionHubScreen(
     ) -> Unit,
     onReturnToRoom: () -> Unit,
     onActivity: () -> Unit,
+    onRooms: () -> Unit,
     onSettings: () -> Unit,
     onAcceptIncomingOffer: (NearbyRendezvousOffer) -> Boolean,
     onCancelReplacement: () -> Unit,
@@ -84,7 +84,11 @@ internal fun ConnectionHubScreen(
             .fillMaxSize()
             .background(colors.bg),
     ) {
-        ConnectionHubAppBar(onActivity = onActivity, onSettings = onSettings)
+        ConnectionHubAppBar(
+            onActivity = onActivity,
+            onRooms = onRooms,
+            onSettings = onSettings,
+        )
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 28.dp),
@@ -220,21 +224,11 @@ internal fun ConnectionHubScreen(
                     NearbyDeviceCard(peer) {
                         val selection = NearbyPairingSelection.from(peer)
                         onNearbyRoom(selection) { invite, completion ->
-                            if (DiscoverySource.Bluetooth !in peer.sources) {
-                                completion(
-                                    AppText.value(
-                                        "Use QR or code with this device",
-                                        "请使用二维码或房间码连接此设备",
-                                        settings.language,
-                                    ),
-                                )
-                            } else {
-                                discoveryViewModel.offerInvite(
-                                    peer.peerKey,
-                                    invite,
-                                    completion,
-                                )
-                            }
+                            discoveryViewModel.offerInvite(
+                                selection,
+                                invite,
+                                completion,
+                            )
                         }
                     }
                 }

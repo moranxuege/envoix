@@ -179,6 +179,29 @@ class ConnectionWorkflowViewModelTest {
     }
 
     @Test
+    fun `saved rooms navigate independently from one-time room state`() {
+        val viewModel = ConnectionWorkflowViewModel()
+
+        viewModel.openRooms()
+        assertEquals(WorkflowScreen.Rooms, viewModel.uiState.value.screen)
+        assertNull(viewModel.uiState.value.room)
+
+        viewModel.openRememberedRoom("relationship-1")
+        assertEquals(WorkflowScreen.RememberedRoom, viewModel.uiState.value.screen)
+        assertEquals(
+            "relationship-1",
+            viewModel.uiState.value.selectedRememberedRelationshipId,
+        )
+
+        viewModel.navigateBack()
+        assertEquals(WorkflowScreen.Rooms, viewModel.uiState.value.screen)
+        assertNull(viewModel.uiState.value.selectedRememberedRelationshipId)
+
+        viewModel.navigateBack()
+        assertEquals(WorkflowScreen.Hub, viewModel.uiState.value.screen)
+    }
+
+    @Test
     fun `nearby delivery reuses a valid hosted invite without replacement`() =
         runTest(dispatcher) {
             val gateway = HostedInviteGateway()
@@ -257,7 +280,7 @@ class ConnectionWorkflowViewModelTest {
         }
 
     @Test
-    fun `connected joiner closes the foreground room when Android backgrounds`() =
+    fun `connected joiner remains live when Android backgrounds`() =
         runTest(dispatcher) {
             val gateway = HostedInviteGateway()
             val viewModel =
@@ -292,18 +315,19 @@ class ConnectionWorkflowViewModelTest {
             viewModel.setForeground(false)
             runCurrent()
 
-            assertEquals(RoomCloseReason.Backgrounded, gateway.closedWith)
-            assertEquals(RoomControlPhase.Closed, viewModel.uiState.value.control.phase)
+            assertNull(gateway.closedWith)
+            assertEquals(RoomControlPhase.Connected, viewModel.uiState.value.control.phase)
         }
 
     @Test
-    fun `connected creator closes the foreground room when Android backgrounds`() =
+    fun `connected creator remains live when Android backgrounds`() =
         runTest(dispatcher) {
             val gateway = HostedInviteGateway()
             val viewModel =
                 ConnectionWorkflowViewModel(
                     gateway = gateway,
                     currentSettings = { TEST_SETTINGS },
+                    clockEpochMs = { 0L },
                 )
             runCurrent()
             viewModel.revealRoomInvite()
@@ -326,8 +350,36 @@ class ConnectionWorkflowViewModelTest {
             viewModel.setForeground(false)
             runCurrent()
 
-            assertEquals(RoomCloseReason.Backgrounded, gateway.closedWith)
-            assertEquals(RoomControlPhase.Closed, viewModel.uiState.value.control.phase)
+            assertNull(gateway.closedWith)
+            assertEquals(RoomControlPhase.Connected, viewModel.uiState.value.control.phase)
+            viewModel.endRoom()
+            runCurrent()
+        }
+
+    @Test
+    fun `background hides hosted QR even while an external activity is open`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel =
+                ConnectionWorkflowViewModel(
+                    gateway = gateway,
+                    currentSettings = { TEST_SETTINGS },
+                )
+            runCurrent()
+            viewModel.revealRoomInvite()
+            runCurrent()
+            assertTrue(viewModel.uiState.value.control.inviteRevealed)
+
+            viewModel.setExternalActivityActive(true)
+            viewModel.setForeground(false)
+            assertFalse(viewModel.uiState.value.control.inviteRevealed)
+
+            viewModel.setExternalActivityActive(false)
+            runCurrent()
+
+            assertFalse(viewModel.uiState.value.control.inviteRevealed)
+            assertNull(gateway.closedWith)
+            assertEquals(RoomControlPhase.Hosting, viewModel.uiState.value.control.phase)
         }
 
     @Test
@@ -399,7 +451,7 @@ class ConnectionWorkflowViewModelTest {
         }
 
     @Test
-    fun `incoming offer on another endpoint is not prepared or acknowledged`() =
+    fun `incoming offer on another endpoint is rejected without preparing a receiver`() =
         runTest(dispatcher) {
             val gateway = HostedInviteGateway()
             val viewModel =
@@ -444,11 +496,17 @@ class ConnectionWorkflowViewModelTest {
             runCurrent()
 
             assertFalse(receiverPrepared)
-            assertNull(gateway.respondedOffer)
+            assertEquals(TEST_TRANSFER_OFFER.id to false, gateway.respondedOffer)
             assertEquals(
                 "This file offer does not belong to the current room.",
-                viewModel.uiState.value.incomingOfferError,
+                viewModel.uiState.value.control.error,
             )
+            assertNull(viewModel.uiState.value.control.incomingOffer)
+
+            val nextOffer = TEST_TRANSFER_OFFER.copy(id = "offer-after-rejection")
+            gateway.emit(RoomControlEvent.IncomingOffer(nextOffer))
+            runCurrent()
+            assertEquals(nextOffer, viewModel.uiState.value.control.incomingOffer)
         }
 
     @Test

@@ -148,20 +148,29 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     }
 
     func offerInvite(
-        peerKey: String,
+        to selection: NearbyPairingSelection,
         invite: String,
         completion: @escaping (_ error: String?) -> Void
     ) {
-        guard started,
-              let provider = providers.compactMap({ $0 as? NearbyRendezvousProvider }).first else {
-            completion("Experimental Bluetooth pairing is not available")
+        let rendezvousProviders = providers.compactMap { $0 as? NearbyRendezvousProvider }
+        let isRoomControlInvite = invite.trimmed.lowercased().hasPrefix("envoix://room/")
+        let selectedSecureMdns = isRoomControlInvite
+            && selection.sources.contains(.mdns)
+            && selection.nearbyInviteRoute != nil
+        let provider = selectedSecureMdns
+            ? rendezvousProviders.first { $0.source == .mdns }
+            : rendezvousProviders.first {
+                $0.source != .mdns && $0.canOfferInvite(to: selection)
+            }
+        guard started, let provider else {
+            completion("Nearby invitation delivery is not available for this device")
             return
         }
         let activeGeneration = generation
-        provider.offerInvite(peerKey: peerKey, invite: invite) { [weak self] error in
+        provider.offerInvite(to: selection, invite: invite) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self, self.started, self.generation == activeGeneration else {
-                    completion("Bluetooth discovery stopped")
+                    completion("Nearby discovery stopped")
                     return
                 }
                 completion(error)
@@ -254,7 +263,7 @@ final class ReservedNearbyDiscoveryProvider: NearbyDiscoveryProvider {
 }
 
 #if DEBUG
-private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, NearbyRendezvousProvider {
+private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
     let source: NearbyDiscoverySource
     private var sink: ((NearbyDiscoveryEvent) -> Void)?
 
@@ -271,7 +280,8 @@ private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, Nea
             source: source,
             seenAtMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000),
             displayName: source == .mdns ? "Nearby test device" : nil,
-            rssi: source == .bluetooth ? -48 : nil
+            rssi: source == .bluetooth ? -48 : nil,
+            inviteRoute: source == .mdns ? Self.fixtureInviteRoute : nil
         )))
         if source == .bluetooth,
            ProcessInfo.processInfo.arguments.contains("--ui-testing-incoming-nearby-offer") {
@@ -279,6 +289,8 @@ private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, Nea
                 requestID: "ui-test-incoming-offer",
                 senderPeerKey: "0011223344556677",
                 senderDisplayName: "Nearby test device",
+                source: source,
+                senderInboxEndpointID: source == .mdns ? Self.fixtureInboxEndpointID : nil,
                 invite: "envoix://pair/123456-alpha-bravo?role=send"
             )))
         }
@@ -289,16 +301,35 @@ private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, Nea
     }
 
     func offerInvite(
-        peerKey: String,
+        to selection: NearbyPairingSelection,
         invite: String,
         completion: @escaping (String?) -> Void
     ) {
-        let validPeer = NearbyDiscoveryPeerRegistry.normalizePeerKey(peerKey) != nil
+        let validPeer = NearbyDiscoveryPeerRegistry.normalizePeerKey(
+            selection.discoveryPeerKey
+        ) != nil
         let normalizedInvite = invite.lowercased()
         let validInvite = normalizedInvite.hasPrefix("envoix://pair/")
             || normalizedInvite.hasPrefix("envoix://room/")
         completion(validPeer && validInvite ? nil : "Invalid fixture invitation")
     }
+
+    func canOfferInvite(to selection: NearbyPairingSelection) -> Bool {
+        guard NearbyDiscoveryPeerRegistry.normalizePeerKey(
+            selection.discoveryPeerKey
+        ) != nil else {
+            return false
+        }
+        return source != .mdns || selection.nearbyInviteRoute != nil
+    }
+
+    private static let fixtureInboxEndpointID =
+        "2cfu7vzc7zhqv6w3k7m2kkwqvwzppmzvv53lmst6xm7ubjx5qnya"
+    private static let fixtureInviteRoute = NearbyInviteRoute(
+        endpointID: fixtureInboxEndpointID,
+        relayURL: "https://relay.example.test",
+        directAddresses: ["192.0.2.1:4242"]
+    )!
 }
 #endif
 #endif

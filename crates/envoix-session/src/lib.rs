@@ -5,6 +5,7 @@ mod connection;
 mod endpoint;
 mod identity;
 mod manifest_v2_session;
+mod nearby_invite;
 mod room;
 mod room_control;
 
@@ -14,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use envoix_auth::{
-    AuthenticationOutcome, PairingConfig, RememberedCredential, RememberedSession,
-    authenticate_receiver, authenticate_receiver_with_remember, authenticate_sender,
-    authenticate_sender_with_remember,
+    AuthenticationOutcome, PairingConfig, REMEMBERED_PRESENCE_TAG_LEN,
+    REMEMBERED_PRESENCE_TAG_PREFIX, RememberedCredential, RememberedSession, authenticate_receiver,
+    authenticate_receiver_with_remember, authenticate_sender, authenticate_sender_with_remember,
 };
 use envoix_error::CoreError;
 pub use envoix_error::RendezvousCause;
@@ -63,14 +64,19 @@ pub use manifest_v2_session::{
     send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr,
     send_manifest_v2_to_endpoint_addr_with_authentication,
 };
+pub use nearby_invite::{
+    MAX_NEARBY_INVITE_BYTES, NEARBY_INVITE_ALPN, NearbyInvite, NearbyInviteEndpoint,
+    NearbyInviteInbox, start_nearby_invite_inbox,
+};
 pub use room::{
     receive_manifest_v2_offer_via_remembered, receive_manifest_v2_offer_via_room,
     receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_via_remembered,
     send_manifest_v2_via_room, send_manifest_v2_via_room_with_authentication,
 };
 pub use room_control::{
-    ROOM_CONTROL_ALPN, RoomCloseReason, RoomControlEvent, RoomControlInvite, RoomControlSession,
-    RoomLifetimePolicy, RoomLifetimeState, RoomOfferRejection, RoomTransferOffer,
+    ROOM_CONTROL_ALPN, RememberedRoomControlConnectError, RememberedRoomControlRole,
+    RoomCloseReason, RoomControlEvent, RoomControlInvite, RoomControlSession, RoomLifetimePolicy,
+    RoomLifetimeState, RoomOfferRejection, RoomTransferOffer, connect_remembered_room_control,
     connect_room_control,
 };
 

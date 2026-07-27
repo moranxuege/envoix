@@ -21,6 +21,10 @@ use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
+const DEFAULT_PAIRING_BROKER: &str =
+    "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
+const DEFAULT_PAIRING_RELAY: &str = "https://envoix.chkxwlyh.us:8444";
+
 fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -71,9 +75,9 @@ pub extern "system" fn Java_dev_envoix_app_Native_generateInvite(
         "receive" => TransferRole::Receiver,
         _ => return to_jstring(&mut env, r#"{"error":"role must be send or receive"}"#),
     };
-    let broker = jstr(&mut env, &broker);
-    let relay = jstr(&mut env, &relay);
-    let relay_urls = (!relay.is_empty()).then_some(relay).into_iter().collect();
+    let (broker, relay) =
+        pairing_invite_endpoints(&jstr(&mut env, &broker), &jstr(&mut env, &relay));
+    let relay_urls = relay.into_iter().collect();
     let json = match InviteV2::create(
         broker.clone(),
         relay_urls,
@@ -281,6 +285,22 @@ fn unix_now() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+fn pairing_invite_endpoints(broker: &str, relay: &str) -> (String, Option<String>) {
+    let broker = broker.trim();
+    let use_default_relay = broker.is_empty();
+    let broker = if broker.is_empty() {
+        DEFAULT_PAIRING_BROKER
+    } else {
+        broker
+    };
+    let relay = match relay.trim() {
+        "" if use_default_relay => Some(DEFAULT_PAIRING_RELAY.to_string()),
+        "" => None,
+        relay => Some(relay.to_string()),
+    };
+    (broker.to_string(), relay)
+}
+
 fn to_jstring(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
     env.new_string(s)
         .map(|s| s.into_raw())
@@ -356,4 +376,35 @@ fn callback_or_log(env: &JNIEnv, callback: &JObject, context: &str) -> Option<Gl
 
 mod logging;
 mod manifest_v2;
+mod nearby_invite;
 mod room_control;
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_PAIRING_BROKER, DEFAULT_PAIRING_RELAY, pairing_invite_endpoints};
+
+    #[test]
+    fn blank_pairing_endpoints_use_public_defaults() {
+        let (broker, relay) = pairing_invite_endpoints(" \n", "\t");
+
+        assert_eq!(broker, DEFAULT_PAIRING_BROKER);
+        assert_eq!(relay.as_deref(), Some(DEFAULT_PAIRING_RELAY));
+    }
+
+    #[test]
+    fn explicit_pairing_endpoints_are_trimmed() {
+        let (broker, relay) =
+            pairing_invite_endpoints(" broker.example:8500 ", " https://relay.example ");
+
+        assert_eq!(broker, "broker.example:8500");
+        assert_eq!(relay.as_deref(), Some("https://relay.example"));
+    }
+
+    #[test]
+    fn custom_broker_does_not_gain_an_implicit_relay() {
+        let (broker, relay) = pairing_invite_endpoints("broker.example:8500", "");
+
+        assert_eq!(broker, "broker.example:8500");
+        assert_eq!(relay, None);
+    }
+}

@@ -461,7 +461,16 @@ internal fun TransferCard(
                 .clip(RoundedCornerShape(16.dp))
                 .background(if (canceled) colors.line else colors.surface)
                 .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-                .clickable { onToggleDetail(t.id) },
+                .clickable {
+                    if (t.status == Status.Delivered &&
+                        t.direction == Direction.Receive &&
+                        t.savedUri != null
+                    ) {
+                        onOpen(t)
+                    } else {
+                        onToggleDetail(t.id)
+                    }
+                },
         ) {
             if (t.status == Status.WaitingForPeer && t.qrPayload != null) {
                 WaitingBody(t, onPauseResume, onCancel)

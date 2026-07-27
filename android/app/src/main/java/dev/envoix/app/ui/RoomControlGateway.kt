@@ -38,6 +38,11 @@ internal enum class RoomLifetimePolicy {
     UntilForegroundEnds,
 }
 
+internal enum class RememberedRoomConnectRole {
+    Connector,
+    Responder,
+}
+
 internal data class RoomLifetimeSnapshot(
     val revision: Long,
     val policy: RoomLifetimePolicy,
@@ -68,6 +73,7 @@ internal sealed interface RoomControlEvent {
         val creator: Boolean,
         val endpoint: RoomControlEndpoint,
         val lifetime: RoomLifetimeSnapshot,
+        val rememberedGeneration: Long? = null,
     ) : RoomControlEvent
 
     data class IncomingOffer(
@@ -99,11 +105,15 @@ internal sealed interface RoomControlEvent {
 
     data class Failed(
         val message: String,
+        val peerAuthenticated: Boolean = false,
+        val attemptedRememberedGeneration: Long? = null,
+        val failureCode: String? = null,
+        val retryAfterSeconds: Long? = null,
     ) : RoomControlEvent
 }
 
 /**
- * Native-facing boundary for the foreground room-control session.
+ * Native-facing boundary for the live room-control session.
  *
  * Implementations must emit [RoomControlEvent.Connected] only after the peer is
  * authenticated. UI navigation is never treated as proof of a connection.
@@ -122,6 +132,17 @@ internal interface RoomControlGateway {
         input: String,
         displayName: String,
     )
+
+    suspend fun connectRemembered(
+        credentialReference: String,
+        generation: Long,
+        displayName: String,
+        role: RememberedRoomConnectRole,
+        broker: String,
+        relay: String,
+    ) {
+        error("Remembered room control is unavailable")
+    }
 
     suspend fun refreshInvite()
 

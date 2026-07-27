@@ -387,11 +387,11 @@ internal class BluetoothDiscoveryProvider(
 
     @SuppressLint("MissingPermission")
     override fun offerInvite(
-        peerKey: String,
+        selection: NearbyPairingSelection,
         invite: String,
         completion: (String?) -> Unit,
     ) {
-        val normalizedPeerKey = DiscoveryPeerRegistry.normalizePeerKey(peerKey)
+        val normalizedPeerKey = DiscoveryPeerRegistry.normalizePeerKey(selection.discoveryPeerKey)
         val device = normalizedPeerKey?.let(discoveredDevices::get)
         if (!active || !scanning) {
             completion("Experimental Bluetooth pairing is not ready")

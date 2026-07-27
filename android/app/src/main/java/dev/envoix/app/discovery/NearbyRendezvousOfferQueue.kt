@@ -1,9 +1,10 @@
 package dev.envoix.app.discovery
 
 /**
- * Small in-memory inbox for unauthenticated nearby invitations. Duplicate
- * advertisements do not refresh their lifetime, so a peer cannot keep a stale
- * prompt alive indefinitely.
+ * Small in-memory inbox for nearby invitations. A secure carrier authenticates
+ * its transport endpoint, but the public device name remains unverified.
+ * Duplicate advertisements do not refresh their lifetime, so a peer cannot
+ * keep a stale prompt alive indefinitely.
  */
 internal class NearbyRendezvousOfferQueue(
     private val maxSize: Int = 4,
@@ -15,7 +16,7 @@ internal class NearbyRendezvousOfferQueue(
     }
 
     private data class Key(
-        val senderPeerKey: String,
+        val senderIdentity: String,
         val invite: String,
     )
 
@@ -31,7 +32,7 @@ internal class NearbyRendezvousOfferQueue(
         nowMs: Long,
     ): Boolean {
         expire(nowMs)
-        val key = Key(offer.senderPeerKey, offer.invite)
+        val key = Key(offer.senderEndpointId ?: offer.senderPeerKey, offer.invite)
         if (key in entries) return false
         while (entries.size >= maxSize) {
             entries.remove(entries.keys.first())

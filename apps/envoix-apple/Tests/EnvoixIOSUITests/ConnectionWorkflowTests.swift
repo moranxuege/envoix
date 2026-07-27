@@ -9,13 +9,486 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(ConnectionWorkflowPolicy.localAction(forLocalRole: .receive), .receiveFiles)
     }
 
+    func testRememberedGenerationSweepNeverProbesCurrentTwice() {
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.rememberedGenerationSchedule(
+                current: 9,
+                previous: 8,
+                mode: .connector
+            ),
+            [9, 8]
+        )
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.rememberedGenerationSchedule(
+                current: 9,
+                previous: 9,
+                mode: .responder
+            ),
+            [9]
+        )
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.rememberedGenerationSchedule(
+                current: 9,
+                previous: nil,
+                mode: .responder
+            ),
+            [9]
+        )
+    }
+
+    func testRememberedReconnectPolicyUsesPositiveBoundedJitter() {
+        let policy = RememberedRoomReconnectPolicy.live
+
+        XCTAssertEqual(policy.connectorAttemptTimeout, 75)
+        XCTAssertEqual(policy.responderAttemptTimeout, 240)
+        XCTAssertEqual(policy.sameLocatorCooldown, 6)
+        XCTAssertEqual(policy.passiveConnectedDwell, 45)
+        XCTAssertEqual(policy.delay(failureCount: 1, jitterUnit: 0), 30)
+        XCTAssertGreaterThan(policy.delay(failureCount: 1, jitterUnit: 1), 30)
+        XCTAssertEqual(policy.delay(failureCount: 7, jitterUnit: 1), 300)
+        XCTAssertEqual(policy.collisionDelay(jitterUnit: 0), 1)
+        XCTAssertEqual(policy.collisionDelay(jitterUnit: 1), 6)
+        XCTAssertEqual(
+            policy.requiredCooldown(
+                failureCode: .roomExpired,
+                retryAfterSeconds: nil
+            ),
+            300
+        )
+        XCTAssertEqual(
+            policy.requiredCooldown(
+                failureCode: .serverBusy,
+                retryAfterSeconds: 17
+            ),
+            17
+        )
+        XCTAssertEqual(
+            policy.requiredCooldown(
+                failureCode: .serverBusy,
+                retryAfterSeconds: UInt64.max
+            ),
+            300
+        )
+    }
+
+    func testRememberedStoreReturnsConsistentMaterialAndProtectsActiveLease() throws {
+        let credentials = InMemoryRememberedCredentialStore()
+        let metadataURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("remembered.json")
+        let store = RememberedPeerStore(
+            credentialStore: credentials,
+            metadataFileURL: metadataURL
+        )
+        let pending = try store.prepare(
+            label: "Other phone",
+            broker: "udp://broker.example:8555",
+            relay: ""
+        )
+        let credential = Data([1, 2, 3, 4])
+
+        XCTAssertThrowsError(try store.create(
+            pending,
+            opaqueCredential: credential,
+            generation: 7
+        )) { error in
+            guard case RememberedPeerStoreError.inactiveSession = error else {
+                return XCTFail("Expected inactive-session protection, got \(error)")
+            }
+        }
+
+        try store.acquireSession(pending.relationshipID)
+        try store.create(pending, opaqueCredential: credential, generation: 7)
+        XCTAssertEqual(
+            try store.sessionMaterial(relationshipID: pending.relationshipID),
+            RememberedPeerSessionMaterial(
+                summary: RememberedPeerSummary(
+                    relationshipID: pending.relationshipID,
+                    label: "Other phone",
+                    generation: 7,
+                    previousGeneration: nil,
+                    broker: "udp://broker.example:8555",
+                    relay: ""
+                ),
+                opaqueCredential: credential
+            )
+        )
+
+        try store.rotate(
+            relationshipID: pending.relationshipID,
+            opaqueCredential: credential,
+            generation: 8
+        )
+        let rotated = try store.sessionMaterial(relationshipID: pending.relationshipID)
+        XCTAssertEqual(rotated.summary.generation, 8)
+        XCTAssertEqual(rotated.summary.previousGeneration, 7)
+        XCTAssertEqual(rotated.opaqueCredential, credential)
+        XCTAssertThrowsError(try store.delete(rotated.summary)) { error in
+            guard case RememberedPeerStoreError.activeTransfer = error else {
+                return XCTFail("Expected active-lease protection, got \(error)")
+            }
+        }
+
+        store.releaseSession(pending.relationshipID)
+        try store.delete(rotated.summary)
+        XCTAssertTrue(try store.peers().isEmpty)
+        try? FileManager.default.removeItem(
+            at: metadataURL.deletingLastPathComponent()
+        )
+    }
+
+    func testRememberedRoomRotatesGenerationBeforePublishingConnected() async throws {
+        let credentials = InMemoryRememberedCredentialStore()
+        let metadataURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("remembered.json")
+        let store = RememberedPeerStore(
+            credentialStore: credentials,
+            metadataFileURL: metadataURL
+        )
+        let pending = try store.prepare(
+            label: "Other phone",
+            broker: "udp://broker.example:8555",
+            relay: ""
+        )
+        let credential = Data([4, 3, 2, 1])
+        try store.acquireSession(pending.relationshipID)
+        try store.create(pending, opaqueCredential: credential, generation: 11)
+        store.releaseSession(pending.relationshipID)
+
+        let gateway = RecordingRoomControlGateway()
+        gateway.rememberedConnectHandler = { attempt, _, beforeConnected, onEvent in
+            try beforeConnected(attempt.generation)
+            let persisted = try store.sessionMaterial(
+                relationshipID: pending.relationshipID
+            )
+            XCTAssertEqual(persisted.summary.generation, 12)
+            XCTAssertEqual(persisted.summary.previousGeneration, 11)
+            onEvent(.connected(
+                peerDisplayName: "Other phone",
+                creator: false,
+                lifetime: RoomControlLifetimeState(
+                    revision: 1,
+                    policy: .untilForegroundEnds,
+                    idleDeadline: nil
+                )
+            ))
+            try await Task.sleep(nanoseconds: UInt64.max)
+        }
+        let workflow = ConnectionWorkflowState(
+            gateway: gateway,
+            rememberedStore: store,
+            jitterUnit: { 0.5 }
+        )
+        workflow.refreshRememberedRooms()
+        XCTAssertNil(workflow.openRememberedRoom(
+            relationshipID: pending.relationshipID,
+            existingActivityIDs: []
+        ))
+        workflow.setRememberedReconnectEnabled(
+            true,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+
+        for _ in 0..<100 where workflow.controlPhase != .connected {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(workflow.controlPhase, .connected)
+        XCTAssertEqual(
+            workflow.activeRememberedRelationshipID,
+            pending.relationshipID
+        )
+        workflow.setRememberedReconnectEnabled(
+            false,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+        try? FileManager.default.removeItem(
+            at: metadataURL.deletingLastPathComponent()
+        )
+    }
+
+    func testPassiveRememberedConnectionRotatesToAnotherSavedRoom() async throws {
+        let credentials = InMemoryRememberedCredentialStore()
+        let metadataURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("remembered.json")
+        let store = RememberedPeerStore(
+            credentialStore: credentials,
+            metadataFileURL: metadataURL
+        )
+        for (label, broker, byte) in [
+            ("Phone A", "udp://a.example:8555", UInt8(1)),
+            ("Phone B", "udp://b.example:8555", UInt8(2)),
+        ] {
+            let pending = try store.prepare(label: label, broker: broker, relay: "")
+            try store.acquireSession(pending.relationshipID)
+            try store.create(
+                pending,
+                opaqueCredential: Data([byte, byte, byte, byte]),
+                generation: 1
+            )
+            store.releaseSession(pending.relationshipID)
+        }
+
+        let gateway = RecordingRoomControlGateway()
+        gateway.rememberedConnectHandler = { attempt, _, beforeConnected, onEvent in
+            try beforeConnected(attempt.generation)
+            onEvent(.connected(
+                peerDisplayName: attempt.endpoint.broker,
+                creator: false,
+                lifetime: RoomControlLifetimeState(
+                    revision: 1,
+                    policy: .untilForegroundEnds,
+                    idleDeadline: nil
+                )
+            ))
+            try await Task.sleep(nanoseconds: UInt64.max)
+        }
+        let policy = RememberedRoomReconnectPolicy(
+            connectorAttemptTimeout: 1,
+            responderAttemptTimeout: 1,
+            sameLocatorCooldown: 0.001,
+            minimumBackoff: 0.001,
+            maximumBackoff: 0.01,
+            passiveConnectedDwell: 0.03
+        )
+        let workflow = ConnectionWorkflowState(
+            gateway: gateway,
+            rememberedStore: store,
+            reconnectPolicy: policy,
+            jitterUnit: { 0 }
+        )
+        workflow.refreshRememberedRooms()
+        workflow.setRememberedReconnectEnabled(
+            true,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+
+        for _ in 0..<200 {
+            let brokers = Set(gateway.rememberedAttempts.map(\.endpoint.broker))
+            if brokers.contains("udp://a.example:8555"),
+               brokers.contains("udp://b.example:8555") {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let attemptedBrokers = Set(gateway.rememberedAttempts.map(\.endpoint.broker))
+        XCTAssertTrue(attemptedBrokers.contains("udp://a.example:8555"))
+        XCTAssertTrue(attemptedBrokers.contains("udp://b.example:8555"))
+        XCTAssertTrue(gateway.closeReasons.contains(.idleExpired))
+
+        workflow.setRememberedReconnectEnabled(
+            false,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+        try? FileManager.default.removeItem(
+            at: metadataURL.deletingLastPathComponent()
+        )
+    }
+
+    func testQueuedWorkPreemptsDifferentIdlePassiveRoom() async throws {
+        let credentials = InMemoryRememberedCredentialStore()
+        let metadataURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("remembered.json")
+        let store = RememberedPeerStore(
+            credentialStore: credentials,
+            metadataFileURL: metadataURL
+        )
+        var relationshipIDs: [String] = []
+        for (label, broker, byte) in [
+            ("Phone A", "udp://a.example:8555", UInt8(1)),
+            ("Phone B", "udp://b.example:8555", UInt8(2)),
+        ] {
+            let pending = try store.prepare(label: label, broker: broker, relay: "")
+            relationshipIDs.append(pending.relationshipID)
+            try store.acquireSession(pending.relationshipID)
+            try store.create(
+                pending,
+                opaqueCredential: Data([byte, byte, byte, byte]),
+                generation: 1
+            )
+            store.releaseSession(pending.relationshipID)
+        }
+
+        let gateway = RecordingRoomControlGateway()
+        gateway.rememberedConnectHandler = { attempt, _, beforeConnected, onEvent in
+            try beforeConnected(attempt.generation)
+            onEvent(.connected(
+                peerDisplayName: attempt.endpoint.broker,
+                creator: false,
+                lifetime: RoomControlLifetimeState(
+                    revision: 1,
+                    policy: .untilForegroundEnds,
+                    idleDeadline: nil
+                )
+            ))
+            try await Task.sleep(nanoseconds: UInt64.max)
+        }
+        let workflow = ConnectionWorkflowState(
+            gateway: gateway,
+            rememberedStore: store,
+            reconnectPolicy: RememberedRoomReconnectPolicy(
+                connectorAttemptTimeout: 1,
+                responderAttemptTimeout: 1,
+                sameLocatorCooldown: 0.001,
+                minimumBackoff: 0.001,
+                maximumBackoff: 0.01,
+                passiveConnectedDwell: 30
+            ),
+            jitterUnit: { 0 }
+        )
+        workflow.refreshRememberedRooms()
+        workflow.setRememberedReconnectEnabled(
+            true,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+
+        for _ in 0..<100 where workflow.controlPhase != .connected {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let passiveRelationshipID = try XCTUnwrap(
+            workflow.activeRememberedRelationshipID
+        )
+        let queuedRelationshipID = try XCTUnwrap(
+            relationshipIDs.first { $0 != passiveRelationshipID }
+        )
+        workflow.setQueuedRememberedRelationships([queuedRelationshipID])
+
+        for _ in 0..<100 where
+            workflow.activeRememberedRelationshipID != queuedRelationshipID
+                || workflow.controlPhase != .connected {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(
+            workflow.activeRememberedRelationshipID,
+            queuedRelationshipID
+        )
+        XCTAssertEqual(workflow.controlPhase, .connected)
+        XCTAssertTrue(gateway.closeReasons.contains(.idleExpired))
+
+        workflow.setRememberedReconnectEnabled(
+            false,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+        try? FileManager.default.removeItem(
+            at: metadataURL.deletingLastPathComponent()
+        )
+    }
+
+    func testRoomExpiredCurrentGenerationStillProbesPreviousGeneration() async throws {
+        let credentials = InMemoryRememberedCredentialStore()
+        let metadataURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("remembered.json")
+        let store = RememberedPeerStore(
+            credentialStore: credentials,
+            metadataFileURL: metadataURL
+        )
+        let pending = try store.prepare(
+            label: "Other phone",
+            broker: "udp://broker.example:8555",
+            relay: ""
+        )
+        let credential = Data([9, 8, 7, 6])
+        try store.acquireSession(pending.relationshipID)
+        try store.create(pending, opaqueCredential: credential, generation: 10)
+        try store.rotate(
+            relationshipID: pending.relationshipID,
+            opaqueCredential: credential,
+            generation: 11
+        )
+        store.releaseSession(pending.relationshipID)
+
+        let gateway = RecordingRoomControlGateway()
+        gateway.rememberedConnectHandler = { attempt, _, _, _ in
+            throw RememberedRoomConnectFailure(
+                reason: attempt.generation == 11 ? "expired" : "not found",
+                peerAuthenticated: false,
+                failureCode: attempt.generation == 11
+                    ? .roomExpired
+                    : .roomNotFound
+            )
+        }
+        let workflow = ConnectionWorkflowState(
+            gateway: gateway,
+            rememberedStore: store,
+            jitterUnit: { 0.5 }
+        )
+        workflow.refreshRememberedRooms()
+        XCTAssertNil(workflow.openRememberedRoom(
+            relationshipID: pending.relationshipID,
+            existingActivityIDs: []
+        ))
+        workflow.setRememberedReconnectEnabled(
+            true,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+
+        for _ in 0..<100 where gateway.rememberedAttempts.count < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(
+            gateway.rememberedAttempts.map(\.generation),
+            [11, 10]
+        )
+        workflow.setRememberedReconnectEnabled(
+            false,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+        try? FileManager.default.removeItem(
+            at: metadataURL.deletingLastPathComponent()
+        )
+    }
+
     func testLinkedCoreExposesTheExpectedRoomControlContract() {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 9)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 11)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
         XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v4")
+        XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
+        XCTAssertEqual(expectedNearbyInviteCoreCapability, "nearby_invite_inbox_v1")
+    }
+
+    func testBackgroundScenePreservesRoomWhileHidingInvitationAndDiscovery() {
+        let effects = MobileSceneLifecyclePolicy.effects(for: .background)
+
+        XCTAssertTrue(effects.shouldHideRoomInvitation)
+        XCTAssertFalse(effects.allowsNearbyDiscovery)
+        XCTAssertFalse(effects.shouldPresentPendingSendSelection)
+    }
+
+    func testActiveSceneRestoresForegroundPresentationAndDiscovery() {
+        let effects = MobileSceneLifecyclePolicy.effects(for: .active)
+
+        XCTAssertFalse(effects.shouldHideRoomInvitation)
+        XCTAssertTrue(effects.allowsNearbyDiscovery)
+        XCTAssertTrue(effects.shouldPresentPendingSendSelection)
+    }
+
+    func testRememberedRoomSurvivesAnExternalFilePicker() {
+        XCTAssertTrue(RememberedRoomLifecyclePolicy.shouldKeepConnected(
+            sceneIsActive: false,
+            externalActivityActive: true
+        ))
+        XCTAssertFalse(RememberedRoomLifecyclePolicy.shouldKeepConnected(
+            sceneIsActive: false,
+            externalActivityActive: false
+        ))
     }
 
     func testIncomingOfferQueueDeduplicatesBoundsAndExpires() {
@@ -187,6 +660,43 @@ final class ConnectionWorkflowTests: XCTestCase {
         )
     }
 
+    func testTransferInvitationUsesItsEndpointWithoutChangingConfiguredEndpoint() throws {
+        let suiteName = "TransferInvitationEndpointTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let configuredBroker = "configured-a.example.test:8555"
+        let configuredRelay = "https://configured-a.example.test:8444"
+        defaults.set(configuredBroker, forKey: "envoix.serverURL")
+        defaults.set(configuredRelay, forKey: "envoix.relayURL")
+        let invitation = FfiPairingInvite(
+            roomCode: "123456-test-room",
+            payload: "envoix://invite/v2/opaque",
+            broker: "invite-b.example.test:8555",
+            relayUrls: ["https://invite-b.example.test:8444"],
+            creatorRole: .send,
+            joinerRole: .receive,
+            expiresAt: 2_000
+        )
+
+        let settings = try RuntimeSettingsProvider.make(
+            transferInvitation: invitation,
+            concurrentTransfers: false,
+            language: "en",
+            speedLimit: 0
+        )
+
+        XCTAssertEqual(settings.serverUrl, invitation.broker)
+        XCTAssertEqual(settings.relayUrl, invitation.relayUrls[0])
+        XCTAssertEqual(
+            defaults.string(forKey: "envoix.serverURL"),
+            configuredBroker
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: "envoix.relayURL"),
+            configuredRelay
+        )
+    }
+
     func testDestinationRepairRequiresTheSameOfferAndRoom() {
         let roomID = UUID()
         let request = RoomDestinationRepairRequest(
@@ -294,7 +804,7 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(workflow.controlPhase, .connected)
     }
 
-    func testJoinerMayCloseRoomWhenAppBackgrounds() async {
+    func testExplicitBackgroundCloseReasonStillClosesRoom() async {
         let gateway = RecordingRoomControlGateway()
         let workflow = ConnectionWorkflowState(gateway: gateway)
         _ = workflow.startHosting(
@@ -580,6 +1090,8 @@ final class ConnectionWorkflowTests: XCTestCase {
             requestID: id,
             senderPeerKey: "0011223344556677",
             senderDisplayName: "Nearby phone",
+            source: .bluetooth,
+            senderInboxEndpointID: nil,
             invite: "envoix://pair/river-stone-\(invitationID)?role=send"
         )
     }
@@ -627,12 +1139,20 @@ private final class ControlledReceiverLaunch {
 
 @MainActor
 private final class RecordingRoomControlGateway: RoomControlGateway {
+    typealias RememberedConnectHandler = (
+        RememberedRoomConnectAttempt,
+        RememberedRoomConnectMode,
+        (UInt64) throws -> Void,
+        (RoomControlEvent) -> Void
+    ) async throws -> Void
+
     private var eventHandler: ((RoomControlEvent) -> Void)?
     private var acceptanceContinuation: CheckedContinuation<Void, Never>?
     var suspendAcceptance = false
     var rejectIdleExpiry = false
     var invitationError: Error?
     var localTransferLifetime: ((Bool) -> RoomControlLifetimeState?)?
+    var rememberedConnectHandler: RememberedConnectHandler?
     var currentLifetime = RoomControlLifetimeState(
         revision: 0,
         policy: .idleFifteenMinutes,
@@ -641,6 +1161,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     private(set) var acceptedOfferIDs: [String] = []
     private(set) var rejectedOfferIDs: [String] = []
     private(set) var localTransferStates: [Bool] = []
+    private(set) var rememberedAttempts: [RememberedRoomConnectAttempt] = []
     private(set) var idleExpiryAttempts = 0
     private(set) var closeReasons: [RoomControlCloseReason] = []
 
@@ -681,6 +1202,28 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws {
         eventHandler = onEvent
+    }
+
+    func connectRemembered(
+        attempt: RememberedRoomConnectAttempt,
+        mode: RememberedRoomConnectMode,
+        timeout: TimeInterval?,
+        beforeConnected: @escaping (UInt64) throws -> Void,
+        onEvent: @escaping (RoomControlEvent) -> Void
+    ) async throws {
+        rememberedAttempts.append(attempt)
+        guard let rememberedConnectHandler else {
+            throw RememberedRoomConnectFailure(
+                reason: "No remembered-room fixture was configured.",
+                peerAuthenticated: false
+            )
+        }
+        try await rememberedConnectHandler(
+            attempt,
+            mode,
+            beforeConnected,
+            onEvent
+        )
     }
 
     func offerTransfer(
@@ -742,5 +1285,24 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     func finishAcceptance() {
         acceptanceContinuation?.resume()
         acceptanceContinuation = nil
+    }
+}
+
+private final class InMemoryRememberedCredentialStore: RememberedCredentialStoring {
+    private var values: [String: Data] = [:]
+
+    func put(_ reference: String, _ credential: Data) throws {
+        values[reference] = credential
+    }
+
+    func get(_ reference: String) throws -> Data {
+        guard let value = values[reference] else {
+            throw RememberedPeerStoreError.missingCredential
+        }
+        return value
+    }
+
+    func delete(_ reference: String) throws {
+        values.removeValue(forKey: reference)
     }
 }

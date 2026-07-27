@@ -23,6 +23,10 @@ import dev.envoix.app.ui.ConnectionWorkflowViewModel
 import dev.envoix.app.ui.DeviceRoomScreen
 import dev.envoix.app.ui.EnvoixTheme
 import dev.envoix.app.ui.LocalAppLanguage
+import dev.envoix.app.ui.RememberedRoomConnectionManager
+import dev.envoix.app.ui.RememberedRoomDetailScreen
+import dev.envoix.app.ui.RememberedRoomsScreen
+import dev.envoix.app.ui.RememberedRoomsViewModel
 import dev.envoix.app.ui.SettingsScreen
 import dev.envoix.app.ui.TransferActivityScreen
 import dev.envoix.app.ui.WorkflowScreen
@@ -31,6 +35,10 @@ class MainActivity : ComponentActivity() {
     private val vm: TransferViewModel by viewModels()
     private val discoveryVm: DiscoveryViewModel by viewModels()
     private val workflowVm: ConnectionWorkflowViewModel by viewModels()
+    private val rememberedRoomsVm: RememberedRoomsViewModel by viewModels()
+    private val rememberedRoomConnections by lazy {
+        RememberedRoomConnectionManager.get(this)
+    }
 
     private val requestNotif =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -49,6 +57,7 @@ class MainActivity : ComponentActivity() {
                 EnvoixTheme {
                     val transfers by vm.transfers.collectAsState()
                     val workflow by workflowVm.uiState.collectAsState()
+                    val rememberedRooms by rememberedRoomsVm.uiState.collectAsState()
                     val selectedPeerKey = workflow.room?.nearbySelection?.discoveryPeerKey
                     val controlRoom = workflow.room?.controlSession == true
                     val activeRoomTransferCount =
@@ -93,11 +102,12 @@ class MainActivity : ComponentActivity() {
                                 onNearbyRoom = workflowVm::startNearbyRoom,
                                 onReturnToRoom = workflowVm::returnToCurrentRoom,
                                 onActivity = workflowVm::openActivity,
+                                onRooms = workflowVm::openRooms,
                                 onSettings = workflowVm::openSettings,
                                 onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
                                 onCancelReplacement = workflowVm::cancelReplacement,
                                 onConfirmReplacement = workflowVm::confirmReplacement,
-                                onExternalActivityChanged = workflowVm::setExternalActivityActive,
+                                onExternalActivityChanged = ::setExternalActivityActive,
                                 pendingShareCount = workflow.pendingShares.size,
                                 discoveryViewModel = discoveryVm,
                             )
@@ -114,11 +124,12 @@ class MainActivity : ComponentActivity() {
                                     onNearbyRoom = workflowVm::startNearbyRoom,
                                     onReturnToRoom = workflowVm::returnToCurrentRoom,
                                     onActivity = workflowVm::openActivity,
+                                    onRooms = workflowVm::openRooms,
                                     onSettings = workflowVm::openSettings,
                                     onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
                                     onCancelReplacement = workflowVm::cancelReplacement,
                                     onConfirmReplacement = workflowVm::confirmReplacement,
-                                    onExternalActivityChanged = workflowVm::setExternalActivityActive,
+                                    onExternalActivityChanged = ::setExternalActivityActive,
                                     pendingShareCount = workflow.pendingShares.size,
                                     discoveryViewModel = discoveryVm,
                                 )
@@ -169,7 +180,7 @@ class MainActivity : ComponentActivity() {
                                     onEndRoom = { workflowVm.endRoom() },
                                     onDismissEndedRoom = workflowVm::dismissEndedRoom,
                                     onRoomActiveTransfers = workflowVm::updateRoomTransferActivity,
-                                    onExternalActivityChanged = workflowVm::setExternalActivityActive,
+                                    onExternalActivityChanged = ::setExternalActivityActive,
                                     onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
                                     onReceive = {
                                         c,
@@ -215,6 +226,41 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
+                        WorkflowScreen.Rooms ->
+                            RememberedRoomsScreen(
+                                state = rememberedRooms,
+                                onBack = workflowVm::navigateBack,
+                                onOpenRoom = workflowVm::openRememberedRoom,
+                                onDismissError = rememberedRoomsVm::clearError,
+                            )
+                        WorkflowScreen.RememberedRoom -> {
+                            val relationshipId = workflow.selectedRememberedRelationshipId
+                            val peer =
+                                rememberedRooms.peers.firstOrNull {
+                                    it.relationshipId == relationshipId
+                                }
+                            RememberedRoomDetailScreen(
+                                peer = peer,
+                                connection = rememberedRooms.connections[relationshipId],
+                                transferState = rememberedRooms.transfers[relationshipId],
+                                error = rememberedRooms.error,
+                                connectionManager = rememberedRoomConnections,
+                                onBack = workflowVm::navigateBack,
+                                onRetry = rememberedRoomsVm::retry,
+                                onRename = rememberedRoomsVm::rename,
+                                onForget = rememberedRoomsVm::forget,
+                                onQueuePrepared = rememberedRoomsVm::enqueuePrepared,
+                                onRetryOutbox = rememberedRoomsVm::retryOutbox,
+                                onRemoveOutbox = rememberedRoomsVm::removeOutbox,
+                                onAcceptIncoming = rememberedRoomsVm::acceptIncoming,
+                                onRejectIncoming = rememberedRoomsVm::rejectIncoming,
+                                onClearTransferError = rememberedRoomsVm::clearTransferError,
+                                onOpenReceived = ::openReceived,
+                                onShareReceived = ::shareReceived,
+                                onExternalActivityChanged = ::setExternalActivityActive,
+                                onDismissError = rememberedRoomsVm::clearError,
+                            )
+                        }
                         WorkflowScreen.Activity ->
                             TransferActivityScreen(
                                 transfers = transfers,
@@ -253,6 +299,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         workflowVm.setForeground(true)
         discoveryVm.setForeground(true)
+        rememberedRoomConnections.setForeground(true)
     }
 
     override fun onStop() {
@@ -261,6 +308,7 @@ class MainActivity : ComponentActivity() {
         if (!isChangingConfigurations) {
             workflowVm.setForeground(false)
             discoveryVm.setForeground(false)
+            rememberedRoomConnections.setForeground(false)
         }
         super.onStop()
     }
@@ -276,6 +324,11 @@ class MainActivity : ComponentActivity() {
                 else -> emptyList()
             }
         workflowVm.captureSharedUris(uris)
+    }
+
+    private fun setExternalActivityActive(active: Boolean) {
+        workflowVm.setExternalActivityActive(active)
+        rememberedRoomConnections.setExternalActivityActive(active)
     }
 
     /** Open a received file (a Downloads content Uri) in whatever app handles it. */

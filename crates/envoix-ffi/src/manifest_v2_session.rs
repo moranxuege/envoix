@@ -319,6 +319,14 @@ impl AuthenticationHandler for NativeAuthentication {
     }
 }
 
+fn should_stop_remembered_fallback<T>(
+    result: &Result<T, SessionError>,
+    authentication: &NativeAuthentication,
+    cancel: &TransferCancelToken,
+) -> bool {
+    result.is_ok() || authentication.authenticated() || cancel.is_cancelled()
+}
+
 impl EventSink for NativeSessionEvents {
     fn on_event(&self, event: TransferEvent) {
         match event {
@@ -370,7 +378,7 @@ impl EventSink for NativeSessionEvents {
 
 fn pairing_phase(step: PairingStep) -> Option<FfiManifestV2Phase> {
     match step {
-        PairingStep::Joining => None,
+        PairingStep::Joining => Some(FfiManifestV2Phase::WaitingForPeer),
         PairingStep::Matched | PairingStep::Exchanged => Some(FfiManifestV2Phase::Pairing),
     }
 }
@@ -744,7 +752,7 @@ async fn send_attempt(
                     &authentication,
                 )
                 .await;
-                if result.is_ok() || authentication.persisted() || cancel.is_cancelled() {
+                if should_stop_remembered_fallback(&result, &authentication, cancel) {
                     return result;
                 }
                 last_error = result.err();
@@ -893,7 +901,7 @@ async fn receive_offer_attempt(
                 } else {
                     receive.await
                 };
-                if result.is_ok() || authentication.persisted() || cancel.is_cancelled() {
+                if should_stop_remembered_fallback(&result, &authentication, cancel) {
                     return result;
                 }
                 last_error = result.err();
@@ -1013,81 +1021,92 @@ fn report_v2_failure(
     direction: FfiTransferDirection,
     fallback_phase: FfiFailurePhase,
 ) {
-    let (code, category, phase, origin, retryable, recovery_action, message_key) = match error {
-        SessionError::Cause { cause, .. } => manifest_v2_cause_projection(cause.code()),
-        SessionError::Rendezvous { cause, .. } => rendezvous_cause_projection(*cause),
-        SessionError::Cancelled => (
-            FfiFailureCode::UserCanceled,
-            FfiFailureCategory::User,
-            fallback_phase,
-            FfiFailureOrigin::Local,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.user_canceled",
-        ),
-        SessionError::Transport(_) | SessionError::Discovery(_) => (
-            FfiFailureCode::NetworkLost,
-            FfiFailureCategory::Network,
-            fallback_phase,
-            FfiFailureOrigin::Unknown,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.network_lost",
-        ),
-        SessionError::Crypto(_) | SessionError::InvitationConsumed(_) => (
-            FfiFailureCode::AuthenticationFailed,
-            FfiFailureCategory::Authentication,
-            FfiFailurePhase::Authenticating,
-            FfiFailureOrigin::Unknown,
-            true,
-            FfiRecoveryAction::RePair,
-            "transfer.authentication_failed",
-        ),
-        SessionError::Protocol(_) => (
-            FfiFailureCode::ProtocolOrIntegrityFailure,
-            FfiFailureCategory::Integrity,
-            FfiFailurePhase::Verifying,
-            FfiFailureOrigin::Unknown,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.protocol_or_integrity_failure",
-        ),
-        SessionError::Io(_) | SessionError::Storage(_) => (
-            if direction == FfiTransferDirection::Receive {
-                FfiFailureCode::ReceiverSaveFailed
-            } else {
-                FfiFailureCode::SenderSourceUnavailable
-            },
-            FfiFailureCategory::Storage,
-            fallback_phase,
-            FfiFailureOrigin::Local,
-            true,
-            io_failure_recovery(direction),
-            if direction == FfiTransferDirection::Receive {
-                "transfer.receiver_save_failed"
-            } else {
-                "transfer.sender_source_unavailable"
-            },
-        ),
-        SessionError::InvalidInput(_) => (
-            FfiFailureCode::UnsupportedFeature,
-            FfiFailureCategory::Unsupported,
-            fallback_phase,
-            FfiFailureOrigin::Local,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.unsupported_feature",
-        ),
-        SessionError::Transfer(_) => (
-            FfiFailureCode::InternalError,
-            FfiFailureCategory::Internal,
-            fallback_phase,
-            FfiFailureOrigin::Unknown,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.internal_error",
-        ),
+    let (projected_error, invitation_consumed) = match error {
+        SessionError::InvitationConsumed(source) => (source.as_ref(), true),
+        error => (error, false),
     };
+    let (code, category, phase, origin, retryable, mut recovery_action, message_key) =
+        match projected_error {
+            SessionError::Cause { cause, .. } => manifest_v2_cause_projection(cause.code()),
+            SessionError::Rendezvous { cause, .. } => rendezvous_cause_projection(*cause),
+            SessionError::Cancelled => (
+                FfiFailureCode::UserCanceled,
+                FfiFailureCategory::User,
+                fallback_phase,
+                FfiFailureOrigin::Local,
+                false,
+                FfiRecoveryAction::None,
+                "transfer.user_canceled",
+            ),
+            SessionError::Transport(_) | SessionError::Discovery(_) => (
+                FfiFailureCode::NetworkLost,
+                FfiFailureCategory::Network,
+                fallback_phase,
+                FfiFailureOrigin::Unknown,
+                true,
+                FfiRecoveryAction::Resume,
+                "transfer.network_lost",
+            ),
+            SessionError::Crypto(_) => (
+                FfiFailureCode::AuthenticationFailed,
+                FfiFailureCategory::Authentication,
+                FfiFailurePhase::Authenticating,
+                FfiFailureOrigin::Unknown,
+                true,
+                FfiRecoveryAction::RePair,
+                "transfer.authentication_failed",
+            ),
+            SessionError::Protocol(_) => (
+                FfiFailureCode::ProtocolOrIntegrityFailure,
+                FfiFailureCategory::Integrity,
+                FfiFailurePhase::Verifying,
+                FfiFailureOrigin::Unknown,
+                false,
+                FfiRecoveryAction::None,
+                "transfer.protocol_or_integrity_failure",
+            ),
+            SessionError::Io(_) | SessionError::Storage(_) => (
+                if direction == FfiTransferDirection::Receive {
+                    FfiFailureCode::ReceiverSaveFailed
+                } else {
+                    FfiFailureCode::SenderSourceUnavailable
+                },
+                FfiFailureCategory::Storage,
+                fallback_phase,
+                FfiFailureOrigin::Local,
+                true,
+                io_failure_recovery(direction),
+                if direction == FfiTransferDirection::Receive {
+                    "transfer.receiver_save_failed"
+                } else {
+                    "transfer.sender_source_unavailable"
+                },
+            ),
+            SessionError::InvalidInput(_) => (
+                FfiFailureCode::UnsupportedFeature,
+                FfiFailureCategory::Unsupported,
+                fallback_phase,
+                FfiFailureOrigin::Local,
+                false,
+                FfiRecoveryAction::None,
+                "transfer.unsupported_feature",
+            ),
+            SessionError::Transfer(_) => (
+                FfiFailureCode::InternalError,
+                FfiFailureCategory::Internal,
+                fallback_phase,
+                FfiFailureOrigin::Unknown,
+                true,
+                FfiRecoveryAction::Retry,
+                "transfer.internal_error",
+            ),
+            SessionError::InvitationConsumed(_) => {
+                unreachable!("consumed invitation was unwrapped")
+            }
+        };
+    if invitation_consumed && retryable {
+        recovery_action = FfiRecoveryAction::RePair;
+    }
     observer.on_transfer_failed(FfiTransferFailure {
         code,
         category,
@@ -1335,6 +1354,8 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Mutex as StdMutex;
 
+    use envoix_error::TransferCause;
+
     use super::*;
 
     #[derive(Default)]
@@ -1373,8 +1394,11 @@ mod tests {
     }
 
     #[test]
-    fn room_joining_keeps_the_platform_waiting_state() {
-        assert_eq!(pairing_phase(PairingStep::Joining), None);
+    fn room_joining_reports_native_receiver_readiness() {
+        assert_eq!(
+            pairing_phase(PairingStep::Joining),
+            Some(FfiManifestV2Phase::WaitingForPeer)
+        );
         assert_eq!(
             pairing_phase(PairingStep::Matched),
             Some(FfiManifestV2Phase::Pairing)
@@ -1414,7 +1438,9 @@ mod tests {
         let observer = RecordingObserver::default();
         report_v2_failure(
             &observer,
-            &SessionError::InvitationConsumed("connection lost".into()),
+            &SessionError::InvitationConsumed(Box::new(SessionError::Transport(
+                "connection lost".into(),
+            ))),
             FfiTransferDirection::Send,
             FfiFailurePhase::Transferring,
         );
@@ -1425,8 +1451,61 @@ mod tests {
             .clone()
             .expect("reported failure");
 
-        assert_eq!(failure.code, FfiFailureCode::AuthenticationFailed);
+        assert_eq!(failure.code, FfiFailureCode::NetworkLost);
         assert_eq!(failure.recovery_action, FfiRecoveryAction::RePair);
+        assert!(
+            failure
+                .diagnostic_message
+                .contains("one-time invitation was consumed after authentication")
+        );
+    }
+
+    #[test]
+    fn consumed_invitation_preserves_receiver_save_failure() {
+        let observer = RecordingObserver::default();
+        report_v2_failure(
+            &observer,
+            &SessionError::InvitationConsumed(Box::new(SessionError::Cause {
+                cause: TransferCause::ReceiverSaveFailed,
+                detail: "destination contended".into(),
+            })),
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
+        );
+        let failure = observer
+            .failure
+            .lock()
+            .expect("failure mutex")
+            .clone()
+            .expect("reported failure");
+
+        assert_eq!(failure.code, FfiFailureCode::ReceiverSaveFailed);
+        assert_eq!(failure.category, FfiFailureCategory::Storage);
+        assert_eq!(failure.phase, FfiFailurePhase::Committing);
+        assert_eq!(failure.recovery_action, FfiRecoveryAction::RePair);
+    }
+
+    #[test]
+    fn consumed_invitation_does_not_make_integrity_failure_retryable() {
+        let observer = RecordingObserver::default();
+        report_v2_failure(
+            &observer,
+            &SessionError::InvitationConsumed(Box::new(SessionError::Protocol(
+                "bad digest".into(),
+            ))),
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Verifying,
+        );
+        let failure = observer
+            .failure
+            .lock()
+            .expect("failure mutex")
+            .clone()
+            .expect("reported failure");
+
+        assert_eq!(failure.code, FfiFailureCode::ProtocolOrIntegrityFailure);
+        assert!(!failure.retryable);
+        assert_eq!(failure.recovery_action, FfiRecoveryAction::None);
     }
 
     #[test]
@@ -1438,9 +1517,14 @@ mod tests {
             remember_secret: None,
         });
 
-        assert!(matches!(result, Err(SessionError::Storage(_))));
+        assert!(matches!(&result, Err(SessionError::Storage(_))));
         assert!(authentication.authenticated());
         assert!(!authentication.persisted());
+        assert!(should_stop_remembered_fallback(
+            &result,
+            &authentication,
+            &TransferCancelToken::new(),
+        ));
     }
 
     #[test]

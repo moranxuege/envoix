@@ -34,7 +34,6 @@ class TransferService : Service() {
     private val specs = ConcurrentHashMap<Long, ManifestSpec>()
     private val progressTrackers = ConcurrentHashMap<Long, TransferProgressTracker>()
     private val destinationWriter by lazy { ManifestV2DestinationWriter(this) }
-    private val nextNativeAttemptId = AtomicLong(1)
     private val clock =
         DateTimeFormatter
             .ofPattern("HH:mm:ss")
@@ -73,8 +72,8 @@ class TransferService : Service() {
         startId: Int,
     ): Int {
         when (intent?.action) {
-            ACTION_START_SEND -> startNew(intent, Direction.Send)
-            ACTION_START_RECEIVE -> startNew(intent, Direction.Receive)
+            ACTION_START_SEND -> startForegroundTransfer(intent, Direction.Send)
+            ACTION_START_RECEIVE -> startForegroundTransfer(intent, Direction.Receive)
             ACTION_APPROVE_RECEIVE -> approveReceive(intent.getLongExtra(EXTRA_ID, -1))
             ACTION_PAUSE -> pause(intent.getLongExtra(EXTRA_ID, -1))
             ACTION_RESUME -> resume(intent.getLongExtra(EXTRA_ID, -1))
@@ -83,6 +82,50 @@ class TransferService : Service() {
             ACTION_RESTORE -> restoreSessions()
         }
         return START_NOT_STICKY
+    }
+
+    private fun startForegroundTransfer(
+        intent: Intent,
+        direction: Direction,
+    ) {
+        // startForegroundService() starts a strict platform deadline before
+        // any credential or source validation runs. Satisfy it immediately,
+        // then tear the notification down if validation rejects the request.
+        enterForeground()
+        try {
+            startNew(intent, direction)
+        } catch (error: Throwable) {
+            failReservedStart(
+                intent.getLongExtra(EXTRA_ID, -1L),
+                uiText(
+                    "Could not start this transfer. Try again.",
+                    "无法开始此次传输，请重试。",
+                ),
+                "start_failed",
+                RecoveryAction.Retry,
+            )
+            OpLog.add("manifest-v2 start rejected: ${error.message ?: error::class.java.simpleName}")
+        } finally {
+            leaveForegroundIfIdle()
+        }
+    }
+
+    private fun failReservedStart(
+        reservedId: Long,
+        message: String,
+        cause: String,
+        recoveryAction: RecoveryAction,
+    ) {
+        if (reservedId < 0L) return
+        TransferRepository.update(reservedId) {
+            it.copy(
+                status = Status.Failed,
+                error = message,
+                failureCause = cause,
+                retryable = true,
+                recoveryAction = recoveryAction,
+            )
+        }
     }
 
     private fun startNew(
@@ -95,20 +138,26 @@ class TransferService : Service() {
         val remembered =
             rememberedRelationshipId?.let { RememberedPeerStore.get(this).load(it) }
         if (rememberedRelationshipId != null && remembered == null) {
-            if (reservedId >= 0L) {
-                TransferRepository.update(reservedId) {
-                    it.copy(
-                        status = Status.Failed,
-                        error = uiText("This remembered device is no longer available", "此已记住设备已不可用"),
-                    )
-                }
-            }
+            failReservedStart(
+                reservedId,
+                uiText("This remembered device is no longer available", "此已记住设备已不可用"),
+                "remembered_device_missing",
+                RecoveryAction.RePair,
+            )
             return
         }
         val room =
             remembered?.summary?.label
                 ?: intent.getStringExtra(EXTRA_ROOM)?.takeIf(String::isNotBlank)
-                ?: return
+                ?: run {
+                    failReservedStart(
+                        reservedId,
+                        uiText("The transfer room is unavailable", "传输房间不可用"),
+                        "room_unavailable",
+                        RecoveryAction.RePair,
+                    )
+                    return
+                }
         val broker = remembered?.summary?.broker ?: intent.getStringExtra(EXTRA_BROKER).orEmpty()
         val relay = remembered?.summary?.relay ?: intent.getStringExtra(EXTRA_RELAY).orEmpty()
         val useRoom = intent.getBooleanExtra(EXTRA_USE_ROOM, true)
@@ -118,7 +167,15 @@ class TransferService : Service() {
                 val response = JSONObject(Native.registerRememberedCredential(it.opaqueCredential))
                 val reference = response.optString("reference")
                 if (response.optString("error").isNotBlank() || reference.isBlank()) {
-                    RememberedPeerStore.get(this).delete(it.summary.relationshipId)
+                    failReservedStart(
+                        reservedId,
+                        uiText(
+                            "This remembered device could not be unlocked. Try again.",
+                            "暂时无法解锁此已记住设备，请重试。",
+                        ),
+                        "remembered_credential_unavailable",
+                        RecoveryAction.Retry,
+                    )
                     return
                 }
                 reference
@@ -134,7 +191,7 @@ class TransferService : Service() {
         val id =
             if (reservedId >= 0L &&
                 TransferRepository.transfers.value.any {
-                    it.id == reservedId && it.direction == direction && it.room == room
+                    it.id == reservedId && it.direction == direction
                 }
             ) {
                 reservedId
@@ -163,6 +220,12 @@ class TransferService : Service() {
                 rememberedPreviousGeneration = remembered?.summary?.previousGeneration,
                 restorable = false,
             )
+        TransferRepository.update(id) {
+            it.copy(
+                room = room,
+                jobId = spec.jobId,
+            )
+        }
         if (!useRoom && !useMdns) {
             TransferRepository.update(id) {
                 it.copy(
@@ -209,23 +272,15 @@ class TransferService : Service() {
         specs[id] = spec
         persistSpecs()
         startNative(spec)
-        // Publish readiness only after the native receiver/sender has been
-        // launched. Room control uses this transition before acknowledging an
-        // incoming offer, so the peer cannot race an unbound receiver.
+        // Keep launch metadata visible without publishing synthetic readiness.
+        // The native Joining event is the authoritative waiting-for-peer
+        // barrier used before room control acknowledges an incoming offer.
         TransferRepository.update(id) {
-            if (it.status != Status.Connecting) {
-                // A synchronous native callback may already have failed the
-                // attempt. Never overwrite that terminal result with a false
-                // readiness signal.
-                it
-            } else {
-                it.copy(
-                    status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
-                    qrPayload = spec.qrPayload,
-                    jobId = spec.jobId,
-                    log = addLog(it.log, "canonical Manifest v2 session started"),
-                )
-            }
+            it.copy(
+                qrPayload = spec.qrPayload,
+                jobId = spec.jobId,
+                log = addLog(it.log, "canonical Manifest v2 session started"),
+            )
         }
     }
 
@@ -236,7 +291,7 @@ class TransferService : Service() {
                 .firstOrNull { it.id == spec.id }
                 ?.bytes ?: 0
         progressTrackers[spec.id] = TransferProgressTracker(initialBytes)
-        val callback = ManifestCallback(spec, nextNativeAttemptId.getAndIncrement())
+        val callback = ManifestCallback(spec, nextNativeAttemptIds.getAndIncrement())
         callbacks[spec.id] = callback
         Native.startManifestV2Session(callback.nativeId, spec.paramsJson(this), callback)
         updateNotification()
@@ -534,7 +589,7 @@ class TransferService : Service() {
         }
         callbacks.remove(id, callback)
         progressTrackers.remove(id)
-        if (canceled || !retryable) {
+        if (canceled || !retryable || recoveryAction == RecoveryAction.RePair) {
             releaseRememberedSession(specs.remove(id))
             persistSpecs()
         }
@@ -605,11 +660,29 @@ class TransferService : Service() {
         // Only job-owned private/incomplete artifacts are discarded. Public
         // saved URIs returned by the result gate are never deleted here.
         receiveBase(id).deleteRecursively()
-        jobId?.let {
-            File(filesDir, "manifest-v2/source-staging/$it").deleteRecursively()
-            File(filesDir, "manifest-v2/destination-save/$it.json").delete()
-            File(filesDir, "manifest-v2/destination-save/$it.json.tmp").delete()
+        jobId?.let { ownedJobId ->
+            // A failed room send and its durable outbox entry intentionally
+            // share the sealed job. Removing the old Activity card must not
+            // delete that job underneath a queued or already-running retry.
+            // If the outbox cannot be read, retain the private artifacts; a
+            // later explicit queue removal can safely reclaim them.
+            val roomOutboxJobIds =
+                runCatching {
+                    RoomOutboxStore
+                        .get(this)
+                        .entries()
+                        .map(RoomOutboxEntry::jobId)
+                }.getOrElse { listOf(ownedJobId) }
+            if (!manifestJobHasRemainingOwner(
+                    jobId = ownedJobId,
+                    otherTransferJobIds = specs.values.map(ManifestSpec::jobId),
+                    roomOutboxJobIds = roomOutboxJobIds,
+                )
+            ) {
+                deleteManifestJobArtifacts(filesDir, ownedJobId)
+            }
         }
+        TransferLogs.delete(id)
         persistSpecs()
         TransferRepository.remove(id)
         leaveForegroundIfIdle()
@@ -653,26 +726,38 @@ class TransferService : Service() {
         status: Status,
         log: String,
     ) {
+        var presentationChanged = false
         TransferRepository.update(id) {
             if (it.status.isTerminal && it.status != status) {
                 it
             } else {
+                val decision =
+                    TransferStatusPresentationReducer.decide(
+                        direction = it.direction,
+                        current = it.status,
+                        reported = status,
+                        bytes = it.bytes,
+                        total = it.total,
+                    )
+                if (!decision.shouldPublish) return@update it
+                presentationChanged = true
+                val presentedStatus = decision.status
                 val payloadComplete =
-                    status == Status.Verifying ||
-                        status == Status.Saving ||
-                        status == Status.WaitingForReceiverSave ||
-                        status == Status.FinalizingDelivery ||
-                        status == Status.Delivered
+                    presentedStatus == Status.Verifying ||
+                        presentedStatus == Status.Saving ||
+                        presentedStatus == Status.WaitingForReceiverSave ||
+                        presentedStatus == Status.FinalizingDelivery ||
+                        presentedStatus == Status.Delivered
                 it.copy(
-                    status = status,
+                    status = presentedStatus,
                     bytes = if (payloadComplete) maxOf(it.bytes, it.total) else it.bytes,
-                    speedBps = if (status == Status.Transferring) it.speedBps else 0.0,
+                    speedBps = if (presentedStatus == Status.Transferring) it.speedBps else 0.0,
                     error = null,
                     log = addLog(it.log, log),
                 )
             }
         }
-        updateNotification()
+        if (presentationChanged) updateNotification()
     }
 
     private fun addLog(
@@ -928,6 +1013,7 @@ class TransferService : Service() {
         }
 
     companion object {
+        private val nextNativeAttemptIds = AtomicLong(1)
         private const val CHANNEL = "transfers"
         private const val NOTIFICATION_ID = 1001
         private const val ACTION_START_SEND = "dev.envoix.app.manifest_v2.START_SEND"
@@ -959,18 +1045,50 @@ class TransferService : Service() {
             qrPayload: String?,
             rememberLabel: String?,
             rememberedRelationshipId: String?,
-        ) = launch(
-            context,
-            ACTION_START_SEND,
-            room,
-            broker,
-            relay,
-            qrPayload,
-            jobId,
-            copyApproved = false,
-            rememberLabel = rememberLabel,
-            rememberedRelationshipId = rememberedRelationshipId,
-        )
+        ): Long {
+            // Own the prepared job with a visible card before crossing the
+            // foreground-service boundary. Credential-store or service-launch
+            // failures can then fail this exact attempt instead of orphaning
+            // an unsent native job after the sheet hands ownership away.
+            val id = TransferRepository.create(Direction.Send, room)
+            TransferRepository.update(id) { it.copy(jobId = jobId) }
+            try {
+                launch(
+                    context,
+                    ACTION_START_SEND,
+                    room,
+                    broker,
+                    relay,
+                    qrPayload,
+                    jobId,
+                    copyApproved = false,
+                    rememberLabel = rememberLabel,
+                    rememberedRelationshipId = rememberedRelationshipId,
+                    reservedId = id,
+                )
+            } catch (error: Throwable) {
+                TransferRepository.update(id) {
+                    it.copy(
+                        status = Status.Failed,
+                        error =
+                            AppText.value(
+                                "Could not start this transfer. Try again.",
+                                "无法开始此次传输，请重试。",
+                                SettingsStore.settings.value.language,
+                            ),
+                        failureCause = "start_failed",
+                        retryable = true,
+                        recoveryAction = RecoveryAction.Retry,
+                        log =
+                            (
+                                it.log +
+                                    "start_failed · ${error.message ?: error::class.java.simpleName}"
+                            ).takeLast(TransferRepository.LOG_CAP),
+                    )
+                }
+            }
+            return id
+        }
 
         fun startReceive(
             context: Context,
@@ -1075,16 +1193,90 @@ class TransferService : Service() {
 
         fun jobStoreDirectory(context: Context): File = File(context.filesDir, "manifest-v2/jobs").apply { mkdirs() }
 
-        fun nextSessionIdFloor(context: Context): Long =
-            runCatching {
-                val values = JSONArray(specFile(context).readText())
-                (0 until values.length()).maxOfOrNull { values.getJSONObject(it).getLong("id") }?.plus(1)
-                    ?: 1L
-            }.getOrDefault(1L)
+        fun nextSessionIdFloor(context: Context): Long {
+            val persistedIds =
+                runCatching {
+                    val values = JSONArray(specFile(context).readText())
+                    (0 until values.length()).map { values.getJSONObject(it).getLong("id") }
+                }.getOrDefault(emptyList())
+            val retainedWorkspaceNames =
+                File(context.filesDir, "manifest-v2/receiver")
+                    .listFiles()
+                    ?.asSequence()
+                    ?.filter(File::isDirectory)
+                    ?.map(File::getName)
+                    ?.toList()
+                    .orEmpty()
+            val retainedLogNames =
+                File(context.filesDir, "logs/transfers")
+                    .listFiles()
+                    ?.map(File::getName)
+                    .orEmpty()
+            return nextManifestSessionIdFloor(
+                persistedIds,
+                retainedWorkspaceNames,
+                retainedLogNames,
+            )
+        }
 
         private fun specFile(context: Context) = File(context.filesDir, "manifest-v2/android-sessions.json")
     }
 }
+
+/**
+ * Receiver workspaces outlive terminal cards so save reconciliation and
+ * verified artifacts are never silently overwritten. Include those retained
+ * directories when seeding the process-local id allocator.
+ */
+internal fun nextManifestSessionIdFloor(
+    persistedIds: Iterable<Long>,
+    retainedWorkspaceNames: Iterable<String>,
+    retainedLogNames: Iterable<String> = emptyList(),
+): Long {
+    val highest =
+        (
+            persistedIds.asSequence() +
+                retainedWorkspaceNames.asSequence().mapNotNull(String::toLongOrNull) +
+                retainedLogNames.asSequence().mapNotNull { name ->
+                    name
+                        .takeIf { it.startsWith("transfer-") }
+                        ?.removePrefix("transfer-")
+                        ?.substringBefore('.')
+                        ?.toLongOrNull()
+                }
+        ).filter { it in 1 until Long.MAX_VALUE }
+            .maxOrNull()
+            ?: 0L
+    return highest + 1L
+}
+
+internal fun deleteManifestJobArtifacts(
+    filesDirectory: File,
+    jobId: String,
+) {
+    if (jobId.length != 32 || !jobId.all(Char::isLowerCaseHexDigit)) return
+    File(filesDirectory, "manifest-v2/source-staging/$jobId").deleteRecursively()
+    File(filesDirectory, "manifest-v2/jobs/.envoix-staging/$jobId").deleteRecursively()
+    File(filesDirectory, "manifest-v2/jobs/job-$jobId.json").delete()
+    File(filesDirectory, "manifest-v2/jobs/.job-$jobId.tmp").delete()
+    File(filesDirectory, "manifest-v2/destination-save")
+        .listFiles()
+        ?.filter { file ->
+            file.isFile &&
+                file.name.startsWith("$jobId-") &&
+                (file.name.endsWith(".json") || file.name.endsWith(".json.tmp"))
+        }?.forEach(File::delete)
+}
+
+internal fun manifestJobHasRemainingOwner(
+    jobId: String,
+    otherTransferJobIds: Iterable<String?>,
+    roomOutboxJobIds: Iterable<String>,
+): Boolean =
+    otherTransferJobIds.any { it == jobId } ||
+        roomOutboxJobIds.any { it == jobId }
+
+private fun Char.isLowerCaseHexDigit(): Boolean = this in '0'..'9' || this in 'a'..'f'
 
 private data class ManifestSpec(
     val id: Long,

@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use envoix_client::api::{
-    Client, IdentityConfig, RoomCloseReason, RoomControlEvent, RoomControlInvite,
-    RoomControlSession, RoomLifetimePolicy, RoomLifetimeState, RoomOfferRejection,
-    RoomTransferOffer, TransferCancelToken, TransferOptions, connect_room_control,
+    Client, IdentityConfig, RememberedCredentialRef, RememberedRoomControlRole, RoomCloseReason,
+    RoomControlEvent, RoomControlInvite, RoomControlSession, RoomLifetimePolicy, RoomLifetimeState,
+    RoomOfferRejection, RoomTransferOffer, TransferCancelToken, TransferOptions,
+    acquire_remembered_credential, connect_remembered_room_control, connect_room_control,
 };
 use envoix_error::CoreError;
 use jni::JNIEnv;
@@ -39,6 +40,7 @@ fn active_rooms() -> &'static Mutex<HashMap<i64, ActiveRoom>> {
 #[derive(Deserialize)]
 struct StartParams {
     mode: String,
+    #[serde(default)]
     input: String,
     display_name: String,
     #[serde(default)]
@@ -47,6 +49,26 @@ struct StartParams {
     fallback_broker: String,
     #[serde(default)]
     fallback_relay: String,
+    #[serde(default)]
+    remembered_credential_ref: String,
+    #[serde(default)]
+    remembered_generation: Option<u64>,
+}
+
+struct ConnectFailure {
+    error: CoreError,
+    peer_authenticated: bool,
+    attempted_remembered_generation: Option<u64>,
+}
+
+impl ConnectFailure {
+    fn invitation(error: CoreError) -> Self {
+        Self {
+            error,
+            peer_authenticated: false,
+            attempted_remembered_generation: None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -136,11 +158,16 @@ pub extern "system" fn Java_dev_envoix_app_Native_startRoomControlSession(
             return;
         }
     };
-    if !matches!(params.mode.as_str(), "host" | "join") {
+    if !matches!(
+        params.mode.as_str(),
+        "host" | "join" | "remembered_connector" | "remembered_responder"
+    ) {
         emit(
             &vm,
             &callback,
-            &failed_event("room-control mode must be host or join"),
+            &failed_event(
+                "room-control mode must be host, join, remembered_connector, or remembered_responder",
+            ),
         );
         return;
     }
@@ -176,9 +203,13 @@ pub extern "system" fn Java_dev_envoix_app_Native_startRoomControlSession(
         let result = connect_from_params(&params, &cancel).await;
         let session = match result {
             Ok(session) => Arc::new(session),
-            Err(error) => {
-                if !closing.load(Ordering::Acquire) {
-                    emit(vm.as_ref(), callback.as_ref(), &failed_event(error));
+            Err(failure) => {
+                if !closing.load(Ordering::Acquire) || failure.peer_authenticated {
+                    emit(
+                        vm.as_ref(),
+                        callback.as_ref(),
+                        &connect_failed_event(&failure),
+                    );
                 }
                 remove_room_if(id, &closing);
                 return;
@@ -218,6 +249,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_startRoomControlSession(
                 "state":"connected",
                 "peer_name":session.peer_name(),
                 "creator":session.is_creator(),
+                "remembered_generation":session.remembered_generation(),
                 "lifetime":lifetime_json(&session.lifetime_state()),
             })
             .to_string(),
@@ -432,15 +464,64 @@ pub extern "system" fn Java_dev_envoix_app_Native_cancelRoomControlSession(
 async fn connect_from_params(
     params: &StartParams,
     cancel: &TransferCancelToken,
-) -> Result<RoomControlSession, CoreError> {
+) -> Result<RoomControlSession, ConnectFailure> {
     let broker = fallback(&params.fallback_broker, DEFAULT_RENDEZVOUS_BROKER);
     let relay = fallback_optional(&params.fallback_relay, DEFAULT_RELAY_URL);
-    let invite = RoomControlInvite::parse(&params.input, broker, relay)?;
     let mut client = Client::default();
     if !params.identity_path.trim().is_empty() {
         client.identity = IdentityConfig::Persistent(PathBuf::from(params.identity_path.trim()));
     }
     let mut options = TransferOptions::default();
+    if matches!(
+        params.mode.as_str(),
+        "remembered_connector" | "remembered_responder"
+    ) {
+        let generation = params.remembered_generation.ok_or_else(|| ConnectFailure {
+            error: CoreError::InvalidInput("remembered generation is missing".into()),
+            peer_authenticated: false,
+            attempted_remembered_generation: None,
+        })?;
+        let reference = params.remembered_credential_ref.trim();
+        if reference.is_empty() {
+            return Err(ConnectFailure {
+                error: CoreError::InvalidInput("remembered credential reference is missing".into()),
+                peer_authenticated: false,
+                attempted_remembered_generation: Some(generation),
+            });
+        }
+        let credential = acquire_remembered_credential(
+            &RememberedCredentialRef::from_process_handle(reference.to_string()),
+        )
+        .map_err(|error| ConnectFailure {
+            error: CoreError::InvalidInput(error.to_string()),
+            peer_authenticated: false,
+            attempted_remembered_generation: Some(generation),
+        })?;
+        options.relay = relay.clone();
+        let role = if params.mode == "remembered_responder" {
+            RememberedRoomControlRole::Responder
+        } else {
+            RememberedRoomControlRole::Connector
+        };
+        return connect_remembered_room_control(
+            credential.derive_session(generation),
+            broker.to_string(),
+            relay,
+            params.display_name.clone(),
+            role,
+            client.session_config(&options),
+            cancel,
+        )
+        .await
+        .map_err(|error| ConnectFailure {
+            peer_authenticated: error.peer_authenticated(),
+            error: error.into_error(),
+            attempted_remembered_generation: Some(generation),
+        });
+    }
+
+    let invite = RoomControlInvite::parse(&params.input, broker, relay)
+        .map_err(ConnectFailure::invitation)?;
     options.relay = invite.relay().map(str::to_string);
     connect_room_control(
         invite,
@@ -450,6 +531,7 @@ async fn connect_from_params(
         cancel,
     )
     .await
+    .map_err(ConnectFailure::invitation)
 }
 
 async fn execute_command(
@@ -557,6 +639,28 @@ fn failed_event(error: impl std::fmt::Display) -> String {
         "message":error.to_string(),
     })
     .to_string()
+}
+
+fn connect_failed_event(failure: &ConnectFailure) -> String {
+    let (failure_code, retry_after_seconds) = failure_projection(&failure.error);
+    json!({
+        "notice":"room_control",
+        "state":"failed",
+        "message":failure.error.to_string(),
+        "peer_authenticated":failure.peer_authenticated,
+        "attempted_remembered_generation":failure.attempted_remembered_generation,
+        "failure_code":failure_code,
+        "retry_after_seconds":retry_after_seconds,
+    })
+    .to_string()
+}
+
+fn failure_projection(error: &CoreError) -> (Option<&'static str>, Option<u64>) {
+    match error {
+        CoreError::Rendezvous { cause, retry_after } => (Some(cause.code()), *retry_after),
+        CoreError::InvitationConsumed(source) => failure_projection(source),
+        _ => (None, None),
+    }
 }
 
 fn command_failed_event(command: &RoomCommand, error: impl std::fmt::Display) -> String {
@@ -699,12 +803,29 @@ mod tests {
     #[test]
     fn invite_json_contains_epoch_milliseconds() {
         let invite = RoomControlInvite::parse(
-            "envoix://room/R123456-amber-comet?broker=test&expires=42",
+            "envoix://room/R123456-a1b2-c3d4?broker=test&expires=42",
             "fallback",
             None,
         )
         .unwrap();
         assert_eq!(invite_json(invite)["expires_at_epoch_ms"], 42_000);
+    }
+
+    #[test]
+    fn remembered_failure_json_projects_typed_rendezvous_recovery() {
+        let failure = ConnectFailure {
+            error: CoreError::Rendezvous {
+                cause: envoix_error::RendezvousCause::RoomExpired,
+                retry_after: Some(17),
+            },
+            peer_authenticated: false,
+            attempted_remembered_generation: Some(9),
+        };
+        let event: Value = serde_json::from_str(&connect_failed_event(&failure)).unwrap();
+
+        assert_eq!(event["failure_code"], "room_expired");
+        assert_eq!(event["retry_after_seconds"], 17);
+        assert_eq!(event["attempted_remembered_generation"], 9);
     }
 
     #[test]

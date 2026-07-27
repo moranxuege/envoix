@@ -26,13 +26,15 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-let expectedCoreFFIAPIVersion: UInt32 = 9
+let expectedCoreFFIAPIVersion: UInt32 = 11
 let expectedRoomControlCoreCapability = "foreground_room_control_v4"
+let expectedNearbyInviteCoreCapability = "nearby_invite_inbox_v1"
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 func coreMatchesExpectedRoomControlContract(_ info: FfiCoreInfo) -> Bool {
     info.ffiApiVersion == expectedCoreFFIAPIVersion
         && info.capabilities.contains(expectedRoomControlCoreCapability)
+        && info.capabilities.contains(expectedNearbyInviteCoreCapability)
 }
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
@@ -61,6 +63,26 @@ extension String {
 }
 
 enum RuntimeSettingsProvider {
+    static func make(
+        transferInvitation: FfiPairingInvite,
+        concurrentTransfers: Bool,
+        language: String,
+        candidatesAllow: String = "",
+        candidatesDeny: String = "",
+        speedLimit: Int
+    ) throws -> EnvoixRuntimeSettings {
+        let endpoint = RoomControlEndpoint(transferInvitation: transferInvitation)
+        return try make(
+            concurrentTransfers: concurrentTransfers,
+            language: language,
+            serverURL: endpoint.broker,
+            relayURL: endpoint.relay,
+            candidatesAllow: candidatesAllow,
+            candidatesDeny: candidatesDeny,
+            speedLimit: speedLimit
+        )
+    }
+
     static func make(
         concurrentTransfers: Bool,
         language: String,
@@ -255,7 +277,7 @@ struct RoomCodeField: View {
     @Binding var code: String
     var disabled: Bool
     var title = "Room code"
-    var placeholder = "135790-amber-comet"
+    var placeholder = "135790-a1b2-c3d4"
     var canGenerate: Bool = false
     var generateLabel = "Generate"
     var copyLabel = "Copy Code"
