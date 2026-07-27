@@ -98,7 +98,7 @@ val recordedPayloadSources = policy("payload_sources_sha256")
 val allowedPermissions = policyList("allowed_permissions").toSet()
 
 /** Every ABI Android defines. The policy names which of them a release ships. */
-val ANDROID_ABIS = setOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+val androidAbis = setOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
 val forbiddenManifestMarkers = policyList("forbidden_manifest_markers")
 val forbiddenReleaseClasses = policyList("forbidden_release_classes")
 
@@ -214,7 +214,7 @@ android {
     // policy's list from the ABIs Android defines, never by naming two here.
     packaging {
         jniLibs {
-            for (abi in ANDROID_ABIS - requiredAbis.toSet()) {
+            for (abi in androidAbis - requiredAbis.toSet()) {
                 excludes += "lib/$abi/**"
             }
         }

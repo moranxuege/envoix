@@ -273,16 +273,14 @@ class ScanActivity :
          * default analysis resolution (640x480) leaves too few pixels per
          * module for one; this is the nearest larger size the device offers.
          */
+        private val ANALYSIS_STRATEGY =
+            ResolutionStrategy(
+                Size(1280, 720),
+                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+            )
+
         private val ANALYSIS_RESOLUTION =
-            ResolutionSelector
-                .Builder()
-                .setResolutionStrategy(
-                    ResolutionStrategy(
-                        Size(1280, 720),
-                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                    ),
-                )
-                .build()
+            ResolutionSelector.Builder().setResolutionStrategy(ANALYSIS_STRATEGY).build()
 
         private val READER =
             MultiFormatReader().apply {
