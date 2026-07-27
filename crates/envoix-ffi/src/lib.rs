@@ -21,14 +21,18 @@ mod manifest_v2_job;
 pub use manifest_v2_job::*;
 mod manifest_v2_session;
 pub use manifest_v2_session::*;
+mod nearby_invite;
+pub use nearby_invite::*;
+mod room_control;
+pub use room_control::*;
 
 const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
-const ENVOIX_FFI_API_VERSION: u32 = 6;
+const ENVOIX_FFI_API_VERSION: u32 = 11;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), InvitationBootstrap>>> =
+static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
     OnceLock::new();
 
 fn ffi_runtime() -> &'static tokio::runtime::Runtime {
@@ -281,6 +285,7 @@ pub enum FfiManifestV2Phase {
     WaitingForReceiverSave,
     FinalizingDelivery,
     Delivered,
+    WaitingForPeer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -368,6 +373,31 @@ pub struct FfiTransferFailure {
     pub diagnostic_message: String,
 }
 
+/// Privacy-safe classification of the data path selected by the transport.
+///
+/// Endpoint addresses and relay URLs remain internal diagnostics and are
+/// deliberately excluded from this product-facing contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiDataPathKind {
+    Direct,
+    Relay,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiConnectionPathEventKind {
+    /// The first data path selected for an established transfer connection.
+    Selected,
+    /// A later transport migration, such as a relay-to-direct upgrade.
+    Changed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiConnectionPathEvent {
+    pub path_kind: FfiDataPathKind,
+    pub event_kind: FfiConnectionPathEventKind,
+}
+
 #[uniffi::export(with_foreign)]
 pub trait TransferObserver: Send + Sync {
     fn on_invite_ready(&self, invite: String);
@@ -376,6 +406,7 @@ pub trait TransferObserver: Send + Sync {
     fn on_progress(&self, transferred: u64, total: u64);
     fn on_completed(&self, bytes: u64);
     fn on_transfer_failed(&self, failure: FfiTransferFailure);
+    fn on_connection_path(&self, event: FfiConnectionPathEvent);
     fn on_diagnostic(&self, message: String);
     /// Called only on the native worker at the authenticated persistence
     /// boundary. Implementations store these bytes immediately and must never
@@ -400,6 +431,10 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "manifest_v2_session".into(),
             "paged_transfer_inventory_v2".into(),
             "delivery_proof_v2".into(),
+            "structured_connection_path".into(),
+            "foreground_room_control_v4".into(),
+            "remembered_room_control_v1".into(),
+            "nearby_invite_inbox_v1".into(),
             "remembered_devices_v1".into(),
         ],
     }
@@ -429,7 +464,7 @@ pub fn make_pairing_invite(
         now_unix_seconds(),
     )
     .map_err(invitation_err)?;
-    register_created_invitation(&invitation);
+    register_created_invitation(&invitation)?;
     Ok(FfiPairingInvite::from_created(&invitation))
 }
 
@@ -629,9 +664,17 @@ pub(crate) fn peer_sources_for_request(
                 });
             }
             let role = transfer_role(request.direction);
-            let bootstrap = take_created_invitation(&room_code, role)
-                .unwrap_or_else(|| InvitationBootstrap::room_code_joiner(room_code, role));
-            single(PeerSource::invitation(bootstrap, broker).map_err(op_err)?)
+            if let Some(source) = created_invitation_source(&room_code, role) {
+                single(source)
+            } else {
+                single(
+                    PeerSource::invitation(
+                        InvitationBootstrap::room_code_joiner(room_code, role),
+                        broker,
+                    )
+                    .map_err(op_err)?,
+                )
+            }
         }
     }
 }
@@ -647,26 +690,30 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn register_created_invitation(invitation: &CreatedInvitation) {
+fn register_created_invitation(invitation: &CreatedInvitation) -> Result<(), EnvoixError> {
+    let source = PeerSource::invitation(
+        invitation.clone().into_bootstrap(),
+        invitation.invitation().public_context.broker.clone(),
+    )
+    .map_err(op_err)?;
     CREATED_INVITATIONS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .expect("created invitation store poisoned")
         .insert(
             (invitation.room_code.to_string(), invitation.creator_role),
-            invitation.clone().into_bootstrap(),
+            source,
         );
+    Ok(())
 }
 
-fn take_created_invitation(
-    room_code: &RoomCode,
-    local_role: TransferRole,
-) -> Option<InvitationBootstrap> {
+fn created_invitation_source(room_code: &RoomCode, local_role: TransferRole) -> Option<PeerSource> {
     CREATED_INVITATIONS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .expect("created invitation store poisoned")
-        .remove(&(room_code.to_string(), local_role))
+        .get(&(room_code.to_string(), local_role))
+        .cloned()
 }
 
 fn broker_for_pairing_invite(broker: &str) -> String {
@@ -849,5 +896,47 @@ mod android_bootstrap {
         fn drop(&mut self) {
             let _ = self.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod created_invitation_tests {
+    use super::*;
+    use envoix_client::api::acquire_invitation;
+
+    const TEST_BROKER: &str =
+        "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
+
+    #[test]
+    fn creator_room_source_survives_pre_authentication_retry() {
+        let invitation = InviteV2::create(
+            TEST_BROKER.into(),
+            Vec::new(),
+            TransferRole::Sender,
+            Capabilities::current(),
+            now_unix_seconds(),
+        )
+        .expect("create invitation");
+        let room_code = invitation.room_code.clone();
+        register_created_invitation(&invitation).expect("register invitation");
+
+        let first = created_invitation_source(&room_code, TransferRole::Sender)
+            .expect("first creator source");
+        let second = created_invitation_source(&room_code, TransferRole::Sender)
+            .expect("creator source remains registered");
+        assert_eq!(first, second);
+
+        let PeerSource::Invitation { secret_ref, .. } = first else {
+            panic!("expected invitation source");
+        };
+        drop(acquire_invitation(&secret_ref).expect("first lease"));
+        drop(acquire_invitation(&secret_ref).expect("pre-authentication retry"));
+
+        CREATED_INVITATIONS
+            .get()
+            .expect("created invitation store")
+            .lock()
+            .expect("created invitation store poisoned")
+            .remove(&(room_code.to_string(), TransferRole::Sender));
     }
 }

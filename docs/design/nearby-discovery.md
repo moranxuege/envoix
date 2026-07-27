@@ -2,7 +2,7 @@
 
 Status: **Android and iOS foreground discovery complete; unauthenticated BLE invitation handoff physically verified from Android to iPhone**
 
-Last reviewed: 2026-07-19
+Last reviewed: 2026-07-24
 
 This document freezes the nearby-discovery contract and its experimental handoff
 into the existing Envoix pairing flow. Discovery metadata and the current BLE
@@ -12,22 +12,29 @@ that carrier.
 
 ## 1. Product boundary
 
-The Android and iOS apps have an independent **Nearby devices** page that:
+The Android and iOS apps expose nearby devices directly on the **Connect**
+surface. That surface:
 
-- scans and advertises over Bluetooth LE while the page is visible;
+- scans and advertises over Bluetooth LE while Connect is visible;
 - discovers and publishes a DNS-SD service on the local network;
 - merges observations from both transports by one foreground-presence key;
 - exposes provider availability and permission failures instead of one Boolean;
 - reserves the same provider interface for Wi-Fi Aware; and
-- stops all discovery work when the page is hidden or the app leaves the
-  foreground.
+- stops broad discovery when Connect is hidden or the app leaves the
+  foreground, except while a nearby One-time Room needs its handoff lease.
+  That room filters the visible observations and inbound offers to its selected
+  presence key; the current platform providers still scan broadly underneath
+  that workflow filter.
 
-Selecting a BLE peer opens an explicitly experimental pairing context. After
-the user chooses a local send or receive role, the app creates the existing
-Envoix invitation, writes it to the selected peer over BLE GATT, and starts the
-existing SPAKE2, Direct/Relay, and transfer state machines. The receiving app
-shows the remote role and requires a confirmation before entering the opposite
-role. No second transfer protocol is introduced.
+Selecting a BLE peer opens an explicitly experimental pairing context. The
+selected context remains attached to one One-time Room while either endpoint
+prepares a send source or confirms an incoming offer. Send/Receive remains an
+internal Invite v1 adapter, not a top-level navigation choice. Only the final
+**Start** action writes an outbound Envoix invitation to the selected peer over
+BLE GATT and starts the existing SPAKE2, Direct/Relay, and transfer state
+machines. The receiving app requires explicit Accept or Reject before entering
+the opposite internal role. No second transfer protocol or persistent
+connection is introduced.
 
 The current BLE carrier is useful only for completing the product flow. It is
 not a secure replacement for QR, NFC, or a compared short code: the SPAKE2
@@ -38,13 +45,14 @@ discovery DNS-SD record carries no invitation endpoint.
 
 ## 2. Discovery identity
 
-Each foreground discovery coordinator generates a fresh random 8-byte value as
-16 lowercase hexadecimal characters. BLE and mDNS share that value only for the
-current visible discovery lifetime. The value is never persisted, and leaving
-and reopening the page produces a new value. It exists only to merge nearby
-observations during one presence session. It is not a public key, trusted
-account/device ID, or proof that two observations came from an authentic Envoix
-installation.
+Each discovery coordinator generates a random 8-byte value as 16 lowercase
+hexadecimal characters. BLE and mDNS share that value only for an ephemeral
+foreground workflow-owner lifetime. The value is never persisted. Both clients
+retain it while their workflow owner pauses and resumes discovery so an open
+nearby room can reacquire the same presence after Activity, Settings, or a
+system picker. Recreating the workflow owner replaces it. It exists only to
+merge nearby observations and is not a public key, trusted account/device ID,
+or proof that two observations came from an authentic Envoix installation.
 
 Stopping or restarting discovery advances a coordinator generation. Provider
 callbacks capture the generation in which they were registered, so a late
@@ -74,7 +82,8 @@ mask = ffffffff-ffff-ffff-0000-000000000000
 ```
 
 No device name, MAC address, IP address, or authenticated identity is included.
-The current page uses low-latency scan/advertise modes only while visible.
+Low-latency browsing is scoped to Connect and an active nearby Room handoff
+lease; Activity and Settings never keep it running.
 
 Apple foreground support can advertise the same full UUID and scan without a
 service filter before applying the prefix check in-app. Apple places service
@@ -152,8 +161,9 @@ only direction, state, request ID, and `auth=none`; they never contain the
 invitation, password, peer key, Bluetooth address, or network address.
 
 The service, scanner, advertisement, peripheral map, and partial frame buffers
-exist only while the discovery page is active. An invitation is sent only after
-the user taps a BLE-observed card, chooses a role, and confirms the action.
+exist only while a discovery lease is active. An invitation is sent only after
+the user enters a BLE-observed One-time Room, prepares the transfer details, and
+taps the final **Start** action.
 
 ## 6. Merge and lifecycle rules
 
@@ -188,10 +198,14 @@ The implementation is accepted when all of the following hold:
 4. An `_envoix-disc._udp` probe appears with its normalized name and mDNS badge.
 5. BLE and mDNS probes with the same peer key appear as one card with two badges.
 6. Stopping one probe expires only that source; stopping both removes the card.
-7. Leaving the page stops scanning, advertising, DNS-SD, the UDP socket, and the
-   multicast lock.
-8. Re-entering discovery rotates the presence key, and callbacks from the
-   stopped generation are ignored.
+7. Leaving Connect stops scanning, advertising, DNS-SD, the UDP socket, and
+   multicast lock unless a nearby room holds the handoff lease. That lease
+   filters product state to the selected peer, but the providers are not yet
+   narrowed below the workflow layer. Activity and Settings never hold a
+   discovery lease.
+8. Restarting discovery advances the callback generation so callbacks from the
+   stopped generation are ignored. Presence-key lifetime follows the shared
+   workflow-owner continuity rule in section 2.
 9. Android JVM and Apple hosted tests decode fragmented invitation frames and
    reject invalid, out-of-order, oversized, or mismatched-security payloads.
 10. Android and Apple builds include the GATT server and client implementations.
@@ -200,10 +214,18 @@ The experimental BLE handoff additionally verifies that:
 
 - `NearbyPairingSelection` remains untrusted display context and carries no
   endpoint, credential, or long-term identity;
-- tapping a BLE-observed card opens an unauthenticated-channel warning before
-  role selection;
+- tapping a BLE-observed card opens an unverified One-time Room without
+  claiming device identity or a persistent connection;
+- Apple and Android keep the selected nearby context attached to that stable
+  room while a transfer is prepared;
+- Photos, Files, and Folder selection remain usable after a nearby sender
+  handoff, and receive-destination authorization occurs before invitation
+  delivery;
 - the selected side creates and fragments the existing full invitation, while
-  the receiving side decodes it and asks the user to confirm the opposite role;
+  the receiving side decodes it and asks the user to Accept or Reject;
+- only the final Start action may deliver an outbound BLE invitation, with one
+  delivery in flight and late or duplicate completions unable to create a
+  second Activity;
 - the selected-device context is cleared when the flow is dismissed or started;
 - no invitation or password appears in advertisements or logs; and
 - after handoff, both sides use the unchanged SPAKE2 and Direct/Relay transfer
@@ -211,7 +233,10 @@ The experimental BLE handoff additionally verifies that:
 
 Automated protocol tests, Android `ktlintCheck`/JVM tests/`assembleDebug`, Apple
 hosted tests, an Apple simulator UI regression, and an Apple physical-device
-build passed on 2026-07-19.
+build passed on 2026-07-19. On 2026-07-24, hosted tests additionally covered
+single-flight invitation delivery, failure retry, cancellation, and duplicate
+callback suppression; the simulator opened Photos, Files, and Folder from the
+same nearby sender setup and retained the selected folder.
 
 The same-day physical GATT gate then passed 1/1 on Android model `25060RK16C`
 and an iPhone 15 Pro Max:
@@ -246,9 +271,7 @@ re-run on the lifecycle-fixed binaries on 2026-07-19 with Android model
 - during the same foreground window, Android exposed one `iPhone` card containing
   both `BLE` and `mDNS` in its UI hierarchy;
 - a Mac on the same hotspot link observed Android remove its DNS-SD instance
-  when the page closed and add an instance with a different random prefix when
-  the page reopened, physically confirming presence-key rotation without
-  retaining either ephemeral value;
+  when discovery stopped and restore publication when it resumed;
 - observed BLE RSSI values were approximately -22 to -44 dBm; these are
   independent receiver measurements, not a distance or trust signal;
 - with the iPhone initially on cellular and Android on an unrelated Wi-Fi, both

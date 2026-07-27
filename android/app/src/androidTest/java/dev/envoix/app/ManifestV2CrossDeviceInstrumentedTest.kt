@@ -125,6 +125,13 @@ class ManifestV2CrossDeviceInstrumentedTest {
             assertEquals(fixture.totalBytes, prepared.getLong("total"))
             assertEquals(0, prepared.getInt("warning_count"))
 
+            val invitation =
+                checkedResponse(
+                    Native.parseInviteForRole(
+                        scenarioCode(),
+                        "send",
+                    ),
+                )
             val callback = RecordingCallback()
             val sessionId = sessionId()
             try {
@@ -136,6 +143,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                         stateDirectory = stateDirectory,
                         jobStore = jobStore,
                         jobId = jobId,
+                        invitationReference = invitation.getString("reference"),
                     ).toString(),
                     callback,
                 )
@@ -169,6 +177,15 @@ class ManifestV2CrossDeviceInstrumentedTest {
         val originalSettings = SettingsStore.settings.value
         val publishedUris = mutableListOf<Uri>()
         var collisionUri: Uri? = null
+        val invitation =
+            checkedResponse(
+                Native.generateInvite(
+                    "receive",
+                    Endpoints.BROKER,
+                    Endpoints.RELAY,
+                ),
+            )
+        marker("invitation=${invitation.getString("code")}")
 
         if (fixture.scenario == Scenario.Collision) {
             val sentinel = File(testRoot, "collision-sentinel").apply { writeBytes(COLLISION_SENTINEL) }
@@ -220,6 +237,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                     stateDirectory = stateDirectory,
                     jobStore = jobStore,
                     jobId = null,
+                    invitationReference = invitation.getString("reference"),
                 ).toString(),
                 callback,
             )
@@ -338,34 +356,21 @@ class ManifestV2CrossDeviceInstrumentedTest {
         stateDirectory: File,
         jobStore: File,
         jobId: String?,
-    ): JSONObject {
-        val preparedInvitation =
-            if (direction == "receive") {
-                checkedResponse(Native.generateInvite("receive", Endpoints.BROKER, Endpoints.RELAY))
-            } else {
-                checkedResponse(Native.parseInviteForRole(scenarioCode(), "send"))
-            }
-        val roomCode =
-            if (direction == "receive") {
-                preparedInvitation.getString("code").also {
-                    marker("pairing_code=$it")
-                }
-            } else {
-                scenarioCode()
-            }
-        return JSONObject()
+        invitationReference: String,
+    ): JSONObject =
+        JSONObject()
             .put("direction", direction)
-            .put("room", roomCode)
+            .put("mode", "invitation")
+            .put("room", invitationReference)
+            .put("invitation_ref", invitationReference)
             .put("broker", Endpoints.BROKER)
             .put("relay", Endpoints.RELAY)
             .put("state_directory", stateDirectory.path)
             .put("job_store_directory", jobStore.path)
             .put("job_id", jobId ?: JSONObject.NULL)
-            .put("invitation_ref", preparedInvitation.getString("reference"))
             .put("use_room", true)
             .put("use_mdns", false)
             .also { check(context.packageName == "dev.envoix.app") }
-    }
 
     private fun publishShareSource(
         context: Context,
@@ -470,7 +475,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
         const val ARG_SCENARIO = "envoixCrossDeviceScenario"
         const val ARG_CODE = "envoixCrossDeviceCode"
         const val ARG_LARGE_BYTES = "envoixCrossDeviceLargeBytes"
-        const val DEFAULT_CODE = "741203-amber-comet"
+        const val DEFAULT_CODE = "741203-ambe-come"
         const val DEFAULT_TIMEOUT_MS = 180_000L
         const val TIMEOUT_BYTES_PER_MS = 2_048L
         const val DEFAULT_LARGE_BYTES = 128L * 1_024 * 1_024

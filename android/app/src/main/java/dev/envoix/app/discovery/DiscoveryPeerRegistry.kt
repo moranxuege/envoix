@@ -16,7 +16,14 @@ internal class DiscoveryPeerRegistry(
             observation.copy(
                 peerKey = peerKey,
                 displayName = sanitizeText(observation.displayName, MAX_DISPLAY_NAME_LENGTH),
-                endpoint = sanitizeText(observation.endpoint, MAX_ENDPOINT_LENGTH),
+                nearbyInviteRoute =
+                    observation.nearbyInviteRoute?.let { route ->
+                        NearbyInviteRoute.normalized(
+                            endpointId = route.endpointId,
+                            relayUrl = route.relayUrl,
+                            directAddresses = route.directAddresses,
+                        )
+                    },
             )
         val bySource = observations.getOrPut(peerKey, ::mutableMapOf)
         val previous = bySource[observation.source]
@@ -51,7 +58,7 @@ internal class DiscoveryPeerRegistry(
                     sources = bySource.keys.toSet(),
                     lastSeenAtMs = values.maxOf { it.seenAtMs },
                     rssi = values.latestValue { it.rssi },
-                    endpoint = values.latestNonBlank { it.endpoint },
+                    nearbyInviteRoute = values.latestValue { it.nearbyInviteRoute },
                 )
             }.sortedWith(compareByDescending<DiscoveredPeer> { it.lastSeenAtMs }.thenBy { it.peerKey })
     }
@@ -59,7 +66,6 @@ internal class DiscoveryPeerRegistry(
     companion object {
         const val DEFAULT_OBSERVATION_TTL_MS = 20_000L
         const val MAX_DISPLAY_NAME_LENGTH = 48
-        const val MAX_ENDPOINT_LENGTH = 96
         const val PEER_KEY_HEX_LENGTH = 16
 
         fun normalizePeerKey(value: String): String? {

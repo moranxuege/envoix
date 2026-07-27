@@ -56,8 +56,8 @@ struct TransferStatusView: View {
 
             if let state = viewModel.presentationState {
                 let progress = TransferPresentationPolicy.progress(for: state)
-                if progress != .hidden, viewModel.total > 0 {
-                    ProgressBar(value: progress == .complete ? 1 : viewModel.progressFraction)
+                if state != .delivered, progress != .hidden, viewModel.total > 0 {
+                    ProgressBar(value: viewModel.progressFraction)
                     transferProgressLine
                 }
                 if progress == .active || progress == .retained,
@@ -83,9 +83,11 @@ struct TransferStatusView: View {
                     Text(preparedInventorySummaryText(summary))
                         .font(.footnote.monospacedDigit())
                         .foregroundStyle(Theme.muted)
-                    ForEach(viewModel.preparedInventoryRoots.prefix(12), id: \.itemId) { item in
+                    ForEach(viewModel.preparedInventoryRoots.prefix(6), id: \.itemId) { item in
                         HStack(spacing: 6) {
-                            Image(systemName: item.kind == .directory ? "folder" : "doc")
+                            Image(systemName: inventoryIcon(name: item.name, isDirectory: item.kind == .directory))
+                                .foregroundStyle(item.kind == .directory ? Theme.warning : Theme.accentStrong)
+                                .frame(width: 24)
                             Text(item.name)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -94,14 +96,33 @@ struct TransferStatusView: View {
                                 Text(byteString(item.plaintextSize))
                                     .monospacedDigit()
                             }
+                            Button(role: .destructive) {
+                                viewModel.removeManifestSource(rootItemID: item.rootItemId)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.body.weight(.semibold))
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.danger)
+                            .disabled(viewModel.isPreparingManifest || viewModel.isBusy)
+                            .accessibilityLabel(AppText.value(
+                                "Remove \(item.name)",
+                                "移除 \(item.name)",
+                                language: language
+                            ))
+                            .accessibilityIdentifier("remove_prepared_source_\(item.rootItemId)")
                         }
                         .font(.footnote)
                         .foregroundStyle(item.hasWarning ? Theme.danger : Theme.muted)
+                        .padding(.horizontal, 9)
+                        .frame(minHeight: 34)
+                        .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 9))
                     }
-                    if summary.rootCount > 12 {
+                    if summary.rootCount > 6 {
                         Text(AppText.value(
-                            "Additional selected roots are included in the same transfer.",
-                            "其余所选根项目也会包含在同一传输中。",
+                            "\(summary.rootCount - 6) more top-level items are included.",
+                            "还包含 \(summary.rootCount - 6) 个顶层项目。",
                             language: language
                         ))
                             .font(.footnote)
@@ -122,9 +143,11 @@ struct TransferStatusView: View {
                             .font(.footnote.monospacedDigit())
                             .foregroundStyle(Theme.muted)
                     }
-                    ForEach(viewModel.pendingOfferEntries.prefix(12), id: \.entryId) { entry in
+                    ForEach(viewModel.pendingOfferEntries.prefix(6), id: \.entryId) { entry in
                         HStack(spacing: 6) {
-                            Image(systemName: entry.kind == .directory ? "folder" : "doc")
+                            Image(systemName: inventoryIcon(name: entry.name, isDirectory: entry.kind == .directory))
+                                .foregroundStyle(entry.kind == .directory ? Theme.warning : Theme.accentStrong)
+                                .frame(width: 24)
                             Text(entry.name)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -136,11 +159,14 @@ struct TransferStatusView: View {
                         }
                         .font(.footnote)
                         .foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 9)
+                        .frame(minHeight: 34)
+                        .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 9))
                     }
-                    if viewModel.pendingOfferEntries.count > 12 {
+                    if viewModel.pendingOfferEntries.count > 6 {
                         Text(AppText.value(
-                            "Large inventories are summarized here; transfer still preserves the complete tree.",
-                            "此处仅摘要显示大型清单；传输仍会完整保留全部目录树。",
+                            "\(viewModel.pendingOfferEntries.count - 6) more items are included in the authenticated manifest.",
+                            "已认证清单中还包含 \(viewModel.pendingOfferEntries.count - 6) 个项目。",
                             language: language
                         ))
                             .font(.footnote)
@@ -181,6 +207,11 @@ struct TransferStatusView: View {
                                     viewModel.removeManifestSource(rootItemID: selection.rootItemId)
                                 }
                                 .buttonStyle(.bordered)
+                                .accessibilityLabel(AppText.value(
+                                    "Remove \(selection.requestedName)",
+                                    "移除 \(selection.requestedName)",
+                                    language: language
+                                ))
                             }
                         }
                     }
@@ -252,6 +283,24 @@ struct TransferStatusView: View {
         )
     }
 
+    private func inventoryIcon(name: String, isDirectory: Bool) -> String {
+        if isDirectory { return "folder.fill" }
+        switch URL(fileURLWithPath: name).pathExtension.lowercased() {
+        case "jpg", "jpeg", "png", "gif", "heic", "webp":
+            return "photo"
+        case "mov", "mp4", "m4v":
+            return "video"
+        case "mp3", "m4a", "wav", "flac":
+            return "waveform"
+        case "pdf":
+            return "doc.richtext"
+        case "zip", "tar", "gz", "7z":
+            return "archivebox"
+        default:
+            return "doc.fill"
+        }
+    }
+
     private var transferProgressLine: some View {
         HStack(spacing: 6) {
             Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
@@ -282,7 +331,8 @@ struct TransferStatusView: View {
     }
 
     private var currentDataPathText: String? {
-        nil
+        guard let path = viewModel.connectionPath else { return nil }
+        return ConnectionPathPresentationPolicy.label(for: path, language: language)
     }
 
     @ViewBuilder private var logsCard: some View {
@@ -357,7 +407,9 @@ struct TransferStatusView: View {
         case .paused?:
             return AppText.value("Transfer paused", "传输已暂停", language: language)
         case .delivered?:
-            return AppText.value("Delivered", "已送达", language: language)
+            return viewModel.transferActivity?.direction == .receive
+                ? AppText.value("Received", "已接收", language: language)
+                : AppText.value("Delivered", "已送达", language: language)
         case .canceled?:
             return AppText.value("Transfer canceled", "传输已取消", language: language)
         case .failed?:

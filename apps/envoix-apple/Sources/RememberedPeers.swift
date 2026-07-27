@@ -16,6 +16,11 @@ struct RememberedPeerSummary: Equatable, Identifiable, CustomDebugStringConverti
     }
 }
 
+struct RememberedPeerSessionMaterial: Equatable {
+    let summary: RememberedPeerSummary
+    let opaqueCredential: Data
+}
+
 private struct RememberedPeerRecord: Codable {
     let relationshipID: String
     var label: String
@@ -49,6 +54,7 @@ enum RememberedPeerStoreError: LocalizedError {
     case invalidLabel
     case missingCredential
     case activeTransfer
+    case inactiveSession
     case keychain(OSStatus)
     case corruptMetadata
 
@@ -59,7 +65,9 @@ enum RememberedPeerStoreError: LocalizedError {
         case .missingCredential:
             return "This remembered device is unavailable and must be paired again."
         case .activeTransfer:
-            return "This remembered device already has an active transfer."
+            return "This remembered device is already in use."
+        case .inactiveSession:
+            return "This remembered-device session is no longer active."
         case .keychain:
             return "Protected credential storage is unavailable."
         case .corruptMetadata:
@@ -72,10 +80,17 @@ final class RememberedPeerStore: @unchecked Sendable {
     static let shared = RememberedPeerStore()
 
     private let lock = NSLock()
-    private let credentialStore = AppleCredentialStore()
+    private let credentialStore: RememberedCredentialStoring
+    private let metadataFileURL: URL?
     private var activeRelationships = Set<String>()
 
-    private init() {}
+    init(
+        credentialStore: RememberedCredentialStoring = AppleCredentialStore(),
+        metadataFileURL: URL? = nil
+    ) {
+        self.credentialStore = credentialStore
+        self.metadataFileURL = metadataFileURL
+    }
 
     func prepare(label: String, broker: String, relay: String) throws -> PendingRememberedPeer {
         let label = label.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -116,13 +131,20 @@ final class RememberedPeerStore: @unchecked Sendable {
     }
 
     func credential(for peer: RememberedPeerSummary) throws -> Data {
+        try sessionMaterial(relationshipID: peer.relationshipID).opaqueCredential
+    }
+
+    func sessionMaterial(relationshipID: String) throws -> RememberedPeerSessionMaterial {
         try lock.withEnvoixLock {
             guard let record = try readMetadata().first(where: {
-                $0.relationshipID == peer.relationshipID
+                $0.relationshipID == relationshipID
             }) else {
                 throw RememberedPeerStoreError.missingCredential
             }
-            return try credentialStore.get(record.credentialReference)
+            return RememberedPeerSessionMaterial(
+                summary: record.summary,
+                opaqueCredential: try credentialStore.get(record.credentialReference)
+            )
         }
     }
 
@@ -135,7 +157,7 @@ final class RememberedPeerStore: @unchecked Sendable {
     }
 
     func releaseSession(_ relationshipID: String) {
-        lock.withEnvoixLock {
+        _ = lock.withEnvoixLock {
             activeRelationships.remove(relationshipID)
         }
     }
@@ -146,6 +168,9 @@ final class RememberedPeerStore: @unchecked Sendable {
         generation: UInt64
     ) throws {
         try lock.withEnvoixLock {
+            guard activeRelationships.contains(pending.relationshipID) else {
+                throw RememberedPeerStoreError.inactiveSession
+            }
             try credentialStore.put(pending.credentialReference, opaqueCredential)
             do {
                 var peers = try readMetadata()
@@ -173,6 +198,9 @@ final class RememberedPeerStore: @unchecked Sendable {
         generation: UInt64
     ) throws {
         try lock.withEnvoixLock {
+            guard activeRelationships.contains(relationshipID) else {
+                throw RememberedPeerStoreError.inactiveSession
+            }
             var peers = try readMetadata()
             guard let index = peers.firstIndex(where: { $0.relationshipID == relationshipID }) else {
                 throw RememberedPeerStoreError.missingCredential
@@ -193,6 +221,9 @@ final class RememberedPeerStore: @unchecked Sendable {
 
     func delete(_ peer: RememberedPeerSummary) throws {
         try lock.withEnvoixLock {
+            guard !activeRelationships.contains(peer.relationshipID) else {
+                throw RememberedPeerStoreError.activeTransfer
+            }
             var peers = try readMetadata()
             guard let record = peers.first(where: {
                 $0.relationshipID == peer.relationshipID
@@ -231,6 +262,15 @@ final class RememberedPeerStore: @unchecked Sendable {
     }
 
     private func metadataURL() throws -> URL {
+        if let metadataFileURL {
+            let directory = metadataFileURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            return metadataFileURL
+        }
         guard let support = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -310,7 +350,13 @@ final class RememberPersistenceContext: @unchecked Sendable {
     }
 }
 
-private final class AppleCredentialStore {
+protocol RememberedCredentialStoring {
+    func put(_ reference: String, _ credential: Data) throws
+    func get(_ reference: String) throws -> Data
+    func delete(_ reference: String) throws
+}
+
+final class AppleCredentialStore: RememberedCredentialStoring {
     private let service = "com.envoix.remembered-credential.v1"
 
     func put(_ reference: String, _ credential: Data) throws {
@@ -364,7 +410,7 @@ private final class AppleCredentialStore {
     }
 }
 
-private extension NSLock {
+extension NSLock {
     func withEnvoixLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }

@@ -3,6 +3,10 @@ package dev.envoix.app
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -91,6 +95,12 @@ internal class RememberedPeerStore private constructor(
     private val context: Context,
 ) {
     private val activeRelationships = mutableSetOf<String>()
+    private val mutableChanges =
+        MutableSharedFlow<Unit>(
+            replay = 1,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        ).apply { tryEmit(Unit) }
+    val changes: SharedFlow<Unit> = mutableChanges.asSharedFlow()
 
     @Synchronized
     fun prepare(
@@ -109,35 +119,15 @@ internal class RememberedPeerStore private constructor(
     }
 
     @Synchronized
-    fun peers(): List<RememberedPeerSummary> {
-        val records = readRecords()
-        val usable = mutableListOf<RememberedPeerRecord>()
-        for (record in records) {
-            if (loadCredential(record) != null) {
-                usable += record
-            } else {
-                deleteCredentialFiles(record.credentialReference)
-            }
-        }
-        if (usable.size != records.size) writeRecords(usable)
-        reclaimOrphans(usable.mapTo(mutableSetOf()) { it.credentialReference })
-        return usable.sortedBy { it.label.lowercase() }.map(RememberedPeerRecord::summary)
-    }
+    fun peers(): List<RememberedPeerSummary> =
+        readRecords()
+            .sortedBy { it.label.lowercase() }
+            .map(RememberedPeerRecord::summary)
 
     @Synchronized
     fun load(relationshipId: String): LoadedRememberedPeer? {
-        val records = readRecords().toMutableList()
-        val index = records.indexOfFirst { it.relationshipId == relationshipId }
-        if (index < 0) return null
-        val record = records[index]
-        val credential = loadCredential(record)
-        if (credential == null) {
-            records.removeAt(index)
-            writeRecords(records)
-            deleteCredentialFiles(record.credentialReference)
-            return null
-        }
-        return LoadedRememberedPeer(record.summary(), credential)
+        val record = readRecords().firstOrNull { it.relationshipId == relationshipId } ?: return null
+        return LoadedRememberedPeer(record.summary(), loadCredential(record))
     }
 
     @Synchronized
@@ -168,7 +158,9 @@ internal class RememberedPeerStore private constructor(
                 throw error
             }
             true
-        }.getOrDefault(false)
+        }.getOrDefault(false).also { created ->
+            if (created) mutableChanges.tryEmit(Unit)
+        }
     }
 
     @Synchronized
@@ -198,16 +190,67 @@ internal class RememberedPeerStore private constructor(
         }.getOrElse {
             credentialFile(rotated.credentialReference, rotated.generation).delete()
             false
+        }.also { persisted ->
+            if (persisted) mutableChanges.tryEmit(Unit)
+        }
+    }
+
+    /**
+     * Commits the generation consumed by an authenticated remembered control
+     * attempt. A retry on the retained previous generation is an idempotent
+     * catch-up, never a reason to regress the current generation.
+     */
+    @Synchronized
+    fun advanceAfterPeerAuthentication(
+        relationshipId: String,
+        opaqueCredential: ByteArray,
+        authenticatedGeneration: Long,
+    ): Boolean {
+        val record = readRecords().firstOrNull { it.relationshipId == relationshipId } ?: return false
+        val nextGeneration =
+            runCatching { Math.addExact(authenticatedGeneration, 1L) }
+                .getOrNull()
+                ?: return false
+        return when {
+            authenticatedGeneration == record.generation ->
+                rotate(relationshipId, opaqueCredential, nextGeneration)
+            authenticatedGeneration == record.previousGeneration &&
+                nextGeneration == record.generation -> true
+            else -> false
+        }
+    }
+
+    @Synchronized
+    fun rename(
+        relationshipId: String,
+        label: String,
+    ): Boolean {
+        val normalized = label.trim()
+        if (normalized.isEmpty()) return false
+        val records = readRecords().toMutableList()
+        val index = records.indexOfFirst { it.relationshipId == relationshipId }
+        if (index < 0) return false
+        if (records[index].label == normalized) return true
+        records[index] = records[index].copy(label = normalized)
+        return runCatching {
+            writeRecords(records)
+            true
+        }.getOrDefault(false).also { persisted ->
+            if (persisted) mutableChanges.tryEmit(Unit)
         }
     }
 
     @Synchronized
     fun delete(relationshipId: String) {
+        check(relationshipId !in activeRelationships) {
+            "This remembered room is still active"
+        }
         val records = readRecords().toMutableList()
         val record = records.firstOrNull { it.relationshipId == relationshipId } ?: return
         records.remove(record)
         writeRecords(records)
         deleteCredentialFiles(record.credentialReference)
+        mutableChanges.tryEmit(Unit)
     }
 
     @Synchronized
@@ -218,19 +261,25 @@ internal class RememberedPeerStore private constructor(
         activeRelationships.remove(relationshipId)
     }
 
-    private fun loadCredential(record: RememberedPeerRecord): ByteArray? {
+    private fun loadCredential(record: RememberedPeerRecord): ByteArray {
         val generations = listOfNotNull(record.generation, record.previousGeneration)
+        val failures = mutableListOf<Throwable>()
         for (generation in generations) {
-            val bytes =
-                runCatching {
-                    decrypt(
-                        credentialFile(record.credentialReference, generation).readBytes(),
-                        aad(record, generation),
-                    )
-                }.getOrNull()
-            if (bytes != null) return bytes
+            try {
+                return decrypt(
+                    credentialFile(record.credentialReference, generation).readBytes(),
+                    aad(record, generation),
+                )
+            } catch (error: Throwable) {
+                failures += error
+            }
         }
-        return null
+        throw IllegalStateException(
+            "remembered credential is temporarily unavailable; the relationship was preserved",
+            failures.lastOrNull(),
+        ).also { failure ->
+            failures.dropLast(1).forEach(failure::addSuppressed)
+        }
     }
 
     private fun writeCredential(
@@ -248,7 +297,7 @@ internal class RememberedPeerStore private constructor(
         aad: ByteArray,
     ): ByteArray {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key())
+        cipher.init(Cipher.ENCRYPT_MODE, encryptionKey())
         val nonce = cipher.iv
         require(nonce.size == NONCE_BYTES)
         cipher.updateAAD(aad)
@@ -264,7 +313,7 @@ internal class RememberedPeerStore private constructor(
         val nonce = envelope.copyOfRange(1, 1 + NONCE_BYTES)
         val ciphertext = envelope.copyOfRange(1 + NONCE_BYTES, envelope.size)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, nonce))
+        cipher.init(Cipher.DECRYPT_MODE, decryptionKey(), GCMParameterSpec(TAG_BITS, nonce))
         cipher.updateAAD(aad)
         return try {
             cipher.doFinal(ciphertext)
@@ -284,7 +333,7 @@ internal class RememberedPeerStore private constructor(
             generation.toString(),
         ).joinToString("\u0000").toByteArray(Charsets.UTF_8)
 
-    private fun key(): SecretKey {
+    private fun encryptionKey(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
         return KeyGenerator
@@ -303,17 +352,25 @@ internal class RememberedPeerStore private constructor(
             }.generateKey()
     }
 
+    private fun decryptionKey(): SecretKey {
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        return store.getKey(KEY_ALIAS, null) as? SecretKey
+            ?: throw IllegalStateException("remembered credential key is unavailable")
+    }
+
     private fun readRecords(): List<RememberedPeerRecord> {
         val file = metadataFile()
         if (!file.exists()) return emptyList()
         return try {
-            val values = JSONArray(metadataFile().readText())
+            val values = JSONArray(file.readText())
             (0 until values.length()).map {
                 RememberedPeerRecord.fromJson(values.getJSONObject(it))
             }
-        } catch (_: Throwable) {
-            file.delete()
-            emptyList()
+        } catch (error: Throwable) {
+            throw IllegalStateException(
+                "remembered-device metadata is temporarily unavailable; no records were changed",
+                error,
+            )
         }
     }
 
@@ -321,13 +378,6 @@ internal class RememberedPeerStore private constructor(
         val values = JSONArray()
         records.forEach { values.put(it.toJson()) }
         atomicWrite(metadataFile(), values.toString().toByteArray(Charsets.UTF_8))
-    }
-
-    private fun reclaimOrphans(liveReferences: Set<String>) {
-        credentialDirectory().listFiles()?.forEach { file ->
-            val reference = file.name.substringBeforeLast('-', "")
-            if (reference !in liveReferences) file.delete()
-        }
     }
 
     private fun deleteCredentialFiles(reference: String) {

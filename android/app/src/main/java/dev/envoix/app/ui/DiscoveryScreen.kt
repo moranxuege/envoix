@@ -23,15 +23,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -90,20 +91,6 @@ internal fun DiscoveryScreen(
         }
     var pairingSelection by remember { mutableStateOf<NearbyPairingSelection?>(null) }
     var initialPairingInput by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(state.incomingRendezvousOffer?.requestId) {
-        val offer = state.incomingRendezvousOffer ?: return@LaunchedEffect
-        if (pairingSelection == null) {
-            pairingSelection =
-                NearbyPairingSelection(
-                    discoveryPeerKey = offer.senderPeerKey,
-                    displayName = offer.senderDisplayName,
-                    sources = setOf(DiscoverySource.Bluetooth),
-                )
-            initialPairingInput = offer.invite
-            discoveryViewModel.consumeRendezvousOffer(offer.requestId)
-        }
-    }
 
     DisposableEffect(lifecycleOwner, discoveryViewModel) {
         val observer =
@@ -210,8 +197,8 @@ internal fun DiscoveryScreen(
             item {
                 Text(
                     appText(
-                        "Bluetooth invitation handoff is disabled. Use the selected device context, then scan a QR code or enter a Room Code.",
-                        "蓝牙邀请交接已禁用。选择设备后，请扫描二维码或输入房间码。",
+                        "Local-network devices can receive a room invitation directly. QR and Room Code remain available.",
+                        "局域网设备可直接接收房间邀请；二维码和房间码仍然可用。",
                     ),
                     color = colors.muted,
                     fontSize = 12.sp,
@@ -234,7 +221,23 @@ internal fun DiscoveryScreen(
             NewTransferSheet(
                 nearbySelection = selection,
                 initialPairingInput = initialPairingInput,
-                onOfferInvite = null,
+                onOfferInvite =
+                    if (initialPairingInput == null &&
+                        (
+                            selection.nearbyInviteRoute != null ||
+                                DiscoverySource.Bluetooth in selection.sources
+                        )
+                    ) {
+                        { offer, completion ->
+                            discoveryViewModel.offerInvite(
+                                selection,
+                                offer.transferInvite,
+                                completion,
+                            )
+                        }
+                    } else {
+                        null
+                    },
                 onReceive = {
                     code,
                     broker,
@@ -277,6 +280,45 @@ internal fun DiscoveryScreen(
                         rememberedRelationshipId,
                     )
                 },
+            )
+        }
+    }
+
+    if (pairingSelection == null) {
+        state.incomingRendezvousOffers.firstOrNull()?.let { offer ->
+            AlertDialog(
+                onDismissRequest = { discoveryViewModel.consumeRendezvousOffer(offer.requestId) },
+                title = { Text(appText("Nearby transfer invitation", "附近传输邀请")) },
+                text = {
+                    Text(
+                        appText(
+                            "Review this nearby invitation before continuing. The device name is not a verified identity.",
+                            "继续前请检查此附近邀请；设备名称不代表已验证身份。",
+                        ),
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            pairingSelection =
+                                NearbyPairingSelection(
+                                    discoveryPeerKey = offer.senderPeerKey,
+                                    displayName = offer.senderDisplayName,
+                                    sources = setOf(offer.source),
+                                )
+                            initialPairingInput = offer.invite
+                            discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                        },
+                    ) {
+                        Text(appText("Accept", "接受"))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { discoveryViewModel.consumeRendezvousOffer(offer.requestId) }) {
+                        Text(appText("Reject", "拒绝"))
+                    }
+                },
+                containerColor = colors.surface,
             )
         }
     }

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result as AnyResult, anyhow};
 use base64::Engine as _;
@@ -11,6 +12,7 @@ use tokio::fs;
 use crate::SessionError;
 
 const IDENTITY_FILE_VERSION: u32 = 1;
+static IDENTITY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// iroh endpoint identity policy.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -77,10 +79,17 @@ async fn load_or_create_identity(path: &Path) -> AnyResult<SecretKey> {
             .await
             .context("failed to create persistent identity directory")?;
     }
-    write_new_identity_file(path, &text)
-        .await
-        .context("failed to create persistent identity file")?;
-    Ok(secret_key)
+    match write_new_identity_file(path, &text).await {
+        Ok(()) => Ok(secret_key),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another endpoint won the atomic first-use creation race. Reuse
+            // that identity instead of failing one of the concurrent starts.
+            read_identity(path)
+                .await
+                .context("failed to read concurrently created persistent identity")
+        }
+        Err(error) => Err(error).context("failed to create persistent identity file"),
+    }
 }
 
 async fn read_identity(path: &Path) -> AnyResult<SecretKey> {
@@ -106,19 +115,93 @@ async fn read_identity(path: &Path) -> AnyResult<SecretKey> {
 }
 
 #[cfg(unix)]
-async fn write_new_identity_file(path: &Path, bytes: &[u8]) -> AnyResult<()> {
+async fn write_new_identity_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temporary_path = temporary_identity_path(path);
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true).mode(0o600);
-    let mut file = options.open(path).await?;
-    use tokio::io::AsyncWriteExt as _;
-    file.write_all(bytes).await?;
-    Ok(())
+    publish_identity_file(path, &temporary_path, options, bytes).await
 }
 
 #[cfg(not(unix))]
-async fn write_new_identity_file(path: &Path, bytes: &[u8]) -> AnyResult<()> {
-    fs::write(path, bytes).await?;
-    Ok(())
+async fn write_new_identity_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temporary_path = temporary_identity_path(path);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    publish_identity_file(path, &temporary_path, options, bytes).await
+}
+
+fn temporary_identity_path(path: &Path) -> PathBuf {
+    let counter = IDENTITY_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("identity");
+    path.with_file_name(format!(".{name}.{}.{counter}.tmp", std::process::id()))
+}
+
+async fn publish_identity_file(
+    final_path: &Path,
+    temporary_path: &Path,
+    options: fs::OpenOptions,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let result = async {
+        let mut file = options.open(temporary_path).await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        publish_identity_no_replace(temporary_path, final_path).await
+    }
+    .await;
+    let _ = fs::remove_file(temporary_path).await;
+    result
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "visionos",
+    target_os = "watchos",
+    target_os = "redox",
+))]
+async fn publish_identity_no_replace(
+    temporary_path: &Path,
+    final_path: &Path,
+) -> std::io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+
+    match renameat_with(CWD, temporary_path, CWD, final_path, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        // Older kernels/filesystems can lack rename-with-flags. Preserve the
+        // prior no-replace fallback where hard links are permitted.
+        Err(Errno::NOSYS | Errno::INVAL) => fs::hard_link(temporary_path, final_path).await,
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "visionos",
+    target_os = "watchos",
+    target_os = "redox",
+)))]
+async fn publish_identity_no_replace(
+    temporary_path: &Path,
+    final_path: &Path,
+) -> std::io::Result<()> {
+    // A hard link publishes the already-complete inode without replacing an
+    // identity another concurrent endpoint has just installed.
+    fs::hard_link(temporary_path, final_path).await
 }
 
 #[cfg(test)]

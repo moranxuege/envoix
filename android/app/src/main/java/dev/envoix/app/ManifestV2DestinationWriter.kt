@@ -80,7 +80,13 @@ class ManifestV2DestinationWriter(
         return planReply(roots).toString()
     }
 
-    fun save(requestJson: String): String {
+    fun save(requestJson: String): String = saveWithDestination(requestJson).responseJson
+
+    /**
+     * Commits the public roots and returns presentation metadata derived from
+     * the same immutable settings snapshot that selected the destination.
+     */
+    internal fun saveWithDestination(requestJson: String): ManifestV2SaveResult {
         val request = JSONObject(requestJson)
         val jobId = request.getString("job_id")
         val generation = request.getInt("generation")
@@ -156,7 +162,10 @@ class ManifestV2DestinationWriter(
         }
         value.put("state", STATE_COMMITTED)
         writeJournal(journal, value)
-        return committedReply(roots).toString()
+        return ManifestV2SaveResult(
+            responseJson = committedReply(roots).toString(),
+            destinationLabel = destinationLabel(settings, tree),
+        )
     }
 
     private data class Outcome(
@@ -525,6 +534,16 @@ class ManifestV2DestinationWriter(
         folder: String,
     ): String = if (treeUri.isNotBlank()) "tree:$treeUri" else "downloads:$folder"
 
+    private fun destinationLabel(
+        settings: Settings,
+        tree: DocumentFile?,
+    ): String =
+        tree
+            ?.name
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: "Downloads / ${settings.saveFolder}"
+
     private companion object {
         const val JOURNAL_SCHEMA_VERSION = 2
         const val MAX_NAME_ATTEMPTS = 10_000
@@ -536,6 +555,11 @@ class ManifestV2DestinationWriter(
         const val STATE_COMMITTED = "committed"
     }
 }
+
+internal data class ManifestV2SaveResult(
+    val responseJson: String,
+    val destinationLabel: String,
+)
 
 internal fun manifestV2KeepBothName(
     name: String,

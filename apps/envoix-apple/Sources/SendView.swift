@@ -26,6 +26,12 @@ struct SendSelectionSnapshot {
 }
 
 struct SendView: View {
+    private enum ImportedSelectionKind {
+        case any
+        case files
+        case folders
+    }
+
     #if os(iOS)
     private static let mobileScrollBottomClearance: CGFloat = 32
     #endif
@@ -48,8 +54,10 @@ struct SendView: View {
     @State private var roomQRCodeImage: PlatformImage?
     @State private var roomQRCodePayload = ""
     @State private var mode: PairingMode = .room
+    #if os(macOS)
     @State private var rememberedPeers: [RememberedPeerSummary] = []
     @State private var selectedRememberedPeer: RememberedPeerSummary?
+    #endif
     @State private var rememberAfterPairing = false
     @State private var rememberLabel = ""
     @State private var pairingPanel: PairingPanelMode = .show
@@ -60,12 +68,27 @@ struct SendView: View {
     @State private var selectedSourceAccess: AnyObject?
     @State private var selectedPendingSelectionID: UUID?
     @State private var didApplyInitialPairingInput = false
+    @State private var pendingRoomOfferID: String?
+    @State private var isQueueingRememberedRoom = false
+    @StateObject private var nearbyInviteDelivery = NearbyInviteDeliveryController()
     private let initialPairingInput: String?
+    private let nearbySelection: NearbyPairingSelection?
+    private let nearbyInviteOffer: NearbyInviteOffer?
+    private let roomControlOffer: ((
+        RoomControlTransferOffer,
+        @escaping (Bool) -> Void
+    ) -> Void)?
+    private let roomControlEndpoint: RoomControlEndpoint?
+    private let rememberedRoomRelationshipID: String?
+    private let onRoomOfferPendingChange: ((Bool) -> Void)?
+    private let onRememberedRoomQueued: (() -> Void)?
     private let onInitialPairingInputConsumed: (() -> Void)?
     private let onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)?
+    private let onExternalActivityChanged: ((Bool) -> Void)?
     #if os(iOS)
     @State private var isFolderPickerPresented = false
     @State private var isPhotoPickerPresented = false
+    @State private var externalActivityLeaseHeld = false
     @State private var photoImporter: PhotoDraftImporter?
     @State private var photoImportItemNumber = 0
     @State private var photoImportItemCount = 0
@@ -78,13 +101,32 @@ struct SendView: View {
         initialFileAccess: AnyObject? = nil,
         initialPendingSelectionID: UUID? = nil,
         initialPairingInput: String? = nil,
+        nearbySelection: NearbyPairingSelection? = nil,
+        nearbyInviteOffer: NearbyInviteOffer? = nil,
+        roomControlOffer: ((
+            RoomControlTransferOffer,
+            @escaping (Bool) -> Void
+        ) -> Void)? = nil,
+        roomControlEndpoint: RoomControlEndpoint? = nil,
+        rememberedRoomRelationshipID: String? = nil,
+        onRoomOfferPendingChange: ((Bool) -> Void)? = nil,
+        onRememberedRoomQueued: (() -> Void)? = nil,
         onInitialPairingInputConsumed: (() -> Void)? = nil,
-        onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)? = nil
+        onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)? = nil,
+        onExternalActivityChanged: ((Bool) -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.initialPairingInput = initialPairingInput
+        self.nearbySelection = nearbySelection
+        self.nearbyInviteOffer = nearbyInviteOffer
+        self.roomControlOffer = roomControlOffer
+        self.roomControlEndpoint = roomControlEndpoint
+        self.rememberedRoomRelationshipID = rememberedRoomRelationshipID
+        self.onRoomOfferPendingChange = onRoomOfferPendingChange
+        self.onRememberedRoomQueued = onRememberedRoomQueued
         self.onInitialPairingInputConsumed = onInitialPairingInputConsumed
         self.onSwitchToReceive = onSwitchToReceive
+        self.onExternalActivityChanged = onExternalActivityChanged
         _mode = State(initialValue: initialMode)
         _selectedItems = State(initialValue: initialFiles)
         _filePathInput = State(initialValue: initialFiles.count == 1 ? initialFiles[0].path : "")
@@ -107,42 +149,57 @@ struct SendView: View {
             FilePickerSheet(
                 initialDirectoryURL: filePickerInitialDirectoryURL,
                 onPick: { urls in
+                    setExternalActivityActive(false)
                     isFileImporterPresented = false
                     handleImportedItems(.success(urls))
                 },
-                onCancel: { isFileImporterPresented = false }
+                onCancel: {
+                    setExternalActivityActive(false)
+                    isFileImporterPresented = false
+                }
             )
         }
         .sheet(isPresented: $isFolderPickerPresented) {
             MultiFolderPickerSheet(
                 initialDirectoryURL: folderPickerInitialDirectoryURL,
                 onPick: { urls in
+                    setExternalActivityActive(false)
                     isFolderPickerPresented = false
                     handleImportedFolders(urls)
                 },
-                onCancel: { isFolderPickerPresented = false }
+                onCancel: {
+                    setExternalActivityActive(false)
+                    isFolderPickerPresented = false
+                }
             )
         }
         .sheet(isPresented: $isPhotoPickerPresented) {
             PhotoPickerSheet(
                 onPick: { providers in
+                    setExternalActivityActive(false)
                     isPhotoPickerPresented = false
                     beginPhotoImport(providers)
                 },
-                onCancel: { isPhotoPickerPresented = false }
+                onCancel: {
+                    setExternalActivityActive(false)
+                    isPhotoPickerPresented = false
+                }
             )
         }
         .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onAppear(perform: applyInitialPairingInputIfNeeded)
         .onAppear(perform: prepareCurrentSelectionIfNeeded)
-        .onAppear(perform: refreshRememberedPeers)
         .onChange(of: model.pendingSendSelection?.id) { _ in
             adoptSharedSelectionIfAvailable()
         }
         .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
             adoptPreparedManifestPaths(paths)
         }
-        .onDisappear(perform: cancelPhotoImport)
+        .onDisappear {
+            setExternalActivityActive(false)
+            cancelPhotoImport()
+            cancelNearbyInviteDelivery()
+        }
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -152,7 +209,6 @@ struct SendView: View {
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
         .onAppear(perform: prepareCurrentSelectionIfNeeded)
-        .onAppear(perform: refreshRememberedPeers)
         .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
             adoptPreparedManifestPaths(paths)
         }
@@ -162,8 +218,20 @@ struct SendView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                #if os(iOS)
+                if let nearbySelection {
+                    NearbyTransferContextView(
+                        selection: nearbySelection,
+                        deliversInvitationOnStart: nearbyInviteOffer != nil,
+                        isDelivering: nearbyInviteDelivery.isDelivering,
+                        error: nearbyInviteDelivery.error
+                    )
+                }
+                #endif
                 fileSection
-                connectionSection
+                if roomControlOffer == nil && rememberedRoomRelationshipID == nil {
+                    connectionSection
+                }
                 TransferStatusView(viewModel: viewModel)
             }
             .padding(.vertical, 12)
@@ -193,9 +261,11 @@ struct SendView: View {
 
     @ViewBuilder private var connectionSection: some View {
         VStack(alignment: .leading, spacing: 12) {
+            #if os(macOS)
             if !rememberedPeers.isEmpty {
                 rememberedPeerSection
             }
+            #endif
             if mode == .invite {
                 inviteSection
             } else if mode == .room {
@@ -212,6 +282,7 @@ struct SendView: View {
         }
     }
 
+    #if os(macOS)
     private var rememberedPeerSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(AppText.value("Remembered devices", "已记住的设备", language: uiLanguage))
@@ -236,12 +307,17 @@ struct SendView: View {
                         Image(systemName: "trash")
                     }
                     .disabled(viewModel.isBusy)
-                    .accessibilityLabel(AppText.value("Forget device", "忘记设备", language: uiLanguage))
+                    .accessibilityLabel(AppText.value(
+                        "Forget device",
+                        "忘记设备",
+                        language: uiLanguage
+                    ))
                 }
             }
         }
         .card(padding: 14)
     }
+    #endif
 
     private var rememberConsentSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -461,7 +537,13 @@ struct SendView: View {
                 primaryLabel,
                 systemImage: viewModel.isPreparingManifest
                     ? "xmark"
-                    : (viewModel.isBusy ? "list.bullet.rectangle" : "paperplane")
+                    : (viewModel.isBusy
+                        ? "list.bullet.rectangle"
+                        : ((nearbyInviteDelivery.isDelivering
+                            || pendingRoomOfferID != nil
+                            || isQueueingRememberedRoom)
+                            ? "dot.radiowaves.left.and.right"
+                            : "paperplane"))
             )
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
@@ -470,7 +552,14 @@ struct SendView: View {
         .buttonStyle(PrimaryActionButtonStyle())
         .disabled(
             !viewModel.isPreparingManifest
-                && (viewModel.isBusy || viewModel.isFinalizing || isPhotoImporting || !canSend || concurrencyBlocked)
+                && (viewModel.isBusy
+                    || viewModel.isFinalizing
+                    || nearbyInviteDelivery.isDelivering
+                    || pendingRoomOfferID != nil
+                    || isQueueingRememberedRoom
+                    || isPhotoImporting
+                    || !canSend
+                    || concurrencyBlocked)
         )
         .accessibilityIdentifier("send_start_button")
     }
@@ -608,6 +697,7 @@ struct SendView: View {
                 systemImage: "photo.on.rectangle",
                 identifier: "send_photo_picker"
             ) {
+                setExternalActivityActive(true)
                 isPhotoPickerPresented = true
             }
             selectionSourceAction(
@@ -615,6 +705,7 @@ struct SendView: View {
                 systemImage: "doc.badge.plus",
                 identifier: "send_file_picker"
             ) {
+                setExternalActivityActive(true)
                 isFileImporterPresented = true
             }
             selectionSourceAction(
@@ -622,10 +713,19 @@ struct SendView: View {
                 systemImage: "folder.badge.plus",
                 identifier: "send_folder_picker"
             ) {
+                setExternalActivityActive(true)
                 isFolderPickerPresented = true
             }
         }
     }
+
+    #if os(iOS)
+    private func setExternalActivityActive(_ active: Bool) {
+        guard externalActivityLeaseHeld != active else { return }
+        externalActivityLeaseHeld = active
+        onExternalActivityChanged?(active)
+    }
+    #endif
 
     private func selectionSourceAction(
         _ title: String,
@@ -648,7 +748,7 @@ struct SendView: View {
             .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isBusy || viewModel.isPreparingManifest || isPhotoImporting)
+        .disabled(selectionMutationDisabled)
         .accessibilityIdentifier(identifier)
     }
     #endif
@@ -843,15 +943,9 @@ struct SendView: View {
         let input = value.trimmed
         do {
             if input.lowercased().hasPrefix("envoix:") {
-                let parsed = try parsePairingInviteForRole(input: input, localRole: .send)
+                _ = try parsePairingInviteForRole(input: input, localRole: .send)
                 invite = input
                 roomCode = ""
-                if !parsed.broker.trimmed.isEmpty {
-                    serverURL = parsed.broker.trimmed
-                }
-                if let relay = parsed.relayUrls.first, !relay.trimmed.isEmpty {
-                    relayURL = relay.trimmed
-                }
                 mode = .invite
             } else {
                 roomCode = try normalizeRoomCode(input: input)
@@ -885,12 +979,22 @@ struct SendView: View {
     }
 
     private func refreshPairingInviteIfNeeded() {
-        guard mode == .room, pairingInvite == nil else { return }
+        guard roomControlOffer == nil,
+              rememberedRoomRelationshipID == nil,
+              mode == .room,
+              pairingInvite == nil else {
+            return
+        }
         refreshPairingInvite()
     }
 
     private func refreshPairingInviteForSettingsChange() {
-        guard mode == .room, !viewModel.isBusy else { return }
+        guard roomControlOffer == nil,
+              rememberedRoomRelationshipID == nil,
+              mode == .room,
+              !viewModel.isBusy else {
+            return
+        }
         refreshPairingInvite()
     }
 
@@ -904,18 +1008,18 @@ struct SendView: View {
         }
     }
 
-    private func activeSendRoomCode() throws -> String {
+    private func activeSendPairingInvite() throws -> FfiPairingInvite {
         if let invite = pairingInvite {
             let code = invite.roomCode.trimmed
             if !code.isEmpty {
                 updateRoomQRCode(for: invite.payload)
-                return code
+                return invite
             }
         }
         let invite = try makePairingInvite(role: .send, broker: serverURL, relay: relayURL)
         pairingInvite = invite
         updateRoomQRCode(for: invite.payload)
-        return invite.roomCode
+        return invite
     }
 
     private func updateRoomQRCode(for payload: String) {
@@ -926,10 +1030,9 @@ struct SendView: View {
 
     private func runtimeSettings(for parsed: FfiPairingInvite) throws -> EnvoixRuntimeSettings {
         try RuntimeSettingsProvider.make(
+            transferInvitation: parsed,
             concurrentTransfers: concurrentTransfers,
             language: language,
-            serverURL: parsed.broker.trimmed.isEmpty ? serverURL : parsed.broker,
-            relayURL: parsed.relayUrls.first.flatMap { $0.trimmed.isEmpty ? nil : $0 } ?? relayURL,
             candidatesAllow: candidatesAllow,
             candidatesDeny: candidatesDeny,
             speedLimit: speedLimit
@@ -940,7 +1043,19 @@ struct SendView: View {
         if viewModel.isPreparingManifest {
             return AppText.value("Cancel Preparation", "取消准备", language: uiLanguage)
         }
+        if nearbyInviteDelivery.isDelivering {
+            return AppText.value("Delivering Invitation…", "正在发送邀请码…", language: uiLanguage)
+        }
+        if pendingRoomOfferID != nil {
+            return AppText.value("Waiting for acceptance…", "正在等待对方接受…", language: uiLanguage)
+        }
+        if isQueueingRememberedRoom {
+            return AppText.value("Adding to room…", "正在加入房间队列…", language: uiLanguage)
+        }
         if viewModel.isBusy { return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage) }
+        if rememberedRoomRelationshipID != nil {
+            return AppText.value("Add to room", "加入房间队列", language: uiLanguage)
+        }
         return AppText.value("Send", "发送", language: uiLanguage)
     }
 
@@ -952,10 +1067,21 @@ struct SendView: View {
         #endif
     }
 
+    private var selectionMutationDisabled: Bool {
+        viewModel.isBusy ||
+            viewModel.isPreparingManifest ||
+            isPhotoImporting ||
+            isQueueingRememberedRoom ||
+            pendingRoomOfferID != nil
+    }
+
     private var canSend: Bool {
         guard !selectedItems.isEmpty,
               viewModel.isManifestSelectionReady,
               viewModel.pendingSourceSelections.isEmpty else { return false }
+        if roomControlOffer != nil || rememberedRoomRelationshipID != nil {
+            return true
+        }
         if rememberAfterPairing,
            (mode == .room || mode == .invite),
            rememberLabel.trimmed.isEmpty {
@@ -969,7 +1095,11 @@ struct SendView: View {
         case .token:
             return token.trimmed.count >= minTokenLength
         case .remembered:
+            #if os(macOS)
             return selectedRememberedPeer != nil
+            #else
+            return false
+            #endif
         }
     }
 
@@ -1018,7 +1148,7 @@ struct SendView: View {
             return AppText.value("Folder structure will be preserved.", "将完整保留文件夹结构。", language: uiLanguage)
         case 1:
             #if os(iOS)
-            return AppText.value("Ready to send. Tap to replace.", "已准备发送，点击可替换。", language: uiLanguage)
+            return AppText.value("Ready to send.", "已准备发送。", language: uiLanguage)
             #else
             return AppText.value("Ready to send. Click to replace.", "已准备发送，点击可替换。", language: uiLanguage)
             #endif
@@ -1045,7 +1175,7 @@ struct SendView: View {
         access: AnyObject? = nil,
         pendingSelectionID: UUID? = nil
     ) -> Bool {
-        guard !urls.isEmpty else { return false }
+        guard !selectionMutationDisabled, !urls.isEmpty else { return false }
         var seenPaths = Set<String>()
         var accepted: [URL] = []
         for url in urls {
@@ -1074,6 +1204,7 @@ struct SendView: View {
     }
 
     private func prepareCurrentSelectionIfNeeded() {
+        guard !selectionMutationDisabled else { return }
         if selectedItems.isEmpty, !viewModel.preparedManifestSourcePaths.isEmpty {
             adoptPreparedManifestPaths(viewModel.preparedManifestSourcePaths)
             return
@@ -1095,16 +1226,7 @@ struct SendView: View {
     private func handleImportedFolders(_ urls: [URL]) {
         do {
             guard !urls.isEmpty else { return }
-            for url in urls {
-                guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
-                    throw RuntimeSettingsError(AppText.value(
-                        "Choose folders, not files.",
-                        "请选择文件夹，而不是文件。",
-                        language: uiLanguage
-                    ))
-                }
-            }
-            guard try adoptUserSelectedItems(urls) else { return }
+            guard try adoptUserSelectedItems(urls, expectedKind: .folders) else { return }
             ToastCenter.shared.show(AppText.value(
                 urls.count == 1 ? "Folder ready to upload" : "Folders ready to upload",
                 urls.count == 1 ? "文件夹已准备上传" : "多个文件夹已准备上传",
@@ -1214,7 +1336,7 @@ struct SendView: View {
     }
 
     private func adoptSharedSelectionIfAvailable() {
-        guard !viewModel.isBusy,
+        guard !selectionMutationDisabled,
               let selection = model.pendingSendSelection else { return }
         if selection.id == selectedPendingSelectionID {
             model.consumePendingSendSelection(id: selection.id)
@@ -1246,23 +1368,17 @@ struct SendView: View {
         do {
             let urls = try result.get()
             guard !urls.isEmpty else { return }
-            for url in urls {
-                guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
-                    throw RuntimeSettingsError(AppText.value(
-                        "Use the Folder button to upload a folder.",
-                        "请使用“文件夹”按钮上传文件夹。",
-                        language: uiLanguage
-                    ))
-                }
-            }
-            guard try adoptUserSelectedItems(urls) else { return }
+            guard try adoptUserSelectedItems(urls, expectedKind: .files) else { return }
             ToastCenter.shared.show(AppText.value("Files selected", "已选择文件", language: uiLanguage))
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }
     }
 
-    private func adoptUserSelectedItems(_ urls: [URL]) throws -> Bool {
+    private func adoptUserSelectedItems(
+        _ urls: [URL],
+        expectedKind: ImportedSelectionKind = .any
+    ) throws -> Bool {
         #if os(iOS)
         let accesses = urls.map(SecurityScopedResourceAccess.init)
         for (url, access) in zip(urls, accesses) {
@@ -1274,10 +1390,43 @@ struct SendView: View {
                 ))
             }
         }
+        try validateImportedItems(urls, expectedKind: expectedKind)
         return selectItems(urls, access: SelectedResourceAccessGroup(accesses))
         #else
+        try validateImportedItems(urls, expectedKind: expectedKind)
         return selectItems(urls)
         #endif
+    }
+
+    private func validateImportedItems(
+        _ urls: [URL],
+        expectedKind: ImportedSelectionKind
+    ) throws {
+        for url in urls {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
+            switch expectedKind {
+            case .any:
+                guard values.isRegularFile == true || values.isDirectory == true else {
+                    throw RuntimeSettingsError(invalidSelectionMessage)
+                }
+            case .files:
+                guard values.isRegularFile == true else {
+                    throw RuntimeSettingsError(AppText.value(
+                        "Use the Folder button to upload a folder.",
+                        "请使用“文件夹”按钮上传文件夹。",
+                        language: uiLanguage
+                    ))
+                }
+            case .folders:
+                guard values.isDirectory == true else {
+                    throw RuntimeSettingsError(AppText.value(
+                        "Choose folders, not files.",
+                        "请选择文件夹，而不是文件。",
+                        language: uiLanguage
+                    ))
+                }
+            }
+        }
     }
 
     private func applyPathInput() {
@@ -1332,10 +1481,16 @@ struct SendView: View {
     }
     #endif
 
-    private func startRoomSend(code: String, settings: EnvoixRuntimeSettings) {
-        let access = selectedSourceAccessForTransfer()
+    private func startRoomSend(
+        code: String,
+        settings: EnvoixRuntimeSettings,
+        selectedPaths: [String]? = nil,
+        sourceAccess: AnyObject? = nil
+    ) {
+        let paths = selectedPaths ?? selectedItems.map(\.path)
+        let access = selectedPaths == nil ? selectedSourceAccessForTransfer() : sourceAccess
         viewModel.startSendingManifestWithRoom(
-            selectedPaths: selectedItems.map(\.path),
+            selectedPaths: paths,
             code: code,
             settings: settings,
             sourceAccess: access,
@@ -1364,6 +1519,10 @@ struct SendView: View {
         )
     }
 
+    private func cancelNearbyInviteDelivery() {
+        nearbyInviteDelivery.cancel()
+    }
+
     private func primaryButtonAction() {
         if viewModel.isPreparingManifest {
             _ = viewModel.cancelManifestPreparation()
@@ -1373,9 +1532,86 @@ struct SendView: View {
     }
 
     private func primaryAction() {
-        guard !viewModel.isBusy, !viewModel.isFinalizing else { return }
+        guard !viewModel.isBusy,
+              !viewModel.isFinalizing,
+              !isQueueingRememberedRoom,
+              !nearbyInviteDelivery.isDelivering else { return }
         guard !selectedItems.isEmpty else { return }
         do {
+            if let relationshipID = rememberedRoomRelationshipID {
+                isQueueingRememberedRoom = true
+                onRoomOfferPendingChange?(true)
+                Task { @MainActor in
+                    do {
+                        _ = try await viewModel.queuePreparedManifestForRememberedRoom(
+                            relationshipID: relationshipID
+                        )
+                        isQueueingRememberedRoom = false
+                        onRoomOfferPendingChange?(false)
+                        onRememberedRoomQueued?()
+                    } catch {
+                        isQueueingRememberedRoom = false
+                        onRoomOfferPendingChange?(false)
+                        ToastCenter.shared.show(error.localizedDescription)
+                    }
+                }
+                return
+            }
+            if let roomControlOffer {
+                guard let roomControlEndpoint else {
+                    throw RuntimeSettingsError("The room transfer route is unavailable.")
+                }
+                let settings = try RuntimeSettingsProvider.make(
+                    concurrentTransfers: concurrentTransfers,
+                    language: language,
+                    serverURL: roomControlEndpoint.broker,
+                    relayURL: roomControlEndpoint.relay,
+                    candidatesAllow: candidatesAllow,
+                    candidatesDeny: candidatesDeny,
+                    speedLimit: speedLimit
+                )
+                let pairingInvite = try makePairingInvite(
+                    role: .send,
+                    broker: roomControlEndpoint.broker,
+                    relay: roomControlEndpoint.relay
+                )
+                let summary = viewModel.preparedInventorySummary
+                let offeredPaths = selectedItems.map(\.path)
+                let offeredSourceAccess = selectedSourceAccessForTransfer()
+                let offerID = UUID().uuidString.lowercased()
+                let offer = RoomControlTransferOffer(
+                    id: offerID,
+                    transferInvite: pairingInvite.payload,
+                    rootNames: viewModel.preparedInventoryRoots.prefix(3).map(\.name),
+                    itemCount: (summary?.fileCount ?? 0) + (summary?.directoryCount ?? 0),
+                    directoryCount: summary?.directoryCount ?? 0,
+                    totalBytes: summary?.totalPlaintextBytes ?? 0
+                )
+                pendingRoomOfferID = offerID
+                onRoomOfferPendingChange?(true)
+                roomControlOffer(offer) { accepted in
+                    DispatchQueue.main.async {
+                        guard pendingRoomOfferID == offerID else { return }
+                        pendingRoomOfferID = nil
+                        onRoomOfferPendingChange?(false)
+                        guard accepted else {
+                            ToastCenter.shared.show(AppText.value(
+                                "The file offer was declined.",
+                                "对方拒绝了文件邀请。",
+                                language: uiLanguage
+                            ))
+                            return
+                        }
+                        startRoomSend(
+                            code: pairingInvite.roomCode,
+                            settings: settings,
+                            selectedPaths: offeredPaths,
+                            sourceAccess: offeredSourceAccess
+                        )
+                    }
+                }
+                return
+            }
             let settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
                 language: language,
@@ -1389,9 +1625,26 @@ struct SendView: View {
             case .room:
                 let input = roomCode.trimmed
                 if input.isEmpty {
-                    startRoomSend(
-                        code: try activeSendRoomCode(),
-                        settings: settings
+                    let pairingInvite = try activeSendPairingInvite()
+                    nearbyInviteDelivery.deliver(
+                        invite: pairingInvite.payload,
+                        using: nearbyInviteOffer
+                    ) {
+                        startRoomSend(
+                            code: pairingInvite.roomCode,
+                            settings: settings
+                        )
+                    }
+                } else if input.lowercased().hasPrefix("envoix:") {
+                    let parsed = try parsePairingInviteForRole(
+                        input: input,
+                        localRole: .send
+                    )
+                    invite = input
+                    mode = .invite
+                    startInviteSend(
+                        invite: input,
+                        settings: try runtimeSettings(for: parsed)
                     )
                 } else {
                     let normalized = try normalizeRoomCode(input: input)
@@ -1413,6 +1666,7 @@ struct SendView: View {
                     settings: settings
                 )
             case .remembered:
+                #if os(macOS)
                 guard let peer = selectedRememberedPeer else { return }
                 let rememberedSettings = try RuntimeSettingsProvider.make(
                     concurrentTransfers: concurrentTransfers,
@@ -1429,12 +1683,16 @@ struct SendView: View {
                     settings: rememberedSettings,
                     sourceAccess: selectedSourceAccessForTransfer()
                 )
+                #else
+                return
+                #endif
             }
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
     }
 
+    #if os(macOS)
     private func refreshRememberedPeers() {
         rememberedPeers = (try? RememberedPeerStore.shared.peers()) ?? []
         if let selectedRememberedPeer,
@@ -1443,4 +1701,6 @@ struct SendView: View {
             if mode == .remembered { mode = .room }
         }
     }
+    #endif
+
 }

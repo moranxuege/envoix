@@ -55,6 +55,26 @@ class RememberedPeerStoreInstrumentedTest {
     }
 
     @Test
+    fun authenticatedControlGenerationAdvancesOnceAndPreviousRetryIsIdempotent() {
+        val pending = store.prepare("control-${System.nanoTime()}", "broker", "relay")
+        val opaque = ByteArray(37) { (it + 3).toByte() }
+        try {
+            assertTrue(store.create(pending, opaque, 7))
+            assertTrue(store.advanceAfterPeerAuthentication(pending.relationshipId, opaque, 7))
+            val advanced = requireNotNull(store.load(pending.relationshipId))
+            assertTrue(advanced.summary.generation == 8L)
+            assertTrue(advanced.summary.previousGeneration == 7L)
+
+            assertTrue(store.advanceAfterPeerAuthentication(pending.relationshipId, opaque, 7))
+            assertTrue(requireNotNull(store.load(pending.relationshipId)).summary.generation == 8L)
+            assertFalse(store.advanceAfterPeerAuthentication(pending.relationshipId, opaque, 6))
+            assertFalse(store.advanceAfterPeerAuthentication(pending.relationshipId, opaque, Long.MAX_VALUE))
+        } finally {
+            store.delete(pending.relationshipId)
+        }
+    }
+
+    @Test
     fun modifiedCiphertextFailsClosed() {
         val pending = store.prepare("corrupt-${System.nanoTime()}", "broker", "relay")
         try {
@@ -64,9 +84,9 @@ class RememberedPeerStoreInstrumentedTest {
             envelope[envelope.lastIndex] = (envelope.last().toInt() xor 1).toByte()
             file.writeBytes(envelope)
 
-            assertNull(store.load(pending.relationshipId))
-            assertFalse(store.peers().any { it.relationshipId == pending.relationshipId })
-            assertFalse(file.exists())
+            assertTrue(runCatching { store.load(pending.relationshipId) }.exceptionOrNull() is IllegalStateException)
+            assertTrue(store.peers().any { it.relationshipId == pending.relationshipId })
+            assertTrue(file.exists())
         } finally {
             store.delete(pending.relationshipId)
         }
@@ -87,9 +107,9 @@ class RememberedPeerStoreInstrumentedTest {
             records.getJSONObject(index).put("relationship_id", tamperedRelationshipId)
             metadata.writeText(records.toString())
 
-            assertNull(store.load(tamperedRelationshipId))
-            assertFalse(store.peers().any { it.relationshipId == tamperedRelationshipId })
-            assertFalse(credentialFile(pending, 0).exists())
+            assertTrue(runCatching { store.load(tamperedRelationshipId) }.exceptionOrNull() is IllegalStateException)
+            assertTrue(store.peers().any { it.relationshipId == tamperedRelationshipId })
+            assertTrue(credentialFile(pending, 0).exists())
         } finally {
             store.delete(pending.relationshipId)
             store.delete(tamperedRelationshipId)
@@ -103,8 +123,8 @@ class RememberedPeerStoreInstrumentedTest {
             assertTrue(store.create(pending, ByteArray(37) { 0x24 }, 0))
             assertTrue(credentialFile(pending, 0).delete())
 
-            assertNull(store.load(pending.relationshipId))
-            assertFalse(store.peers().any { it.relationshipId == pending.relationshipId })
+            assertTrue(runCatching { store.load(pending.relationshipId) }.exceptionOrNull() is IllegalStateException)
+            assertTrue(store.peers().any { it.relationshipId == pending.relationshipId })
         } finally {
             store.delete(pending.relationshipId)
         }

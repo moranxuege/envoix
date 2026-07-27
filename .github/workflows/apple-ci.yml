@@ -193,6 +193,9 @@ jobs:
             ui_args=(
               -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testEnglishSendAndReceiveExposeCanonicalInventoryControls
               -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testSimplifiedChineseSendAndReceiveExposeCanonicalInventoryControls
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testActivityAndSettingsAreSeparatePages
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testUnverifiedNearbyOfferRequiresExplicitAcceptance
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testNearbySendHandoffKeepsEverySourcePickerUsable
             )
           fi
 
@@ -220,8 +223,8 @@ jobs:
           if [[ "$UI_SCOPE" == "smoke" ]]; then
             scripts/check-apple-test-results.py "$UI_RESULT" \
               --label ui-smoke \
-              --minimum-total 2 \
-              --minimum-executed 2 \
+              --minimum-total 5 \
+              --minimum-executed 5 \
               --maximum-skipped 0
           else
             scripts/check-apple-test-results.py "$UI_RESULT" \

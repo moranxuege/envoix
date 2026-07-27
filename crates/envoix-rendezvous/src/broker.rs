@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::oneshot;
 
+use envoix_invite::is_room_control_locator;
+
 use crate::peer::{PeerConn, PeerParts};
 use crate::protocol::{
     BrokerOutcome, BrokerRejection, Join, Paired, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role,
@@ -130,6 +132,7 @@ struct RoomState {
     instance: u64,
     expires_at: Instant,
     attempts: u32,
+    consumed: bool,
     attempt_rate: TokenBucket,
     active_connections: usize,
     waiter: Option<Waiter>,
@@ -347,10 +350,19 @@ impl Drop for RoomSlotGuard {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if let Some(room) = state.rooms.get_mut(&self.room_id)
+        let release_remembered_room = if let Some(room) = state.rooms.get_mut(&self.room_id)
             && room.instance == self.instance
         {
             room.active_connections = room.active_connections.saturating_sub(1);
+            is_remembered_room_id(&self.room_id)
+                && room.active_connections == 0
+                && room.waiter.is_none()
+                && matches!(room.status, RoomStatus::Live)
+        } else {
+            false
+        };
+        if release_remembered_room {
+            state.rooms.remove(&self.room_id);
         }
     }
 }
@@ -576,6 +588,8 @@ impl RoomRegistry {
         let room_id = join.room_id.clone();
         let room_log_label = if is_remembered_room_id(&room_id) {
             "<remembered>"
+        } else if is_room_control_locator(&room_id) {
+            "<room-control>"
         } else {
             room_id.as_str()
         };
@@ -619,6 +633,7 @@ impl RoomRegistry {
                             instance,
                             expires_at: now + self.config.room_ttl,
                             attempts: 0,
+                            consumed: false,
                             attempt_rate: TokenBucket::new(self.config.room_attempt_rate, now),
                             active_connections: 0,
                             waiter: None,
@@ -633,6 +648,7 @@ impl RoomRegistry {
                 let rejection = match room.status {
                     RoomStatus::Expired { .. } => Some(BrokerOutcome::RoomExpired),
                     RoomStatus::Exhausted { .. } => Some(BrokerOutcome::RoomUnderAttack),
+                    RoomStatus::Live if room.consumed => Some(BrokerOutcome::RoomFull),
                     RoomStatus::Live
                         if room.waiter.is_some()
                             || room.active_connections >= self.config.max_connections_per_room =>
@@ -681,10 +697,17 @@ impl RoomRegistry {
                 let status_rejection = match room.status {
                     RoomStatus::Expired { .. } => Some(BrokerOutcome::RoomExpired),
                     RoomStatus::Exhausted { .. } => Some(BrokerOutcome::RoomUnderAttack),
+                    RoomStatus::Live if room.consumed => Some(BrokerOutcome::RoomFull),
                     RoomStatus::Live => None,
                 };
                 if let Some(outcome) = status_rejection {
-                    Some(self.rejection(outcome, None))
+                    Some(
+                        self.rejection(
+                            outcome,
+                            matches!(outcome, BrokerOutcome::RoomFull)
+                                .then_some(self.config.unavailable_retry_after),
+                        ),
+                    )
                 } else if room.short_code && room.attempts >= self.config.room_attempt_limit {
                     self.exhaust_room(room, now);
                     Some(self.rejection(BrokerOutcome::RoomUnderAttack, None))
@@ -752,6 +775,9 @@ impl RoomRegistry {
         match handed {
             Ok(()) => {
                 room.attempts += 1;
+                if is_remembered_room_id(room_id) {
+                    room.consumed = true;
+                }
                 self.metrics.matches.fetch_add(1, Ordering::Relaxed);
                 if room.short_code && room.attempts >= self.config.room_attempt_limit {
                     self.exhaust_room(room, now);
@@ -825,6 +851,7 @@ impl RoomRegistry {
 
     fn evict_waiter(&self, room_id: &str, waiter_id: u64) {
         let mut state = self.state.lock().expect("registry mutex");
+        let mut release_remembered_room = false;
         if let Some(room) = state.rooms.get_mut(room_id)
             && room
                 .waiter
@@ -832,6 +859,16 @@ impl RoomRegistry {
                 .is_some_and(|waiter| waiter.id == waiter_id)
         {
             room.waiter.take();
+            // Human Room codes retain their original expiry and attempt state
+            // across creator reconnects. A remembered locator is high entropy
+            // and has no Room attempt budget, so retaining an unpaired,
+            // disconnected responder only creates a stale scheduler slot.
+            release_remembered_room = is_remembered_room_id(room_id)
+                && matches!(room.status, RoomStatus::Live)
+                && room.active_connections <= 1;
+        }
+        if release_remembered_room {
+            state.rooms.remove(room_id);
         }
     }
 
@@ -865,7 +902,7 @@ impl RoomRegistry {
 
     fn sweep_rooms(&self, state: &mut RegistryState, now: Instant) {
         for room in state.rooms.values_mut() {
-            if matches!(room.status, RoomStatus::Live) && now >= room.expires_at {
+            if matches!(room.status, RoomStatus::Live) && !room.consumed && now >= room.expires_at {
                 room.waiter.take();
                 room.status = RoomStatus::Expired {
                     purge_at: now + self.config.room_tombstone_ttl,
@@ -961,12 +998,16 @@ fn validate_join(join: &Join) -> Result<(), BrokerOutcome> {
     let invitation_room =
         join.room_id.len() == ROOM_ID_LEN && join.room_id.bytes().all(|byte| byte.is_ascii_digit());
     let remembered_room = is_remembered_room_id(&join.room_id);
-    if !invitation_room && !remembered_room {
+    let room_control = is_room_control_locator(&join.room_id);
+    if !invitation_room && !remembered_room && !room_control {
         return Err(BrokerOutcome::MalformedJoin);
     }
     match join.invitation_side {
         InvitationSide::Creator => {
-            let valid_methods = if remembered_room {
+            let valid_methods = if room_control {
+                join.bootstrap_methods == [BootstrapKind::RoomCode]
+                    && join.transfer_role == TransferRole::Receiver
+            } else if remembered_room {
                 join.bootstrap_methods == [BootstrapKind::FullTicket]
                     && join.transfer_role == TransferRole::Receiver
             } else {
@@ -977,7 +1018,10 @@ fn validate_join(join: &Join) -> Result<(), BrokerOutcome> {
             }
         }
         InvitationSide::Joiner => {
-            let valid_selection = if remembered_room {
+            let valid_selection = if room_control {
+                join.selected_bootstrap_method == Some(BootstrapKind::RoomCode)
+                    && join.transfer_role == TransferRole::Sender
+            } else if remembered_room {
                 join.selected_bootstrap_method == Some(BootstrapKind::FullTicket)
                     && join.transfer_role == TransferRole::Sender
             } else {
@@ -1339,6 +1383,7 @@ mod tests {
                 instance: 1,
                 expires_at: now,
                 attempts: 0,
+                consumed: false,
                 attempt_rate: TokenBucket::new(config.room_attempt_rate, now),
                 active_connections: 0,
                 waiter: None,

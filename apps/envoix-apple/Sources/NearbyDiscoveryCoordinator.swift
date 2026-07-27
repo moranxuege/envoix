@@ -1,5 +1,6 @@
 #if os(iOS)
 import Combine
+import EnvoixCore
 import Foundation
 import OSLog
 import UIKit
@@ -19,7 +20,6 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     @Published private(set) var state: NearbyDiscoveryState
 
     private var identity: LocalNearbyDiscoveryIdentity
-    private let identityFactory: () -> LocalNearbyDiscoveryIdentity
     private let registry: NearbyDiscoveryPeerRegistry
     private let clock: () -> Int64
     private let providerFactory: ProviderFactory
@@ -33,8 +33,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     private var lastLoggedAvailability: [NearbyDiscoverySource: NearbyProviderAvailability] = [:]
     private var generation = 0
     private var started = false
-    private var hasStarted = false
-
+    private var advertisingEnabled = false
     init(
         identity: LocalNearbyDiscoveryIdentity? = nil,
         identityFactory: (() -> LocalNearbyDiscoveryIdentity)? = nil,
@@ -42,19 +41,10 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         clock: @escaping () -> Int64 = NearbyDiscoveryCoordinator.monotonicMilliseconds,
         providerFactory: @escaping ProviderFactory = NearbyDiscoveryCoordinator.defaultProviderFactory
     ) {
-        let resolvedIdentityFactory: () -> LocalNearbyDiscoveryIdentity
-        if let identity {
-            resolvedIdentityFactory = { identity }
-        } else if let identityFactory {
-            resolvedIdentityFactory = identityFactory
-        } else {
-            resolvedIdentityFactory = {
-                NearbyDiscoveryIdentityFactory.create(displayName: UIDevice.current.model)
-            }
-        }
-        let resolvedIdentity = resolvedIdentityFactory()
+        let resolvedIdentity = identity
+            ?? identityFactory?()
+            ?? NearbyDiscoveryIdentityFactory.create(displayName: UIDevice.current.model)
         self.identity = resolvedIdentity
-        self.identityFactory = resolvedIdentityFactory
         self.registry = registry
         self.clock = clock
         self.providerFactory = providerFactory
@@ -83,12 +73,6 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        if hasStarted {
-            identity = identityFactory()
-            state.localName = identity.displayName
-        } else {
-            hasStarted = true
-        }
         generation += 1
         let activeGeneration = generation
         registry.clear()
@@ -97,6 +81,8 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         state.incomingRendezvousOffer = nil
         providers = providerFactory(identity)
         providers.forEach { provider in
+            (provider as? NearbyAdvertisingConfigurable)?
+                .setAdvertisingEnabled(advertisingEnabled)
             provider.start { [weak self] event in
                 guard let self else { return }
                 if Thread.isMainThread {
@@ -140,21 +126,52 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         start()
     }
 
+    func configure(displayName: String, advertisingEnabled: Bool) {
+        let resolvedName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(displayName)
+            ?? identity.displayName
+        let needsRestart = resolvedName != identity.displayName
+            || advertisingEnabled != self.advertisingEnabled
+        guard needsRestart else { return }
+
+        let wasStarted = started
+        if wasStarted {
+            stop()
+        }
+        identity = LocalNearbyDiscoveryIdentity(
+            peerKey: identity.peerKey,
+            displayName: resolvedName
+        )
+        self.advertisingEnabled = advertisingEnabled
+        state.localName = resolvedName
+        if wasStarted {
+            start()
+        }
+    }
+
     func offerInvite(
-        peerKey: String,
+        to selection: NearbyPairingSelection,
         invite: String,
         completion: @escaping (_ error: String?) -> Void
     ) {
-        guard started,
-              let provider = providers.compactMap({ $0 as? NearbyRendezvousProvider }).first else {
-            completion("Experimental Bluetooth pairing is not available")
+        let rendezvousProviders = providers.compactMap { $0 as? NearbyRendezvousProvider }
+        let isRoomControlInvite = invite.trimmed.lowercased().hasPrefix("envoix://room/")
+        let selectedSecureMdns = isRoomControlInvite
+            && selection.sources.contains(.mdns)
+            && selection.nearbyInviteRoute != nil
+        let provider = selectedSecureMdns
+            ? rendezvousProviders.first { $0.source == .mdns }
+            : rendezvousProviders.first {
+                $0.source != .mdns && $0.canOfferInvite(to: selection)
+            }
+        guard started, let provider else {
+            completion("Nearby invitation delivery is not available for this device")
             return
         }
         let activeGeneration = generation
-        provider.offerInvite(peerKey: peerKey, invite: invite) { [weak self] error in
+        provider.offerInvite(to: selection, invite: invite) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self, self.started, self.generation == activeGeneration else {
-                    completion("Bluetooth discovery stopped")
+                    completion("Nearby discovery stopped")
                     return
                 }
                 completion(error)
@@ -247,7 +264,7 @@ final class ReservedNearbyDiscoveryProvider: NearbyDiscoveryProvider {
 }
 
 #if DEBUG
-private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, NearbyRendezvousProvider {
+private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
     let source: NearbyDiscoverySource
     private var sink: ((NearbyDiscoveryEvent) -> Void)?
 
@@ -264,8 +281,21 @@ private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, Nea
             source: source,
             seenAtMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000),
             displayName: source == .mdns ? "Nearby test device" : nil,
-            rssi: source == .bluetooth ? -48 : nil
+            rssi: source == .bluetooth ? -48 : nil,
+            inviteRoute: source == .mdns ? Self.fixtureInviteRoute : nil
         )))
+        if source == .bluetooth,
+           ProcessInfo.processInfo.arguments.contains("--ui-testing-incoming-nearby-offer"),
+           let invite = try? makePairingInvite(role: .send, broker: "", relay: "") {
+            sink(.rendezvousOffer(NearbyRendezvousOffer(
+                requestID: "ui-test-incoming-offer",
+                senderPeerKey: "0011223344556677",
+                senderDisplayName: "Nearby test device",
+                source: source,
+                senderInboxEndpointID: source == .mdns ? Self.fixtureInboxEndpointID : nil,
+                invite: invite.payload
+            )))
+        }
     }
 
     func stop() {
@@ -273,14 +303,35 @@ private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, Nea
     }
 
     func offerInvite(
-        peerKey: String,
+        to selection: NearbyPairingSelection,
         invite: String,
         completion: @escaping (String?) -> Void
     ) {
-        let validPeer = NearbyDiscoveryPeerRegistry.normalizePeerKey(peerKey) != nil
-        let validInvite = invite.lowercased().hasPrefix("envoix://pair/")
+        let validPeer = NearbyDiscoveryPeerRegistry.normalizePeerKey(
+            selection.discoveryPeerKey
+        ) != nil
+        let normalizedInvite = invite.lowercased()
+        let validInvite = normalizedInvite.hasPrefix("envoix://pair/")
+            || normalizedInvite.hasPrefix("envoix://room/")
         completion(validPeer && validInvite ? nil : "Invalid fixture invitation")
     }
+
+    func canOfferInvite(to selection: NearbyPairingSelection) -> Bool {
+        guard NearbyDiscoveryPeerRegistry.normalizePeerKey(
+            selection.discoveryPeerKey
+        ) != nil else {
+            return false
+        }
+        return source != .mdns || selection.nearbyInviteRoute != nil
+    }
+
+    private static let fixtureInboxEndpointID =
+        "2cfu7vzc7zhqv6w3k7m2kkwqvwzppmzvv53lmst6xm7ubjx5qnya"
+    private static let fixtureInviteRoute = NearbyInviteRoute(
+        endpointID: fixtureInboxEndpointID,
+        relayURL: "https://relay.example.test",
+        directAddresses: ["192.0.2.1:4242"]
+    )!
 }
 #endif
 #endif
