@@ -43,6 +43,7 @@ fn agreeing(
         .collect();
     PackagedFacts {
         variant: "prodRelease".to_owned(),
+        flavor: "prod".to_owned(),
         kind: ArtifactKind::Apk,
         application_id: "app.envoix.host".to_owned(),
         artifact: "Cargo.toml".to_owned(),

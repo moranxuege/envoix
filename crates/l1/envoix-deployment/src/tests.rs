@@ -271,6 +271,131 @@ fn a_newly_keyed_environment_becomes_deployable() {
     assert!(catalogue.violations(LegacyValues::default()).is_empty());
 }
 
+/// The identity this build carries is the catalogue's own answer for the
+/// environment it names — not a copy of it, and not a constant beside it.
+#[test]
+fn the_compiled_build_target_is_the_catalogue_it_was_built_from() {
+    let catalogue = shipped();
+    let parsed = catalogue
+        .identity(&BUILD_TARGET.environment)
+        .expect("a build exists, so its environment is deployable");
+    assert_eq!(parsed, BUILD_TARGET);
+    assert!(
+        BUILD_TARGET.rendezvous_endpoint.contains('@'),
+        "a broker is <node_id>@<host>:<port>, got {:?}",
+        BUILD_TARGET.rendezvous_endpoint
+    );
+}
+
+/// The rule that makes a non-deployable build impossible rather than
+/// discouraged: `build.rs` asks exactly this question and panics on `Err`, so
+/// an environment nobody may deploy is one nothing may be compiled for.
+#[test]
+fn an_environment_that_may_not_be_deployed_may_not_be_built_for() {
+    let catalogue = shipped();
+    for name in ["test", "prod", "staging"] {
+        let error = catalogue
+            .identity(name)
+            .expect_err("{name} is not deployable, so no build may target it");
+        assert!(
+            matches!(error, IdentityError::Blocked { .. }),
+            "{name}: {error:?}"
+        );
+    }
+    assert!(catalogue.identity("dev").is_ok());
+}
+
+/// The endpoint spelling comes from `[meta]`, so changing the template changes
+/// what a build carries. That is what makes those two keys rules rather than
+/// documentation.
+#[test]
+fn an_endpoint_is_spelled_by_the_catalogues_own_derivation() {
+    let text = mutate(
+        "node_endpoint_derivation = \"<node_id>@<rendezvous.host>:<rendezvous.port>\"",
+        "node_endpoint_derivation = \"<node_id>@<rendezvous.host>|<rendezvous.port>\"",
+    );
+    let identity = DeploymentCatalogue::parse(&text)
+        .expect("the mutation parses")
+        .identity("dev")
+        .expect("dev is still deployable");
+    assert!(
+        identity.rendezvous_endpoint.contains('|'),
+        "the derivation was not applied: {identity:?}"
+    );
+}
+
+/// A template that drops part of the identity, or names a placeholder nothing
+/// substitutes, is a defect in the file — reported for the whole catalogue
+/// rather than only when somebody happens to build.
+#[test]
+fn a_derivation_that_cannot_spell_an_identity_is_a_violation() {
+    for (from, to, fragment) in [
+        (
+            "node_endpoint_derivation = \"<node_id>@<rendezvous.host>:<rendezvous.port>\"",
+            "node_endpoint_derivation = \"<rendezvous.host>:<rendezvous.port>\"",
+            "node_id",
+        ),
+        (
+            "https_url_derivation = \"<service.scheme>://<service.host>:<service.port>\"",
+            "https_url_derivation = \"<service.scheme>://<service.hostname>:<service.port>\"",
+            "service.hostname",
+        ),
+    ] {
+        let violations = violations_of(&mutate(from, to));
+        assert!(
+            violations.iter().any(|violation| matches!(
+                violation,
+                Violation::DerivationUnusable { detail, .. } if detail.contains(fragment)
+            )),
+            "{to:?} must be a violation, got {violations:?}"
+        );
+    }
+}
+
+/// The two keys that name an environment are checked against the set of
+/// environments, so neither can point at one that does not exist.
+#[test]
+fn a_validation_key_may_not_name_an_environment_that_is_not_declared() {
+    for (from, to, key) in [
+        (
+            "default_build_environment = \"dev\"",
+            "default_build_environment = \"sandbox\"",
+            "default_build_environment",
+        ),
+        (
+            "production_environment = \"prod\"",
+            "production_environment = \"live\"",
+            "production_environment",
+        ),
+    ] {
+        let violations = violations_of(&mutate(from, to));
+        assert!(
+            violations.iter().any(
+                |violation| matches!(violation, Violation::UnknownEnvironmentReference {
+                    key: found, ..
+                } if *found == key)
+            ),
+            "{to:?} must be a violation, got {violations:?}"
+        );
+    }
+}
+
+/// One app flavour ships to one environment. Two environments claiming the same
+/// flavour would make "which deployment is this artifact for" unanswerable,
+/// which is the question the release gate's per-artifact rule asks.
+#[test]
+fn two_environments_may_not_ship_the_same_app_flavour() {
+    let text = mutate("app_flavor = \"qa\"", "app_flavor = \"dev\"");
+    let violations = violations_of(&text);
+    assert!(
+        violations.iter().any(|violation| matches!(
+            violation,
+            Violation::DuplicateAppFlavor { flavor, .. } if flavor == "dev"
+        )),
+        "{violations:?}"
+    );
+}
+
 #[test]
 fn reserved_ports_name_their_owner() {
     let catalogue = shipped();

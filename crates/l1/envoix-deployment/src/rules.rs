@@ -3,54 +3,24 @@ use std::fmt;
 
 use crate::{DeploymentCatalogue, ProvisioningStatus, Service};
 
-/// A provisioned value an environment cannot be deployed without.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Slot {
-    RendezvousNodeId,
-}
-
-impl Slot {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::RendezvousNodeId => "rendezvous.node_id",
-        }
-    }
-}
-
-impl fmt::Display for Slot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Why one environment may not be deployed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Blocker {
-    Undeclared,
-    Unprovisioned { slot: Slot },
-    Malformed { slot: Slot },
-}
-
-impl fmt::Display for Blocker {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Undeclared => formatter.write_str("no such environment in the catalogue"),
-            Self::Unprovisioned { slot } => write!(formatter, "{slot} is not provisioned"),
-            Self::Malformed { slot } => {
-                write!(
-                    formatter,
-                    "{slot} claims to be provisioned but is malformed"
-                )
-            }
-        }
-    }
-}
+/// The `[validation]` keys that must name a declared environment. Both are
+/// consequential — one decides what an unconfigured build targets, the other
+/// what a public release must be built for — so neither may name a stranger.
+const ENVIRONMENT_REFERENCES: [&str; 2] = ["default_build_environment", "production_environment"];
 
 /// A defect in the catalogue as a whole.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Violation {
     RuleDisabled(&'static str),
     ProvisionedStatusSpelling(String),
+    UnknownEnvironmentReference {
+        key: &'static str,
+        name: String,
+    },
+    DerivationUnusable {
+        key: &'static str,
+        detail: String,
+    },
     UndeclaredEnvironment(String),
     MissingEnvironment(String),
     NameMismatch {
@@ -87,6 +57,10 @@ pub enum Violation {
         port: u16,
         reserved_for: String,
     },
+    DuplicateAppFlavor {
+        flavor: String,
+        owners: [String; 2],
+    },
     DuplicateNodeId {
         owners: [String; 2],
     },
@@ -113,6 +87,13 @@ impl fmt::Display for Violation {
                 formatter,
                 "deployment: meta.provisioned_status is {spelling:?}, but the provisioned status is spelled \"provisioned\""
             ),
+            Self::UnknownEnvironmentReference { key, name } => write!(
+                formatter,
+                "deployment: validation.{key} names {name:?}, which is not an allowed environment"
+            ),
+            Self::DerivationUnusable { key, detail } => {
+                write!(formatter, "deployment: meta.{key}: {detail}")
+            }
             Self::UndeclaredEnvironment(name) => write!(
                 formatter,
                 "deployment: environment {name:?} is declared but not in allowed_environments"
@@ -162,6 +143,11 @@ impl fmt::Display for Violation {
             } => write!(
                 formatter,
                 "deployment: {owner} declares port {port}, reserved for {reserved_for}"
+            ),
+            Self::DuplicateAppFlavor { flavor, owners } => write!(
+                formatter,
+                "deployment: {} and {} both ship the {flavor:?} app flavour",
+                owners[0], owners[1]
             ),
             Self::DuplicateNodeId { owners } => write!(
                 formatter,
@@ -239,9 +225,32 @@ impl DeploymentCatalogue {
                 self.meta.provisioned_status.clone(),
             ));
         }
+        for (key, name) in ENVIRONMENT_REFERENCES.into_iter().zip([
+            &validation.default_build_environment,
+            &validation.production_environment,
+        ]) {
+            if !validation.allowed_environments.contains(name) {
+                violations.push(Violation::UnknownEnvironmentReference {
+                    key,
+                    name: name.clone(),
+                });
+            }
+        }
+        for (key, detail) in self.meta.derivation_errors() {
+            violations.push(Violation::DerivationUnusable { key, detail });
+        }
     }
 
     fn check_environment_set(&self, violations: &mut Vec<Violation>) {
+        let mut flavors: BTreeMap<&str, String> = BTreeMap::new();
+        for (name, environment) in &self.environment {
+            if let Some(first) = flavors.insert(environment.app_flavor.as_str(), name.clone()) {
+                violations.push(Violation::DuplicateAppFlavor {
+                    flavor: environment.app_flavor.clone(),
+                    owners: [first, name.clone()],
+                });
+            }
+        }
         for name in self.environment.keys() {
             if !self.validation.allowed_environments.contains(name) {
                 violations.push(Violation::UndeclaredEnvironment(name.clone()));

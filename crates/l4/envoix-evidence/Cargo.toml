@@ -10,6 +10,7 @@ role = "library"
 
 [dependencies]
 envoix-attempt-api = { path = "../../l1/envoix-attempt-api" }
+envoix-deployment = { path = "../../l1/envoix-deployment" }
 envoix-protocol = { path = "../../l1/envoix-protocol" }
 envoix-storage-api = { path = "../../l1/envoix-storage-api" }
 envoix-outcomes = { path = "../../l0/envoix-outcomes" }

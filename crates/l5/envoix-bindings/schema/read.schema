@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/7"
+id = "envoix/binding/read/8"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -453,6 +453,25 @@ fields = [
   { name = "operation_envelope_schema_id", type = "ascii(64)" },
 ]
 
+# Which deployment this build is FOR. It is part of the build identity, not a
+# setting: an app is compiled for one environment, freezes that environment's
+# broker and relay into every invite it mints, and the release gate's
+# destination rule judges the environment named here.
+[[decl]]
+kind = "struct"
+name = "DeploymentManifestView"
+fields = [
+  { name = "environment", type = "ascii(32)" },
+  # `<node_id>@<host>:<port>` and `<scheme>://<host>:<port>`, both spelled by
+  # the catalogue's own derivation templates rather than by this contract. The
+  # bounds are the INVITE grammar's published broker/relay maxima, because these
+  # two strings become exactly those two fields in every invite this build
+  # mints: an endpoint this contract could carry but an invite could not would
+  # be a number invented about somebody else's data.
+  { name = "rendezvous_endpoint", type = "ascii(1024)" },
+  { name = "relay_url", type = "ascii(2048)" },
+]
+
 [[decl]]
 kind = "struct"
 name = "BuildManifestView"
@@ -460,6 +479,7 @@ fields = [
   { name = "package_version", type = "ascii(32)" },
   { name = "protocol", type = "ProtocolManifestView" },
   { name = "abi_schema", type = "AbiSchemaManifestView" },
+  { name = "deployment", type = "DeploymentManifestView" },
 ]
 
 # ---- the frame envelope ----

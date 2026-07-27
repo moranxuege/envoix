@@ -98,9 +98,11 @@ class BuildCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    reportBuild(manifest);
     final ThemeData theme = Theme.of(context);
     final ProtocolManifestView protocol = manifest.protocol;
     final AbiSchemaManifestView abi = manifest.abiSchema;
+    final DeploymentManifestView deployment = manifest.deployment;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -110,6 +112,9 @@ class BuildCard extends StatelessWidget {
             Text('Build', style: theme.textTheme.titleMedium),
             for (final String line in <String>[
               'version ${manifest.packageVersion}',
+              'deployment ${deployment.environment}',
+              'rendezvous ${deployment.rendezvousEndpoint}',
+              'relay ${deployment.relayUrl}',
               'protocol ${protocol.setId} · wire ${protocol.dataWireVersion}',
               'alpn ${protocol.dataAlpn} · magic ${protocol.dataMagic}',
               'read ${abi.readBindingSchemaId} · '

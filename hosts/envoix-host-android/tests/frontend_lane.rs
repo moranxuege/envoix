@@ -477,6 +477,23 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
     // the link's base64, where a harness cannot read it.
     fs::write(work.join("invite.txt"), link.expose()).expect("write the invite");
     fs::write(work.join("code.txt"), invite.code.expose()).expect("write the room code");
+    // The digest a device harness can actually compare against. A release build
+    // must never log the room code — it IS the SPAKE2 password — so what reaches
+    // the screen is this fingerprint, and a harness holding only `code.txt`
+    // has nothing to match it with.
+    fs::write(work.join("fingerprint.txt"), &invite.code_fingerprint)
+        .expect("write the code fingerprint");
+
+    // Every card this build mints is frozen to the deployment it was compiled
+    // for, and the invite a harness pastes therefore names the live rendezvous.
+    // Asserted on the PUBLISHED invite rather than on the plan, so this is the
+    // endpoint that actually crossed the contract.
+    let decoded = envoix_invite::route_invite(link.expose()).expect("the published invite parses");
+    assert_eq!(
+        decoded.broker(),
+        envoix_deployment::BUILD_TARGET.rendezvous_endpoint.as_ref(),
+        "a published invite must name the deployment this build is for"
+    );
 
     // The join: the sender's own published invite, pasted back. The authority
     // parses it, chooses the opposite role, and creates the receiving card.

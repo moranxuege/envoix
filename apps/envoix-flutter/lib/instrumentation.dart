@@ -36,6 +36,18 @@ void reportTimeline(EvidenceTimelineView timeline) {
       'entries=${timeline.entries.length} diagnostics=$status');
 }
 
+/// The deployment this build is FOR, as the app actually drew it.
+///
+/// It is the manifest's own value, read out of a frame the host encoded, so the
+/// harness compares what is on screen against `deploy/environments.toml` rather
+/// than against anything the frontend could have invented.
+void reportBuild(BuildManifestView manifest) {
+  final DeploymentManifestView deployment = manifest.deployment;
+  _report('envoix-d2 build environment=${deployment.environment} '
+      'rendezvous=${deployment.rendezvousEndpoint} '
+      'relay=${deployment.relayUrl}');
+}
+
 /// The card as it was DRAWN, with the offer the authority currently makes for
 /// it. This is how on-device instrumentation sees that a command changed
 /// durable truth — and that the legality published beside it moved too.
@@ -72,6 +84,13 @@ void reportAffordance(BuildContext context, String card, CommandView command) {
 /// button cannot silently change what a harness taps.
 void reportSheetControl(BuildContext context, String control) {
   _reportPoint(context, 'envoix-f2b sheet control=$control');
+}
+
+/// Where the shell drew one of its destinations, for the same reason a sheet
+/// control reports itself: a two-item navigation bar is split by a layout the
+/// harness cannot see, and a tap computed from the screen width is a guess.
+void reportDestination(BuildContext context, String destination) {
+  _reportPoint(context, 'envoix-d2 destination control=$destination');
 }
 
 /// One widget's centre in device pixels, reported post-frame — a widget does

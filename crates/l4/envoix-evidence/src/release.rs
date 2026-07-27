@@ -29,7 +29,65 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use envoix_deployment::DeploymentCatalogue;
 use serde::Deserialize;
+
+/// Who a release-shaped artifact may be handed to.
+///
+/// This enum is back only because there is now something to key on it. Its ONE
+/// consequence is [`Self::required_environment`]: a `public` artifact must
+/// embed the catalogue's production deployment identity, an `internal` one only
+/// has to embed a deployable identity at all. Both enforcers read the
+/// CONSEQUENCE — the required environment name, or the empty string — never the
+/// spelling of the variant, so the Rust side stays the only place that decides
+/// what "public" implies.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseChannel {
+    Internal,
+    Public,
+}
+
+impl ReleaseChannel {
+    /// Which environment an artifact on this channel must be built FOR, if the
+    /// channel constrains it at all.
+    pub fn required_environment(self, catalogue: &DeploymentCatalogue) -> Option<&str> {
+        match self {
+            Self::Internal => None,
+            Self::Public => Some(&catalogue.validation.production_environment),
+        }
+    }
+
+    /// Which app flavour an artifact on this channel must BE, if any.
+    ///
+    /// One payload is cross-compiled per build type and every flavour packages
+    /// the same one, so all three flavours of a release carry the same
+    /// deployment. That is tolerable for an internal build — the flavours are
+    /// install slots and the team knows what it installed — and it is not
+    /// tolerable for a public one, where `app.envoix.host` pointed at a
+    /// development rendezvous would be a production app talking to a test
+    /// server. `public` therefore admits exactly the production flavour.
+    pub fn required_flavor(self, catalogue: &DeploymentCatalogue) -> Option<&str> {
+        let environment = self.required_environment(catalogue)?;
+        catalogue
+            .environment(environment)
+            .map(|environment| environment.app_flavor.as_str())
+    }
+
+    /// The wire spelling, for the report line and the flat policy projection.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::Public => "public",
+        }
+    }
+}
+
+impl fmt::Display for ReleaseChannel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 /// One (applicationId, versionCode) pair that has actually been released.
 /// Append-only: the release action adds a row, nothing ever edits one.
@@ -58,6 +116,9 @@ pub struct ReleaseLedger {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleasePolicy {
+    /// Who this artifact may be handed to, and therefore which deployment it
+    /// must be built for.
+    pub channel: ReleaseChannel,
     pub signer_sha256: String,
     pub required_abis: Vec<String>,
     /// THE payload: the one library this repository builds and accounts for.
@@ -181,6 +242,10 @@ pub struct BuildIdentity {
     pub payload: PayloadRecord,
     /// The checked-in flat policy projection the packaging side consumes.
     pub policy_projection: String,
+    /// The deployment catalogue this build compiled against — the same bytes
+    /// the build script read to resolve the identity in `compiled`. It arrives
+    /// as an input like every other fact, so this layer still reads no file.
+    pub catalogue: DeploymentCatalogue,
 }
 
 /// Which kind of release artifact a facts file describes. An app bundle is a
@@ -242,6 +307,10 @@ impl ArtifactKind {
 #[serde(deny_unknown_fields)]
 pub struct PackagedFacts {
     pub variant: String,
+    /// The product flavour this artifact IS. Carried rather than parsed out of
+    /// `variant`: gradle knows it exactly, and a prefix match on a variant name
+    /// is a guess.
+    pub flavor: String,
     pub kind: ArtifactKind,
     pub application_id: String,
     /// Repository-relative path of the artifact these facts describe. The gate
@@ -307,6 +376,7 @@ pub enum Invariant {
     IdentityDrift,
     PolicyProjection,
     PayloadRecord,
+    Destination,
     ArtifactAnchor,
     ReleasedVersions,
     AppVersion,
@@ -327,6 +397,7 @@ impl Invariant {
             Self::IdentityDrift => "identity_drift",
             Self::PolicyProjection => "policy_projection",
             Self::PayloadRecord => "payload_record",
+            Self::Destination => "destination",
             Self::ArtifactAnchor => "artifact_anchor",
             Self::ReleasedVersions => "released_versions",
             Self::AppVersion => "app_version",
@@ -428,7 +499,7 @@ pub enum Disagreement {
         declared: Option<String>,
         compiled: Option<String>,
     },
-    /// Any other declared manifest identity (package version, trust root).
+    /// Any other declared manifest identity (package version, deployment).
     ManifestDrift {
         field: String,
         declared: Option<String>,
@@ -524,6 +595,33 @@ pub enum Disagreement {
     TestTrustMaterial { variant: String, entry: String },
     /// The packaged dex defines a class only a debug build may define.
     DebugClassInRelease { variant: String, class: String },
+    /// The build names no deployment at all, so nothing can be said about where
+    /// the artifact would talk to.
+    DestinationMissing { channel: ReleaseChannel },
+    /// The build embeds an environment the catalogue will not deploy.
+    DestinationBlocked {
+        channel: ReleaseChannel,
+        environment: String,
+        reason: String,
+    },
+    /// This channel requires one specific deployment, and the build is not for
+    /// it. `public` is the case that exists: an artifact anyone may install has
+    /// to be built for production, not for whatever environment was convenient.
+    DestinationNotRequired {
+        channel: ReleaseChannel,
+        environment: String,
+        required: String,
+    },
+    /// This channel requires one specific app flavour, and this artifact is a
+    /// different one. Three flavours package one payload, so on a constrained
+    /// channel only the flavour that belongs to the required deployment may be
+    /// produced at all.
+    DestinationFlavorNotRequired {
+        channel: ReleaseChannel,
+        variant: String,
+        flavor: String,
+        required: String,
+    },
 }
 
 impl fmt::Display for Disagreement {
@@ -748,6 +846,39 @@ impl fmt::Display for Disagreement {
                 formatter,
                 "trust: {variant} defines {class}, which only a debug build may define"
             ),
+            Self::DestinationMissing { channel } => write!(
+                formatter,
+                "destination: this is a {channel} release, but the build embeds no \
+                 deployment identity at all"
+            ),
+            Self::DestinationBlocked {
+                channel,
+                environment,
+                reason,
+            } => write!(
+                formatter,
+                "destination: this {channel} release is built for {environment}, \
+                 which the catalogue will not deploy: {reason}"
+            ),
+            Self::DestinationNotRequired {
+                channel,
+                environment,
+                required,
+            } => write!(
+                formatter,
+                "destination: a {channel} release must be built for {required}, \
+                 but this one is built for {environment}"
+            ),
+            Self::DestinationFlavorNotRequired {
+                channel,
+                variant,
+                flavor,
+                required,
+            } => write!(
+                formatter,
+                "destination: {variant} is the {flavor:?} flavour, but a {channel} \
+                 release may only be the {required:?} one"
+            ),
         }
     }
 }
@@ -773,6 +904,7 @@ fn drift(field: &str, declared: &Option<String>, compiled: &Option<String>) -> S
 /// parser instead of a hand-rolled TOML reader.
 pub fn render_policy(
     ledger: &ReleaseLedger,
+    catalogue: &DeploymentCatalogue,
     declared: &BTreeMap<String, String>,
     payload: &PayloadRecord,
 ) -> String {
@@ -795,6 +927,27 @@ pub fn render_policy(
         text.push_str(&value);
         text.push('\n');
     };
+    line("channel", policy.channel.as_str().to_owned());
+    // The CONSEQUENCE of the channel, never its spelling: the packaging side
+    // compares this against `identity_deployment_environment` and needs no
+    // opinion about what "public" means. Empty means the channel constrains
+    // nothing, which is how one line covers both variants.
+    line(
+        "destination_environment_required",
+        policy
+            .channel
+            .required_environment(catalogue)
+            .unwrap_or_default()
+            .to_owned(),
+    );
+    line(
+        "destination_flavor_required",
+        policy
+            .channel
+            .required_flavor(catalogue)
+            .unwrap_or_default()
+            .to_owned(),
+    );
     line("signer_sha256", policy.signer_sha256.clone());
     line("required_abis", policy.required_abis.join(","));
     line("native_library", policy.native_library.clone());
@@ -869,6 +1022,7 @@ pub fn check_release(
     check_identity_drift(build, &mut verdict);
     check_policy_projection(ledger, build, &mut verdict);
     check_payload_record(build, &mut verdict);
+    check_destination(ledger, build, &mut verdict);
 
     let package_version = build.compiled.get("package_version");
     for artifact in artifacts {
@@ -943,7 +1097,7 @@ fn check_policy_projection(
         }
     }
 
-    let expected = render_policy(ledger, &build.declared, &build.payload);
+    let expected = render_policy(ledger, &build.catalogue, &build.declared, &build.payload);
     verdict.judged(None, Invariant::PolicyProjection, expected.lines().count());
     if expected == build.policy_projection {
         return;
@@ -979,6 +1133,50 @@ fn check_payload_record(build: &BuildIdentity, verdict: &mut ReleaseVerdict) {
         verdict.disagree(Disagreement::PayloadSourcesDrift {
             recorded: build.payload.sources_sha256.clone(),
             observed: build.sources_sha256.clone(),
+        });
+    }
+}
+
+/// The invariant that is a function of a release's DESTINATION.
+///
+/// Three questions, always all three, so a clean record cannot be produced by a
+/// build that named no deployment: does this build embed one, will the
+/// catalogue deploy it, and is it the one this channel requires? The artifact is
+/// tied to the answer by `Invariant::ShippedManifest` — the deployment identity
+/// is part of the build manifest, so an artifact carrying a different
+/// destination carries a different manifest digest.
+///
+/// The deployability question is asked again here even though
+/// `envoix-deployment`'s build script already refuses to compile an app for a
+/// blocked environment. That is deliberate: the gate judges artifacts, and an
+/// artifact that reached it by some other route must still be judged.
+fn check_destination(ledger: &ReleaseLedger, build: &BuildIdentity, verdict: &mut ReleaseVerdict) {
+    const QUESTIONS: usize = 3;
+    verdict.judged(None, Invariant::Destination, QUESTIONS);
+    let channel = ledger.policy.channel;
+    let Some(environment) = build.compiled.get("deployment_environment") else {
+        verdict.disagree(Disagreement::DestinationMissing { channel });
+        return;
+    };
+    let blockers = build.catalogue.blockers(environment);
+    if !blockers.is_empty() {
+        verdict.disagree(Disagreement::DestinationBlocked {
+            channel,
+            environment: environment.clone(),
+            reason: blockers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; "),
+        });
+    }
+    if let Some(required) = channel.required_environment(&build.catalogue)
+        && required != environment
+    {
+        verdict.disagree(Disagreement::DestinationNotRequired {
+            channel,
+            environment: environment.clone(),
+            required: required.to_owned(),
         });
     }
 }
@@ -1204,6 +1402,24 @@ fn check_artifact(
             class: class.clone(),
         });
     }
+
+    // The per-ARTIFACT half of the destination rule. The build-wide half judges
+    // which deployment was compiled; this judges which artifact may carry it,
+    // because one payload is shared by every flavour and `app.envoix.host`
+    // pointing at a development rendezvous is a different failure from
+    // `app.envoix.host.dev` doing so.
+    let channel = policy.channel;
+    verdict.judged(label, Invariant::Destination, 1);
+    if let Some(required) = channel.required_flavor(&build.catalogue)
+        && required != facts.flavor
+    {
+        verdict.disagree(Disagreement::DestinationFlavorNotRequired {
+            channel,
+            variant: variant.clone(),
+            flavor: facts.flavor.clone(),
+            required: required.to_owned(),
+        });
+    }
 }
 
 fn check_payload(
@@ -1421,6 +1637,7 @@ mod tests {
     fn ledger() -> ReleaseLedger {
         ReleaseLedger {
             policy: ReleasePolicy {
+                channel: ReleaseChannel::Internal,
                 signer_sha256: "ab".repeat(32),
                 required_abis: vec!["arm64-v8a".to_owned()],
                 native_library: "libhost.so".to_owned(),
@@ -1461,22 +1678,35 @@ mod tests {
         }
     }
 
+    /// The shipped catalogue, so the destination rule is exercised against the
+    /// environments this repository really declares rather than a fixture that
+    /// could quietly disagree with them.
+    fn catalogue() -> DeploymentCatalogue {
+        DeploymentCatalogue::compiled().expect("the shipped catalogue parses")
+    }
+
     fn identity(ledger: &ReleaseLedger) -> BuildIdentity {
-        let map = BTreeMap::from([("package_version".to_owned(), "0.2.0".to_owned())]);
+        let map = BTreeMap::from([
+            ("package_version".to_owned(), "0.2.0".to_owned()),
+            ("deployment_environment".to_owned(), "dev".to_owned()),
+        ]);
         let payload = payload_record();
+        let catalogue = catalogue();
         BuildIdentity {
-            policy_projection: render_policy(ledger, &map, &payload),
+            policy_projection: render_policy(ledger, &catalogue, &map, &payload),
             declared: map.clone(),
             compiled: map,
             manifest_sha256: payload.build_manifest_sha256.clone(),
             sources_sha256: payload.sources_sha256.clone(),
             payload,
+            catalogue,
         }
     }
 
     fn artifact() -> MeasuredArtifact {
         let facts = PackagedFacts {
             variant: "prodRelease".to_owned(),
+            flavor: "prod".to_owned(),
             kind: ArtifactKind::Apk,
             application_id: "app.probe".to_owned(),
             artifact: "build/app.apk".to_owned(),
@@ -1519,7 +1749,8 @@ mod tests {
         let mut artifact = artifact();
         mutate(&mut ledger, &mut artifact);
         let mut build = identity(&ledger);
-        build.policy_projection = render_policy(&ledger, &build.declared, &build.payload);
+        build.policy_projection =
+            render_policy(&ledger, &build.catalogue, &build.declared, &build.payload);
         check_release(&ledger, &build, &[artifact])
     }
 
@@ -1527,6 +1758,19 @@ mod tests {
         mutate: impl FnOnce(&mut ReleaseLedger, &mut MeasuredArtifact),
     ) -> Vec<Disagreement> {
         judge(mutate).disagreements
+    }
+
+    /// The build-wide half: mutations of the LEDGER and of what the build says
+    /// about itself, with the projection re-rendered afterwards so a
+    /// destination mutation is judged by the destination rule rather than
+    /// reported as a projection drift.
+    fn judge_with(mutate: impl FnOnce(&mut ReleaseLedger, &mut BuildIdentity)) -> ReleaseVerdict {
+        let mut ledger = ledger();
+        let mut build = identity(&ledger);
+        mutate(&mut ledger, &mut build);
+        build.policy_projection =
+            render_policy(&ledger, &build.catalogue, &build.declared, &build.payload);
+        check_release(&ledger, &build, &[artifact()])
     }
 
     #[test]
@@ -2001,7 +2245,195 @@ mod tests {
                     invariant.as_str()
                 );
             }
+            // The build-wide rules, which judge no single artifact and would
+            // otherwise be invisible in a summary that lists only artifacts.
+            for invariant in [
+                Invariant::IdentityDrift,
+                Invariant::PolicyProjection,
+                Invariant::PayloadRecord,
+                Invariant::Destination,
+            ] {
+                assert!(
+                    judged
+                        .evaluations
+                        .iter()
+                        .any(|record| record.artifact.is_none() && record.invariant == invariant),
+                    "the build must record {}",
+                    invariant.as_str()
+                );
+            }
         }
+    }
+
+    /// The destination rule, in all three of its answers. This is the invariant
+    /// that is a function of where a release TALKS TO, and the one `internal`
+    /// and `public` finally differ on: an internal artifact may be built for any
+    /// deployable environment, a public one only for production.
+    #[test]
+    fn a_release_is_judged_by_the_deployment_it_is_built_for() {
+        let production = catalogue().validation.production_environment.clone();
+
+        // internal + dev: nothing to complain about.
+        assert_eq!(verdict(|_, _| {}), Vec::new());
+
+        // A build that names no deployment cannot be judged at all.
+        assert_eq!(
+            judge_with(|_, build| {
+                build.compiled.remove("deployment_environment");
+                build.declared.remove("deployment_environment");
+            })
+            .disagreements,
+            vec![Disagreement::DestinationMissing {
+                channel: ReleaseChannel::Internal,
+            }]
+        );
+
+        // Public is not a label: it demands the production deployment, and this
+        // build is for dev.
+        assert_eq!(
+            judge_with(|ledger, _| ledger.policy.channel = ReleaseChannel::Public).disagreements,
+            vec![Disagreement::DestinationNotRequired {
+                channel: ReleaseChannel::Public,
+                environment: "dev".to_owned(),
+                required: production.clone(),
+            }]
+        );
+
+        // ...and production is not deployable today, so a public release fails
+        // BOTH ways rather than passing by naming the right word.
+        let blocked = judge_with(|ledger, build| {
+            ledger.policy.channel = ReleaseChannel::Public;
+            for map in [&mut build.compiled, &mut build.declared] {
+                map.insert("deployment_environment".to_owned(), production.clone());
+            }
+        })
+        .disagreements;
+        assert!(
+            blocked.iter().any(|found| matches!(
+                found,
+                Disagreement::DestinationBlocked {
+                    channel: ReleaseChannel::Public,
+                    ..
+                }
+            )),
+            "prod holds no rendezvous identity, so no artifact may be published \
+             for it, got {blocked:#?}"
+        );
+
+        // An internal release for a blocked environment fails too: `internal`
+        // relaxes WHICH deployment, never whether it is one at all.
+        let blocked = judge_with(|_, build| {
+            for map in [&mut build.compiled, &mut build.declared] {
+                map.insert("deployment_environment".to_owned(), production.clone());
+            }
+        })
+        .disagreements;
+        assert_eq!(
+            blocked.len(),
+            1,
+            "internal must fail on deployability alone, got {blocked:#?}"
+        );
+        assert!(matches!(
+            blocked[0],
+            Disagreement::DestinationBlocked {
+                channel: ReleaseChannel::Internal,
+                ..
+            }
+        ));
+    }
+
+    /// The per-artifact half. Three flavours package one payload, so on the
+    /// public channel only the production flavour may be produced at all —
+    /// `app.envoix.host` carrying a development rendezvous is exactly the
+    /// artifact this stops.
+    #[test]
+    fn a_public_release_may_only_be_the_production_flavour() {
+        let catalogue = catalogue();
+        let production = catalogue.validation.production_environment.clone();
+        let flavor = catalogue
+            .environment(&production)
+            .expect("production is declared")
+            .app_flavor
+            .clone();
+
+        // internal: the flavour is an install slot, and nothing is claimed
+        // about it — a dev-flavoured artifact for the dev deployment is exactly
+        // what it says it is.
+        assert_eq!(
+            verdict(|_, artifact| artifact.facts.flavor = "dev".to_owned()),
+            Vec::new()
+        );
+
+        // public: the flavour is judged, and the wrong one fails even when the
+        // environment is right.
+        let judged = judge_with(|ledger, build| {
+            ledger.policy.channel = ReleaseChannel::Public;
+            for map in [&mut build.compiled, &mut build.declared] {
+                map.insert("deployment_environment".to_owned(), production.clone());
+            }
+        })
+        .disagreements;
+        assert!(
+            !judged
+                .iter()
+                .any(|found| matches!(found, Disagreement::DestinationFlavorNotRequired { .. })),
+            "the fixture IS the production flavour, got {judged:#?}"
+        );
+        let judged = {
+            let mut ledger = ledger();
+            ledger.policy.channel = ReleaseChannel::Public;
+            let mut build = identity(&ledger);
+            for map in [&mut build.compiled, &mut build.declared] {
+                map.insert("deployment_environment".to_owned(), production.clone());
+            }
+            build.policy_projection =
+                render_policy(&ledger, &build.catalogue, &build.declared, &build.payload);
+            let mut artifact = artifact();
+            artifact.facts.variant = "devRelease".to_owned();
+            artifact.facts.flavor = "dev".to_owned();
+            check_release(&ledger, &build, &[artifact]).disagreements
+        };
+        assert!(
+            judged.contains(&Disagreement::DestinationFlavorNotRequired {
+                channel: ReleaseChannel::Public,
+                variant: "devRelease".to_owned(),
+                flavor: "dev".to_owned(),
+                required: flavor,
+            }),
+            "a public release may not be a non-production flavour, got {judged:#?}"
+        );
+    }
+
+    /// The projection carries the channel's CONSEQUENCE, so the packaging side
+    /// enforces the same rule without owning an opinion about what public means.
+    #[test]
+    fn the_projection_publishes_what_the_channel_requires() {
+        let mut ledger = ledger();
+        let catalogue = catalogue();
+        let build = identity(&ledger);
+        let internal = render_policy(&ledger, &catalogue, &build.declared, &build.payload);
+        assert!(internal.contains("\nchannel=internal\n"));
+        assert!(internal.contains("\ndestination_environment_required=\n"));
+
+        ledger.policy.channel = ReleaseChannel::Public;
+        let public = render_policy(&ledger, &catalogue, &build.declared, &build.payload);
+        assert!(public.contains("\nchannel=public\n"));
+        assert!(public.contains(&format!(
+            "\ndestination_environment_required={}\n",
+            catalogue.validation.production_environment
+        )));
+        assert!(internal.contains("\ndestination_flavor_required=\n"));
+        assert!(public.contains(&format!(
+            "\ndestination_flavor_required={}\n",
+            catalogue
+                .environment(&catalogue.validation.production_environment)
+                .expect("production is declared")
+                .app_flavor
+        )));
+        assert!(
+            public.contains("\nidentity_deployment_environment=dev\n"),
+            "the packaging side compares the two lines, so both must be there"
+        );
     }
 
     #[test]
@@ -2060,7 +2492,8 @@ mod tests {
         let mut ledger = ledger();
         ledger.policy.allowed_native_symbols.push("a,b".to_owned());
         let mut build = identity(&ledger);
-        build.policy_projection = render_policy(&ledger, &build.declared, &build.payload);
+        build.policy_projection =
+            render_policy(&ledger, &build.catalogue, &build.declared, &build.payload);
         assert!(
             check_release(&ledger, &build, &[artifact()])
                 .disagreements

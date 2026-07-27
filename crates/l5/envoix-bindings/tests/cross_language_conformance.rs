@@ -19,14 +19,14 @@ use envoix_bindings::command::{
 };
 use envoix_bindings::read::{
     AbiSchemaManifestView, BuildManifestView, CardUpdateKindView, CardUpdateView, CardView,
-    ClosedView, CommandKindView, DegradedView, DiagnosticsStatusView, DirectionView,
-    EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView,
-    LagView, LosslessKindView, OutcomeCodeView, OutcomeView, PauseOriginView, PausedView,
-    PhaseView, ProductStateView, ProtocolManifestView, QrView, QuiescenceView, ReadBody, ReadError,
-    ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView,
-    RetiringView, RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView,
-    SubscribeRejectionView, TimelineEntryView, WorkerKindView, decode_read_frame,
-    encode_read_frame,
+    ClosedView, CommandKindView, DegradedView, DeploymentManifestView, DiagnosticsStatusView,
+    DirectionView, EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView,
+    InviteView, LagView, LosslessKindView, OutcomeCodeView, OutcomeView, PauseOriginView,
+    PausedView, PhaseView, ProductStateView, ProtocolManifestView, QrView, QuiescenceView,
+    ReadBody, ReadError, ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView,
+    RetirementIntentView, RetiringView, RetryabilityView, RunningView, SessionKeyView,
+    SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView, WorkerKindView,
+    decode_read_frame, encode_read_frame,
 };
 use envoix_bindings::{
     Decl, Direction, SchemaDoc, command_schema_text, emit, parse_schema, read_schema_text,
@@ -882,6 +882,11 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
                         evidence_timeline_schema_id: "envoix/evidence/timeline/1".to_owned(),
                         mailbox_receipt_schema_id: "envoix/mailbox/receipt/1".to_owned(),
                         operation_envelope_schema_id: "envoix/operation/envelope/1".to_owned(),
+                    },
+                    deployment: DeploymentManifestView {
+                        environment: "probe".to_owned(),
+                        rendezvous_endpoint: format!("{}@rdz.probe.example:9645", "ab".repeat(32)),
+                        relay_url: "https://relay.probe.example:9644".to_owned(),
                     },
                 }),
             },

@@ -11,3 +11,10 @@ role = "library"
 [dependencies]
 serde.workspace = true
 toml.workspace = true
+
+# `build.rs` includes `src/catalogue.rs`, so it needs the same two crates the
+# library does. It gains nothing else: the build script resolves an identity,
+# it does not reach the network or the filesystem beyond the catalogue.
+[build-dependencies]
+serde.workspace = true
+toml.workspace = true

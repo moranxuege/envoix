@@ -184,15 +184,23 @@ class _ShellState extends State<Shell> {
         bottomNavigationBar: NavigationBar(
           selectedIndex: _destination,
           onDestinationSelected: _show,
-          destinations: const <NavigationDestination>[
-            NavigationDestination(
+          destinations: <NavigationDestination>[
+            const NavigationDestination(
               icon: _Dot(filled: false),
               selectedIcon: _Dot(filled: true),
               label: 'Transfers',
             ),
             NavigationDestination(
-              icon: _Dot(filled: false),
-              selectedIcon: _Dot(filled: true),
+              // Reported rather than computed: the Logs destination is where
+              // the build this app is states which deployment it is FOR, and a
+              // harness that guessed its coordinate would be tapping arithmetic.
+              icon: Builder(
+                builder: (BuildContext context) {
+                  reportDestination(context, 'logs');
+                  return const _Dot(filled: false);
+                },
+              ),
+              selectedIcon: const _Dot(filled: true),
               label: 'Logs',
             ),
           ],

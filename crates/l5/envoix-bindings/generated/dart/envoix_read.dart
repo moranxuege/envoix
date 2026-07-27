@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/7';
+const String readSchemaId = 'envoix/binding/read/8';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -572,16 +572,30 @@ final class AbiSchemaManifestView {
   final String operationEnvelopeSchemaId;
 }
 
+final class DeploymentManifestView {
+  const DeploymentManifestView({
+    required this.environment,
+    required this.rendezvousEndpoint,
+    required this.relayUrl,
+  });
+
+  final String environment;
+  final String rendezvousEndpoint;
+  final String relayUrl;
+}
+
 final class BuildManifestView {
   const BuildManifestView({
     required this.packageVersion,
     required this.protocol,
     required this.abiSchema,
+    required this.deployment,
   });
 
   final String packageVersion;
   final ProtocolManifestView protocol;
   final AbiSchemaManifestView abiSchema;
+  final DeploymentManifestView deployment;
 }
 
 sealed class ReadBody {
@@ -1416,13 +1430,24 @@ AbiSchemaManifestView _decodeAbiSchemaManifestView(Object? value, String context
   );
 }
 
+DeploymentManifestView _decodeDeploymentManifestView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'environment', 'rendezvous_endpoint', 'relay_url'}, context);
+  return DeploymentManifestView(
+    environment: _asciiBounded(_field(map, 'environment', 'DeploymentManifestView.environment'), 32, 'DeploymentManifestView.environment'),
+    rendezvousEndpoint: _asciiBounded(_field(map, 'rendezvous_endpoint', 'DeploymentManifestView.rendezvous_endpoint'), 1024, 'DeploymentManifestView.rendezvous_endpoint'),
+    relayUrl: _asciiBounded(_field(map, 'relay_url', 'DeploymentManifestView.relay_url'), 2048, 'DeploymentManifestView.relay_url'),
+  );
+}
+
 BuildManifestView _decodeBuildManifestView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'package_version', 'protocol', 'abi_schema'}, context);
+  _knownKeys(map, const {'package_version', 'protocol', 'abi_schema', 'deployment'}, context);
   return BuildManifestView(
     packageVersion: _asciiBounded(_field(map, 'package_version', 'BuildManifestView.package_version'), 32, 'BuildManifestView.package_version'),
     protocol: _decodeProtocolManifestView(_field(map, 'protocol', 'BuildManifestView.protocol'), 'BuildManifestView.protocol'),
     abiSchema: _decodeAbiSchemaManifestView(_field(map, 'abi_schema', 'BuildManifestView.abi_schema'), 'BuildManifestView.abi_schema'),
+    deployment: _decodeDeploymentManifestView(_field(map, 'deployment', 'BuildManifestView.deployment'), 'BuildManifestView.deployment'),
   );
 }
 

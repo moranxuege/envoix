@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use envoix_bindings::build_manifest_frame;
 use envoix_bindings::read::encode_read_frame;
+use envoix_deployment::DeploymentCatalogue;
 use envoix_evidence::BUILD_TRUST_MANIFEST;
 use envoix_evidence::release::{
     BuildIdentity, BundledLibrary, Evaluation, MeasuredArtifact, PackagedFacts, PackagedPayload,
@@ -154,13 +155,20 @@ pub fn build_identity(root: &Path, ledger: &ReleaseLedger) -> CheckResult<BuildI
     let (compiled, frame) = compiled_identity()?;
     let declared = load_declared_identity(root)?;
     let payload = load_payload(root)?;
+    // The catalogue this gate COMPILED, not the one on disk: it is the same
+    // include that resolved the deployment identity in `compiled`, so the
+    // destination rule judges the build rather than the working tree. A working
+    // tree that has moved on shows up as a stale payload/manifest instead.
+    let catalogue = DeploymentCatalogue::compiled()
+        .map_err(|error| format!("the compiled deployment catalogue: {error}"))?;
     Ok(BuildIdentity {
-        policy_projection: render_policy(ledger, &declared, &payload),
+        policy_projection: render_policy(ledger, &catalogue, &declared, &payload),
         declared,
         compiled,
         manifest_sha256: sha256_hex(&frame),
         sources_sha256: sources_digest(root, ledger)?,
         payload,
+        catalogue,
     })
 }
 
@@ -405,9 +413,11 @@ pub fn regenerate(
     }
     write_file(&root.join(IDENTITY_FILE), text.as_bytes())?;
     write_file(&root.join(MANIFEST_ASSET), frame)?;
+    let catalogue = DeploymentCatalogue::compiled()
+        .map_err(|error| format!("the compiled deployment catalogue: {error}"))?;
     write_file(
         &root.join(POLICY_FILE),
-        render_policy(ledger, compiled, payload).as_bytes(),
+        render_policy(ledger, &catalogue, compiled, payload).as_bytes(),
     )
 }
 

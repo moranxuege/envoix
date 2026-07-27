@@ -9,8 +9,8 @@
 //! without holding a live subscription type.
 
 use envoix_evidence::{
-    AbiSchemaManifest, BuildTrustManifest, DiagnosticsStatus, EvidenceValue, RedactedIdKind,
-    SessionTimeline,
+    AbiSchemaManifest, BuildTrustManifest, DeploymentIdentity, DiagnosticsStatus, EvidenceValue,
+    RedactedIdKind, SessionTimeline,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_runtime::{
@@ -24,14 +24,14 @@ use crate::capability::CAPABILITY_SCHEMA_ID;
 use crate::command::COMMAND_SCHEMA_ID;
 use crate::read::{
     AbiSchemaManifestView, BuildManifestView, CapabilityActionView, CardUpdateKindView,
-    CardUpdateView, CardView, ClosedView, CommandKindView, DegradedView, DiagnosticsStatusView,
-    DirectionView, DutyFrameView, DutyKindView, DutyProvenanceView, DutyView, EvidenceProgressView,
-    EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView, LagView, LosslessKindView,
-    OutcomeView, PausedView, PhaseView, ProductStateView, ProtocolManifestView, QrView,
-    QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame, RecoveryView, RedactedIdKindView,
-    RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView, RunningView,
-    SessionKeyView, SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView,
-    WorkerKindView,
+    CardUpdateView, CardView, ClosedView, CommandKindView, DegradedView, DeploymentManifestView,
+    DiagnosticsStatusView, DirectionView, DutyFrameView, DutyKindView, DutyProvenanceView,
+    DutyView, EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView,
+    InviteView, LagView, LosslessKindView, OutcomeView, PausedView, PhaseView, ProductStateView,
+    ProtocolManifestView, QrView, QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame,
+    RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView,
+    RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView, SubscribeRejectionView,
+    TimelineEntryView, WorkerKindView,
 };
 
 /// The codec bound on safe-display text and on offered names: L0 owns both
@@ -145,6 +145,11 @@ pub fn build_manifest_frame(manifest: &BuildTrustManifest) -> ReadFrame {
         mailbox_receipt_schema_id,
         operation_envelope_schema_id,
     } = manifest.abi_schema;
+    let DeploymentIdentity {
+        environment,
+        rendezvous_endpoint,
+        relay_url,
+    } = manifest.deployment;
     frame(ReadBody::BuildManifest(BuildManifestView {
         package_version: manifest.package_version.to_owned(),
         protocol: ProtocolManifestView {
@@ -161,6 +166,11 @@ pub fn build_manifest_frame(manifest: &BuildTrustManifest) -> ReadFrame {
             evidence_timeline_schema_id: evidence_timeline_schema_id.to_owned(),
             mailbox_receipt_schema_id: mailbox_receipt_schema_id.to_owned(),
             operation_envelope_schema_id: operation_envelope_schema_id.to_owned(),
+        },
+        deployment: DeploymentManifestView {
+            environment: environment.to_string(),
+            rendezvous_endpoint: rendezvous_endpoint.to_string(),
+            relay_url: relay_url.to_string(),
         },
     }))
 }

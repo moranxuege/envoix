@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/7"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/8"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -319,10 +319,17 @@ data class AbiSchemaManifestView(
     val operationEnvelopeSchemaId: String,
 )
 
+data class DeploymentManifestView(
+    val environment: String,
+    val rendezvousEndpoint: String,
+    val relayUrl: String,
+)
+
 data class BuildManifestView(
     val packageVersion: String,
     val protocol: ProtocolManifestView,
     val abiSchema: AbiSchemaManifestView,
+    val deployment: DeploymentManifestView,
 )
 
 sealed interface ReadBody {
@@ -1039,13 +1046,24 @@ object EnvoixReadCodec {
         )
     }
 
+    private fun decodeDeploymentManifestView(value: Any?, context: String): DeploymentManifestView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("environment", "rendezvous_endpoint", "relay_url"), context)
+        return DeploymentManifestView(
+            environment = asciiBounded(field(map, "environment", "DeploymentManifestView.environment"), 32, "DeploymentManifestView.environment"),
+            rendezvousEndpoint = asciiBounded(field(map, "rendezvous_endpoint", "DeploymentManifestView.rendezvous_endpoint"), 1024, "DeploymentManifestView.rendezvous_endpoint"),
+            relayUrl = asciiBounded(field(map, "relay_url", "DeploymentManifestView.relay_url"), 2048, "DeploymentManifestView.relay_url"),
+        )
+    }
+
     private fun decodeBuildManifestView(value: Any?, context: String): BuildManifestView {
         val map = obj(value, context)
-        knownKeys(map, setOf("package_version", "protocol", "abi_schema"), context)
+        knownKeys(map, setOf("package_version", "protocol", "abi_schema", "deployment"), context)
         return BuildManifestView(
             packageVersion = asciiBounded(field(map, "package_version", "BuildManifestView.package_version"), 32, "BuildManifestView.package_version"),
             protocol = decodeProtocolManifestView(field(map, "protocol", "BuildManifestView.protocol"), "BuildManifestView.protocol"),
             abiSchema = decodeAbiSchemaManifestView(field(map, "abi_schema", "BuildManifestView.abi_schema"), "BuildManifestView.abi_schema"),
+            deployment = decodeDeploymentManifestView(field(map, "deployment", "BuildManifestView.deployment"), "BuildManifestView.deployment"),
         )
     }
 

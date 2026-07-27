@@ -1237,12 +1237,29 @@ void main() {
                   mailboxReceiptSchemaId: 'receipt/1',
                   operationEnvelopeSchemaId: 'operation/1',
                 ),
+                deployment: DeploymentManifestView(
+                  environment: 'dev',
+                  rendezvousEndpoint: 'abcd@rdz.dev.example:9645',
+                  relayUrl: 'https://relay.dev.example:9644',
+                ),
               ),
             ),
           ),
         );
       await pumpLogs(tester, attachment);
       expect(find.text('version 0.2.0'), findsOneWidget);
+      // The destination is part of the build the app states: an artifact that
+      // named no deployment could not have been produced, so the screen that
+      // reports what this core IS must say where it talks to.
+      expect(find.text('deployment dev'), findsOneWidget);
+      expect(
+        find.text('rendezvous abcd@rdz.dev.example:9645'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('relay https://relay.dev.example:9644'),
+        findsOneWidget,
+      );
       expect(
         find.text('receipt receipt/1 · operation operation/1'),
         findsOneWidget,

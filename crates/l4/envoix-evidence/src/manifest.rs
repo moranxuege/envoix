@@ -1,3 +1,4 @@
+use envoix_deployment::{BUILD_TARGET, DeploymentIdentity};
 use envoix_protocol::identifiers::{DATA_ALPN, DATA_MAGIC, DATA_WIRE_VERSION, PROTOCOL_SET_ID};
 use envoix_protocol::mailbox::identifiers::RECEIPT_PAYLOAD_SCHEMA_ID;
 use envoix_storage_api::identifiers::OPERATION_ENVELOPE_SCHEMA_ID;
@@ -33,11 +34,17 @@ pub struct BuildTrustManifest {
     pub package_version: &'static str,
     pub protocol: ProtocolManifest,
     pub abi_schema: AbiSchemaManifest,
+    /// Which deployment this build is FOR. Resolved by `envoix-deployment`'s
+    /// build script from `deploy/environments.toml`, so it is the destination
+    /// itself rather than a claim about one — and a build for an environment
+    /// the catalogue will not deploy does not exist to have a manifest.
+    pub deployment: &'static DeploymentIdentity,
 }
 
 /// The evidence manifest for this compiled package.
 pub const BUILD_TRUST_MANIFEST: BuildTrustManifest = BuildTrustManifest {
     package_version: env!("CARGO_PKG_VERSION"),
+    deployment: &BUILD_TARGET,
     protocol: ProtocolManifest {
         set_id: PROTOCOL_SET_ID,
         data_alpn: DATA_ALPN,

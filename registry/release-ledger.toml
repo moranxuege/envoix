@@ -17,6 +17,19 @@
 # than by a missing deny entry.
 
 [policy]
+# Who this artifact may be handed to, and therefore where it must be built to
+# talk to. `internal` requires only that the build embeds a deployment identity
+# the catalogue will deploy; `public` requires that identity to be the
+# catalogue's `production_environment`. Both enforcers read the CONSEQUENCE out
+# of the flat projection (`destination_environment_required`), never the word
+# below, so what "public" implies is decided in exactly one place.
+#
+# It says `internal` because that is the truth: production holds no rendezvous
+# identity, so nothing can currently be built for it, and this app is not one
+# anybody may install. Flipping this word does not make a public release
+# possible — it makes the gate say why one is not.
+channel = "internal"
+
 # SHA-256 of the release signing certificate, lowercase hex without separators.
 # An artifact signed by anything else — notably the debug key — fails the gate,
 # and so does one carrying a second signer.
@@ -1076,6 +1089,10 @@ payload_sources = [
     "Cargo.lock",
     "Cargo.toml",
     "registry/android-native-toolchain.properties",
+    # The deployment catalogue is a payload SOURCE: `envoix-deployment`'s build
+    # script compiles this build's rendezvous and relay endpoints out of it, so
+    # editing it changes the bytes an app freezes into every invite it mints.
+    "deploy/environments.toml",
     "crates/**/*.rs",
     "crates/**/Cargo.toml",
     "crates/l5/envoix-bindings/generated/**",

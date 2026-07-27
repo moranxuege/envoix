@@ -992,6 +992,7 @@ name = "envoix-evidence"
 version = "0.2.0"
 dependencies = [
  "envoix-attempt-api",
+ "envoix-deployment",
  "envoix-outcomes",
  "envoix-protocol",
  "envoix-storage-api",
@@ -1008,6 +1009,7 @@ dependencies = [
  "envoix-attempt-iroh",
  "envoix-bindings",
  "envoix-capabilities",
+ "envoix-deployment",
  "envoix-evidence",
  "envoix-invite",
  "envoix-operation-store",

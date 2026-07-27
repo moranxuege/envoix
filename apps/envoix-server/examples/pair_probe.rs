@@ -1,6 +1,12 @@
 //! Real-world probe: two local clients pair through a REMOTE broker.
 //!
-//! Usage: `cargo run -p envoix-server --example pair_probe -- <node-id>@<host:port>`
+//! Usage: `cargo run -p envoix-server --example pair_probe [-- <node-id>@<host:port>]`
+//!
+//! With no argument it dials THIS BUILD'S deployment — the same
+//! `<node_id>@<host>:<port>` that `deploy/environments.toml` derives and that
+//! the app freezes into every invite it mints. So "the endpoint the app is
+//! built for" and "the endpoint this probe proves is live" are one string, not
+//! two that agree by hand.
 //!
 //! Generates a random room code, joins the broker from two endpoints, runs
 //! the full C3 pairing through the blind relay, and exchanges sealed
@@ -9,6 +15,7 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use envoix_deployment::BUILD_TARGET;
 use envoix_pairing::{
     DescriptorPayload, MAX_MESSAGE_BODY, PairingCode, SystemEntropy, WIRE_HEADER_LEN,
     initiator_start, responder_respond,
@@ -89,7 +96,7 @@ async fn receive_frame(session: &mut BrokerSession) -> Vec<u8> {
 async fn main() {
     let broker_arg = std::env::args()
         .nth(1)
-        .expect("usage: pair_probe <node-id>@<host:port>");
+        .unwrap_or_else(|| BUILD_TARGET.rendezvous_endpoint.to_string());
     let broker = parse_broker(&broker_arg).expect("broker address");
 
     let room_code =

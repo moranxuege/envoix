@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/7";
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/8";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -478,10 +478,18 @@ pub struct AbiSchemaManifestView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeploymentManifestView {
+    pub environment: String,
+    pub rendezvous_endpoint: String,
+    pub relay_url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildManifestView {
     pub package_version: String,
     pub protocol: ProtocolManifestView,
     pub abi_schema: AbiSchemaManifestView,
+    pub deployment: DeploymentManifestView,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1871,16 +1879,39 @@ fn encode_abi_schema_manifest_view_value(value: &AbiSchemaManifestView) -> Resul
     Ok(Value::Object(map))
 }
 
+fn decode_deployment_manifest_view_value(value: &Value, context: &'static str) -> Result<DeploymentManifestView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["environment", "rendezvous_endpoint", "relay_url"], context)?;
+    let environment = ascii_bounded(field(map, "environment", "DeploymentManifestView.environment")?, 32, "DeploymentManifestView.environment")?;
+    let rendezvous_endpoint = ascii_bounded(field(map, "rendezvous_endpoint", "DeploymentManifestView.rendezvous_endpoint")?, 1024, "DeploymentManifestView.rendezvous_endpoint")?;
+    let relay_url = ascii_bounded(field(map, "relay_url", "DeploymentManifestView.relay_url")?, 2048, "DeploymentManifestView.relay_url")?;
+    Ok(DeploymentManifestView {
+        environment,
+        rendezvous_endpoint,
+        relay_url,
+    })
+}
+
+fn encode_deployment_manifest_view_value(value: &DeploymentManifestView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("environment".to_owned(), encode_ascii_bounded(&value.environment, 32, "DeploymentManifestView.environment")?);
+    map.insert("rendezvous_endpoint".to_owned(), encode_ascii_bounded(&value.rendezvous_endpoint, 1024, "DeploymentManifestView.rendezvous_endpoint")?);
+    map.insert("relay_url".to_owned(), encode_ascii_bounded(&value.relay_url, 2048, "DeploymentManifestView.relay_url")?);
+    Ok(Value::Object(map))
+}
+
 fn decode_build_manifest_view_value(value: &Value, context: &'static str) -> Result<BuildManifestView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["package_version", "protocol", "abi_schema"], context)?;
+    known_keys(map, &["package_version", "protocol", "abi_schema", "deployment"], context)?;
     let package_version = ascii_bounded(field(map, "package_version", "BuildManifestView.package_version")?, 32, "BuildManifestView.package_version")?;
     let protocol = decode_protocol_manifest_view_value(field(map, "protocol", "BuildManifestView.protocol")?, "BuildManifestView.protocol")?;
     let abi_schema = decode_abi_schema_manifest_view_value(field(map, "abi_schema", "BuildManifestView.abi_schema")?, "BuildManifestView.abi_schema")?;
+    let deployment = decode_deployment_manifest_view_value(field(map, "deployment", "BuildManifestView.deployment")?, "BuildManifestView.deployment")?;
     Ok(BuildManifestView {
         package_version,
         protocol,
         abi_schema,
+        deployment,
     })
 }
 
@@ -1889,6 +1920,7 @@ fn encode_build_manifest_view_value(value: &BuildManifestView) -> Result<Value, 
     map.insert("package_version".to_owned(), encode_ascii_bounded(&value.package_version, 32, "BuildManifestView.package_version")?);
     map.insert("protocol".to_owned(), encode_protocol_manifest_view_value(&value.protocol)?);
     map.insert("abi_schema".to_owned(), encode_abi_schema_manifest_view_value(&value.abi_schema)?);
+    map.insert("deployment".to_owned(), encode_deployment_manifest_view_value(&value.deployment)?);
     Ok(Value::Object(map))
 }
 

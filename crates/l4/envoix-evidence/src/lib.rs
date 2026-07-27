@@ -14,6 +14,9 @@ mod manifest;
 mod model;
 mod timeline;
 
+// Re-exported so the L5 projection can destructure the deployment identity by
+// name: L5 may see L4 and L0, never L1, and the manifest is L4's to publish.
+pub use envoix_deployment::DeploymentIdentity;
 pub use manifest::{AbiSchemaManifest, BUILD_TRUST_MANIFEST, BuildTrustManifest, ProtocolManifest};
 pub use model::{
     BoundedSafeDisplay, DiagnosticsDegraded, DiagnosticsStatus, EvidenceOutcome, EvidenceProgress,

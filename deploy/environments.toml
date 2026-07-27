@@ -1,8 +1,12 @@
 [meta]
 schema_version = 1
 purpose = "Authoritative Envoix dev/test/prod deployment identifiers"
+# These two are APPLIED, not described. `DeploymentCatalogue::identity` expands
+# them to spell a build's broker and relay, so the endpoint an app freezes into
+# every invite it mints is written here rather than by a `format!` next to the
+# code that needed one.
 node_endpoint_derivation = "<node_id>@<rendezvous.host>:<rendezvous.port>"
-https_url_derivation = "https://<service.host>:<service.port>"
+https_url_derivation = "<service.scheme>://<service.host>:<service.port>"
 provisioned_status = "provisioned"
 
 # Ports owned by services this project does not run. They are listed here so
@@ -30,6 +34,13 @@ note = "third-party live service on the shared host"
 # `require_distinct_hosts` did before D1.
 [validation]
 allowed_environments = ["dev", "test", "prod"]
+# Which environment a build carries when nothing selects one, and which one a
+# PUBLIC release must be built for. Both are read: `envoix-deployment`'s build
+# script resolves the first, and the release gate's destination rule enforces
+# the second. Naming production HERE is what stops "which one is production"
+# being a literal inside a gate.
+default_build_environment = "dev"
+production_environment = "prod"
 require_distinct_hosts = true
 require_distinct_node_ids = true
 reject_legacy_node_ids = true
@@ -62,9 +73,15 @@ diagnostics = 62
 # `xtask deploy-check` reports the environment as blocked and `envoix-server
 # --environment <name>` refuses to start.
 
+# `app_flavor` is which Android product flavour ships to this environment. It
+# lives here because "which app goes to which deployment" is a deployment fact,
+# and because the flavour dimension is called `endpoint`: before D2 it named one
+# without meaning one. A PUBLIC release must be the production environment's
+# flavour, which is the rule that finally keys on it.
 [environment.dev]
 name = "dev"
 port_block = 96
+app_flavor = "dev"
 
 [environment.dev.rendezvous]
 host = "rdz.dev.envoix.chkxwlyh.us"
@@ -100,6 +117,7 @@ port = 9662
 [environment.test]
 name = "test"
 port_block = 97
+app_flavor = "qa"
 
 [environment.test.rendezvous]
 host = "rdz.test.envoix.chkxwlyh.us"
@@ -132,6 +150,7 @@ port = 9762
 [environment.prod]
 name = "prod"
 port_block = 94
+app_flavor = "prod"
 
 [environment.prod.rendezvous]
 host = "rdz.prod.envoix.chkxwlyh.us"

@@ -14,8 +14,8 @@ pub use code::{
 };
 pub use error::{InviteError, InviteField, RecognizedInvalid};
 pub use invite::{
-    Invite, MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, QrMatrix, Role, encode_deep_link,
-    encode_qr, encode_qr_matrix, route_invite,
+    Invite, MAX_BROKER_LENGTH, MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_RELAY_LENGTH,
+    QrMatrix, Role, encode_deep_link, encode_qr, encode_qr_matrix, route_invite,
 };
 
 #[cfg(test)]

@@ -22,8 +22,8 @@ use envoix_evidence::{
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Retryability, SafeDisplay};
 use envoix_runtime::{
-    CardUpdateKind, Duty, DutyKind, DutyProvenance, LosslessUpdateKind, MAX_INVITE_LINK_LENGTH,
-    MAX_ROOM_CODE_LENGTH, SubscribeError, TransferRecord,
+    CardUpdateKind, Duty, DutyKind, DutyProvenance, LosslessUpdateKind, MAX_BROKER_LENGTH,
+    MAX_INVITE_LINK_LENGTH, MAX_RELAY_LENGTH, MAX_ROOM_CODE_LENGTH, SubscribeError, TransferRecord,
 };
 use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId, TransferId};
 
@@ -479,7 +479,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/8");
+        value["schema"] = serde_json::json!("envoix/binding/read/9");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {
@@ -684,7 +684,7 @@ fn generated_read_schema_roundtrip_and_containment() {
         /// Text this contract mints, so the bound is this contract's call.
         ContractLocal,
     }
-    let classified: [(&str, &str, TextBound); 14] = [
+    let classified: [(&str, &str, TextBound); 17] = [
         (
             "OutcomeView",
             "display",
@@ -745,6 +745,24 @@ fn generated_read_schema_roundtrip_and_containment() {
             "BuildManifestView",
             "package_version",
             TextBound::ContractLocal,
+        ),
+        (
+            "DeploymentManifestView",
+            "environment",
+            TextBound::ContractLocal,
+        ),
+        // These two ARE the broker and relay of every invite this build mints,
+        // so they are sized by the grammar that owns invites rather than by a
+        // number this contract chose.
+        (
+            "DeploymentManifestView",
+            "rendezvous_endpoint",
+            TextBound::Derived(MAX_BROKER_LENGTH),
+        ),
+        (
+            "DeploymentManifestView",
+            "relay_url",
+            TextBound::Derived(MAX_RELAY_LENGTH),
         ),
         ("ReadFrame", "schema", TextBound::ContractLocal),
     ];

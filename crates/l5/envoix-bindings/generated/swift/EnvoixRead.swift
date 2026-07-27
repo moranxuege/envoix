@@ -8,7 +8,7 @@
 
 import Foundation
 
-public let readSchemaId = "envoix/binding/read/7"
+public let readSchemaId = "envoix/binding/read/8"
 public let readMaxFrameBytes = 1048576
 private let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -321,10 +321,17 @@ public struct AbiSchemaManifestView: Equatable {
     public let operationEnvelopeSchemaId: String
 }
 
+public struct DeploymentManifestView: Equatable {
+    public let environment: String
+    public let rendezvousEndpoint: String
+    public let relayUrl: String
+}
+
 public struct BuildManifestView: Equatable {
     public let packageVersion: String
     public let `protocol`: ProtocolManifestView
     public let abiSchema: AbiSchemaManifestView
+    public let deployment: DeploymentManifestView
 }
 
 public enum ReadBody: Equatable {
@@ -1119,16 +1126,31 @@ public enum EnvoixReadCodec {
         )
     }
 
+    private static func decodeDeploymentManifestView(_ value: Any?, _ context: String) throws -> DeploymentManifestView {
+        let map = try object(value, context)
+        try knownKeys(map, ["environment", "rendezvous_endpoint", "relay_url"], context)
+        let environment = try asciiBounded(try field(map, "environment", "DeploymentManifestView.environment"), 32, "DeploymentManifestView.environment")
+        let rendezvousEndpoint = try asciiBounded(try field(map, "rendezvous_endpoint", "DeploymentManifestView.rendezvous_endpoint"), 1024, "DeploymentManifestView.rendezvous_endpoint")
+        let relayUrl = try asciiBounded(try field(map, "relay_url", "DeploymentManifestView.relay_url"), 2048, "DeploymentManifestView.relay_url")
+        return DeploymentManifestView(
+            environment: environment,
+            rendezvousEndpoint: rendezvousEndpoint,
+            relayUrl: relayUrl
+        )
+    }
+
     private static func decodeBuildManifestView(_ value: Any?, _ context: String) throws -> BuildManifestView {
         let map = try object(value, context)
-        try knownKeys(map, ["package_version", "protocol", "abi_schema"], context)
+        try knownKeys(map, ["package_version", "protocol", "abi_schema", "deployment"], context)
         let packageVersion = try asciiBounded(try field(map, "package_version", "BuildManifestView.package_version"), 32, "BuildManifestView.package_version")
         let `protocol` = try decodeProtocolManifestView(try field(map, "protocol", "BuildManifestView.protocol"), "BuildManifestView.protocol")
         let abiSchema = try decodeAbiSchemaManifestView(try field(map, "abi_schema", "BuildManifestView.abi_schema"), "BuildManifestView.abi_schema")
+        let deployment = try decodeDeploymentManifestView(try field(map, "deployment", "BuildManifestView.deployment"), "BuildManifestView.deployment")
         return BuildManifestView(
             packageVersion: packageVersion,
             `protocol`: `protocol`,
-            abiSchema: abiSchema
+            abiSchema: abiSchema,
+            deployment: deployment
         )
     }
 

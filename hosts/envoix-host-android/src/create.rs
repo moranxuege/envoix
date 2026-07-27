@@ -8,6 +8,7 @@
 
 use envoix_bindings::bridge::{CreateIntent, CreateSpec};
 use envoix_bindings::command::CreateRefusalView;
+use envoix_deployment::BUILD_TARGET;
 use envoix_invite::{
     EntropyError, EntropySource, Invite, InviteError, RecognizedInvalid, Role, generate_room_code,
     route_invite,
@@ -20,16 +21,6 @@ use envoix_types::{ByteCount, Direction, OfferedName};
 /// contract admits twice this, which is what makes that reachable.
 #[cfg(test)]
 const OVER_LONG_INVITE: usize = envoix_invite::MAX_INVITE_INPUT_LENGTH + 1;
-
-/// The rendezvous broker a card minted by this build is frozen to.
-///
-/// A deliberately unroutable placeholder: F2b creates cards and publishes
-/// shareable invites, and D1 is the step that points them at a deployment.
-/// Naming a real endpoint here would freeze it into every durable record this
-/// build writes, and `.invalid` can never be mistaken for one that works.
-const DEFAULT_BROKER: &str = "rendezvous.envoix.invalid";
-/// The relay a card minted by this build is frozen to. Same reasoning.
-const DEFAULT_RELAY: &str = "relay.envoix.invalid";
 
 /// The platform entropy the room code is drawn from.
 struct SystemEntropy;
@@ -57,8 +48,21 @@ fn plan_send(display_name: &str, total: u64) -> Result<NewTransfer, CreateRefusa
         OfferedName::from_untrusted(display_name).map_err(|_| CreateRefusalView::NameTooLong)?;
     let code = generate_room_code(&mut SystemEntropy).map_err(refusal)?;
     // The invite declares OUR role, so whoever joins takes the opposite one.
-    let invite =
-        Invite::new(code.as_str(), DEFAULT_BROKER, DEFAULT_RELAY, Role::Send).map_err(refusal)?;
+    //
+    // The broker and the relay are THIS BUILD'S deployment, resolved by
+    // `envoix-deployment`'s build script out of `deploy/environments.toml` and
+    // spelled by that file's own derivation templates. There is no constant
+    // here to drift from the catalogue, and no way to compile an app for an
+    // environment the catalogue will not deploy — which is why the endpoint
+    // that gets frozen into every durable record this build writes is safe to
+    // be a real one, where until D1 it had to be `.invalid`.
+    let invite = Invite::new(
+        code.as_str(),
+        BUILD_TARGET.rendezvous_endpoint.as_ref(),
+        BUILD_TARGET.relay_url.as_ref(),
+        Role::Send,
+    )
+    .map_err(refusal)?;
     Ok(NewTransfer {
         direction: Direction::Send,
         // Untrusted provider metadata, sanitized by the authority rather than
@@ -231,6 +235,40 @@ mod tests {
             second.pairing.expect("a channel").code(),
             channel.code(),
             "two sends shared a room code"
+        );
+    }
+
+    /// Every card this build mints is frozen to the deployment this build is
+    /// FOR — the endpoints the catalogue derives, not a constant beside them.
+    ///
+    /// This is the durable half of the deployment identity: the manifest says
+    /// which environment the artifact is for, and this is where that answer
+    /// becomes a value written into records that outlive the process.
+    #[test]
+    fn a_card_is_frozen_to_the_deployment_this_build_is_for() {
+        let planned = plan(&CreateSpec {
+            request_id: envoix_types::CommandId::from_bytes([5; 16]),
+            intent: CreateIntent::Send {
+                display_name: "report.pdf".to_owned(),
+                total: 1,
+            },
+        })
+        .expect("a send always plans");
+        let channel = planned.pairing.expect("a send publishes a channel");
+        let invite = channel.invite().expect("the stored fields spell an invite");
+        assert_eq!(invite.broker(), BUILD_TARGET.rendezvous_endpoint.as_ref());
+        assert_eq!(invite.relay(), BUILD_TARGET.relay_url.as_ref());
+
+        // Not a tautology about a placeholder: the endpoint is the catalogue's
+        // own derivation for a deployable environment, so it names a real
+        // rendezvous with a real key rather than something `.invalid`.
+        let catalogue =
+            envoix_deployment::DeploymentCatalogue::compiled().expect("the catalogue parses");
+        assert_eq!(
+            catalogue
+                .identity(BUILD_TARGET.environment.as_ref())
+                .expect("a build exists, so its environment is deployable"),
+            BUILD_TARGET,
         );
     }
 
