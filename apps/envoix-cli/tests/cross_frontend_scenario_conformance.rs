@@ -42,6 +42,65 @@ fn cross_frontend_scenario_conformance() {
         cli, flutter,
         "the generated Rust and Dart frontends observed different product truth"
     );
+
+    // Two witnesses agreeing is not enough. They read the SAME frames, so an
+    // authority that publishes a wrong fact is copied faithfully by both and
+    // the comparison above still passes — it can only catch a defect in one
+    // frontend, never one behind them. Proven, not assumed: making the
+    // authority publish an empty `allowed_actions` leaves `cli == flutter`
+    // untouched and is caught only here.
+    anchor(&cli);
+}
+
+/// A third statement of the same facts, independent of either frontend.
+///
+/// Every assertion is about what the AUTHORITY published, written out here so
+/// that agreement between the two witnesses is checked against something rather
+/// than against itself.
+fn anchor(witness: &str) {
+    let fact = |key: &str| -> String {
+        witness
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("the witness states {key}: {witness}"))
+            .to_owned()
+    };
+
+    assert_eq!(fact("created"), "true", "the send was created");
+    assert_eq!(fact("direction"), "send");
+    assert_eq!(fact("total"), TOTAL.to_string());
+    // A fresh send is not yet running, so pause and resume are not on offer and
+    // the authority says so itself — this is the legality table F2a made the
+    // reducer DERIVE, and the value nobody may re-derive in a frontend.
+    assert_eq!(
+        fact("before_allowed"),
+        "cancel,remove",
+        "the authority's opening offer for a fresh send"
+    );
+    assert_eq!(fact("acceptance"), "accepted");
+    assert_eq!(
+        fact("completion"),
+        "committed:cancelled",
+        "cancel is durable before it is reported"
+    );
+    assert_eq!(fact("after_state"), "cancelled");
+    assert_eq!(fact("after_quiescence"), "quiescent");
+    // Resume IS offered on a cancelled card, and deliberately: `on_resume`
+    // distinguishes `Cancelled => false` from the `_ => return` that refuses,
+    // so the flag means "start fresh" rather than "resume from offset". That is
+    // the cancel-keeps/remove-deletes design — the record survives so the
+    // transfer can be started again. Anchored because it is a product decision
+    // a reader would otherwise mistake for a leaked affordance.
+    assert_eq!(
+        fact("after_allowed"),
+        "resume,remove",
+        "a cancelled card keeps its record: it can be restarted or removed"
+    );
+    assert_eq!(
+        fact("card_count"),
+        "1",
+        "cancelling keeps the card; only remove deletes it"
+    );
 }
 
 #[test]
