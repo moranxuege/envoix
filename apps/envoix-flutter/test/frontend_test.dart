@@ -28,6 +28,9 @@ import 'package:envoix/lane.dart';
 import 'package:envoix/logs.dart';
 import 'package:envoix/main.dart';
 import 'package:envoix/qr.dart';
+// The theme moved out of `main.dart` when it grew from one seed colour into an
+// authored token set; the assertions on it are unchanged.
+import 'package:envoix/theme.dart';
 import 'package:flutter/foundation.dart' show DebugPrintCallback, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';

@@ -9,6 +9,7 @@ import 'instrumentation.dart';
 import 'labels.dart';
 import 'lane.dart';
 import 'qr.dart';
+import 'theme.dart';
 
 /// UI01 — every card this attachment can see, and how healthy the lane that
 /// fed them is.
@@ -36,7 +37,14 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final List<CardRow> cards = attachment.cards;
     return ListView(
-      padding: const EdgeInsets.all(12),
+      // The gutter is the design's, and the deep bottom pad is what keeps the
+      // floating action off the last card.
+      padding: const EdgeInsets.fromLTRB(
+        EnvoixSpace.gutter,
+        EnvoixSpace.row,
+        EnvoixSpace.gutter,
+        EnvoixSpace.aboveFloating,
+      ),
       children: <Widget>[
         if (fault != null) FaultBanner(fault: fault!),
         ActivitySummary(cards: cards),
@@ -44,9 +52,14 @@ class HomeScreen extends StatelessWidget {
             in attachment.refusals.entries)
           RefusalTile(card: refusal.key, reason: refusal.value),
         if (cards.isEmpty && fault == null)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
-            child: Text('No transfers yet. Use New transfer to start one.'),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 24),
+            child: Text(
+              'No transfers yet. Use New transfer to start one.',
+              style: EnvoixType.body.copyWith(
+                color: EnvoixTokens.of(context).muted,
+              ),
+            ),
           ),
         for (final CardRow row in cards)
           CardTile(
@@ -81,19 +94,20 @@ class ActivitySummary extends StatelessWidget {
     }
     final String summary = '${cards.length} '
         '${cards.length == 1 ? 'transfer' : 'transfers'}';
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: EnvoixSpace.row),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text(summary, style: Theme.of(context).textTheme.titleMedium),
+          Text(summary, style: EnvoixType.panel.copyWith(color: tokens.text)),
           if (tally.isNotEmpty)
             Text(
               <String>[
                 for (final MapEntry<String, int> state in tally.entries)
                   '${state.value} ${state.key}',
               ].join(' · '),
-              style: Theme.of(context).textTheme.bodySmall,
+              style: EnvoixType.subtitle.copyWith(color: tokens.muted),
             ),
         ],
       ),
@@ -121,16 +135,20 @@ class CardTile extends StatelessWidget {
     final CardView? view = row.view;
     reportRendered(row);
     reportCard(row);
-    final ThemeData theme = Theme.of(context);
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(EnvoixSpace.card),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Text(
+              // The offered name is the user's; the card id, when that is all
+              // there is, is the machine's.
               view?.offeredName ?? row.card,
-              style: theme.textTheme.titleMedium,
+              style: view == null
+                  ? EnvoixType.monoValue.copyWith(color: tokens.text)
+                  : EnvoixType.title.copyWith(color: tokens.text),
             ),
             if (view != null) ...<Widget>[
               _Fact(
@@ -139,7 +157,9 @@ class CardTile extends StatelessWidget {
                     ' · ${stateLabel(view.state)}',
               ),
               Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  vertical: EnvoixSpace.tight,
+                ),
                 // The indicator's own `semanticsValue` must be a bare number,
                 // which cannot say "unknown" — and a total of zero makes the
                 // fraction genuinely unanswerable. So the bar is described the
@@ -153,6 +173,9 @@ class CardTile extends StatelessWidget {
                   ),
                 ),
               ),
+              // Byte counts are the machine's arithmetic; the phase and the
+              // quiescence beside them are prose. The line carries both, so it
+              // is set in the monospace the counts want.
               Text(
                 <String>[
                   '${view.bytes}/${view.total} bytes',
@@ -161,7 +184,7 @@ class CardTile extends StatelessWidget {
                   phaseLabel(view.phase),
                   quiescenceLabel(view.quiescence),
                 ].join(' · '),
-                style: theme.textTheme.bodySmall,
+                style: EnvoixType.monoLine.copyWith(color: tokens.muted),
               ),
               if (view.invite != null)
                 _Invite(card: row.card, invite: view.invite!),
@@ -178,16 +201,23 @@ class CardTile extends StatelessWidget {
             if (row.status != StreamStatus.live)
               _Fact(label: 'Stream', value: streamLabel(row), warn: true),
             if (row.duty != null)
-              Text(
-                'The host asked the system to '
-                '${capabilityActionLabel(row.duty!.action)} '
-                '(${dutyKindLabel(row.duty!.duty.kind)})',
-                style: theme.textTheme.bodySmall,
+              Padding(
+                padding: const EdgeInsets.only(top: EnvoixSpace.tight),
+                child: Text(
+                  'The host asked the system to '
+                  '${capabilityActionLabel(row.duty!.action)} '
+                  '(${dutyKindLabel(row.duty!.duty.kind)})',
+                  style: EnvoixType.subtitle.copyWith(color: tokens.muted),
+                ),
               ),
-            Text(
-              'card ${row.card} · epoch ${row.epoch}'
-              '${view == null ? '' : ' · attempt ${view.generation}'}',
-              style: theme.textTheme.bodySmall,
+            // Identity, entirely the machine's.
+            Padding(
+              padding: const EdgeInsets.only(top: EnvoixSpace.tight),
+              child: Text(
+                'card ${row.card} · epoch ${row.epoch}'
+                '${view == null ? '' : ' · attempt ${view.generation}'}',
+                style: EnvoixType.monoLine.copyWith(color: tokens.muted),
+              ),
             ),
           ],
         ),
@@ -219,18 +249,20 @@ class _Actions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (view.allowedActions.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.only(top: 8),
+      return const Padding(
+        padding: EdgeInsets.only(top: EnvoixSpace.tight),
         child: _Fact(
           label: 'Actions',
           value: 'Nothing can be asked of this card right now.',
+          quiet: true,
         ),
       );
     }
     return Padding(
-      padding: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.only(top: EnvoixSpace.tight),
       child: Wrap(
-        spacing: 8,
+        spacing: EnvoixSpace.tight,
+        runSpacing: EnvoixSpace.tight,
         children: <Widget>[
           for (final CommandKindView kind in view.allowedActions)
             _Action(
@@ -287,21 +319,21 @@ class _Intent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     reportIntent(intent);
-    final ColorScheme colors = Theme.of(context).colorScheme;
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
     final bool waiting = intent.unsettled;
     return Padding(
-      padding: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.only(top: EnvoixSpace.tight),
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(EnvoixSpace.tight),
         decoration: BoxDecoration(
-          color: waiting
-              ? colors.secondaryContainer
-              : colors.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
+          // In flight is the accent tint; settled is the recessed well. Two
+          // different grounds, not two shades of one.
+          color: waiting ? tokens.accentSoft : tokens.bg,
+          borderRadius: EnvoixShape.corner,
           // The in-flight border is the second carrier: colour alone must not
           // be what says "this has not committed".
-          border: waiting ? Border.all(color: colors.secondary) : null,
+          border: waiting ? Border.all(color: tokens.accent) : null,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -338,29 +370,38 @@ class _Invite extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     reportInvite(card, invite);
-    final ColorScheme colors = Theme.of(context).colorScheme;
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
     // Exposed because sharing it IS the feature. Every other path renders it
     // redacted, which is what keeps it out of a log or a stack trace.
     final String? link = invite.link?.expose();
     return Padding(
-      padding: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.only(top: EnvoixSpace.tight),
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(EnvoixSpace.tight),
+        // The design's link row: raised fill inside a hairline, which is what
+        // marks a block as something to copy out of rather than to read.
         decoration: BoxDecoration(
-          color: colors.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
+          color: tokens.surfaceRaised,
+          borderRadius: EnvoixShape.corner,
+          border: Border.all(color: tokens.line),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            _Fact(label: 'Room code', value: invite.code.expose()),
+            // A room code is read out loud, character by character, so it is
+            // the one string on this screen that most needs the monospace.
+            _Fact(
+              label: 'Room code',
+              value: invite.code.expose(),
+              mono: true,
+            ),
             // The square the authority published. Absent is an ANSWER here —
             // an invite past the QR frontier draws one, never a blank space.
             InviteQr(qr: invite.qr),
             if (link != null)
               Padding(
-                padding: const EdgeInsets.only(top: 4),
+                padding: const EdgeInsets.only(top: EnvoixSpace.hair),
                 child: TextButton(
                   onPressed: () =>
                       Clipboard.setData(ClipboardData(text: link)),
@@ -390,15 +431,18 @@ class _Outcome extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ColorScheme colors = Theme.of(context).colorScheme;
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
     return Padding(
-      padding: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.only(top: EnvoixSpace.tight),
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(EnvoixSpace.tight),
+        // Deliberately NOT the danger tint: `completed`, `cancelled` and
+        // `paused` are outcome codes too, so colouring the block by the fact
+        // that it exists would be this app deciding which outcomes are bad.
         decoration: BoxDecoration(
-          color: colors.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
+          color: tokens.bg,
+          borderRadius: EnvoixShape.corner,
         ),
         child: _Fact(
           label: 'Outcome',
@@ -418,15 +462,30 @@ class _Outcome extends StatelessWidget {
 /// value, and the text itself carries no semantics of its own so the pair is
 /// read once rather than twice.
 class _Fact extends StatelessWidget {
-  const _Fact({required this.label, required this.value, this.warn = false});
+  const _Fact({
+    required this.label,
+    required this.value,
+    this.warn = false,
+    this.mono = false,
+    this.quiet = false,
+  });
 
   final String label;
   final String value;
   final bool warn;
 
+  /// Whether a machine wrote this value. Ids, codes, counts and paths are set
+  /// apart from prose by their face, not by their colour.
+  final bool mono;
+
+  /// Whether this is a fact about the absence of something, which is worth
+  /// reading but not worth reading first.
+  final bool quiet;
+
   @override
   Widget build(BuildContext context) {
-    final ColorScheme colors = Theme.of(context).colorScheme;
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
+    final TextStyle face = mono ? EnvoixType.monoValue : EnvoixType.value;
     return Semantics(
       container: true,
       label: label,
@@ -434,7 +493,13 @@ class _Fact extends StatelessWidget {
       child: ExcludeSemantics(
         child: Text(
           value,
-          style: TextStyle(color: warn ? colors.error : colors.onSurface),
+          style: face.copyWith(
+            color: warn
+                ? tokens.danger
+                : quiet
+                    ? tokens.muted
+                    : tokens.text,
+          ),
         ),
       ),
     );
@@ -449,14 +514,31 @@ class RefusalTile extends StatelessWidget {
   final SubscribeRejectionView reason;
 
   @override
-  Widget build(BuildContext context) => Card(
-        color: Theme.of(context).colorScheme.errorContainer,
-        child: ListTile(
-          title: Text('card $card is not observable'),
-          subtitle: Text(refusalLabel(reason)),
+  Widget build(BuildContext context) {
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
+    return Card(
+      color: tokens.soft(tokens.danger),
+      shape: _alarmed(tokens),
+      child: ListTile(
+        title: Text(
+          'card $card is not observable',
+          style: EnvoixType.monoValue.copyWith(color: tokens.text),
         ),
-      );
+        subtitle: Text(
+          refusalLabel(reason),
+          style: EnvoixType.subtitle.copyWith(color: tokens.danger),
+        ),
+      ),
+    );
+  }
 }
+
+/// The shape a banner takes when it is reporting a fault: the design's own
+/// tint-plus-hairline, in the danger ink rather than the neutral one.
+RoundedRectangleBorder _alarmed(EnvoixTokens tokens) => RoundedRectangleBorder(
+      borderRadius: EnvoixShape.corner,
+      side: BorderSide(color: tokens.danger.withValues(alpha: 0.35)),
+    );
 
 /// The lane is not delivering at all — the host may not be running.
 ///
@@ -469,21 +551,32 @@ class FaultBanner extends StatelessWidget {
   final Object fault;
 
   @override
-  Widget build(BuildContext context) => Semantics(
-        container: true,
-        liveRegion: true,
-        label: 'The lane is not delivering',
-        value: '$fault',
-        child: ExcludeSemantics(
-          child: Card(
-            color: Theme.of(context).colorScheme.errorContainer,
-            child: ListTile(
-              title: const Text('The lane is not delivering'),
-              subtitle: Text('$fault'),
+  Widget build(BuildContext context) {
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      label: 'The lane is not delivering',
+      value: '$fault',
+      child: ExcludeSemantics(
+        child: Card(
+          color: tokens.soft(tokens.danger),
+          shape: _alarmed(tokens),
+          child: ListTile(
+            title: Text(
+              'The lane is not delivering',
+              style: EnvoixType.title.copyWith(color: tokens.text),
+            ),
+            // Whatever went wrong is the machine's own words for it.
+            subtitle: Text(
+              '$fault',
+              style: EnvoixType.monoLine.copyWith(color: tokens.danger),
             ),
           ),
         ),
-      );
+      ),
+    );
+  }
 }
 
 /// What the lane dropped. Frames the app could not use are content, not
@@ -498,16 +591,16 @@ class LaneHealth extends StatelessWidget {
     final int dropped = FrameRejection.values
         .map(attachment.rejected)
         .fold(0, (int total, int count) => total + count);
-    final ThemeData theme = Theme.of(context);
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
     return Padding(
-      padding: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.only(top: EnvoixSpace.block),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           if (dropped > 0)
             Text(
               'This list may be missing updates.',
-              style: TextStyle(color: theme.colorScheme.error),
+              style: EnvoixType.value.copyWith(color: tokens.danger),
             ),
           Semantics(
             container: true,
@@ -523,7 +616,7 @@ class LaneHealth extends StatelessWidget {
                   // attachment has no intent to put it against.
                   'unaddressed answers ${attachment.commands.unaddressed}',
                 ].join(' · '),
-                style: theme.textTheme.bodySmall,
+                style: EnvoixType.monoLine.copyWith(color: tokens.muted),
               ),
             ),
           ),

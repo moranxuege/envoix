@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'bindings/envoix_read.dart';
+import 'theme.dart';
 
 /// UI06 — the invite as the square a camera reads.
 ///
@@ -37,13 +38,18 @@ class InviteQr extends StatelessWidget {
       child: ExcludeSemantics(
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: EnvoixSpace.tight),
             child: DecoratedBox(
               // The quiet zone is part of a readable code, not decoration: a
-              // scanner needs the light margin to find the square at all.
-              decoration: const BoxDecoration(color: Color(0xFFFFFFFF)),
+              // scanner needs the light margin to find the square at all. It
+              // stays white at both brightnesses for the same reason, and takes
+              // the design's corner so it sits in the card rather than on it.
+              decoration: const BoxDecoration(
+                color: Color(0xFFFFFFFF),
+                borderRadius: EnvoixShape.corner,
+              ),
               child: Padding(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(EnvoixSpace.row),
                 child: SizedBox(
                   width: 220,
                   height: 220,
@@ -69,18 +75,15 @@ class _NoSquare extends StatelessWidget {
   final String? reason;
 
   @override
-  Widget build(BuildContext context) {
-    final ThemeData theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Text(
-        reason ?? 'Too long to show as a code — share the link instead.',
-        style: theme.textTheme.bodySmall?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: EnvoixSpace.tight),
+        child: Text(
+          reason ?? 'Too long to show as a code — share the link instead.',
+          style: EnvoixType.subtitle.copyWith(
+            color: EnvoixTokens.of(context).muted,
+          ),
         ),
-      ),
-    );
-  }
+      );
 }
 
 /// The published modules unpacked into one bool per module.

@@ -7,6 +7,7 @@ import 'commands.dart';
 import 'instrumentation.dart';
 import 'labels.dart';
 import 'lane.dart';
+import 'theme.dart';
 
 /// UI02 — the new-transfer sheet: send a document, or join an invite.
 ///
@@ -163,25 +164,28 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final ThemeData theme = Theme.of(context);
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
     final PickedSource? source = _source;
     final CreateIntent? request = _request;
     return Padding(
       padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 16,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        left: EnvoixSpace.gutter,
+        right: EnvoixSpace.gutter,
+        top: EnvoixSpace.gutter,
+        bottom: MediaQuery.of(context).viewInsets.bottom + EnvoixSpace.foot,
       ),
       child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text('New transfer', style: theme.textTheme.titleLarge),
-            const SizedBox(height: 16),
-            Text('Send a file', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 8),
+            Text(
+              'New transfer',
+              style: EnvoixType.sheet.copyWith(color: tokens.text),
+            ),
+            const SizedBox(height: EnvoixSpace.block),
+            const _Section(label: 'Send a file'),
+            const SizedBox(height: EnvoixSpace.tight),
             Row(
               children: <Widget>[
                 Builder(
@@ -195,7 +199,7 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
                     );
                   },
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: EnvoixSpace.row),
                 Expanded(
                   child: Semantics(
                     container: true,
@@ -204,30 +208,46 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
                         ? 'nothing chosen yet'
                         : '${source.displayName}, ${source.sizeBytes} bytes',
                     child: ExcludeSemantics(
-                      child: Text(
-                        source == null
-                            ? 'No file chosen yet.'
-                            : '${source.displayName} · ${source.sizeBytes} bytes',
-                        style: theme.textTheme.bodySmall,
-                      ),
+                      // A chosen file's name and size come from the provider,
+                      // not from a person; the prompt in its place does not.
+                      child: source == null
+                          ? Text(
+                              'No file chosen yet.',
+                              style: EnvoixType.subtitle.copyWith(
+                                color: tokens.muted,
+                              ),
+                            )
+                          : Text(
+                              '${source.displayName} · '
+                              '${source.sizeBytes} bytes',
+                              style: EnvoixType.monoLine.copyWith(
+                                color: tokens.text,
+                              ),
+                            ),
                     ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: EnvoixSpace.row),
             Builder(
               builder: (BuildContext context) {
                 reportSheetControl(context, 'send');
-                return FilledButton(
-                  onPressed: source == null ? null : _send,
-                  child: const Text('Start sending'),
+                return SizedBox(
+                  // The design's primary action is full width and taller than
+                  // the controls around it. That is the whole of its rank.
+                  width: double.infinity,
+                  height: 46,
+                  child: FilledButton(
+                    onPressed: source == null ? null : _send,
+                    child: const Text('Start sending'),
+                  ),
                 );
               },
             ),
-            const Divider(height: 32),
-            Text('Join an invite', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 8),
+            const Divider(),
+            const _Section(label: 'Join an invite'),
+            const SizedBox(height: EnvoixSpace.tight),
             Builder(
               builder: (BuildContext context) {
                 reportSheetControl(context, 'invite');
@@ -235,16 +255,19 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
                   controller: _invite,
                   minLines: 1,
                   maxLines: 3,
+                  // An invite is machine-written and read back character by
+                  // character when it goes wrong, so the field is set in the
+                  // face that makes that possible.
+                  style: EnvoixType.monoValue.copyWith(color: tokens.text),
                   decoration: const InputDecoration(
                     labelText: 'Invite',
                     helperText: 'Paste or type the invite you were given.',
-                    border: OutlineInputBorder(),
                   ),
                 );
               },
             ),
             if (!_scanUnsupported) ...<Widget>[
-              const SizedBox(height: 8),
+              const SizedBox(height: EnvoixSpace.tight),
               Builder(
                 builder: (BuildContext context) {
                   reportSheetControl(context, 'scan');
@@ -256,7 +279,7 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
               ),
             ],
             if (_declined != null) ...<Widget>[
-              const SizedBox(height: 8),
+              const SizedBox(height: EnvoixSpace.tight),
               Semantics(
                 container: true,
                 liveRegion: true,
@@ -265,25 +288,29 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
                 child: ExcludeSemantics(
                   child: Text(
                     scanDeclinedLabel(_declined!),
-                    style: theme.textTheme.bodySmall,
+                    style: EnvoixType.subtitle.copyWith(color: tokens.warning),
                   ),
                 ),
               ),
             ],
-            const SizedBox(height: 8),
+            const SizedBox(height: EnvoixSpace.row),
             // Always enabled. Whether the text is an invite is the core's
             // answer, and a button that greys itself out has already decided.
             Builder(
               builder: (BuildContext context) {
                 reportSheetControl(context, 'join');
-                return FilledButton(
-                  onPressed: _join,
-                  child: const Text('Join'),
+                return SizedBox(
+                  width: double.infinity,
+                  height: 46,
+                  child: FilledButton(
+                    onPressed: _join,
+                    child: const Text('Join'),
+                  ),
                 );
               },
             ),
             if (request != null) ...<Widget>[
-              const SizedBox(height: 16),
+              const SizedBox(height: EnvoixSpace.block),
               _Answer(request: request),
             ],
           ],
@@ -307,7 +334,7 @@ class _Answer extends StatelessWidget {
     // makes to instrumentation: a harness asserting on an answer the model
     // holds would pass on one the user never saw.
     reportCreate(request);
-    final ColorScheme colors = Theme.of(context).colorScheme;
+    final EnvoixTokens tokens = EnvoixTokens.of(context);
     final bool refused = switch (request.outcome) {
       CreateOutcomeViewRefused() => true,
       _ => false,
@@ -315,6 +342,19 @@ class _Answer extends StatelessWidget {
     // Either fault — refused before sending, or sent with no answer — is a
     // failure to show as one.
     final bool faulted = request.fault != null;
+    final bool bad = refused || faulted;
+    // Three answers, three grounds. "Asked — no answer yet" is neither good nor
+    // bad and must not be dressed as either, so it keeps the neutral well.
+    final bool made = !bad &&
+        switch (request.outcome) {
+          CreateOutcomeViewCreated() => true,
+          _ => false,
+        };
+    final Color? signal = bad
+        ? tokens.danger
+        : made
+            ? tokens.success
+            : null;
     return Semantics(
       container: true,
       liveRegion: true,
@@ -323,16 +363,37 @@ class _Answer extends StatelessWidget {
       child: ExcludeSemantics(
         child: Container(
           width: double.infinity,
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(EnvoixSpace.card),
           decoration: BoxDecoration(
-            color: refused || faulted
-                ? colors.errorContainer
-                : colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(8),
+            color: signal == null ? tokens.bg : tokens.soft(signal),
+            borderRadius: EnvoixShape.corner,
+            border: Border.all(
+              color: signal?.withValues(alpha: 0.35) ?? tokens.line,
+            ),
           ),
-          child: Text(createAnswerLabel(request)),
+          child: Text(
+            createAnswerLabel(request),
+            style: EnvoixType.value.copyWith(color: signal ?? tokens.muted),
+          ),
         ),
       ),
     );
   }
+}
+
+/// A section's name, in the design's own caps label: tracked out, accent-strong
+/// and small, so that it reads as navigation rather than as a heading competing
+/// with the sheet's own title.
+class _Section extends StatelessWidget {
+  const _Section({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Text(
+        label.toUpperCase(),
+        style: EnvoixType.eyebrow.copyWith(
+          color: EnvoixTokens.of(context).accentStrong,
+        ),
+      );
 }

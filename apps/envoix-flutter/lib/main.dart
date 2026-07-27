@@ -7,6 +7,7 @@ import 'home.dart';
 import 'instrumentation.dart';
 import 'lane.dart';
 import 'logs.dart';
+import 'theme.dart';
 
 void main() => runApp(const EnvoixApp());
 
@@ -42,17 +43,6 @@ class EnvoixApp extends StatelessWidget {
         ),
       );
 }
-
-/// Light and dark are one design at two brightnesses, not two palettes that
-/// drift apart: Material 3 derives every on-colour from the seed, which is what
-/// keeps text readable in both without a hand-tuned pair per surface.
-ThemeData envoixTheme(Brightness brightness) => ThemeData(
-      useMaterial3: true,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xff2f6b5f),
-        brightness: brightness,
-      ),
-    );
 
 /// UI06 — the shell: one attachment, two destinations onto it.
 ///
@@ -111,11 +101,28 @@ class _ShellState extends State<Shell> {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      builder: (BuildContext context) => NewTransferSheet(
-        creator: _lane.creator,
-        picker: widget.picker,
-        ask: widget.ask,
-      ),
+      // The sheet is the one thing in this app that floats over the whole
+      // screen, so it is where the design spends its elevation. Material's own
+      // elevation shadow is a different drawing, so the sheet paints the
+      // authored one itself and Material's is switched off in the theme.
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext context) {
+        final EnvoixTokens tokens = EnvoixTokens.of(context);
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: tokens.surface,
+            borderRadius: const BorderRadius.vertical(
+              top: Radius.circular(EnvoixShape.radius),
+            ),
+            boxShadow: tokens.shadow,
+          ),
+          child: NewTransferSheet(
+            creator: _lane.creator,
+            picker: widget.picker,
+            ask: widget.ask,
+          ),
+        );
+      },
     );
   }
 
@@ -181,29 +188,43 @@ class _ShellState extends State<Shell> {
                 },
               )
             : null,
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: _destination,
-          onDestinationSelected: _show,
-          destinations: <NavigationDestination>[
-            const NavigationDestination(
-              icon: _Dot(filled: false),
-              selectedIcon: _Dot(filled: true),
-              label: 'Transfers',
-            ),
-            NavigationDestination(
-              // Reported rather than computed: the Logs destination is where
-              // the build this app is states which deployment it is FOR, and a
-              // harness that guessed its coordinate would be tapping arithmetic.
-              icon: Builder(
-                builder: (BuildContext context) {
-                  reportDestination(context, 'logs');
-                  return const _Dot(filled: false);
-                },
+        // The tab band is separated from the content by a hairline, the way
+        // every other edge in this design is. `NavigationBar` has no border of
+        // its own, so the border is drawn around it.
+        bottomNavigationBar: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border(
+              top: BorderSide(
+                color: EnvoixTokens.of(context).line,
+                width: EnvoixShape.hairline,
               ),
-              selectedIcon: const _Dot(filled: true),
-              label: 'Logs',
             ),
-          ],
+          ),
+          child: NavigationBar(
+            selectedIndex: _destination,
+            onDestinationSelected: _show,
+            destinations: <NavigationDestination>[
+              const NavigationDestination(
+                icon: _Dot(filled: false),
+                selectedIcon: _Dot(filled: true),
+                label: 'Transfers',
+              ),
+              NavigationDestination(
+                // Reported rather than computed: the Logs destination is where
+                // the build this app is states which deployment it is FOR, and
+                // a harness that guessed its coordinate would be tapping
+                // arithmetic.
+                icon: Builder(
+                  builder: (BuildContext context) {
+                    reportDestination(context, 'logs');
+                    return const _Dot(filled: false);
+                  },
+                ),
+                selectedIcon: const _Dot(filled: true),
+                label: 'Logs',
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -219,9 +240,11 @@ class _Plus extends StatelessWidget {
   Widget build(BuildContext context) => SizedBox(
         width: 16,
         height: 16,
+        // The colour the button hands its icons, so the glyph and the label
+        // beside it can never disagree about which fill they are sitting on.
         child: CustomPaint(
           painter: _PlusPainter(
-            Theme.of(context).colorScheme.onPrimaryContainer,
+            IconTheme.of(context).color ?? EnvoixTokens.of(context).onAccent,
           ),
         ),
       );
@@ -267,7 +290,10 @@ class _Dot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color color = Theme.of(context).colorScheme.onSurfaceVariant;
+    // The tab band tints its own icons — accent-strong on the selected tab,
+    // muted on the rest — so the dot takes the colour it is handed.
+    final Color color =
+        IconTheme.of(context).color ?? EnvoixTokens.of(context).muted;
     return Container(
       width: 12,
       height: 12,
