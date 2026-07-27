@@ -20,51 +20,81 @@ permissions:
 
 jobs:
   build:
-    name: build static Linux broker
+    name: build glibc-compatible Linux broker
     runs-on: ubuntu-latest
+    container:
+      image: debian:11-slim
     steps:
-      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y \
+            binutils \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            pkg-config
 
       - name: Set up Rust
         run: |
-          rustup update stable
-          rustup default stable
-          rustup target add x86_64-unknown-linux-musl
+          curl --proto '=https' --tlsv1.2 -sSf \
+            https://sh.rustup.rs \
+            -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustc" --version
+
+      - uses: actions/checkout@v4
+
+      - name: Record build ABI
+        run: |
           rustc --version
+          ldd --version | head -n 1
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Test rendezvous broker
         run: cargo test --locked -p envoix-rendezvous --test room_pairing
 
       - name: Build rendezvous server
-        run: |
-          cargo build --locked --release \
-            --target x86_64-unknown-linux-musl \
-            -p envoix-rendezvous-server
+        run: cargo build --locked --release -p envoix-rendezvous-server
 
       - name: Stage and verify artifact
         run: |
           mkdir -p dist
-          server="dist/envoix-rendezvous-server-linux-x86_64"
-          cp \
-            target/x86_64-unknown-linux-musl/release/envoix-rendezvous-server \
-            "$server"
+          server="dist/envoix-rendezvous-server-linux-x86_64-glibc231"
+          cp target/release/envoix-rendezvous-server "$server"
           file "$server"
-          if readelf -l "$server" | grep -q 'Requesting program interpreter'; then
-            echo "rendezvous server unexpectedly requires a dynamic interpreter" >&2
+          if ! readelf -l "$server" | grep -q \
+            'Requesting program interpreter: /lib64/ld-linux-x86-64.so.2'; then
+            echo "rendezvous server has an unexpected ELF interpreter" >&2
             exit 1
           fi
+          max_glibc="$(
+            readelf --version-info "$server" \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
+              | sort -Vu \
+              | tail -n 1
+          )"
+          test -n "$max_glibc"
+          if [ "$(printf '%s\n' "$max_glibc" 2.34 | sort -V | tail -n 1)" != 2.34 ]; then
+            echo "rendezvous server requires unsupported glibc $max_glibc" >&2
+            exit 1
+          fi
+          printf 'maximum required glibc: %s\n' "$max_glibc"
+          ldd "$server" | tee "$server.ldd.txt"
+          readelf --version-info "$server" > "$server.versions.txt"
           sha256sum "$server" > "$server.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: envoix-rendezvous-server-linux-x86_64
+          name: envoix-rendezvous-server-linux-x86_64-glibc231
           path: |
-            dist/envoix-rendezvous-server-linux-x86_64
-            dist/envoix-rendezvous-server-linux-x86_64.sha256
+            dist/envoix-rendezvous-server-linux-x86_64-glibc231
+            dist/envoix-rendezvous-server-linux-x86_64-glibc231.sha256
+            dist/envoix-rendezvous-server-linux-x86_64-glibc231.ldd.txt
+            dist/envoix-rendezvous-server-linux-x86_64-glibc231.versions.txt
           if-no-files-found: error

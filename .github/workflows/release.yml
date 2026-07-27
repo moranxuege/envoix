@@ -52,10 +52,6 @@ jobs:
       - name: Build envoix CLI
         run: cargo build --release -p envoix-cli --target ${{ matrix.target }}
 
-      - name: Build rendezvous server
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo build --locked --release -p envoix-rendezvous-server --target ${{ matrix.target }}
-
       - name: Stage binary
         shell: bash
         run: |
@@ -66,34 +62,11 @@ jobs:
             cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.name }}"
           fi
 
-      - name: Stage and verify rendezvous server
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          server="dist/envoix-rendezvous-server-linux-x86_64"
-          cp "target/${{ matrix.target }}/release/envoix-rendezvous-server" "$server"
-          file "$server"
-          if readelf -l "$server" | grep -q 'Requesting program interpreter'; then
-            echo "rendezvous server unexpectedly requires a dynamic interpreter" >&2
-            exit 1
-          fi
-          sha256sum "$server" > "$server.sha256"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: dist/${{ matrix.name }}
-          if-no-files-found: error
-
-      - name: Upload rendezvous server artifact
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: envoix-rendezvous-server-linux-x86_64
-          path: |
-            dist/envoix-rendezvous-server-linux-x86_64
-            dist/envoix-rendezvous-server-linux-x86_64.sha256
           if-no-files-found: error
 
   android:
