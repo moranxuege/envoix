@@ -56,7 +56,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Test rendezvous broker
-        run: cargo test --locked -p envoix-rendezvous --test room_pairing
+        run: |
+          cargo test --locked -p envoix-rendezvous --test room_pairing
+          cargo test --locked -p envoix-rendezvous-iroh --test iroh_loopback
 
       - name: Build rendezvous server
         run: cargo build --locked --release -p envoix-rendezvous-server
@@ -79,7 +81,7 @@ jobs:
               | tail -n 1
           )"
           test -n "$max_glibc"
-          if [ "$(printf '%s\n' "$max_glibc" 2.34 | sort -V | tail -n 1)" != 2.34 ]; then
+          if [ "$(printf '%s\n' "$max_glibc" 2.31 | sort -V | tail -n 1)" != 2.31 ]; then
             echo "rendezvous server requires unsupported glibc $max_glibc" >&2
             exit 1
           fi
