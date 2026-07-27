@@ -1,0 +1,70 @@
+name: rendezvous server artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+    paths:
+      - '.github/workflows/rendezvous-server-artifact.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'apps/envoix-rendezvous-server/**'
+      - 'crates/envoix-invite/**'
+      - 'crates/envoix-pairing/**'
+      - 'crates/envoix-rendezvous/**'
+      - 'crates/envoix-rendezvous-iroh/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build static Linux broker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Test rendezvous broker
+        run: cargo test --locked -p envoix-rendezvous --test room_pairing
+
+      - name: Build rendezvous server
+        run: |
+          cargo build --locked --release \
+            --target x86_64-unknown-linux-musl \
+            -p envoix-rendezvous-server
+
+      - name: Stage and verify artifact
+        run: |
+          mkdir -p dist
+          server="dist/envoix-rendezvous-server-linux-x86_64"
+          cp \
+            target/x86_64-unknown-linux-musl/release/envoix-rendezvous-server \
+            "$server"
+          file "$server"
+          if readelf -l "$server" | grep -q 'Requesting program interpreter'; then
+            echo "rendezvous server unexpectedly requires a dynamic interpreter" >&2
+            exit 1
+          fi
+          sha256sum "$server" > "$server.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: envoix-rendezvous-server-linux-x86_64
+          path: |
+            dist/envoix-rendezvous-server-linux-x86_64
+            dist/envoix-rendezvous-server-linux-x86_64.sha256
+          if-no-files-found: error
