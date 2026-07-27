@@ -515,10 +515,15 @@ final class NearbyDiscoveryTests: XCTestCase {
         coordinator.start()
 
         var result: String?
+        let completed = expectation(description: "secure mDNS delivery completed")
         coordinator.offerInvite(
             to: routingSelection(),
             invite: "envoix://room/R123456-a1b2-c3d4"
-        ) { result = $0 }
+        ) {
+            result = $0
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 1)
 
         XCTAssertEqual(result, "secure mDNS delivery failed")
         XCTAssertEqual(mdns.offeredPeerKeys, ["8899aabbccddeeff"])

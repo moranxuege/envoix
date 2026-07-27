@@ -286,6 +286,7 @@ impl NativeAuthentication {
         self.authenticated.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     fn persisted(&self) -> bool {
         self.persisted.load(Ordering::Acquire)
     }

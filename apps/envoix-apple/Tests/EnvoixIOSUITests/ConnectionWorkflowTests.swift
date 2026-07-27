@@ -151,7 +151,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             broker: "udp://broker.example:8555",
             relay: ""
         )
-        let credential = Data([4, 3, 2, 1])
+        let credential = validRememberedCredential(secretByte: 4)
         try store.acquireSession(pending.relationshipID)
         try store.create(pending, opaqueCredential: credential, generation: 11)
         store.releaseSession(pending.relationshipID)
@@ -173,7 +173,7 @@ final class ConnectionWorkflowTests: XCTestCase {
                     idleDeadline: nil
                 )
             ))
-            try await Task.sleep(nanoseconds: UInt64.max)
+            try await Task.sleep(nanoseconds: 60_000_000_000)
         }
         let workflow = ConnectionWorkflowState(
             gateway: gateway,
@@ -227,7 +227,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             try store.acquireSession(pending.relationshipID)
             try store.create(
                 pending,
-                opaqueCredential: Data([byte, byte, byte, byte]),
+                opaqueCredential: validRememberedCredential(secretByte: byte),
                 generation: 1
             )
             store.releaseSession(pending.relationshipID)
@@ -245,7 +245,7 @@ final class ConnectionWorkflowTests: XCTestCase {
                     idleDeadline: nil
                 )
             ))
-            try await Task.sleep(nanoseconds: UInt64.max)
+            try await Task.sleep(nanoseconds: 60_000_000_000)
         }
         let policy = RememberedRoomReconnectPolicy(
             connectorAttemptTimeout: 1,
@@ -311,7 +311,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             try store.acquireSession(pending.relationshipID)
             try store.create(
                 pending,
-                opaqueCredential: Data([byte, byte, byte, byte]),
+                opaqueCredential: validRememberedCredential(secretByte: byte),
                 generation: 1
             )
             store.releaseSession(pending.relationshipID)
@@ -329,7 +329,7 @@ final class ConnectionWorkflowTests: XCTestCase {
                     idleDeadline: nil
                 )
             ))
-            try await Task.sleep(nanoseconds: UInt64.max)
+            try await Task.sleep(nanoseconds: 60_000_000_000)
         }
         let workflow = ConnectionWorkflowState(
             gateway: gateway,
@@ -399,7 +399,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             broker: "udp://broker.example:8555",
             relay: ""
         )
-        let credential = Data([9, 8, 7, 6])
+        let credential = validRememberedCredential(secretByte: 9)
         try store.acquireSession(pending.relationshipID)
         try store.create(pending, opaqueCredential: credential, generation: 10)
         try store.rotate(
@@ -1305,4 +1305,12 @@ private final class InMemoryRememberedCredentialStore: RememberedCredentialStori
     func delete(_ reference: String) throws {
         values.removeValue(forKey: reference)
     }
+}
+
+private func validRememberedCredential(secretByte: UInt8) -> Data {
+    Data(
+        Array("ENVR".utf8)
+            + [1]
+            + Array(repeating: secretByte, count: 32)
+    )
 }
