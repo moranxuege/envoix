@@ -944,12 +944,15 @@ dependencies = [
  "blake3",
  "envoix-attempt-api",
  "envoix-attempt-iroh",
+ "envoix-bindings",
  "envoix-capabilities",
+ "envoix-host-android",
  "envoix-invite",
  "envoix-mailbox",
  "envoix-operation-store",
  "envoix-outcomes",
  "envoix-pairing",
+ "envoix-platform-local",
  "envoix-product",
  "envoix-protocol",
  "envoix-rendezvous",
@@ -1086,6 +1089,9 @@ version = "0.2.0"
 [[package]]
 name = "envoix-platform-local"
 version = "0.2.0"
+dependencies = [
+ "envoix-bindings",
+]
 
 [[package]]
 name = "envoix-product"

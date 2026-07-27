@@ -50,11 +50,9 @@ pub mod command {
 /// Generated capability-contract types and codec; see
 /// `generated/rust/capability.rs`.
 ///
-/// The Rust artifact exists because the generator emits one reference codec per
-/// schema and the drift tests compare against it — not because the authority
-/// speaks this contract. Its two peers are a frontend and its platform adapter
-/// (Dart and Kotlin today, SwiftUI and AVFoundation tomorrow); a capability
-/// frame never reaches the host, which decodes [`command`] alone.
+/// Its two peers are a frontend and its platform adapter (Dart and Kotlin on
+/// Android, Rust on the local CLI, SwiftUI and AVFoundation on Apple); a
+/// capability frame never reaches the host, which decodes [`command`] alone.
 pub mod capability {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

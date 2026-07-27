@@ -7,3 +7,6 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L6"
 role = "adapter"
+
+[dependencies]
+envoix-bindings = { path = "../../l5/envoix-bindings" }

@@ -12,11 +12,17 @@ role = "composition-root"
 name = "envoix"
 path = "src/main.rs"
 
+[dependencies]
+envoix-bindings = { path = "../../crates/l5/envoix-bindings" }
+envoix-platform-local = { path = "../../crates/l6/envoix-platform-local" }
+envoix-types = { path = "../../crates/l0/envoix-types" }
+
 [dev-dependencies]
 blake3.workspace = true
 envoix-attempt-api = { path = "../../crates/l1/envoix-attempt-api" }
 envoix-attempt-iroh = { path = "../../crates/l2/envoix-attempt-iroh" }
 envoix-capabilities = { path = "../../crates/l1/envoix-capabilities" }
+envoix-host-android = { path = "../../hosts/envoix-host-android" }
 envoix-invite = { path = "../../crates/l1/envoix-invite" }
 envoix-mailbox = { path = "../../crates/l2/envoix-mailbox" }
 envoix-operation-store = { path = "../../crates/l2/envoix-operation-store" }
