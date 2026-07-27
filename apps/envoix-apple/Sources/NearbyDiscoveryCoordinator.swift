@@ -1,5 +1,6 @@
 #if os(iOS)
 import Combine
+import EnvoixCore
 import Foundation
 import OSLog
 import UIKit
@@ -284,14 +285,15 @@ private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
             inviteRoute: source == .mdns ? Self.fixtureInviteRoute : nil
         )))
         if source == .bluetooth,
-           ProcessInfo.processInfo.arguments.contains("--ui-testing-incoming-nearby-offer") {
+           ProcessInfo.processInfo.arguments.contains("--ui-testing-incoming-nearby-offer"),
+           let invite = try? makePairingInvite(role: .send, broker: "", relay: "") {
             sink(.rendezvousOffer(NearbyRendezvousOffer(
                 requestID: "ui-test-incoming-offer",
                 senderPeerKey: "0011223344556677",
                 senderDisplayName: "Nearby test device",
                 source: source,
                 senderInboxEndpointID: source == .mdns ? Self.fixtureInboxEndpointID : nil,
-                invite: "envoix://pair/123456-alpha-bravo?role=send"
+                invite: invite.payload
             )))
         }
     }

@@ -42,11 +42,11 @@ struct OneTimeRoomView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
         }
+        .accessibilityIdentifier("one_time_room")
         .safeAreaInset(edge: .bottom) {
             roomControls
         }
         .background(Theme.bg)
-        .accessibilityIdentifier("one_time_room")
         .quickLookPreview($previewFileURL)
         .sheet(item: $receivedItemsPresentation) { presentation in
             ReceivedItemsSheet(urls: presentation.urls)
