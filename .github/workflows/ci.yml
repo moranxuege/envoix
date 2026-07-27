@@ -6,6 +6,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  matrix-contract:
+    name: test matrix contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate matrix registry
+        run: |
+          python3 scripts/matrix_contract.py validate-registry tests/e2e/matrix/cases.v1.json
+          python3 -m unittest discover -s scripts/tests -p 'test_matrix_contract.py'
+          bash -n scripts/cross-device-transfer-matrix.sh
+      - name: Publish registry summary
+        run: |
+          python3 scripts/matrix_contract.py render-report \
+            tests/e2e/matrix/cases.v1.json \
+            --output "$RUNNER_TEMP/matrix-registry.md"
+          cat "$RUNNER_TEMP/matrix-registry.md" >> "$GITHUB_STEP_SUMMARY"
+
   rust:
     name: rust fmt + clippy + test
     runs-on: ubuntu-latest
