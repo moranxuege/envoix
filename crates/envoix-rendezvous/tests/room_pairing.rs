@@ -184,6 +184,33 @@ fn start_peer(
     (reply, serve)
 }
 
+struct HeldPeer {
+    reply: tokio::sync::oneshot::Receiver<Reply>,
+    release: tokio::sync::oneshot::Sender<()>,
+    client: tokio::task::JoinHandle<()>,
+    serve: tokio::task::JoinHandle<Result<(), RendezvousError>>,
+}
+
+fn start_held_peer(registry: Arc<RoomRegistry>, join: Join) -> HeldPeer {
+    let (client, broker) = tokio::io::duplex(64 * 1024);
+    let serve = tokio::spawn(async move { registry.serve(broker_conn(broker)).await });
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let client = tokio::spawn(async move {
+        let (mut reader, mut writer) = tokio::io::split(client);
+        write_framed(&mut writer, &join).await.unwrap();
+        let reply = read_framed(&mut reader).await.unwrap();
+        reply_tx.send(reply).ok();
+        release_rx.await.ok();
+    });
+    HeldPeer {
+        reply: reply_rx,
+        release: release_tx,
+        client,
+        serve,
+    }
+}
+
 fn start_sourced_peer(
     registry: Arc<RoomRegistry>,
     source: PeerSource,
@@ -484,6 +511,11 @@ async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
         a_result,
         Err(envoix_rendezvous::RendezvousError::Io(_))
     ));
+    assert_eq!(
+        registry.metrics_snapshot().active_rooms,
+        1,
+        "human Room state must retain its original expiry and abuse budget"
+    );
 
     // B and C join the same room and must pair with each other, not the corpse.
     let (client_b, broker_b) = tokio::io::duplex(64 * 1024);
@@ -510,6 +542,146 @@ async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
 
     sb.await.unwrap().expect("broker serves B");
     sc.await.unwrap().expect("broker serves C");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canceled_remembered_waiter_releases_its_live_locator() {
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(30)));
+    let room = format!("r1_{}", "C".repeat(43));
+
+    let (mut canceled_client, canceled_broker) = tokio::io::duplex(4096);
+    let canceled_registry = registry.clone();
+    let canceled_serve =
+        tokio::spawn(async move { canceled_registry.serve(broker_conn(canceled_broker)).await });
+    write_framed(&mut canceled_client, &remembered_creator_join(&room))
+        .await
+        .unwrap();
+    wait_for_creator(&registry).await;
+    drop(canceled_client);
+
+    let canceled_result = tokio::time::timeout(Duration::from_secs(2), canceled_serve)
+        .await
+        .expect("canceled remembered waiter was not evicted promptly")
+        .unwrap();
+    assert!(matches!(canceled_result, Err(RendezvousError::Io(_))));
+    let metrics = registry.metrics_snapshot();
+    assert_eq!(metrics.waiting_creators, 0);
+    assert_eq!(metrics.room_connections, 0);
+    assert_eq!(
+        metrics.active_rooms, 0,
+        "an unpaired remembered locator must not retain a stale live Room"
+    );
+
+    let (responder, responder_serve) = start_peer(registry.clone(), remembered_creator_join(&room));
+    wait_for_creator(&registry).await;
+    let (connector, connector_serve) = start_peer(registry.clone(), remembered_joiner_join(&room));
+    assert!(matches!(responder.await.unwrap(), Reply::Paired(_)));
+    assert!(matches!(connector.await.unwrap(), Reply::Paired(_)));
+    responder_serve.await.unwrap().unwrap();
+    connector_serve.await.unwrap().unwrap();
+    assert_eq!(registry.metrics_snapshot().matches, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_remembered_match_releases_its_live_locator() {
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(30)));
+    let room = format!("r1_{}", "D".repeat(43));
+
+    let (responder, responder_serve) = start_peer(registry.clone(), remembered_creator_join(&room));
+    wait_for_creator(&registry).await;
+    let (connector, connector_serve) = start_peer(registry.clone(), remembered_joiner_join(&room));
+    assert!(matches!(responder.await.unwrap(), Reply::Paired(_)));
+    assert!(matches!(connector.await.unwrap(), Reply::Paired(_)));
+    responder_serve.await.unwrap().unwrap();
+    connector_serve.await.unwrap().unwrap();
+
+    let metrics = registry.metrics_snapshot();
+    assert_eq!(metrics.matches, 1);
+    assert_eq!(metrics.room_connections, 0);
+    assert_eq!(
+        metrics.active_rooms, 0,
+        "a consumed high-entropy locator must not occupy broker capacity until its TTL"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn matched_remembered_locator_rejects_a_third_peer_until_release() {
+    let config = BrokerConfig {
+        room_ttl: Duration::from_millis(100),
+        max_connections_per_room: 3,
+        ..abuse_test_config()
+    };
+    let registry = Arc::new(RoomRegistry::with_config(config).unwrap());
+    let room = format!("r1_{}", "E".repeat(43));
+
+    let HeldPeer {
+        reply: responder_reply,
+        release: release_responder,
+        client: responder,
+        serve: responder_serve,
+    } = start_held_peer(registry.clone(), remembered_creator_join(&room));
+    wait_for_creator(&registry).await;
+    let HeldPeer {
+        reply: connector_reply,
+        release: release_connector,
+        client: connector,
+        serve: connector_serve,
+    } = start_held_peer(registry.clone(), remembered_joiner_join(&room));
+    assert!(matches!(responder_reply.await.unwrap(), Reply::Paired(_)));
+    assert!(matches!(connector_reply.await.unwrap(), Reply::Paired(_)));
+
+    let (third, third_serve) = start_peer(registry.clone(), remembered_creator_join(&room));
+    let third = tokio::time::timeout(Duration::from_secs(1), third)
+        .await
+        .expect("a consumed remembered locator must reject a third peer")
+        .unwrap();
+    assert!(matches!(
+        third,
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomFull,
+            retry_after: Some(_),
+        })
+    ));
+    assert!(third_serve.await.unwrap().is_err());
+
+    let (fourth, fourth_serve) = start_peer(registry.clone(), remembered_joiner_join(&room));
+    let fourth = tokio::time::timeout(Duration::from_secs(1), fourth)
+        .await
+        .expect("a consumed remembered locator must reject a later connector")
+        .unwrap();
+    assert!(matches!(
+        fourth,
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomFull,
+            retry_after: Some(_),
+        })
+    ));
+    assert!(fourth_serve.await.unwrap().is_err());
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(
+        registry.metrics_snapshot().active_rooms,
+        1,
+        "the waiting-room TTL must not tombstone a locator whose pair is already matched"
+    );
+
+    release_responder.send(()).ok();
+    release_connector.send(()).ok();
+    responder.await.unwrap();
+    connector.await.unwrap();
+    responder_serve.await.unwrap().unwrap();
+    connector_serve.await.unwrap().unwrap();
+    assert_eq!(registry.metrics_snapshot().active_rooms, 0);
+
+    let (next_responder, next_responder_serve) =
+        start_peer(registry.clone(), remembered_creator_join(&room));
+    wait_for_creator(&registry).await;
+    let (next_connector, next_connector_serve) =
+        start_peer(registry.clone(), remembered_joiner_join(&room));
+    assert!(matches!(next_responder.await.unwrap(), Reply::Paired(_)));
+    assert!(matches!(next_connector.await.unwrap(), Reply::Paired(_)));
+    next_responder_serve.await.unwrap().unwrap();
+    next_connector_serve.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

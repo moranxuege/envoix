@@ -132,6 +132,7 @@ struct RoomState {
     instance: u64,
     expires_at: Instant,
     attempts: u32,
+    consumed: bool,
     attempt_rate: TokenBucket,
     active_connections: usize,
     waiter: Option<Waiter>,
@@ -349,10 +350,19 @@ impl Drop for RoomSlotGuard {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if let Some(room) = state.rooms.get_mut(&self.room_id)
+        let release_remembered_room = if let Some(room) = state.rooms.get_mut(&self.room_id)
             && room.instance == self.instance
         {
             room.active_connections = room.active_connections.saturating_sub(1);
+            is_remembered_room_id(&self.room_id)
+                && room.active_connections == 0
+                && room.waiter.is_none()
+                && matches!(room.status, RoomStatus::Live)
+        } else {
+            false
+        };
+        if release_remembered_room {
+            state.rooms.remove(&self.room_id);
         }
     }
 }
@@ -623,6 +633,7 @@ impl RoomRegistry {
                             instance,
                             expires_at: now + self.config.room_ttl,
                             attempts: 0,
+                            consumed: false,
                             attempt_rate: TokenBucket::new(self.config.room_attempt_rate, now),
                             active_connections: 0,
                             waiter: None,
@@ -637,6 +648,7 @@ impl RoomRegistry {
                 let rejection = match room.status {
                     RoomStatus::Expired { .. } => Some(BrokerOutcome::RoomExpired),
                     RoomStatus::Exhausted { .. } => Some(BrokerOutcome::RoomUnderAttack),
+                    RoomStatus::Live if room.consumed => Some(BrokerOutcome::RoomFull),
                     RoomStatus::Live
                         if room.waiter.is_some()
                             || room.active_connections >= self.config.max_connections_per_room =>
@@ -685,10 +697,17 @@ impl RoomRegistry {
                 let status_rejection = match room.status {
                     RoomStatus::Expired { .. } => Some(BrokerOutcome::RoomExpired),
                     RoomStatus::Exhausted { .. } => Some(BrokerOutcome::RoomUnderAttack),
+                    RoomStatus::Live if room.consumed => Some(BrokerOutcome::RoomFull),
                     RoomStatus::Live => None,
                 };
                 if let Some(outcome) = status_rejection {
-                    Some(self.rejection(outcome, None))
+                    Some(
+                        self.rejection(
+                            outcome,
+                            matches!(outcome, BrokerOutcome::RoomFull)
+                                .then_some(self.config.unavailable_retry_after),
+                        ),
+                    )
                 } else if room.short_code && room.attempts >= self.config.room_attempt_limit {
                     self.exhaust_room(room, now);
                     Some(self.rejection(BrokerOutcome::RoomUnderAttack, None))
@@ -756,6 +775,9 @@ impl RoomRegistry {
         match handed {
             Ok(()) => {
                 room.attempts += 1;
+                if is_remembered_room_id(room_id) {
+                    room.consumed = true;
+                }
                 self.metrics.matches.fetch_add(1, Ordering::Relaxed);
                 if room.short_code && room.attempts >= self.config.room_attempt_limit {
                     self.exhaust_room(room, now);
@@ -829,6 +851,7 @@ impl RoomRegistry {
 
     fn evict_waiter(&self, room_id: &str, waiter_id: u64) {
         let mut state = self.state.lock().expect("registry mutex");
+        let mut release_remembered_room = false;
         if let Some(room) = state.rooms.get_mut(room_id)
             && room
                 .waiter
@@ -836,6 +859,16 @@ impl RoomRegistry {
                 .is_some_and(|waiter| waiter.id == waiter_id)
         {
             room.waiter.take();
+            // Human Room codes retain their original expiry and attempt state
+            // across creator reconnects. A remembered locator is high entropy
+            // and has no Room attempt budget, so retaining an unpaired,
+            // disconnected responder only creates a stale scheduler slot.
+            release_remembered_room = is_remembered_room_id(room_id)
+                && matches!(room.status, RoomStatus::Live)
+                && room.active_connections <= 1;
+        }
+        if release_remembered_room {
+            state.rooms.remove(room_id);
         }
     }
 
@@ -869,7 +902,7 @@ impl RoomRegistry {
 
     fn sweep_rooms(&self, state: &mut RegistryState, now: Instant) {
         for room in state.rooms.values_mut() {
-            if matches!(room.status, RoomStatus::Live) && now >= room.expires_at {
+            if matches!(room.status, RoomStatus::Live) && !room.consumed && now >= room.expires_at {
                 room.waiter.take();
                 room.status = RoomStatus::Expired {
                     purge_at: now + self.config.room_tombstone_ttl,
@@ -1350,6 +1383,7 @@ mod tests {
                 instance: 1,
                 expires_at: now,
                 attempts: 0,
+                consumed: false,
                 attempt_rate: TokenBucket::new(config.room_attempt_rate, now),
                 active_connections: 0,
                 waiter: None,
