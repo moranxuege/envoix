@@ -160,6 +160,11 @@ if [ -z "$INVITE" ]; then
     }
     INVITE=$(cat "$FIXTURES/invite.txt")
     EXPECTED_CODE=$(cat "$FIXTURES/code.txt")
+    # The app reports the code's FINGERPRINT, never the code: the room code is
+    # the SPAKE2 pairing password and this line lands in a log that outlives the
+    # screen. The core writes the same fingerprint beside the code so a harness
+    # can still prove WHICH code was drawn without the log spelling it.
+    [ -f "$FIXTURES/fingerprint.txt" ] && EXPECTED_FINGERPRINT=$(cat "$FIXTURES/fingerprint.txt")
 fi
 case "$INVITE" in
 envoix://*) ;;
@@ -314,12 +319,17 @@ INVITE_LINE=$(flutter_log | sed -n "s/.*\(envoix-f2b invite card=$CARD .*\)/\1/p
     echo "FAIL: the joined card drew no invite; a card must show the channel it joined"
     exit 1
 }
-CODE=$(printf '%s\n' "$INVITE_LINE" | sed -n 's/.*code=\([^ ]*\).*/\1/p')
-if [ -n "$EXPECTED_CODE" ] && [ "$CODE" != "$EXPECTED_CODE" ]; then
-    echo "FAIL: the card shows room code '$CODE', but the invite carried '$EXPECTED_CODE'"
+FINGERPRINT=$(printf '%s\n' "$INVITE_LINE" | sed -n 's/.*fingerprint=\([^ ]*\).*/\1/p')
+[ -n "$FINGERPRINT" ] || {
+    echo "FAIL: the invite line reported no code fingerprint: $INVITE_LINE"
+    exit 1
+}
+if [ -n "${EXPECTED_FINGERPRINT:-}" ] && [ "$FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]; then
+    echo "FAIL: the card shows a code whose fingerprint is '$FINGERPRINT', but the" \
+         "invite carried one fingerprinting to '$EXPECTED_FINGERPRINT'"
     exit 1
 fi
-echo "    card $CARD is '$STATE' on room code $CODE"
+echo "    card $CARD is '$STATE' on the room code fingerprinting to $FINGERPRINT"
 
 # ---- 4. the send path reaches the picker, and cancelling creates nothing --
 echo "==> the send path reaches the system document picker"
