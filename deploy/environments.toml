@@ -32,12 +32,9 @@ note = "third-party live service on the shared host"
 allowed_environments = ["dev", "test", "prod"]
 require_distinct_hosts = true
 require_distinct_node_ids = true
-require_distinct_trust_roots = true
 reject_legacy_node_ids = true
 reject_legacy_hosts = true
-prod_must_not_trust_non_prod_roots = true
 node_id_format_when_provisioned = "hex64"
-trust_root_sha256_format_when_provisioned = "sha256-hex64"
 # The port block IS part of an environment's identity: two UDP listeners cannot
 # share a port on one host, and hostnames do not tell a validator whether two
 # environments share a machine. Each environment owns a hundred-block; the last
@@ -57,9 +54,12 @@ mailbox = 60
 evidence = 61
 diagnostics = 62
 
-# Replace each environment's two TBD values and set both statuses to
-# `provisioned` before that environment can be packaged or deployed. Until
-# then `xtask deploy-check` reports it as blocked and `envoix-server
+# An environment is deployable once its rendezvous node id is a real key and
+# its status says `provisioned`. That id IS the identity a client
+# authenticates: the rendezvous is QUIC/iroh and speaks raw public keys, and
+# the HTTPS services are terminated by the CDN in front of them, so there is no
+# certificate of ours in this file to pin. Until the id is replaced,
+# `xtask deploy-check` reports the environment as blocked and `envoix-server
 # --environment <name>` refuses to start.
 
 [environment.dev]
@@ -97,10 +97,6 @@ port = 9661
 bind = "127.0.0.1"
 port = 9662
 
-[environment.dev.trust]
-root_sha256 = "TBD_PROVISION_DEV_TRUST_ROOT_SHA256"
-provisioning_status = "tbd"
-
 [environment.test]
 name = "test"
 port_block = 97
@@ -133,10 +129,6 @@ port = 9761
 bind = "127.0.0.1"
 port = 9762
 
-[environment.test.trust]
-root_sha256 = "TBD_PROVISION_TEST_TRUST_ROOT_SHA256"
-provisioning_status = "tbd"
-
 [environment.prod]
 name = "prod"
 port_block = 94
@@ -165,7 +157,3 @@ port = 9461
 [environment.prod.diagnostics]
 bind = "127.0.0.1"
 port = 9462
-
-[environment.prod.trust]
-root_sha256 = "TBD_PROVISION_PROD_TRUST_ROOT_SHA256"
-provisioning_status = "tbd"

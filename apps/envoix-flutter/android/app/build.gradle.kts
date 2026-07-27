@@ -105,12 +105,6 @@ val forbiddenReleaseClasses = policyList("forbidden_release_classes")
 /** `(applicationId, versionCode)` pairs that have already been released. */
 val releasedVersions = policyList("released").toSet()
 
-/**
- * The typed distribution decision, never the spelling of the enum variant: the
- * Rust side owns what "public" implies and projects only the consequence.
- */
-val trustRootRequired = policy("trust_root_required").toBoolean()
-val declaredTrustRoot = policy("identity_trust_root")
 val compiledPackageVersion = policy("identity_package_version")
 val compiledBuildManifest = policy("build_manifest_sha256")
 
@@ -925,9 +919,6 @@ fun verifyReleaseArtifact(
     }
     for (className in releaseClasses) {
         failures += "$variant defines $className, which only a debug build may define"
-    }
-    if (trustRootRequired && declaredTrustRoot == "unprovisioned") {
-        failures += "$variant is a public release, but the deployment trust root slot is unprovisioned"
     }
     if (failures.isNotEmpty()) {
         throw GradleException(failures.joinToString(separator = "\n- ", prefix = "release trust failed:\n- "))

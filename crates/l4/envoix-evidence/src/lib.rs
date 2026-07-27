@@ -14,10 +14,7 @@ mod manifest;
 mod model;
 mod timeline;
 
-pub use manifest::{
-    AbiSchemaManifest, BUILD_TRUST_MANIFEST, BuildTrustManifest, ProtocolManifest,
-    TrustRootFingerprintSlot,
-};
+pub use manifest::{AbiSchemaManifest, BUILD_TRUST_MANIFEST, BuildTrustManifest, ProtocolManifest};
 pub use model::{
     BoundedSafeDisplay, DiagnosticsDegraded, DiagnosticsStatus, EvidenceOutcome, EvidenceProgress,
     EvidenceRecord, EvidenceValue, MAX_SAFE_DISPLAY_BYTES, RedactedId, RedactedIdKind, SessionKey,

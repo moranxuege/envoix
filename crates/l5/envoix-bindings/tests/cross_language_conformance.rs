@@ -25,8 +25,8 @@ use envoix_bindings::read::{
     PhaseView, ProductStateView, ProtocolManifestView, QrView, QuiescenceView, ReadBody, ReadError,
     ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView,
     RetiringView, RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView,
-    SubscribeRejectionView, TimelineEntryView, TrustRootSha256View, TrustRootView, WorkerKindView,
-    decode_read_frame, encode_read_frame,
+    SubscribeRejectionView, TimelineEntryView, WorkerKindView, decode_read_frame,
+    encode_read_frame,
 };
 use envoix_bindings::{
     Decl, Direction, SchemaDoc, command_schema_text, emit, parse_schema, read_schema_text,
@@ -883,9 +883,6 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
                         mailbox_receipt_schema_id: "envoix/mailbox/receipt/1".to_owned(),
                         operation_envelope_schema_id: "envoix/operation/envelope/1".to_owned(),
                     },
-                    trust_root: TrustRootView::Sha256(TrustRootSha256View {
-                        fingerprint: "ab".repeat(32),
-                    }),
                 }),
             },
         ),

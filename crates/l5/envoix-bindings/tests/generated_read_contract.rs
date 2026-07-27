@@ -18,7 +18,7 @@ use envoix_bindings::{
 };
 use envoix_evidence::{
     BUILD_TRUST_MANIFEST, EvidenceRecord, EvidenceSink, EvidenceValue, RedactedId, SessionKey,
-    TimelineStore, TrustRootFingerprintSlot,
+    TimelineStore,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Retryability, SafeDisplay};
 use envoix_runtime::{
@@ -315,9 +315,6 @@ fn full_surface_frames() -> Vec<ReadFrame> {
     }
     let timeline = store.snapshot(session).expect("session retained");
 
-    let mut provisioned = BUILD_TRUST_MANIFEST;
-    provisioned.trust_root = TrustRootFingerprintSlot::Sha256([0xab; 32]);
-
     vec![
         card_update_frame(1, card(), &CardUpdateKind::Snapshot(running.clone())),
         card_update_frame(1, card(), &CardUpdateKind::Progress(running)),
@@ -337,7 +334,6 @@ fn full_surface_frames() -> Vec<ReadFrame> {
         subscribe_rejected_frame(card(), SubscribeError::UnknownCard),
         evidence_frame(&timeline),
         build_manifest_frame(&BUILD_TRUST_MANIFEST),
-        build_manifest_frame(&provisioned),
     ]
 }
 
@@ -483,7 +479,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/7");
+        value["schema"] = serde_json::json!("envoix/binding/read/8");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {

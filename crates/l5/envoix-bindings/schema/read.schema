@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/6"
+id = "envoix/binding/read/7"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -455,25 +455,11 @@ fields = [
 
 [[decl]]
 kind = "struct"
-name = "TrustRootSha256View"
-fields = [{ name = "fingerprint", type = "hex64" }]
-
-[[decl]]
-kind = "union"
-name = "TrustRootView"
-variants = [
-  { name = "unprovisioned" },
-  { name = "sha256", payload = "TrustRootSha256View" },
-]
-
-[[decl]]
-kind = "struct"
 name = "BuildManifestView"
 fields = [
   { name = "package_version", type = "ascii(32)" },
   { name = "protocol", type = "ProtocolManifestView" },
   { name = "abi_schema", type = "AbiSchemaManifestView" },
-  { name = "trust_root", type = "TrustRootView" },
 ]
 
 # ---- the frame envelope ----

@@ -114,8 +114,7 @@ fn release_package_trust_and_metadata_agreement() {
     );
 
     // The manifest names every identity the running system speaks: all three
-    // generated binding contracts, all four L4 ids, the protocol set, and the
-    // trust-root slot.
+    // generated binding contracts, all four L4 ids, and the protocol set.
     for identity in [
         "abi_schema_read_binding_schema_id",
         "abi_schema_command_binding_schema_id",
@@ -129,21 +128,12 @@ fn release_package_trust_and_metadata_agreement() {
         "protocol_data_magic",
         "protocol_data_wire_version",
         "package_version",
-        "trust_root",
     ] {
         assert!(
             build.compiled.contains_key(identity),
             "the composed manifest must name {identity}"
         );
     }
-
-    // BN5 leaves the deployment trust root to D1; the rule is armed by the
-    // ledger's `distribution` switch, which D2 flips.
-    assert_eq!(
-        build.compiled.get("trust_root").map(String::as_str),
-        Some("unprovisioned"),
-        "BN5 leaves the deployment trust root to D1"
-    );
 
     // Drift against the LIVE declaration: the BN3 command contract is one of
     // the ids the BN5 manifest carries, so a silent change to it is caught.

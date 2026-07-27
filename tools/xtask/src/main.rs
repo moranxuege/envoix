@@ -60,10 +60,9 @@ fn main() -> ExitCode {
         }),
         "release-gate" => release_gate(&root).map(|report| {
             println!(
-                "release-gate: artifacts={} identities={} distribution={} disagreements={}",
+                "release-gate: artifacts={} identities={} disagreements={}",
                 report.artifacts,
                 report.identities,
-                report.distribution.as_str(),
                 report.verdict.disagreements.len()
             );
             for line in report.invariant_summary() {

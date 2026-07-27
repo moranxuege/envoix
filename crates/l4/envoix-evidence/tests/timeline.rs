@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use envoix_attempt_api::AttemptStamp;
 use envoix_evidence::{
     BUILD_TRUST_MANIFEST, DiagnosticsStatus, EvidenceProgress, EvidenceRecord, EvidenceSink,
-    EvidenceValue, MAX_SAFE_DISPLAY_BYTES, RedactedId, TimelineStore, TrustRootFingerprintSlot,
+    EvidenceValue, MAX_SAFE_DISPLAY_BYTES, RedactedId, TimelineStore,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Retryability, SafeDisplay};
 use envoix_types::{AttemptGen, ByteCount, RecordId, TransferId};
@@ -111,9 +111,5 @@ fn static_build_trust_manifest_is_typed_and_descriptive() {
             .abi_schema
             .evidence_timeline_schema_id
             .is_empty()
-    );
-    assert_eq!(
-        BUILD_TRUST_MANIFEST.trust_root,
-        TrustRootFingerprintSlot::Unprovisioned
     );
 }

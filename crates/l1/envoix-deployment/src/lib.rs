@@ -61,12 +61,9 @@ pub struct Validation {
     pub allowed_environments: Vec<String>,
     pub require_distinct_hosts: bool,
     pub require_distinct_node_ids: bool,
-    pub require_distinct_trust_roots: bool,
     pub reject_legacy_node_ids: bool,
     pub reject_legacy_hosts: bool,
-    pub prod_must_not_trust_non_prod_roots: bool,
     pub node_id_format_when_provisioned: ScalarFormat,
-    pub trust_root_sha256_format_when_provisioned: ScalarFormat,
     pub require_distinct_port_blocks: bool,
     pub require_consistent_service_port_suffixes: bool,
     pub require_loopback_diagnostics_bind: bool,
@@ -81,20 +78,17 @@ pub struct Validation {
 #[serde(rename_all = "kebab-case")]
 pub enum ScalarFormat {
     Hex64,
-    Sha256Hex64,
 }
 
 impl ScalarFormat {
     pub fn accepts(self, value: &str) -> bool {
-        let hex64 = |value: &str| {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        };
         match self {
-            Self::Hex64 => hex64(value),
-            Self::Sha256Hex64 => value.strip_prefix("sha256:").is_some_and(hex64),
+            Self::Hex64 => {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            }
         }
     }
 }
@@ -168,7 +162,6 @@ pub struct Environment {
     pub mailbox: PublicEndpoint,
     pub evidence: PublicEndpoint,
     pub diagnostics: DiagnosticsEndpoint,
-    pub trust: TrustRoot,
 }
 
 impl Environment {
@@ -218,13 +211,6 @@ pub struct DiagnosticsEndpoint {
     pub port: u16,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct TrustRoot {
-    pub root_sha256: String,
-    pub provisioning_status: ProvisioningStatus,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvisioningStatus {
@@ -271,36 +257,23 @@ impl DeploymentCatalogue {
     ///
     /// Structural violations are deliberately not folded in: they condemn the
     /// whole file, not one environment, and the caller reports them separately.
+    ///
+    /// The rendezvous node id is the only value an environment cannot be
+    /// deployed without: it IS the identity clients authenticate, and every
+    /// other endpoint is derived from the port block and the hostname.
     pub fn blockers(&self, name: &str) -> Vec<Blocker> {
         let Some(environment) = self.environment(name) else {
             return vec![Blocker::Undeclared];
         };
-        let mut blockers = Vec::new();
-        for (slot, status, value, format) in [
-            (
-                rules::Slot::RendezvousNodeId,
-                environment.rendezvous.provisioning_status,
-                environment.rendezvous.node_id.as_str(),
-                self.validation.node_id_format_when_provisioned,
-            ),
-            (
-                rules::Slot::TrustRoot,
-                environment.trust.provisioning_status,
-                environment.trust.root_sha256.as_str(),
-                self.validation.trust_root_sha256_format_when_provisioned,
-            ),
-        ] {
-            match status {
-                ProvisioningStatus::Tbd => {
-                    blockers.push(Blocker::Unprovisioned { slot });
-                }
-                ProvisioningStatus::Provisioned if !format.accepts(value) => {
-                    blockers.push(Blocker::Malformed { slot });
-                }
-                ProvisioningStatus::Provisioned => {}
+        let slot = rules::Slot::RendezvousNodeId;
+        let format = self.validation.node_id_format_when_provisioned;
+        match environment.rendezvous.provisioning_status {
+            ProvisioningStatus::Tbd => vec![Blocker::Unprovisioned { slot }],
+            ProvisioningStatus::Provisioned if !format.accepts(&environment.rendezvous.node_id) => {
+                vec![Blocker::Malformed { slot }]
             }
+            ProvisioningStatus::Provisioned => Vec::new(),
         }
-        blockers
     }
 }
 

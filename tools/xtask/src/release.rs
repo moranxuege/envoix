@@ -27,8 +27,8 @@ use envoix_bindings::build_manifest_frame;
 use envoix_bindings::read::encode_read_frame;
 use envoix_evidence::BUILD_TRUST_MANIFEST;
 use envoix_evidence::release::{
-    BuildIdentity, BundledLibrary, Distribution, Evaluation, MeasuredArtifact, PackagedFacts,
-    PackagedPayload, PayloadLibrary, PayloadRecord, ReleaseLedger, ReleaseVerdict, check_release,
+    BuildIdentity, BundledLibrary, Evaluation, MeasuredArtifact, PackagedFacts, PackagedPayload,
+    PayloadLibrary, PayloadRecord, ReleaseLedger, ReleaseVerdict, check_release,
     matches_source_glob, render_policy,
 };
 use object::{Object, ObjectSymbol};
@@ -74,7 +74,6 @@ struct PayloadFile {
 pub struct ReleaseGateReport {
     pub artifacts: usize,
     pub identities: usize,
-    pub distribution: Distribution,
     pub verdict: ReleaseVerdict,
 }
 
@@ -101,11 +100,11 @@ impl ReleaseGateReport {
         for Evaluation {
             artifact,
             invariant,
-            evaluated,
+            facts,
         } in &self.verdict.evaluations
         {
             let artifact = artifact.as_deref();
-            let entry = format!("{}={evaluated}", invariant.as_str());
+            let entry = format!("{}={facts}", invariant.as_str());
             match lines.last_mut() {
                 Some((subject, rendered)) if *subject == artifact => {
                     rendered.push(' ');
@@ -134,7 +133,6 @@ pub fn release_gate(root: &Path) -> CheckResult<ReleaseGateReport> {
     Ok(ReleaseGateReport {
         artifacts: artifacts.len(),
         identities: build.compiled.len(),
-        distribution: ledger.policy.distribution,
         verdict: check_release(&ledger, &build, &artifacts),
     })
 }

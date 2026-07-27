@@ -118,7 +118,6 @@ class BuildCard extends StatelessWidget {
                   '${abi.evidenceTimelineSchemaId}',
               'receipt ${abi.mailboxReceiptSchemaId} · '
                   'operation ${abi.operationEnvelopeSchemaId}',
-              'trust root ${trustRootLabel(manifest.trustRoot)}',
             ])
               Text(line, style: theme.textTheme.bodySmall),
           ],

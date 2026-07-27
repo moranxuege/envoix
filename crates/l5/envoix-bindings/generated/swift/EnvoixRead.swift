@@ -8,7 +8,7 @@
 
 import Foundation
 
-public let readSchemaId = "envoix/binding/read/6"
+public let readSchemaId = "envoix/binding/read/7"
 public let readMaxFrameBytes = 1048576
 private let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -321,20 +321,10 @@ public struct AbiSchemaManifestView: Equatable {
     public let operationEnvelopeSchemaId: String
 }
 
-public struct TrustRootSha256View: Equatable {
-    public let fingerprint: String
-}
-
-public enum TrustRootView: Equatable {
-    case unprovisioned
-    case sha256(TrustRootSha256View)
-}
-
 public struct BuildManifestView: Equatable {
     public let packageVersion: String
     public let `protocol`: ProtocolManifestView
     public let abiSchema: AbiSchemaManifestView
-    public let trustRoot: TrustRootView
 }
 
 public enum ReadBody: Equatable {
@@ -1129,44 +1119,16 @@ public enum EnvoixReadCodec {
         )
     }
 
-    private static func decodeTrustRootSha256View(_ value: Any?, _ context: String) throws -> TrustRootSha256View {
-        let map = try object(value, context)
-        try knownKeys(map, ["fingerprint"], context)
-        let fingerprint = try hexFixed(try field(map, "fingerprint", "TrustRootSha256View.fingerprint"), 64, "TrustRootSha256View.fingerprint")
-        return TrustRootSha256View(
-            fingerprint: fingerprint
-        )
-    }
-
-    private static func decodeTrustRootView(_ value: Any?, _ context: String) throws -> TrustRootView {
-        let map = try object(value, context)
-        try knownKeys(map, ["kind", "value"], context)
-        guard let kind = try field(map, "kind", context) as? String else {
-            throw ReadContractError(kind: .shape, context: context)
-        }
-        switch kind {
-        case "unprovisioned":
-            try unitPayload(map, "TrustRootView.unprovisioned")
-            return .unprovisioned
-        case "sha256":
-            return .sha256(try decodeTrustRootSha256View(payload(map, "TrustRootView.sha256"), "TrustRootView.sha256"))
-        default:
-            throw ReadContractError(kind: .unknownVariant, context: context)
-        }
-    }
-
     private static func decodeBuildManifestView(_ value: Any?, _ context: String) throws -> BuildManifestView {
         let map = try object(value, context)
-        try knownKeys(map, ["package_version", "protocol", "abi_schema", "trust_root"], context)
+        try knownKeys(map, ["package_version", "protocol", "abi_schema"], context)
         let packageVersion = try asciiBounded(try field(map, "package_version", "BuildManifestView.package_version"), 32, "BuildManifestView.package_version")
         let `protocol` = try decodeProtocolManifestView(try field(map, "protocol", "BuildManifestView.protocol"), "BuildManifestView.protocol")
         let abiSchema = try decodeAbiSchemaManifestView(try field(map, "abi_schema", "BuildManifestView.abi_schema"), "BuildManifestView.abi_schema")
-        let trustRoot = try decodeTrustRootView(try field(map, "trust_root", "BuildManifestView.trust_root"), "BuildManifestView.trust_root")
         return BuildManifestView(
             packageVersion: packageVersion,
             `protocol`: `protocol`,
-            abiSchema: abiSchema,
-            trustRoot: trustRoot
+            abiSchema: abiSchema
         )
     }
 

@@ -212,12 +212,6 @@ String diagnosticsLabel(DiagnosticsStatusView status) => switch (status) {
             '${value.droppedEvents == 1 ? 'entry was' : 'entries were'} dropped',
     };
 
-String trustRootLabel(TrustRootView root) => switch (root) {
-      TrustRootViewUnprovisioned() => 'not provisioned',
-      TrustRootViewSha256(:final TrustRootSha256View value) =>
-        'sha256 ${value.fingerprint}',
-    };
-
 /// What the lane last said about one card's stream.
 String streamLabel(CardRow row) => switch (row.status) {
       StreamStatus.live => 'Live',

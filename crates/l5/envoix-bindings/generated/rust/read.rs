@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/6";
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/7";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -478,22 +478,10 @@ pub struct AbiSchemaManifestView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TrustRootSha256View {
-    pub fingerprint: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TrustRootView {
-    Unprovisioned,
-    Sha256(TrustRootSha256View),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildManifestView {
     pub package_version: String,
     pub protocol: ProtocolManifestView,
     pub abi_schema: AbiSchemaManifestView,
-    pub trust_root: TrustRootView,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1883,63 +1871,16 @@ fn encode_abi_schema_manifest_view_value(value: &AbiSchemaManifestView) -> Resul
     Ok(Value::Object(map))
 }
 
-fn decode_trust_root_sha256_view_value(value: &Value, context: &'static str) -> Result<TrustRootSha256View, ReadError> {
-    let map = frame_object(value, context)?;
-    known_keys(map, &["fingerprint"], context)?;
-    let fingerprint = hex_fixed(field(map, "fingerprint", "TrustRootSha256View.fingerprint")?, 64, "TrustRootSha256View.fingerprint")?;
-    Ok(TrustRootSha256View {
-        fingerprint,
-    })
-}
-
-fn encode_trust_root_sha256_view_value(value: &TrustRootSha256View) -> Result<Value, ReadError> {
-    let mut map = Map::new();
-    map.insert("fingerprint".to_owned(), encode_hex_fixed(&value.fingerprint, 64, "TrustRootSha256View.fingerprint")?);
-    Ok(Value::Object(map))
-}
-
-fn decode_trust_root_view_value(value: &Value, context: &'static str) -> Result<TrustRootView, ReadError> {
-    let map = frame_object(value, context)?;
-    known_keys(map, &["kind", "value"], context)?;
-    let kind = field(map, "kind", context)?
-        .as_str()
-        .ok_or(ReadError::Shape { context })?;
-    match kind {
-        "unprovisioned" => {
-            unit_payload(map, "TrustRootView.unprovisioned")?;
-            Ok(TrustRootView::Unprovisioned)
-        }
-        "sha256" => Ok(TrustRootView::Sha256(decode_trust_root_sha256_view_value(payload(map, "TrustRootView.sha256")?, "TrustRootView.sha256")?)),
-        _ => Err(ReadError::UnknownVariant { context }),
-    }
-}
-
-fn encode_trust_root_view_value(value: &TrustRootView) -> Result<Value, ReadError> {
-    let mut map = Map::new();
-    match value {
-        TrustRootView::Unprovisioned => {
-            map.insert("kind".to_owned(), Value::from("unprovisioned"));
-        }
-        TrustRootView::Sha256(payload) => {
-            map.insert("kind".to_owned(), Value::from("sha256"));
-            map.insert("value".to_owned(), encode_trust_root_sha256_view_value(payload)?);
-        }
-    }
-    Ok(Value::Object(map))
-}
-
 fn decode_build_manifest_view_value(value: &Value, context: &'static str) -> Result<BuildManifestView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["package_version", "protocol", "abi_schema", "trust_root"], context)?;
+    known_keys(map, &["package_version", "protocol", "abi_schema"], context)?;
     let package_version = ascii_bounded(field(map, "package_version", "BuildManifestView.package_version")?, 32, "BuildManifestView.package_version")?;
     let protocol = decode_protocol_manifest_view_value(field(map, "protocol", "BuildManifestView.protocol")?, "BuildManifestView.protocol")?;
     let abi_schema = decode_abi_schema_manifest_view_value(field(map, "abi_schema", "BuildManifestView.abi_schema")?, "BuildManifestView.abi_schema")?;
-    let trust_root = decode_trust_root_view_value(field(map, "trust_root", "BuildManifestView.trust_root")?, "BuildManifestView.trust_root")?;
     Ok(BuildManifestView {
         package_version,
         protocol,
         abi_schema,
-        trust_root,
     })
 }
 
@@ -1948,7 +1889,6 @@ fn encode_build_manifest_view_value(value: &BuildManifestView) -> Result<Value, 
     map.insert("package_version".to_owned(), encode_ascii_bounded(&value.package_version, 32, "BuildManifestView.package_version")?);
     map.insert("protocol".to_owned(), encode_protocol_manifest_view_value(&value.protocol)?);
     map.insert("abi_schema".to_owned(), encode_abi_schema_manifest_view_value(&value.abi_schema)?);
-    map.insert("trust_root".to_owned(), encode_trust_root_view_value(&value.trust_root)?);
     Ok(Value::Object(map))
 }
 

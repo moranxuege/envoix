@@ -1129,13 +1129,6 @@ forbidden_manifest_markers = [":debuggable(", ":testOnly(", ".permission.E2E", "
 # defines it was built from the wrong sources.
 forbidden_release_classes = ["E2eBridge"]
 
-# "internal": signed with the real key but not distributed to anyone (what BN5
-# builds). "public": additionally requires a provisioned deployment trust root,
-# so flipping this before D1 has provisioned `deploy/environments.toml` fails
-# every release build. D2 owns the flip. Both enforcers read the DECISION this
-# implies (`trust_root_required` in the projection), never the spelling.
-distribution = "internal"
-
 # Append-only record of what has actually been released, one row per
 # (applicationId, versionCode). The release action appends a row; nothing ever
 # edits one. A build whose pair is already present fails, and so does one whose

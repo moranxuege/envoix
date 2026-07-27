@@ -1213,7 +1213,7 @@ void main() {
       semantics.dispose();
     });
 
-    testWidgets('the build the host states is shown, trust root and all', (
+    testWidgets('the build the host states is shown, every identity of it', (
       WidgetTester tester,
     ) async {
       final Attachment attachment = Attachment()
@@ -1237,14 +1237,16 @@ void main() {
                   mailboxReceiptSchemaId: 'receipt/1',
                   operationEnvelopeSchemaId: 'operation/1',
                 ),
-                trustRoot: TrustRootViewUnprovisioned(),
               ),
             ),
           ),
         );
       await pumpLogs(tester, attachment);
       expect(find.text('version 0.2.0'), findsOneWidget);
-      expect(find.text('trust root not provisioned'), findsOneWidget);
+      expect(
+        find.text('receipt receipt/1 · operation operation/1'),
+        findsOneWidget,
+      );
       expect(
         find.text('read envoix/binding/read/2 · command envoix/binding/command/1'),
         findsOneWidget,

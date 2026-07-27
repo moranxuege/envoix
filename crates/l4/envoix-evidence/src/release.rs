@@ -31,32 +31,6 @@ use std::fmt;
 
 use serde::Deserialize;
 
-/// How far a signed artifact may travel.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Distribution {
-    /// Signed with the real key, distributed to nobody.
-    Internal,
-    /// Distributed, so every deployment trust root must be provisioned.
-    Public,
-}
-
-impl Distribution {
-    /// Only a distributed artifact needs a provisioned deployment trust root.
-    /// Both enforcers read this decision, never the spelling of the variant.
-    pub fn requires_trust_root(self) -> bool {
-        matches!(self, Self::Public)
-    }
-
-    /// The wire spelling, for the report line and the flat policy projection.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Internal => "internal",
-            Self::Public => "public",
-        }
-    }
-}
-
 /// One (applicationId, versionCode) pair that has actually been released.
 /// Append-only: the release action adds a row, nothing ever edits one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -129,7 +103,6 @@ pub struct ReleasePolicy {
     pub forbidden_manifest_markers: Vec<String>,
     /// Class names a release dex may never define.
     pub forbidden_release_classes: Vec<String>,
-    pub distribution: Distribution,
 }
 
 /// What `scripts/build-jni-libs.sh` recorded about the payload it produced.
@@ -346,7 +319,6 @@ pub enum Invariant {
     TrustMaterial,
     ReleaseClasses,
     Permissions,
-    TrustRoot,
 }
 
 impl Invariant {
@@ -367,40 +339,22 @@ impl Invariant {
             Self::TrustMaterial => "trust_material",
             Self::ReleaseClasses => "release_classes",
             Self::Permissions => "permissions",
-            Self::TrustRoot => "trust_root",
-        }
-    }
-}
-
-/// Whether an invariant ran, and over how much.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Evaluated {
-    /// It ran, over this many facts. Zero facts is not the same as clean: a
-    /// rule with nothing to look at reports exactly what a satisfied one does,
-    /// which is why the number is printed rather than a tick.
-    Judged(usize),
-    /// It deliberately did not run, and why. The reason is DATA, stated once
-    /// here, so a dormant rule cannot be spelled as a condition in two
-    /// enforcers that then drift apart.
-    Skipped(&'static str),
-}
-
-impl fmt::Display for Evaluated {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Judged(facts) => write!(formatter, "{facts}"),
-            Self::Skipped(reason) => write!(formatter, "skipped({reason})"),
         }
     }
 }
 
 /// One invariant's record for one artifact, or for the build when it judges no
 /// single artifact.
+///
+/// Every invariant this gate owns runs on every release artifact, so a record
+/// is a count and never an absence. Zero facts is not the same as clean: a rule
+/// with nothing to look at reports exactly what a satisfied one does, which is
+/// why the number is carried rather than a tick.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Evaluation {
     pub artifact: Option<String>,
     pub invariant: Invariant,
-    pub evaluated: Evaluated,
+    pub facts: usize,
 }
 
 /// The whole verdict: every invariant that was evaluated, and everything that
@@ -414,18 +368,10 @@ pub struct ReleaseVerdict {
 
 impl ReleaseVerdict {
     fn judged(&mut self, artifact: Option<&str>, invariant: Invariant, facts: usize) {
-        self.record(artifact, invariant, Evaluated::Judged(facts));
-    }
-
-    fn skipped(&mut self, artifact: Option<&str>, invariant: Invariant, reason: &'static str) {
-        self.record(artifact, invariant, Evaluated::Skipped(reason));
-    }
-
-    fn record(&mut self, artifact: Option<&str>, invariant: Invariant, evaluated: Evaluated) {
         self.evaluations.push(Evaluation {
             artifact: artifact.map(ToOwned::to_owned),
             invariant,
-            evaluated,
+            facts,
         });
     }
 
@@ -578,8 +524,6 @@ pub enum Disagreement {
     TestTrustMaterial { variant: String, entry: String },
     /// The packaged dex defines a class only a debug build may define.
     DebugClassInRelease { variant: String, class: String },
-    /// A distributed release whose deployment trust root is still a blank slot.
-    TrustRootUnprovisioned { variant: String },
 }
 
 impl fmt::Display for Disagreement {
@@ -804,11 +748,6 @@ impl fmt::Display for Disagreement {
                 formatter,
                 "trust: {variant} defines {class}, which only a debug build may define"
             ),
-            Self::TrustRootUnprovisioned { variant } => write!(
-                formatter,
-                "trust: {variant} is a public release, but the deployment trust \
-                 root slot is unprovisioned"
-            ),
         }
     }
 }
@@ -886,13 +825,6 @@ pub fn render_policy(
         "forbidden_release_classes",
         policy.forbidden_release_classes.join(","),
     );
-    line("distribution", policy.distribution.as_str().to_owned());
-    // The typed decision, not the spelling of the variant: the packaging side
-    // never compares `distribution` against a string literal.
-    line(
-        "trust_root_required",
-        policy.distribution.requires_trust_root().to_string(),
-    );
     line(
         "released",
         ledger
@@ -939,19 +871,8 @@ pub fn check_release(
     check_payload_record(build, &mut verdict);
 
     let package_version = build.compiled.get("package_version");
-    let provisioned = build
-        .compiled
-        .get("trust_root")
-        .is_some_and(|slot| slot != "unprovisioned");
     for artifact in artifacts {
-        check_artifact(
-            ledger,
-            build,
-            artifact,
-            package_version,
-            provisioned,
-            &mut verdict,
-        );
+        check_artifact(ledger, build, artifact, package_version, &mut verdict);
     }
     verdict
 }
@@ -1067,7 +988,6 @@ fn check_artifact(
     build: &BuildIdentity,
     artifact: &MeasuredArtifact,
     package_version: Option<&String>,
-    provisioned: bool,
     verdict: &mut ReleaseVerdict,
 ) {
     let policy = &ledger.policy;
@@ -1283,19 +1203,6 @@ fn check_artifact(
             variant: variant.clone(),
             class: class.clone(),
         });
-    }
-
-    if policy.distribution.requires_trust_root() {
-        verdict.judged(label, Invariant::TrustRoot, 1);
-        if !provisioned {
-            verdict.disagree(Disagreement::TrustRootUnprovisioned { variant });
-        }
-    } else {
-        verdict.skipped(
-            label,
-            Invariant::TrustRoot,
-            "only a distributed release needs a provisioned trust root",
-        );
     }
 }
 
@@ -1532,7 +1439,6 @@ mod tests {
                 allowed_permissions: vec!["android.permission.INTERNET".to_owned()],
                 forbidden_manifest_markers: vec![":debuggable(".to_owned()],
                 forbidden_release_classes: vec!["E2eBridge".to_owned()],
-                distribution: Distribution::Internal,
             },
             released: Vec::new(),
         }
@@ -2035,8 +1941,8 @@ mod tests {
     }
 
     /// A clean verdict has to say what it looked at. Both artifact kinds report
-    /// the surface rule over every entry they carry, and the one rule that
-    /// deliberately does not run says so with its reason.
+    /// the surface rule over every entry they carry, and every invariant this
+    /// gate owns appears in the record.
     #[test]
     fn the_verdict_names_the_invariants_it_evaluated() {
         for (kind, entries) in [
@@ -2066,20 +1972,35 @@ mod tests {
                         record.artifact.as_deref() == Some(label.as_str())
                             && record.invariant == invariant
                     })
-                    .map(|record| record.evaluated)
+                    .map(|record| record.facts)
             };
             assert_eq!(
                 evaluated(Invariant::PackagedSurface),
-                Some(Evaluated::Judged(entries)),
+                Some(entries),
                 "{label} must report the surface rule over every entry"
             );
-            assert_eq!(
-                evaluated(Invariant::TrustRoot),
-                Some(Evaluated::Skipped(
-                    "only a distributed release needs a provisioned trust root"
-                )),
-                "{label} must say WHY the trust-root rule did not run"
-            );
+            // Every per-artifact invariant, so a rule that stops running on one
+            // kind of archive cannot hide behind a clean summary.
+            for invariant in [
+                Invariant::ArtifactAnchor,
+                Invariant::ReleasedVersions,
+                Invariant::AppVersion,
+                Invariant::Signers,
+                Invariant::Abis,
+                Invariant::PackagedPayload,
+                Invariant::PackagedSurface,
+                Invariant::ShippedManifest,
+                Invariant::ManifestMarkers,
+                Invariant::TrustMaterial,
+                Invariant::ReleaseClasses,
+                Invariant::Permissions,
+            ] {
+                assert!(
+                    evaluated(invariant).is_some(),
+                    "{label} must record {}",
+                    invariant.as_str()
+                );
+            }
         }
     }
 
@@ -2118,43 +2039,6 @@ mod tests {
                 .iter()
                 .any(|found| matches!(found, Disagreement::PolicyProjectionDrift { .. })),
             "a divergent projection must be a violation, got {disagreements:#?}"
-        );
-    }
-
-    /// A public release with a blank trust-root slot fails; a provisioned one
-    /// does not. The decision is the typed enum, never the string.
-    #[test]
-    fn a_public_release_requires_a_provisioned_trust_root() {
-        assert!(!Distribution::Internal.requires_trust_root());
-        assert!(Distribution::Public.requires_trust_root());
-
-        let mut ledger = ledger();
-        ledger.policy.distribution = Distribution::Public;
-        let mut build = identity(&ledger);
-        build
-            .compiled
-            .insert("trust_root".to_owned(), "unprovisioned".to_owned());
-        build
-            .declared
-            .insert("trust_root".to_owned(), "unprovisioned".to_owned());
-        build.policy_projection = render_policy(&ledger, &build.declared, &build.payload);
-        assert_eq!(
-            check_release(&ledger, &build, &[artifact()]).disagreements,
-            vec![Disagreement::TrustRootUnprovisioned {
-                variant: "prodRelease".to_owned(),
-            }]
-        );
-
-        build
-            .compiled
-            .insert("trust_root".to_owned(), "sha256".to_owned());
-        build
-            .declared
-            .insert("trust_root".to_owned(), "sha256".to_owned());
-        build.policy_projection = render_policy(&ledger, &build.declared, &build.payload);
-        assert_eq!(
-            check_release(&ledger, &build, &[artifact()]).disagreements,
-            Vec::new()
         );
     }
 

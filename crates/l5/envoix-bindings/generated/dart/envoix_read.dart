@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/6';
+const String readSchemaId = 'envoix/binding/read/7';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -572,40 +572,16 @@ final class AbiSchemaManifestView {
   final String operationEnvelopeSchemaId;
 }
 
-final class TrustRootSha256View {
-  const TrustRootSha256View({
-    required this.fingerprint,
-  });
-
-  final String fingerprint;
-}
-
-sealed class TrustRootView {
-  const TrustRootView();
-}
-
-final class TrustRootViewUnprovisioned extends TrustRootView {
-  const TrustRootViewUnprovisioned();
-}
-
-final class TrustRootViewSha256 extends TrustRootView {
-  const TrustRootViewSha256(this.value);
-
-  final TrustRootSha256View value;
-}
-
 final class BuildManifestView {
   const BuildManifestView({
     required this.packageVersion,
     required this.protocol,
     required this.abiSchema,
-    required this.trustRoot,
   });
 
   final String packageVersion;
   final ProtocolManifestView protocol;
   final AbiSchemaManifestView abiSchema;
-  final TrustRootView trustRoot;
 }
 
 sealed class ReadBody {
@@ -1440,42 +1416,13 @@ AbiSchemaManifestView _decodeAbiSchemaManifestView(Object? value, String context
   );
 }
 
-TrustRootSha256View _decodeTrustRootSha256View(Object? value, String context) {
-  final map = _object(value, context);
-  _knownKeys(map, const {'fingerprint'}, context);
-  return TrustRootSha256View(
-    fingerprint: _hexFixed(_field(map, 'fingerprint', 'TrustRootSha256View.fingerprint'), 64, 'TrustRootSha256View.fingerprint'),
-  );
-}
-
-TrustRootView _decodeTrustRootView(Object? value, String context) {
-  final map = _object(value, context);
-  _knownKeys(map, const {'kind', 'value'}, context);
-  final kind = _field(map, 'kind', context);
-  if (kind is! String) {
-    throw ReadContractException(ReadErrorKind.shape, context);
-  }
-  switch (kind) {
-    case 'unprovisioned':
-      _unitPayload(map, 'TrustRootView.unprovisioned');
-      return const TrustRootViewUnprovisioned();
-    case 'sha256':
-      return TrustRootViewSha256(
-        _decodeTrustRootSha256View(_payload(map, 'TrustRootView.sha256'), 'TrustRootView.sha256'),
-      );
-    default:
-      throw ReadContractException(ReadErrorKind.unknownVariant, context);
-  }
-}
-
 BuildManifestView _decodeBuildManifestView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'package_version', 'protocol', 'abi_schema', 'trust_root'}, context);
+  _knownKeys(map, const {'package_version', 'protocol', 'abi_schema'}, context);
   return BuildManifestView(
     packageVersion: _asciiBounded(_field(map, 'package_version', 'BuildManifestView.package_version'), 32, 'BuildManifestView.package_version'),
     protocol: _decodeProtocolManifestView(_field(map, 'protocol', 'BuildManifestView.protocol'), 'BuildManifestView.protocol'),
     abiSchema: _decodeAbiSchemaManifestView(_field(map, 'abi_schema', 'BuildManifestView.abi_schema'), 'BuildManifestView.abi_schema'),
-    trustRoot: _decodeTrustRootView(_field(map, 'trust_root', 'BuildManifestView.trust_root'), 'BuildManifestView.trust_root'),
   );
 }
 

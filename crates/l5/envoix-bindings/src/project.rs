@@ -10,7 +10,7 @@
 
 use envoix_evidence::{
     AbiSchemaManifest, BuildTrustManifest, DiagnosticsStatus, EvidenceValue, RedactedIdKind,
-    SessionTimeline, TrustRootFingerprintSlot,
+    SessionTimeline,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_runtime::{
@@ -31,7 +31,7 @@ use crate::read::{
     QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame, RecoveryView, RedactedIdKindView,
     RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView, RunningView,
     SessionKeyView, SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView,
-    TrustRootSha256View, TrustRootView, WorkerKindView,
+    WorkerKindView,
 };
 
 /// The codec bound on safe-display text and on offered names: L0 owns both
@@ -130,8 +130,7 @@ pub fn evidence_frame(timeline: &SessionTimeline) -> ReadFrame {
     }))
 }
 
-/// The static build/trust manifest as a read frame — the COMPLETE build
-/// identity.
+/// The static build manifest as a read frame — the COMPLETE build identity.
 ///
 /// The L4 manifest cannot name the generated binding contracts (L5 depends on
 /// L4, never the reverse), so this projection composes them: the L4
@@ -162,14 +161,6 @@ pub fn build_manifest_frame(manifest: &BuildTrustManifest) -> ReadFrame {
             evidence_timeline_schema_id: evidence_timeline_schema_id.to_owned(),
             mailbox_receipt_schema_id: mailbox_receipt_schema_id.to_owned(),
             operation_envelope_schema_id: operation_envelope_schema_id.to_owned(),
-        },
-        trust_root: match manifest.trust_root {
-            TrustRootFingerprintSlot::Unprovisioned => TrustRootView::Unprovisioned,
-            TrustRootFingerprintSlot::Sha256(fingerprint) => {
-                TrustRootView::Sha256(TrustRootSha256View {
-                    fingerprint: hex_bytes(&fingerprint),
-                })
-            }
         },
     }))
 }

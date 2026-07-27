@@ -7,14 +7,12 @@ use crate::{DeploymentCatalogue, ProvisioningStatus, Service};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Slot {
     RendezvousNodeId,
-    TrustRoot,
 }
 
 impl Slot {
     const fn as_str(self) -> &'static str {
         match self {
             Self::RendezvousNodeId => "rendezvous.node_id",
-            Self::TrustRoot => "trust.root_sha256",
         }
     }
 }
@@ -93,12 +91,6 @@ pub enum Violation {
         owners: [String; 2],
     },
     LegacyNodeId {
-        environment: String,
-    },
-    DuplicateTrustRoot {
-        owners: [String; 2],
-    },
-    ProdTrustsNonProdRoot {
         environment: String,
     },
     MalformedProvisionedValue {
@@ -180,15 +172,6 @@ impl fmt::Display for Violation {
                 formatter,
                 "deployment: {environment} reuses the legacy rendezvous node id"
             ),
-            Self::DuplicateTrustRoot { owners } => write!(
-                formatter,
-                "deployment: {} and {} share a provisioned trust root",
-                owners[0], owners[1]
-            ),
-            Self::ProdTrustsNonProdRoot { environment } => write!(
-                formatter,
-                "deployment: prod trusts the same root as {environment}"
-            ),
             Self::MalformedProvisionedValue { owner } => write!(
                 formatter,
                 "deployment: {owner} claims to be provisioned but does not match its declared format"
@@ -232,16 +215,8 @@ impl DeploymentCatalogue {
                 "require_distinct_node_ids",
                 validation.require_distinct_node_ids,
             ),
-            (
-                "require_distinct_trust_roots",
-                validation.require_distinct_trust_roots,
-            ),
             ("reject_legacy_node_ids", validation.reject_legacy_node_ids),
             ("reject_legacy_hosts", validation.reject_legacy_hosts),
-            (
-                "prod_must_not_trust_non_prod_roots",
-                validation.prod_must_not_trust_non_prod_roots,
-            ),
             (
                 "require_distinct_port_blocks",
                 validation.require_distinct_port_blocks,
@@ -371,7 +346,6 @@ impl DeploymentCatalogue {
 
     fn check_provisioned_values(&self, legacy_node_ids: &[&str], violations: &mut Vec<Violation>) {
         let mut node_ids: BTreeMap<&str, String> = BTreeMap::new();
-        let mut trust_roots: BTreeMap<&str, String> = BTreeMap::new();
         for (name, environment) in &self.environment {
             if environment.rendezvous.provisioning_status == ProvisioningStatus::Provisioned {
                 let node_id = environment.rendezvous.node_id.as_str();
@@ -395,40 +369,6 @@ impl DeploymentCatalogue {
                         environment: name.clone(),
                     });
                 }
-            }
-            if environment.trust.provisioning_status == ProvisioningStatus::Provisioned {
-                let root = environment.trust.root_sha256.as_str();
-                let owner = format!("{name}.trust");
-                if !self
-                    .validation
-                    .trust_root_sha256_format_when_provisioned
-                    .accepts(root)
-                {
-                    violations.push(Violation::MalformedProvisionedValue {
-                        owner: owner.clone(),
-                    });
-                }
-                if let Some(first) = trust_roots.insert(root, owner.clone()) {
-                    violations.push(Violation::DuplicateTrustRoot {
-                        owners: [first, owner],
-                    });
-                }
-            }
-        }
-        let Some(prod) = self.environment.get("prod") else {
-            return;
-        };
-        if prod.trust.provisioning_status != ProvisioningStatus::Provisioned {
-            return;
-        }
-        for (name, environment) in &self.environment {
-            if name != "prod"
-                && environment.trust.provisioning_status == ProvisioningStatus::Provisioned
-                && environment.trust.root_sha256 == prod.trust.root_sha256
-            {
-                violations.push(Violation::ProdTrustsNonProdRoot {
-                    environment: name.clone(),
-                });
             }
         }
     }

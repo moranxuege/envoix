@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/6"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/7"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -319,20 +319,10 @@ data class AbiSchemaManifestView(
     val operationEnvelopeSchemaId: String,
 )
 
-data class TrustRootSha256View(
-    val fingerprint: String,
-)
-
-sealed interface TrustRootView {
-    object Unprovisioned : TrustRootView
-    data class Sha256(val value: TrustRootSha256View) : TrustRootView
-}
-
 data class BuildManifestView(
     val packageVersion: String,
     val protocol: ProtocolManifestView,
     val abiSchema: AbiSchemaManifestView,
-    val trustRoot: TrustRootView,
 )
 
 sealed interface ReadBody {
@@ -1049,39 +1039,13 @@ object EnvoixReadCodec {
         )
     }
 
-    private fun decodeTrustRootSha256View(value: Any?, context: String): TrustRootSha256View {
-        val map = obj(value, context)
-        knownKeys(map, setOf("fingerprint"), context)
-        return TrustRootSha256View(
-            fingerprint = hexFixed(field(map, "fingerprint", "TrustRootSha256View.fingerprint"), 64, "TrustRootSha256View.fingerprint"),
-        )
-    }
-
-    private fun decodeTrustRootView(value: Any?, context: String): TrustRootView {
-        val map = obj(value, context)
-        knownKeys(map, setOf("kind", "value"), context)
-        val kind = field(map, "kind", context) as? String
-            ?: throw ReadContractException(ReadErrorKind.SHAPE, context)
-        return when (kind) {
-            "unprovisioned" -> {
-                unitPayload(map, "TrustRootView.unprovisioned")
-                TrustRootView.Unprovisioned
-            }
-            "sha256" -> TrustRootView.Sha256(
-                decodeTrustRootSha256View(payload(map, "TrustRootView.sha256"), "TrustRootView.sha256"),
-            )
-            else -> throw ReadContractException(ReadErrorKind.UNKNOWN_VARIANT, context)
-        }
-    }
-
     private fun decodeBuildManifestView(value: Any?, context: String): BuildManifestView {
         val map = obj(value, context)
-        knownKeys(map, setOf("package_version", "protocol", "abi_schema", "trust_root"), context)
+        knownKeys(map, setOf("package_version", "protocol", "abi_schema"), context)
         return BuildManifestView(
             packageVersion = asciiBounded(field(map, "package_version", "BuildManifestView.package_version"), 32, "BuildManifestView.package_version"),
             protocol = decodeProtocolManifestView(field(map, "protocol", "BuildManifestView.protocol"), "BuildManifestView.protocol"),
             abiSchema = decodeAbiSchemaManifestView(field(map, "abi_schema", "BuildManifestView.abi_schema"), "BuildManifestView.abi_schema"),
-            trustRoot = decodeTrustRootView(field(map, "trust_root", "BuildManifestView.trust_root"), "BuildManifestView.trust_root"),
         )
     }
 

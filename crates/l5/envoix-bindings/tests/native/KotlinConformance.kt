@@ -305,11 +305,6 @@ fun backendToFrontend(command: Map<String, String>, read: Map<String, String>) {
     val manifest = (EnvoixReadCodec.decode(read["read_build_manifest"]!!).body as ReadBody.BuildManifest).value
     expectEq("u16 max wire version", manifest.protocol.dataWireVersion, 65535L)
     expectEq("variable-length hex decodes", manifest.protocol.dataMagic, "cafebabe")
-    expectEq(
-        "a 64-character fingerprint decodes",
-        (manifest.trustRoot as TrustRootView.Sha256).value.fingerprint.length,
-        64,
-    )
     for (name in read.keys) {
         expectEncodes("$name decodes") { EnvoixReadCodec.decode(read[name]!!) }
     }

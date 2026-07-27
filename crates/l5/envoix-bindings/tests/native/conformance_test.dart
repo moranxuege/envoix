@@ -397,13 +397,6 @@ void backendToFrontend() {
       manifest.value.protocol.dataWireVersion, 65535);
   expectEq('variable-length hex decodes', manifest.value.protocol.dataMagic,
       'cafebabe');
-  expect('the trust root union decodes',
-      manifest.value.trustRoot is TrustRootViewSha256);
-  expectEq(
-    'a 64-character fingerprint decodes',
-    (manifest.value.trustRoot as TrustRootViewSha256).value.fingerprint.length,
-    64,
-  );
 
   for (final name in readVectors.keys) {
     expectEncodes('$name decodes', () {

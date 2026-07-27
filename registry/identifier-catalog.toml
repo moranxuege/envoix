@@ -550,13 +550,6 @@ owner_path = "deploy/environments.toml"
 collision_scope = "diagnostics-service-port"
 extract = "toml-map:environment.*.diagnostics.port"
 
-[[identifier]]
-key = "deployment.trust_root_fingerprints"
-owner = "manifest:environments"
-owner_path = "deploy/environments.toml"
-collision_scope = "deployment-trust-root"
-extract = "toml-map:environment.*.trust.root_sha256 where provisioning_status=provisioned"
-
 # -----------------------------------------------------------------------------
 # Data-authentication cryptographic labels
 # -----------------------------------------------------------------------------

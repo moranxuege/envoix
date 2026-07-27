@@ -222,26 +222,15 @@ impl ServerConfig {
 
 #[cfg(test)]
 mod tests {
-    use envoix_deployment::CATALOGUE_TOML;
-
     use super::*;
-
-    /// dev is the environment one provision away from deployable: it holds the
-    /// node id promoted from test and lacks only a trust root, which needs
-    /// hostnames that do not resolve yet.
-    fn provisioned_dev_catalogue() -> DeploymentCatalogue {
-        let text = CATALOGUE_TOML.replace(
-            "root_sha256 = \"TBD_PROVISION_DEV_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
-            "root_sha256 = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\nprovisioning_status = \"provisioned\"",
-        );
-        DeploymentCatalogue::parse(&text).unwrap()
-    }
 
     /// Naming an environment takes its ports from the catalogue, so the file and
     /// the process cannot disagree about where a service listens.
     #[test]
     fn a_named_environment_binds_the_ports_it_is_declared_with() {
-        let catalogue = provisioned_dev_catalogue();
+        // dev is the deployable environment: it holds the node id promoted from
+        // test, which is the whole of a rendezvous identity.
+        let catalogue = DeploymentCatalogue::compiled().unwrap();
         let config = ServerConfig::operational_defaults()
             .for_declared(&catalogue, "dev")
             .unwrap();
@@ -260,8 +249,8 @@ mod tests {
             .expect("no reserved port is claimed");
     }
 
-    /// The promotion gate, from the process side: an environment missing either
-    /// provisioned value cannot be served under its own name.
+    /// The promotion gate, from the process side: an environment with no
+    /// rendezvous identity cannot be served under its own name.
     #[test]
     fn an_unprovisioned_environment_cannot_be_served() {
         let shipped = DeploymentCatalogue::compiled().unwrap();
@@ -269,7 +258,7 @@ mod tests {
         assert!(matches!(
             refused,
             Err(ServerError::EnvironmentNotDeployable { ref blockers, .. })
-                if blockers.iter().any(|blocker| blocker.contains("trust.root_sha256"))
+                if blockers.iter().any(|blocker| blocker.contains("rendezvous.node_id"))
         ));
 
         let unknown = ServerConfig::operational_defaults().for_declared(&shipped, "staging");

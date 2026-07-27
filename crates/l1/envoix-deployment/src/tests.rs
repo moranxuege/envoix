@@ -180,18 +180,18 @@ fn the_operator_surface_is_loopback_only() {
 #[test]
 fn a_provisioned_value_must_match_its_declared_format() {
     let text = mutate(
-        "root_sha256 = \"TBD_PROVISION_TEST_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
-        "root_sha256 = \"TBD_PROVISION_TEST_TRUST_ROOT_SHA256\"\nprovisioning_status = \"provisioned\"",
+        "node_id = \"TBD_PROVISION_TEST_RENDEZVOUS_NODE_ID\"\nprovisioning_status = \"tbd\"",
+        "node_id = \"TBD_PROVISION_TEST_RENDEZVOUS_NODE_ID\"\nprovisioning_status = \"provisioned\"",
     );
     assert!(
         violations_of(&text).contains(&Violation::MalformedProvisionedValue {
-            owner: "test.trust".into(),
+            owner: "test.rendezvous".into(),
         })
     );
 }
 
 #[test]
-fn provisioned_node_ids_and_trust_roots_must_be_distinct() {
+fn provisioned_node_ids_must_be_distinct() {
     let node_id = "26117638e1bc254b31fa343e55db98313279a5a689f9e66a04a731ad62ad0501";
     // dev HOLDS this id (promoted from test), so the duplicate is planted on
     // the environment that no longer has one.
@@ -205,27 +205,6 @@ fn provisioned_node_ids_and_trust_roots_must_be_distinct() {
             .any(|violation| matches!(violation, Violation::DuplicateNodeId { .. })),
         "distinctness was claimed but never checked before D1"
     );
-
-    let root = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
-    let shared = format!("root_sha256 = \"{root}\"\nprovisioning_status = \"provisioned\"");
-    let text = CATALOGUE_TOML
-        .replace(
-            "root_sha256 = \"TBD_PROVISION_PROD_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
-            &shared,
-        )
-        .replace(
-            "root_sha256 = \"TBD_PROVISION_DEV_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
-            &shared,
-        );
-    let violations = violations_of(&text);
-    assert!(
-        violations
-            .iter()
-            .any(|violation| matches!(violation, Violation::DuplicateTrustRoot { .. }))
-    );
-    assert!(violations.contains(&Violation::ProdTrustsNonProdRoot {
-        environment: "dev".into(),
-    }));
 }
 
 #[test]
@@ -253,45 +232,42 @@ fn the_provisioned_status_spelling_is_checked_not_assumed() {
     );
 }
 
+/// An environment is deployable exactly when it holds a real rendezvous
+/// identity. dev holds the id promoted from test, so it is the one environment
+/// that passes — the gate is a gate, not a wall.
 #[test]
-fn nothing_in_the_catalogue_is_deployable_until_it_is_provisioned() {
+fn an_environment_is_deployable_once_its_node_id_is_provisioned() {
     let catalogue = shipped();
-    assert_eq!(
-        catalogue.blockers("dev"),
-        vec![Blocker::Unprovisioned {
-            slot: Slot::TrustRoot
-        }],
-        "dev holds the promoted node id but no trust root: the hostnames do \
-         not resolve yet, so there is no TLS root to record"
+    assert!(
+        catalogue.blockers("dev").is_empty(),
+        "dev holds the promoted node id, which is the whole of its identity"
     );
     assert_eq!(
         catalogue.blockers("test"),
-        vec![
-            Blocker::Unprovisioned {
-                slot: Slot::RendezvousNodeId
-            },
-            Blocker::Unprovisioned {
-                slot: Slot::TrustRoot
-            },
-        ],
+        vec![Blocker::Unprovisioned {
+            slot: Slot::RendezvousNodeId
+        }],
         "test vacated its identity to dev and needs its own key"
     );
-    assert_eq!(catalogue.blockers("prod").len(), 2);
+    assert_eq!(
+        catalogue.blockers("prod"),
+        vec![Blocker::Unprovisioned {
+            slot: Slot::RendezvousNodeId
+        }]
+    );
     assert_eq!(catalogue.blockers("staging"), vec![Blocker::Undeclared]);
 }
 
-/// A fully provisioned environment is deployable — the gate is a gate, not a
-/// wall.
+/// Provisioning the vacated environment with a key of its own unblocks it and
+/// leaves the file sound.
 #[test]
-fn a_fully_provisioned_environment_is_deployable() {
-    // dev is one provision away: it holds the promoted node id and lacks only
-    // the trust root.
+fn a_newly_keyed_environment_becomes_deployable() {
     let text = mutate(
-        "root_sha256 = \"TBD_PROVISION_DEV_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
-        "root_sha256 = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\nprovisioning_status = \"provisioned\"",
+        "node_id = \"TBD_PROVISION_TEST_RENDEZVOUS_NODE_ID\"\nprovisioning_status = \"tbd\"",
+        "node_id = \"3333333333333333333333333333333333333333333333333333333333333333\"\nprovisioning_status = \"provisioned\"",
     );
     let catalogue = DeploymentCatalogue::parse(&text).unwrap();
-    assert!(catalogue.blockers("dev").is_empty());
+    assert!(catalogue.blockers("test").is_empty());
     assert!(catalogue.violations(LegacyValues::default()).is_empty());
 }
 

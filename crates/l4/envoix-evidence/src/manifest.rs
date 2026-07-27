@@ -27,27 +27,15 @@ pub struct AbiSchemaManifest {
     pub operation_envelope_schema_id: &'static str,
 }
 
-/// Typed deployment trust-root slot. It cannot contain an arbitrary string.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "status", content = "sha256")]
-pub enum TrustRootFingerprintSlot {
-    Unprovisioned,
-    Sha256([u8; 32]),
-}
-
-/// Static descriptive build and trust evidence.
+/// Static descriptive build evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct BuildTrustManifest {
     pub package_version: &'static str,
     pub protocol: ProtocolManifest,
     pub abi_schema: AbiSchemaManifest,
-    pub trust_root: TrustRootFingerprintSlot,
 }
 
 /// The evidence manifest for this compiled package.
-///
-/// Deployment composition may copy this value and fill the typed SHA-256 slot;
-/// the default build never guesses a trust root.
 pub const BUILD_TRUST_MANIFEST: BuildTrustManifest = BuildTrustManifest {
     package_version: env!("CARGO_PKG_VERSION"),
     protocol: ProtocolManifest {
@@ -62,5 +50,4 @@ pub const BUILD_TRUST_MANIFEST: BuildTrustManifest = BuildTrustManifest {
         mailbox_receipt_schema_id: RECEIPT_PAYLOAD_SCHEMA_ID,
         operation_envelope_schema_id: OPERATION_ENVELOPE_SCHEMA_ID,
     },
-    trust_root: TrustRootFingerprintSlot::Unprovisioned,
 };
