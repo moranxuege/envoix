@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="envoix_bg">#121519</color>
+    <color name="envoix_surface">#1B2027</color>
+    <bool name="envoix_light_bars">false</bool>
+</resources>

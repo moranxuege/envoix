@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The host activity had NO theme, so the platform gave it the default
+         one: a system ActionBar drawn above Flutter, showing `android:label`.
+         That is the black band with a second "Envoix" in it. Flutter draws its
+         own app bar, so the platform must not draw one too. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <!-- `bg` from the design tokens, so the launch frame is the page the
+             app opens on rather than a white flash. -->
+        <item name="android:windowBackground">@color/envoix_bg</item>
+        <!-- The system bars take the design's own grounds instead of the
+             platform default black: the status bar sits on the page and the
+             navigation bar under the tab band, which is what the Compose app
+             looked like. targetSdk is 34, so these are still honoured; at 35+
+             Android forces edge-to-edge and this moves into Dart. -->
+        <item name="android:statusBarColor">@color/envoix_bg</item>
+        <item name="android:navigationBarColor">@color/envoix_surface</item>
+        <item name="android:windowLightStatusBar">@bool/envoix_light_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/envoix_light_bars</item>
+    </style>
+
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@color/envoix_bg</item>
+        <!-- The system bars take the design's own grounds instead of the
+             platform default black: the status bar sits on the page and the
+             navigation bar under the tab band, which is what the Compose app
+             looked like. targetSdk is 34, so these are still honoured; at 35+
+             Android forces edge-to-edge and this moves into Dart. -->
+        <item name="android:statusBarColor">@color/envoix_bg</item>
+        <item name="android:navigationBarColor">@color/envoix_surface</item>
+        <item name="android:windowLightStatusBar">@bool/envoix_light_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/envoix_light_bars</item>
+    </style>
+</resources>

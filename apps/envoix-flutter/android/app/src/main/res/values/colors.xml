@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors `EnvoixTokens` in lib/theme.dart. Only the window frame reads
+         these; every other surface is drawn by Flutter from the tokens. -->
+    <color name="envoix_bg">#F6F7F9</color>
+    <color name="envoix_surface">#FFFFFF</color>
+    <!-- Light grounds want dark system-bar icons. -->
+    <bool name="envoix_light_bars">true</bool>
+</resources>

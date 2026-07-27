@@ -36,7 +36,14 @@
             android:exported="true"
             android:hardwareAccelerated="true"
             android:launchMode="singleInstance"
+            android:theme="@style/LaunchTheme"
             android:windowSoftInputMode="adjustResize">
+            <!-- Swapped for the running theme once Flutter's first frame is up,
+                 which is the template's own handoff. Both are NoTitleBar; the
+                 platform must never draw a bar above the one Flutter draws. -->
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
