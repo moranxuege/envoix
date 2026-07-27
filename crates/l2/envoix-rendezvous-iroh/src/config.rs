@@ -12,7 +12,6 @@ pub enum ConfigField {
     ConnectDeadline,
     StreamDeadline,
     CloseDeadline,
-    ConnectionLimit,
 }
 
 impl fmt::Display for ConfigField {
@@ -23,7 +22,6 @@ impl fmt::Display for ConfigField {
             Self::ConnectDeadline => formatter.write_str("broker connect deadline"),
             Self::StreamDeadline => formatter.write_str("broker stream deadline"),
             Self::CloseDeadline => formatter.write_str("broker close deadline"),
-            Self::ConnectionLimit => formatter.write_str("connection limit"),
         }
     }
 }
@@ -31,14 +29,12 @@ impl fmt::Display for ConfigField {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigError {
     ZeroDuration { field: ConfigField },
-    ZeroLimit { field: ConfigField },
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroDuration { field } => write!(formatter, "{field} must be non-zero"),
-            Self::ZeroLimit { field } => write!(formatter, "{field} must be non-zero"),
         }
     }
 }
@@ -77,36 +73,26 @@ impl EndpointConfig {
     }
 }
 
+/// How the adapter serves a connection it has been given. How MANY it may be
+/// given is a budget, and budgets belong to whoever is being budgeted — see
+/// [`crate::ConnectionAdmission`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrohServerConfig {
     handshake_deadline: Duration,
-    connection_limit: usize,
 }
 
 impl IrohServerConfig {
-    pub fn new(handshake_deadline: Duration, connection_limit: usize) -> Result<Self, ConfigError> {
+    pub fn new(handshake_deadline: Duration) -> Result<Self, ConfigError> {
         if handshake_deadline.is_zero() {
             return Err(ConfigError::ZeroDuration {
                 field: ConfigField::HandshakeDeadline,
             });
         }
-        if connection_limit == 0 {
-            return Err(ConfigError::ZeroLimit {
-                field: ConfigField::ConnectionLimit,
-            });
-        }
-        Ok(Self {
-            handshake_deadline,
-            connection_limit,
-        })
+        Ok(Self { handshake_deadline })
     }
 
     pub const fn handshake_deadline(self) -> Duration {
         self.handshake_deadline
-    }
-
-    pub const fn connection_limit(self) -> usize {
-        self.connection_limit
     }
 }
 

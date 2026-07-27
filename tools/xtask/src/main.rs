@@ -1,17 +1,21 @@
 use std::process::ExitCode;
 
 use xtask::{
-    arch_check, identifier_check, record_bundled, record_payload, release_gate, workspace_root,
+    arch_check, deploy_check, identifier_check, record_bundled, record_payload, release_gate,
+    workspace_root,
 };
 
 fn main() -> ExitCode {
-    let Some(command) = std::env::args().nth(1) else {
+    let mut arguments = std::env::args().skip(1);
+    let Some(command) = arguments.next() else {
         eprintln!(
             "usage: cargo run -p xtask -- \
-             <identifier-check|arch-check|release-gate|record-payload|record-bundled>"
+             <identifier-check|arch-check|deploy-check [environment]|release-gate\
+             |record-payload|record-bundled>"
         );
         return ExitCode::FAILURE;
     };
+    let subject = arguments.next();
     let root = workspace_root();
     let result = match command.as_str() {
         "identifier-check" => identifier_check(&root).map(|report| {
@@ -34,6 +38,25 @@ fn main() -> ExitCode {
                 report.violations.len()
             );
             report.ensure_success()
+        }),
+        "deploy-check" => deploy_check(&root).map(|report| {
+            println!(
+                "deploy-check: environments={} deployable={} blocked={} violations={}",
+                report.environments,
+                report.deployable.len(),
+                report.blocked.len(),
+                report.violations.len()
+            );
+            for name in &report.deployable {
+                println!("deployable: {name}");
+            }
+            for blocked in &report.blocked {
+                println!("blocked: {blocked}");
+            }
+            match subject.as_deref() {
+                Some(environment) => report.ensure_deployable(environment),
+                None => report.ensure_success(),
+            }
         }),
         "release-gate" => release_gate(&root).map(|report| {
             println!(

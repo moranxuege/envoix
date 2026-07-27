@@ -11,6 +11,7 @@ role = "composition-root"
 [dependencies]
 bytes.workspace = true
 clap.workspace = true
+envoix-deployment = { path = "../../crates/l1/envoix-deployment" }
 envoix-protocol = { path = "../../crates/l1/envoix-protocol" }
 envoix-rendezvous = { path = "../../crates/l2/envoix-rendezvous" }
 envoix-rendezvous-iroh = { path = "../../crates/l2/envoix-rendezvous-iroh" }

@@ -980,6 +980,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoix-deployment"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "envoix-evidence"
 version = "0.2.0"
 dependencies = [
@@ -1161,6 +1169,7 @@ version = "0.2.0"
 dependencies = [
  "bytes",
  "clap",
+ "envoix-deployment",
  "envoix-invite",
  "envoix-mailbox",
  "envoix-pairing",
@@ -4705,6 +4714,7 @@ dependencies = [
  "cargo_metadata",
  "envoix-auth",
  "envoix-bindings",
+ "envoix-deployment",
  "envoix-evidence",
  "envoix-invite",
  "envoix-operation-store",

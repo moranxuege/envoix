@@ -3,12 +3,25 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    ConfigError, EndpointConfig, IrohClientConfig, IrohServerConfig, bind_endpoint, endpoint_addr,
-    join_room, serve_endpoint,
+    ConfigError, ConnectionAdmission, EndpointConfig, IrohClientConfig, IrohRendezvousError,
+    IrohServerConfig, ServeOutcome, bind_endpoint, endpoint_addr, join_room, serve_endpoint,
 };
 use envoix_invite::{NamespacedRoomKey, RoomCode};
 use envoix_rendezvous::{ClientConfig, ControlLimits, RegistryConfig, RoomRegistry};
 use iroh::SecretKey;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+/// A connection budget with a fixed number of slots, standing in for the
+/// composition root's.
+struct Slots(Arc<Semaphore>);
+
+impl ConnectionAdmission for Slots {
+    type Permit = OwnedSemaphorePermit;
+
+    fn try_admit(&self) -> Option<Self::Permit> {
+        Arc::clone(&self.0).try_acquire_owned().ok()
+    }
+}
 
 fn endpoint_config() -> EndpointConfig {
     EndpointConfig::new(
@@ -55,8 +68,13 @@ async fn rendezvous_iroh_loopback() {
     let server_task = tokio::spawn(serve_endpoint(
         server,
         registry,
-        IrohServerConfig::new(Duration::from_secs(2), 16).unwrap(),
-        move |result| observed.lock().unwrap().push(result.clone()),
+        IrohServerConfig::new(Duration::from_secs(2)).unwrap(),
+        Slots(Arc::new(Semaphore::new(16))),
+        move |outcome| {
+            if let ServeOutcome::Completed(result) = outcome {
+                observed.lock().unwrap().push(result.clone());
+            }
+        },
     ));
 
     let client_a = bind_endpoint(endpoint_config()).await.unwrap();
@@ -101,15 +119,67 @@ async fn rendezvous_iroh_loopback() {
     assert!(outcomes.iter().all(Result::is_ok));
 }
 
+/// A caller the budget cannot admit is TOLD, and told at once. A refusal that
+/// arrives as a timeout is indistinguishable from a dead server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_budget_refuses_instead_of_letting_the_caller_time_out() {
+    let server = bind_endpoint(endpoint_config()).await.unwrap();
+    let broker = endpoint_addr(&server);
+    let server_shutdown = server.clone();
+    let registry = Arc::new(RoomRegistry::new(
+        RegistryConfig::new(
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+            core_limits(),
+            16,
+        )
+        .unwrap(),
+    ));
+    let refusals = Arc::new(Mutex::new(0_usize));
+    let counted = refusals.clone();
+    // A budget with no free slot: every arrival must be refused.
+    let full = Slots(Arc::new(Semaphore::new(0)));
+    let server_task = tokio::spawn(serve_endpoint(
+        server,
+        registry,
+        IrohServerConfig::new(Duration::from_secs(2)).unwrap(),
+        full,
+        move |outcome| {
+            if matches!(outcome, ServeOutcome::Refused) {
+                *counted.lock().unwrap() += 1;
+            }
+        },
+    ));
+
+    let client = bind_endpoint(endpoint_config()).await.unwrap();
+    let room = RoomCode::parse("123456-amber-comet")
+        .unwrap()
+        .namespaced_key();
+    let started = std::time::Instant::now();
+    let refused = join_room(&client, broker, room, client_config()).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(refused, Err(IrohRendezvousError::Refused)),
+        "a full budget must refuse, not fail vaguely"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "a refusal must not take the connect deadline, took {elapsed:?}"
+    );
+    client.close().await;
+    server_shutdown.close().await;
+    server_task.await.unwrap().unwrap();
+    assert_eq!(*refusals.lock().unwrap(), 1, "the server counted it too");
+}
+
 #[test]
 fn iroh_config_rejects_zero_policy() {
     assert!(matches!(
-        IrohServerConfig::new(Duration::ZERO, 1),
+        IrohServerConfig::new(Duration::ZERO),
         Err(ConfigError::ZeroDuration { .. })
-    ));
-    assert!(matches!(
-        IrohServerConfig::new(Duration::from_secs(1), 0),
-        Err(ConfigError::ZeroLimit { .. })
     ));
     assert!(matches!(
         IrohClientConfig::new(

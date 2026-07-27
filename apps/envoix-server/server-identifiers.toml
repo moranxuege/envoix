@@ -1,2 +1,5 @@
 [rendezvous]
 node_key_path = "rendezvous-node.key"
+
+[diagnostics]
+http_route = "/api/envoix/diagnostics/v2/budgets"

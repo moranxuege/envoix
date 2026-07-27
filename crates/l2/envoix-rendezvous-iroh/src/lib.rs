@@ -8,7 +8,10 @@ mod transport;
 
 pub use config::{ConfigError, ConfigField, EndpointConfig, IrohClientConfig, IrohServerConfig};
 pub use error::{IrohOperation, IrohRendezvousError, IrohWait};
-pub use transport::{BrokerSession, bind_endpoint, endpoint_addr, join_room, serve_endpoint};
+pub use transport::{
+    BrokerSession, ConnectionAdmission, ServeOutcome, bind_endpoint, endpoint_addr, join_room,
+    serve_endpoint,
+};
 
 #[cfg(test)]
 mod tests;

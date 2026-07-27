@@ -463,6 +463,13 @@ collision_scope = "iroh-peer-key-storage"
 extract = "rust-const:CLIENT_PEER_KEY_ALIAS"
 
 [[identifier]]
+key = "diagnostics.budget_http_route"
+owner = "manifest:envoix-server"
+owner_path = "apps/envoix-server/server-identifiers.toml"
+collision_scope = "server-http-route"
+extract = "toml-key:diagnostics.http_route"
+
+[[identifier]]
 key = "iroh.rendezvous_node_key_path"
 owner = "manifest:envoix-server"
 owner_path = "apps/envoix-server/server-identifiers.toml"
@@ -535,6 +542,13 @@ owner = "manifest:environments"
 owner_path = "deploy/environments.toml"
 collision_scope = "evidence-service-port"
 extract = "toml-map:environment.*.evidence.port"
+
+[[identifier]]
+key = "deployment.diagnostics_ports"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "diagnostics-service-port"
+extract = "toml-map:environment.*.diagnostics.port"
 
 [[identifier]]
 key = "deployment.trust_root_fingerprints"

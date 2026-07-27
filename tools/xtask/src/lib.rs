@@ -5,8 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use cargo_metadata::{DependencyKind, MetadataCommand, Package};
 use serde::Deserialize;
 
+pub mod deploy;
 pub mod release;
 
+pub use deploy::{DeployCheckReport, deploy_check};
 pub use release::{ReleaseGateReport, record_bundled, record_payload, release_gate};
 
 pub type CheckResult<T> = Result<T, String>;
@@ -164,6 +166,13 @@ pub fn identifier_check(root: &Path) -> CheckResult<IdentifierCheckReport> {
     }
 
     validate_live_identifiers(&live, &legacy, &mut violations);
+    // Deployment endpoints are identifiers too, and their rules live with the
+    // catalogue that declares them.
+    let catalogue = envoix_deployment::DeploymentCatalogue::parse(&load_toml_text(
+        &root.join(deploy::CATALOGUE_PATH),
+    )?)
+    .map_err(|error| error.to_string())?;
+    violations.extend(deploy::catalogue_violations(root, &catalogue)?);
     pending.sort();
     violations.sort();
 
@@ -749,9 +758,29 @@ fn scalar_value(value: &toml::Value) -> CheckResult<String> {
 }
 
 fn load_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> CheckResult<T> {
-    let text =
-        fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+    let text = load_toml_text(path)?;
     toml::from_str(&text).map_err(|error| format!("parsing {}: {error}", path.display()))
+}
+
+fn load_toml_text(path: &Path) -> CheckResult<String> {
+    fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))
+}
+
+/// Every retired value in one collision scope, for the rules that forbid
+/// reusing them.
+fn legacy_values_by_scope(root: &Path, scope: &str) -> CheckResult<Vec<String>> {
+    let legacy: LegacyRegistry = load_toml(&root.join("registry/legacy-identifiers.toml"))?;
+    Ok(legacy
+        .identifiers()
+        .into_iter()
+        .filter(|identifier| identifier.collision_scope == scope)
+        .flat_map(|identifier| {
+            identifier
+                .all_values()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect())
 }
 
 // Architecture checking lives below so both gates share root/path utilities.

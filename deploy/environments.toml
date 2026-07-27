@@ -5,6 +5,29 @@ node_endpoint_derivation = "<node_id>@<rendezvous.host>:<rendezvous.port>"
 https_url_derivation = "https://<service.host>:<service.port>"
 provisioned_status = "provisioned"
 
+# Ports owned by services this project does not run. They are listed here so
+# that one file answers "may I bind this?": `xtask deploy-check` rejects any
+# environment that claims one, and the server refuses to bind one whatever the
+# command line says.
+[[reserved_port]]
+port = 8444
+owner = "iroh-relay.service"
+note = "third-party live service on the shared host"
+
+[[reserved_port]]
+port = 8445
+owner = "envoix-rendezvous.service"
+note = "third-party live service on the shared host"
+
+[[reserved_port]]
+port = 8446
+owner = "envoix-rendezvous.service"
+note = "third-party live service on the shared host"
+
+# Every key below is READ by `xtask deploy-check`; none of them is a comment.
+# The parse rejects an unknown key and a missing one, so this table cannot
+# drift into claiming a rule that nothing enforces — which is exactly what
+# `require_distinct_hosts` did before D1.
 [validation]
 allowed_environments = ["dev", "test", "prod"]
 require_distinct_hosts = true
@@ -13,35 +36,62 @@ require_distinct_trust_roots = true
 reject_legacy_node_ids = true
 reject_legacy_hosts = true
 prod_must_not_trust_non_prod_roots = true
-node_id_format_when_provisioned = "^[0-9a-f]{64}$"
-trust_root_sha256_format_when_provisioned = "^sha256:[0-9a-f]{64}$"
+node_id_format_when_provisioned = "hex64"
+trust_root_sha256_format_when_provisioned = "sha256-hex64"
+# The port block IS part of an environment's identity: two UDP listeners cannot
+# share a port on one host, and hostnames do not tell a validator whether two
+# environments share a machine. Each environment owns a hundred-block; the last
+# two digits keep their service meaning so the service is readable from the
+# number. 95xx is deliberately unallocated, so a mistyped block lands on
+# nothing rather than on a neighbouring environment.
+require_distinct_port_blocks = true
+require_consistent_service_port_suffixes = true
+require_loopback_diagnostics_bind = true
+unallocated_port_blocks = [95]
+
+# The service meaning of the last two digits, identical in every block.
+[validation.service_port_suffix]
+relay = 44
+rendezvous = 45
+mailbox = 60
+evidence = 61
+diagnostics = 62
 
 # Replace each environment's two TBD values and set both statuses to
-# `provisioned` before that environment can be packaged or deployed.
+# `provisioned` before that environment can be packaged or deployed. Until
+# then `xtask deploy-check` reports it as blocked and `envoix-server
+# --environment <name>` refuses to start.
 
 [environment.dev]
 name = "dev"
+port_block = 96
 
 [environment.dev.rendezvous]
 host = "rdz.dev.envoix.chkxwlyh.us"
-port = 9445
+port = 9645
 node_id = "TBD_PROVISION_DEV_RENDEZVOUS_NODE_ID"
 provisioning_status = "tbd"
 
 [environment.dev.relay]
 scheme = "https"
 host = "relay.dev.envoix.chkxwlyh.us"
-port = 9444
+port = 9644
 
 [environment.dev.mailbox]
 scheme = "https"
 host = "mailbox.dev.envoix.chkxwlyh.us"
-port = 9460
+port = 9660
 
 [environment.dev.evidence]
 scheme = "https"
 host = "evidence.dev.envoix.chkxwlyh.us"
-port = 9461
+port = 9661
+
+# Operator surface, reached through an SSH tunnel and never from the internet.
+# It has a bind rather than a host because it is not a published endpoint.
+[environment.dev.diagnostics]
+bind = "127.0.0.1"
+port = 9662
 
 [environment.dev.trust]
 root_sha256 = "TBD_PROVISION_DEV_TRUST_ROOT_SHA256"
@@ -49,27 +99,32 @@ provisioning_status = "tbd"
 
 [environment.test]
 name = "test"
+port_block = 97
 
 [environment.test.rendezvous]
 host = "rdz.test.envoix.chkxwlyh.us"
-port = 9445
+port = 9745
 node_id = "26117638e1bc254b31fa343e55db98313279a5a689f9e66a04a731ad62ad0501"
 provisioning_status = "provisioned"
 
 [environment.test.relay]
 scheme = "https"
 host = "relay.test.envoix.chkxwlyh.us"
-port = 9444
+port = 9744
 
 [environment.test.mailbox]
 scheme = "https"
 host = "mailbox.test.envoix.chkxwlyh.us"
-port = 9460
+port = 9760
 
 [environment.test.evidence]
 scheme = "https"
 host = "evidence.test.envoix.chkxwlyh.us"
-port = 9461
+port = 9761
+
+[environment.test.diagnostics]
+bind = "127.0.0.1"
+port = 9762
 
 [environment.test.trust]
 root_sha256 = "TBD_PROVISION_TEST_TRUST_ROOT_SHA256"
@@ -77,6 +132,7 @@ provisioning_status = "tbd"
 
 [environment.prod]
 name = "prod"
+port_block = 94
 
 [environment.prod.rendezvous]
 host = "rdz.prod.envoix.chkxwlyh.us"
@@ -98,6 +154,10 @@ port = 9460
 scheme = "https"
 host = "evidence.prod.envoix.chkxwlyh.us"
 port = 9461
+
+[environment.prod.diagnostics]
+bind = "127.0.0.1"
+port = 9462
 
 [environment.prod.trust]
 root_sha256 = "TBD_PROVISION_PROD_TRUST_ROOT_SHA256"

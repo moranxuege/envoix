@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,13 +7,11 @@ use bytes::Bytes;
 use envoix_protocol::mailbox::identifiers::RECEIPT_HTTP_ROUTE;
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::body::Incoming;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio::task::JoinSet;
+
+use crate::budget::ServiceBudget;
+use crate::serve::serve_bounded_http;
 
 #[derive(Clone, Copy)]
 pub(crate) struct MailboxLimits {
@@ -36,63 +33,44 @@ struct Entry {
 }
 
 pub(crate) async fn serve(
-    listener: TcpListener,
+    listener: std::net::TcpListener,
     limits: MailboxLimits,
-    mut shutdown: oneshot::Receiver<()>,
+    budget: ServiceBudget,
+    shutdown: oneshot::Receiver<()>,
 ) -> Result<(), io::Error> {
     let state = MailboxState {
         entries: Arc::new(Mutex::new(HashMap::new())),
         limits,
     };
-    let mut connections = JoinSet::new();
-    loop {
-        let accepted = tokio::select! {
-            _ = &mut shutdown => {
-                connections.abort_all();
-                while connections.join_next().await.is_some() {}
-                return Ok(());
-            }
-            _ = connections.join_next(), if !connections.is_empty() => continue,
-            accepted = listener.accept() => accepted,
-        };
-        let (stream, _) = accepted?;
-        let state = state.clone();
-        connections.spawn(async move {
-            let service = service_fn(move |request| handle(request, state.clone()));
-            if http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
-                .await
-                .is_err()
-            {
-                tracing::warn!("mailbox HTTP connection failed");
-            }
-        });
-    }
+    serve_bounded_http(listener, budget, shutdown, move |request| {
+        handle(request, state.clone())
+    })
+    .await
 }
 
-async fn handle(
-    request: Request<Incoming>,
-    state: MailboxState,
-) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle(request: Request<Incoming>, state: MailboxState) -> Response<Full<Bytes>> {
     let Some(slot) =
         route_slot(request.uri().path(), state.limits.max_key_length).map(str::to_owned)
     else {
-        return Ok(empty(StatusCode::NOT_FOUND));
+        return empty(StatusCode::NOT_FOUND);
     };
     match *request.method() {
         // Writes are unauthenticated: any client that knows the (confidential,
         // transfer-id-derived) slot may replace the blob. The seal makes this a
         // bounded liveness/DoS surface only — a griefer cannot forge a valid
         // receipt, so it can never drive a false completion, only stall polling.
-        // Real admission control (rate/quota/auth) is D1-deferred.
+        //
+        // Two budgets answer separately, and neither ever stalls a caller:
+        // 503 means this service is serving all it may at once, 429 means the
+        // store itself is full until a TTL expires.
         Method::POST => {
             let body = Limited::new(request.into_body(), state.limits.max_blob_size);
             let collected = match body.collect().await {
                 Ok(collected) => collected.to_bytes(),
-                Err(_) => return Ok(empty(StatusCode::PAYLOAD_TOO_LARGE)),
+                Err(_) => return empty(StatusCode::PAYLOAD_TOO_LARGE),
             };
             if collected.is_empty() {
-                return Ok(empty(StatusCode::BAD_REQUEST));
+                return empty(StatusCode::BAD_REQUEST);
             }
             let mut entries = state
                 .entries
@@ -100,7 +78,7 @@ async fn handle(
                 .unwrap_or_else(|lock| lock.into_inner());
             evict_expired(&mut entries, state.limits.ttl);
             if !entries.contains_key(&slot) && entries.len() >= state.limits.max_entries {
-                return Ok(empty(StatusCode::TOO_MANY_REQUESTS));
+                return empty(StatusCode::TOO_MANY_REQUESTS);
             }
             entries.insert(
                 slot,
@@ -109,7 +87,7 @@ async fn handle(
                     stored_at: Instant::now(),
                 },
             );
-            Ok(empty(StatusCode::NO_CONTENT))
+            empty(StatusCode::NO_CONTENT)
         }
         Method::GET => {
             let mut entries = state
@@ -118,14 +96,14 @@ async fn handle(
                 .unwrap_or_else(|lock| lock.into_inner());
             evict_expired(&mut entries, state.limits.ttl);
             match entries.get(&slot) {
-                Some(entry) => Ok(Response::builder()
+                Some(entry) => Response::builder()
                     .status(StatusCode::OK)
                     .body(Full::new(entry.blob.clone()))
-                    .expect("fixed mailbox response is valid")),
-                None => Ok(empty(StatusCode::NOT_FOUND)),
+                    .expect("fixed mailbox response is valid"),
+                None => empty(StatusCode::NOT_FOUND),
             }
         }
-        _ => Ok(empty(StatusCode::METHOD_NOT_ALLOWED)),
+        _ => empty(StatusCode::METHOD_NOT_ALLOWED),
     }
 }
 

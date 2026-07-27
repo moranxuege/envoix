@@ -5,9 +5,11 @@ use std::sync::Arc;
 use envoix_invite::NamespacedRoomKey;
 use envoix_rendezvous::identifiers::RENDEZVOUS_ALPN;
 use envoix_rendezvous::{CloseWaiter, PeerConn, Role, RoomRegistry};
-use iroh::endpoint::{BindOpts, Connection, Incoming, RecvStream, SendStream, VarInt, presets};
+use iroh::endpoint::{
+    BindOpts, ConnectError, ConnectingError, Connection, ConnectionError, Incoming, RecvStream,
+    SendStream, TransportErrorCode, VarInt, presets,
+};
 use iroh::{Endpoint, EndpointAddr, RelayMap, RelayMode};
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
@@ -55,13 +57,34 @@ pub fn endpoint_addr(endpoint: &Endpoint) -> EndpointAddr {
     endpoint.addr()
 }
 
+/// Who may occupy a connection slot.
+///
+/// The adapter owns how a refusal is spoken on the wire; the composition root
+/// owns the policy, because a budget belongs to the service that is budgeted
+/// and not to the transport that happens to accept for it.
+pub trait ConnectionAdmission: Send + Sync + 'static {
+    /// Held for as long as the admitted connection is served.
+    type Permit: Send + 'static;
+
+    /// Takes a slot if one is free. Must not wait: a caller that cannot be
+    /// served now is refused now.
+    fn try_admit(&self) -> Option<Self::Permit>;
+}
+
+/// What happened to one incoming connection.
+pub enum ServeOutcome<'a> {
+    /// Admission was refused; the peer was told with CONNECTION_REFUSED.
+    Refused,
+    Completed(&'a Result<(), IrohRendezvousError>),
+}
+
 pub async fn serve_endpoint(
     endpoint: Endpoint,
     registry: Arc<RoomRegistry>,
     config: IrohServerConfig,
-    observe: impl Fn(&Result<(), IrohRendezvousError>) + Send + Sync + 'static,
+    admission: impl ConnectionAdmission,
+    observe: impl Fn(ServeOutcome<'_>) + Send + Sync + 'static,
 ) -> Result<(), IrohRendezvousError> {
-    let permits = Arc::new(Semaphore::new(config.connection_limit()));
     let observe = Arc::new(observe);
     let mut tasks = JoinSet::new();
     loop {
@@ -70,8 +93,11 @@ pub async fn serve_endpoint(
                 let Some(incoming) = incoming else {
                     break;
                 };
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    drop(incoming);
+                let Some(permit) = admission.try_admit() else {
+                    // Refuse rather than let the attempt time out: the caller
+                    // learns it was turned away, and learns it immediately.
+                    incoming.refuse();
+                    observe(ServeOutcome::Refused);
                     continue;
                 };
                 let registry = registry.clone();
@@ -79,7 +105,7 @@ pub async fn serve_endpoint(
                 tasks.spawn(async move {
                     let _permit = permit;
                     let result = serve_incoming(incoming, registry, config).await;
-                    observe(&result);
+                    observe(ServeOutcome::Completed(&result));
                 });
             }
             completed = tasks.join_next(), if !tasks.is_empty() => {
@@ -179,23 +205,48 @@ impl BrokerSession {
     }
 }
 
+/// A refusal and a failure are different answers, and the caller is entitled to
+/// know which it got: one says come back later, the other says something is
+/// broken. Collapsing them is how a full server comes to look like a dead one.
+fn classify_connect_failure(error: &ConnectError) -> IrohRendezvousError {
+    let closed = match error {
+        ConnectError::Connection { source, .. } => Some(source),
+        ConnectError::Connecting {
+            source: ConnectingError::ConnectionError { source, .. },
+            ..
+        } => Some(source),
+        _ => None,
+    };
+    if let Some(ConnectionError::ConnectionClosed(close)) = closed
+        && close.error_code == TransportErrorCode::CONNECTION_REFUSED
+    {
+        return IrohRendezvousError::Refused;
+    }
+    IrohRendezvousError::Transport {
+        operation: IrohOperation::Connect,
+    }
+}
+
 pub async fn join_room(
     endpoint: &Endpoint,
     broker: EndpointAddr,
     room_key: NamespacedRoomKey,
     config: IrohClientConfig,
 ) -> Result<BrokerSession, IrohRendezvousError> {
-    let connection = timeout(
+    let connection = match timeout(
         config.connect_deadline(),
         endpoint.connect(broker, RENDEZVOUS_ALPN),
     )
     .await
-    .map_err(|_| IrohRendezvousError::Deadline {
-        wait: IrohWait::Connect,
-    })?
-    .map_err(|_| IrohRendezvousError::Transport {
-        operation: IrohOperation::Connect,
-    })?;
+    {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(error)) => return Err(classify_connect_failure(&error)),
+        Err(_) => {
+            return Err(IrohRendezvousError::Deadline {
+                wait: IrohWait::Connect,
+            });
+        }
+    };
     let (mut send, mut recv) = match timeout(config.stream_deadline(), connection.open_bi()).await {
         Ok(Ok(streams)) => streams,
         Ok(Err(_)) => {
