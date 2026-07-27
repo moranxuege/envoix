@@ -33,12 +33,12 @@ sha256 = "693411bfb665c005e36a76099354bdd9903ede6397402d08e1f54671d5dedf69"
 [[payload.bundled]]
 soname = "libapp.so"
 abi = "arm64-v8a"
-sha256 = "07448097ad882c05b8f9c649e16d2b573df5f282e6230a944858fb9224f9288a"
+sha256 = "c097298a94208b49b2262b546831d2575fee8578e4e474bd2f4872e7fc416d26"
 
 [[payload.bundled]]
 soname = "libapp.so"
 abi = "x86_64"
-sha256 = "497b12a10bcf4f1bd3b17db5f73a16f77d65d5c1052b178c5af320af9bc53760"
+sha256 = "a6a122c1beffa16596f7f8d5b43947f1c2e76f1ad8cf10a7dc6d700bfedfc926"
 
 [[payload.bundled]]
 soname = "libflutter.so"

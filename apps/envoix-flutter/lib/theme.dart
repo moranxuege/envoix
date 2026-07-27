@@ -149,10 +149,15 @@ class EnvoixTokens {
 }
 
 /// Radii. The stylesheet has essentially one: 8 for everything rectangular, a
-/// full round for pills. The Compose port fanned that out into 16/14/12/10/9/8,
-/// which is fussier and reads as Material rather than as this product.
+/// full round for pills. The Compose port fanned that out into 16/14/12/10/9/8.
+///
+/// 16 here, not the stylesheet's 8, and deliberately: the stylesheet is a
+/// desktop-first demo whose mobile view is one breakpoint, while the Compose
+/// port is the adaptation that actually shipped on a phone and is the design
+/// the owner asked to have back. It travels with the page ground below — the
+/// two are one decision, and flipping either alone reads as neither reference.
 abstract final class EnvoixShape {
-  static const double radius = 8;
+  static const double radius = 16;
   static const BorderRadius corner = BorderRadius.all(Radius.circular(radius));
   static const BorderRadius pill = BorderRadius.all(Radius.circular(999));
   static const double hairline = 1;
@@ -357,10 +362,13 @@ ThemeData envoixTheme(Brightness brightness) {
     useMaterial3: true,
     colorScheme: scheme,
     textTheme: type,
-    // The phone screen is `surface`; cards on it are `surface-raised` with a
-    // hairline. `bg` is the recessed well, not the page.
-    scaffoldBackgroundColor: t.surface,
-    canvasColor: t.surface,
+    // The phone screen is `bg`; cards on it are `surface`. That is the Compose
+    // adaptation rather than the stylesheet, which puts a white page under
+    // near-white cards — right for a wide desktop canvas, and on a phone it
+    // loses the card edges the whole layout is built on. Paired with the 16
+    // radius above.
+    scaffoldBackgroundColor: t.bg,
+    canvasColor: t.bg,
     dividerColor: t.line,
     dividerTheme: DividerThemeData(color: t.line, thickness: 1, space: 32),
     appBarTheme: AppBarTheme(
@@ -375,7 +383,7 @@ ThemeData envoixTheme(Brightness brightness) {
       titleTextStyle: EnvoixType.wordmark.copyWith(color: t.text),
     ),
     cardTheme: CardThemeData(
-      color: t.surfaceRaised,
+      color: t.surface,
       surfaceTintColor: Colors.transparent,
       shadowColor: Colors.transparent,
       elevation: 0,
