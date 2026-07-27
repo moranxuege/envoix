@@ -69,8 +69,12 @@ port_block = 96
 [environment.dev.rendezvous]
 host = "rdz.dev.envoix.chkxwlyh.us"
 port = 9645
-node_id = "TBD_PROVISION_DEV_RENDEZVOUS_NODE_ID"
-provisioning_status = "tbd"
+# Promoted from test by owner decision: this identity is derived from the
+# `rendezvous-node.key` already on the VPS, so promoting it is a catalogue
+# move, not a re-key. The running server keeps the identity clients know and
+# changes only its port block.
+node_id = "26117638e1bc254b31fa343e55db98313279a5a689f9e66a04a731ad62ad0501"
+provisioning_status = "provisioned"
 
 [environment.dev.relay]
 scheme = "https"
@@ -104,8 +108,11 @@ port_block = 97
 [environment.test.rendezvous]
 host = "rdz.test.envoix.chkxwlyh.us"
 port = 9745
-node_id = "26117638e1bc254b31fa343e55db98313279a5a689f9e66a04a731ad62ad0501"
-provisioning_status = "provisioned"
+# Vacated: the identity this environment held was promoted to dev. A test
+# environment now needs its own key, and holding NO id is the honest state —
+# an environment must never share dev's identity.
+node_id = "TBD_PROVISION_TEST_RENDEZVOUS_NODE_ID"
+provisioning_status = "tbd"
 
 [environment.test.relay]
 scheme = "https"

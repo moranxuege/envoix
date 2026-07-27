@@ -10,9 +10,15 @@ use iroh::RelayUrl;
 use crate::ServerError;
 use crate::budget::{BudgetPlan, Service};
 
-pub const DEFAULT_BIND: &str = "0.0.0.0:9445";
-pub const DEFAULT_MAILBOX_BIND: &str = "0.0.0.0:9460";
-pub const DEFAULT_DIAGNOSTICS_BIND: &str = "127.0.0.1:9462";
+// The 95xx block, which the deployment catalogue reserves as UNALLOCATED. A
+// flagless run is a bootstrap or a local experiment and must not silently
+// occupy an environment's number: these used to be 94xx, which the owner's
+// allocation made PROD's, so `envoix-server` with no arguments quietly sat on
+// the production rendezvous port. Defaulting into the reserved block keeps the
+// bootstrap path working while making that collision unspellable.
+pub const DEFAULT_BIND: &str = "0.0.0.0:9545";
+pub const DEFAULT_MAILBOX_BIND: &str = "0.0.0.0:9560";
+pub const DEFAULT_DIAGNOSTICS_BIND: &str = "127.0.0.1:9562";
 pub const DEFAULT_NODE_KEY_PATH: &str = "rendezvous-node.key";
 pub const DEFAULT_ROOM_TTL_SECS: u64 = 300;
 pub const DEFAULT_RELAY_TTL_SECS: u64 = 120;
@@ -220,9 +226,12 @@ mod tests {
 
     use super::*;
 
-    fn provisioned_test_catalogue() -> DeploymentCatalogue {
+    /// dev is the environment one provision away from deployable: it holds the
+    /// node id promoted from test and lacks only a trust root, which needs
+    /// hostnames that do not resolve yet.
+    fn provisioned_dev_catalogue() -> DeploymentCatalogue {
         let text = CATALOGUE_TOML.replace(
-            "root_sha256 = \"TBD_PROVISION_TEST_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
+            "root_sha256 = \"TBD_PROVISION_DEV_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
             "root_sha256 = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\nprovisioning_status = \"provisioned\"",
         );
         DeploymentCatalogue::parse(&text).unwrap()
@@ -232,12 +241,12 @@ mod tests {
     /// the process cannot disagree about where a service listens.
     #[test]
     fn a_named_environment_binds_the_ports_it_is_declared_with() {
-        let catalogue = provisioned_test_catalogue();
+        let catalogue = provisioned_dev_catalogue();
         let config = ServerConfig::operational_defaults()
-            .for_declared(&catalogue, "test")
+            .for_declared(&catalogue, "dev")
             .unwrap();
 
-        let declared = catalogue.environment("test").unwrap();
+        let declared = catalogue.environment("dev").unwrap();
         assert_eq!(config.bind.port(), declared.rendezvous.port);
         assert_eq!(config.mailbox_bind.port(), declared.mailbox.port);
         assert_eq!(config.diagnostics_bind.port(), declared.diagnostics.port);

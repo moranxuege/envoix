@@ -193,8 +193,10 @@ fn a_provisioned_value_must_match_its_declared_format() {
 #[test]
 fn provisioned_node_ids_and_trust_roots_must_be_distinct() {
     let node_id = "26117638e1bc254b31fa343e55db98313279a5a689f9e66a04a731ad62ad0501";
+    // dev HOLDS this id (promoted from test), so the duplicate is planted on
+    // the environment that no longer has one.
     let text = mutate(
-        "node_id = \"TBD_PROVISION_DEV_RENDEZVOUS_NODE_ID\"\nprovisioning_status = \"tbd\"",
+        "node_id = \"TBD_PROVISION_TEST_RENDEZVOUS_NODE_ID\"\nprovisioning_status = \"tbd\"",
         &format!("node_id = \"{node_id}\"\nprovisioning_status = \"provisioned\""),
     );
     assert!(
@@ -234,7 +236,7 @@ fn a_legacy_node_id_may_not_be_reused() {
         rendezvous_node_ids: &legacy,
     });
     assert!(violations.contains(&Violation::LegacyNodeId {
-        environment: "test".into(),
+        environment: "dev".into(),
     }));
 }
 
@@ -256,6 +258,14 @@ fn nothing_in_the_catalogue_is_deployable_until_it_is_provisioned() {
     let catalogue = shipped();
     assert_eq!(
         catalogue.blockers("dev"),
+        vec![Blocker::Unprovisioned {
+            slot: Slot::TrustRoot
+        }],
+        "dev holds the promoted node id but no trust root: the hostnames do \
+         not resolve yet, so there is no TLS root to record"
+    );
+    assert_eq!(
+        catalogue.blockers("test"),
         vec![
             Blocker::Unprovisioned {
                 slot: Slot::RendezvousNodeId
@@ -263,14 +273,8 @@ fn nothing_in_the_catalogue_is_deployable_until_it_is_provisioned() {
             Blocker::Unprovisioned {
                 slot: Slot::TrustRoot
             },
-        ]
-    );
-    assert_eq!(
-        catalogue.blockers("test"),
-        vec![Blocker::Unprovisioned {
-            slot: Slot::TrustRoot
-        }],
-        "test has a node id but no trust root"
+        ],
+        "test vacated its identity to dev and needs its own key"
     );
     assert_eq!(catalogue.blockers("prod").len(), 2);
     assert_eq!(catalogue.blockers("staging"), vec![Blocker::Undeclared]);
@@ -280,12 +284,14 @@ fn nothing_in_the_catalogue_is_deployable_until_it_is_provisioned() {
 /// wall.
 #[test]
 fn a_fully_provisioned_environment_is_deployable() {
+    // dev is one provision away: it holds the promoted node id and lacks only
+    // the trust root.
     let text = mutate(
-        "root_sha256 = \"TBD_PROVISION_TEST_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
+        "root_sha256 = \"TBD_PROVISION_DEV_TRUST_ROOT_SHA256\"\nprovisioning_status = \"tbd\"",
         "root_sha256 = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\nprovisioning_status = \"provisioned\"",
     );
     let catalogue = DeploymentCatalogue::parse(&text).unwrap();
-    assert!(catalogue.blockers("test").is_empty());
+    assert!(catalogue.blockers("dev").is_empty());
     assert!(catalogue.violations(LegacyValues::default()).is_empty());
 }
 
