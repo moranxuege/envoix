@@ -29,9 +29,22 @@ resolve_cache_root() {
 }
 
 cache_root="$(resolve_cache_root)"
-ios_sim_cache="$cache_root/ios-simulator-debug"
-ios_device_cache="$cache_root/ios-device-debug"
-macos_cache="$cache_root/macos-debug"
+apple_build_configuration="${ENVOIX_APPLE_BUILD_CONFIGURATION:-Debug}"
+case "$apple_build_configuration" in
+  Debug)
+    apple_configuration_slug="debug"
+    ;;
+  Release)
+    apple_configuration_slug="release"
+    ;;
+  *)
+    echo "error: ENVOIX_APPLE_BUILD_CONFIGURATION must be Debug or Release" >&2
+    exit 2
+    ;;
+esac
+ios_sim_cache="$cache_root/ios-simulator-$apple_configuration_slug"
+ios_device_cache="$cache_root/ios-device-$apple_configuration_slug"
+macos_cache="$cache_root/macos-$apple_configuration_slug"
 ios_sim_destination="${ENVOIX_IOS_SIM_DESTINATION:-}"
 required_shared_schemes=(
   Envoix
@@ -67,6 +80,8 @@ Space commands:
 
 Environment:
   ENVOIX_APPLE_CACHE_ROOT        Stable cache root (default: $TMPDIR/envoix-apple-cache)
+  ENVOIX_APPLE_BUILD_CONFIGURATION
+                                Xcode configuration: Debug (default) or Release
   ENVOIX_APPLE_CORE_PROFILE      Rust core profile: release (default) or debug
   ENVOIX_IOS_SIM_DESTINATION    Simulator destination passed to xcodebuild
   ENVOIX_IOS_DEVICE_DESTINATION Required by ios-device-build
@@ -194,7 +209,7 @@ run_ios() {
   xcodebuild \
     -project "$project" \
     -scheme "$scheme" \
-    -configuration Debug \
+    -configuration "$apple_build_configuration" \
     -destination "$destination" \
     -derivedDataPath "$ios_sim_cache" \
     COMPILER_INDEX_STORE_ENABLE=NO \
@@ -305,7 +320,7 @@ case "$command_name" in
     xcodebuild \
       -project "$project" \
       -scheme Envoix-iOS \
-      -configuration Debug \
+      -configuration "$apple_build_configuration" \
       -destination "$ENVOIX_IOS_DEVICE_DESTINATION" \
       -derivedDataPath "$ios_device_cache" \
       -allowProvisioningUpdates \
@@ -318,7 +333,7 @@ case "$command_name" in
     xcodebuild \
       -project "$project" \
       -scheme Envoix \
-      -configuration Debug \
+      -configuration "$apple_build_configuration" \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_cache" \
       CODE_SIGNING_ALLOWED=YES \
@@ -337,7 +352,7 @@ case "$command_name" in
     xcodebuild \
       -project "$project" \
       -scheme Envoix-macOS-Hosted \
-      -configuration Debug \
+      -configuration "$apple_build_configuration" \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_cache" \
       COMPILER_INDEX_STORE_ENABLE=NO \
@@ -350,7 +365,7 @@ case "$command_name" in
     xcodebuild \
       -project "$project" \
       -scheme Envoix-macOS-Hosted \
-      -configuration Debug \
+      -configuration "$apple_build_configuration" \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_cache" \
       COMPILER_INDEX_STORE_ENABLE=NO \
@@ -365,7 +380,7 @@ case "$command_name" in
     xcodebuild \
       -project "$project" \
       -scheme Envoix-macOS-Hosted \
-      -configuration Debug \
+      -configuration "$apple_build_configuration" \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_cache" \
       COMPILER_INDEX_STORE_ENABLE=NO \

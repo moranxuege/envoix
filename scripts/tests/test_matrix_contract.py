@@ -95,6 +95,39 @@ class MatrixContractTests(unittest.TestCase):
             "metrics": {"plaintext_bytes": 7, "elapsed_ms": 1_000},
         }
 
+    def product_endpoint_result(self, role: str = "sender") -> dict:
+        value = self.endpoint_result()
+        value["case_id"] = "l2.baseline.room.android-ios.single-file"
+        value["test_layer"] = "l2_physical"
+        value["driver"] = "product_activity"
+        value["build_variant"] = "release_equivalent"
+        value["activity_id"] = "activity-1"
+        if role == "receiver":
+            value["role"] = "receiver"
+            value["source_summary"] = None
+            value["destination_summary"] = {
+                "root_count": 1,
+                "file_count": 1,
+                "directory_count": 0,
+                "plaintext_bytes": 7,
+                "manifest_digest": None,
+                "tree_digest": "a" * 64,
+                "entries": [
+                    {
+                        "relative_path": "single.txt",
+                        "kind": "file",
+                        "plaintext_bytes": 7,
+                        "sha256": "b" * 64,
+                        "disposition": "completed",
+                    }
+                ],
+                "publication": {
+                    "mechanism": "media_store",
+                    "committed": True,
+                },
+            }
+        return value
+
     def test_android_l1_endpoint_result_is_valid(self) -> None:
         self.assertEqual(
             matrix_contract.validate_endpoint_result(self.endpoint_result()),
@@ -114,6 +147,50 @@ class MatrixContractTests(unittest.TestCase):
         value["driver"] = "direct_ffi"
         errors = matrix_contract.validate_endpoint_result(value)
         self.assert_error(errors, "direct_ffi endpoint results must be Apple L1")
+
+    def test_product_activity_endpoint_result_is_valid(self) -> None:
+        self.assertEqual(
+            matrix_contract.validate_endpoint_result(
+                self.product_endpoint_result("sender")
+            ),
+            [],
+        )
+        self.assertEqual(
+            matrix_contract.validate_endpoint_result(
+                self.product_endpoint_result("receiver")
+            ),
+            [],
+        )
+
+    def test_product_activity_requires_release_activity_and_typed_path(self) -> None:
+        value = self.product_endpoint_result()
+        value["build_variant"] = "debug"
+        value["activity_id"] = None
+        value["selected_path"] = None
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "require a release-equivalent build")
+        self.assert_error(errors, "require activity_id")
+        self.assert_error(errors, "require selected_path")
+
+    def test_product_activity_receiver_requires_native_publication(self) -> None:
+        value = self.product_endpoint_result("receiver")
+        value["destination_summary"]["publication"] = {
+            "mechanism": "test_local_directory",
+            "committed": True,
+        }
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "cannot use test-local publication")
+
+        value["destination_summary"]["publication"] = None
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "requires publication")
+
+        value["destination_summary"]["publication"] = {
+            "mechanism": "files_directory",
+            "committed": False,
+        }
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "requires committed publication")
 
     def test_apple_typed_failure_phases_are_valid(self) -> None:
         value = self.endpoint_result()
@@ -390,7 +467,7 @@ class MatrixContractTests(unittest.TestCase):
     def test_case_selection_uses_explicit_filters(self) -> None:
         selected = matrix_contract.select_cases(
             self.registry,
-            statuses={"planned"},
+            statuses={"experimental"},
             gate="cross-platform-baseline",
             tag="multi-entry",
         )
@@ -493,6 +570,39 @@ class MatrixContractTests(unittest.TestCase):
         )
         self.assertEqual(matrix_contract.validate_run_plan(plan, self.registry), [])
 
+    def test_product_baseline_executes_only_automated_file_profiles(self) -> None:
+        selected, _, selection = matrix_contract.resolve_cases(
+            self.registry,
+            gate="cross-platform-baseline",
+        )
+        plan = matrix_contract.build_run_plan(
+            self.registry,
+            selected,
+            run_id="fixture-run",
+            tested_commit="0123456789abcdef",
+            build_variant="release_equivalent",
+            selection=selection,
+            dry_run=False,
+        )
+        executable = [
+            execution
+            for execution in plan["executions"]
+            if execution["disposition"] == "execute"
+        ]
+        deferred = [
+            execution
+            for execution in plan["executions"]
+            if execution["disposition"] == "not_run"
+        ]
+        self.assertEqual(len(executable), 12)
+        self.assertEqual(len(deferred), 6)
+        self.assertTrue(
+            all(execution["scenario"] != "multi_root" for execution in executable)
+        )
+        self.assertTrue(
+            all(execution["scenario"] == "multi_root" for execution in deferred)
+        )
+
     def test_repetition_override_cannot_weaken_the_registry(self) -> None:
         selected, _, selection = matrix_contract.resolve_cases(
             self.registry,
@@ -529,6 +639,38 @@ class MatrixContractTests(unittest.TestCase):
             matrix_contract.validate_run_plan(plan, self.registry),
             "disposition does not match support and run state",
         )
+
+    def test_execution_rows_include_registry_test_layer(self) -> None:
+        selected, _, selection = matrix_contract.resolve_cases(
+            self.registry,
+            case_ids=["l2.baseline.room.android-ios.single-file"],
+        )
+        plan = matrix_contract.build_run_plan(
+            self.registry,
+            selected,
+            run_id="fixture-run",
+            tested_commit="0123456789abcdef",
+            build_variant="release_equivalent",
+            selection=selection,
+            dry_run=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts/matrix_contract.py"),
+                    "list-executions",
+                    str(REGISTRY_PATH),
+                    str(plan_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        fields = completed.stdout.splitlines()[0].split("\t")
+        self.assertEqual(fields[-2:], ["l2_physical", "not_run"])
 
     def test_fixture_aggregate_is_deterministic_and_keeps_failure_classes(self) -> None:
         fixture = json.loads(RUNNER_FIXTURE_PATH.read_text(encoding="utf-8"))

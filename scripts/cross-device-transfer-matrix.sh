@@ -35,8 +35,12 @@ selected_cases=()
 legacy_selection=0
 original_args=("$@")
 test_runner="dev.envoix.app.test/androidx.test.runner.AndroidJUnitRunner"
-main_apk="$android_dir/app/build/outputs/apk/debug/app-debug.apk"
-test_apk="$android_dir/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+android_build_type=""
+android_task_suffix=""
+apple_build_configuration=""
+apple_configuration_slug=""
+main_apk=""
+test_apk=""
 
 usage() {
   cat <<'EOF'
@@ -200,6 +204,19 @@ if [[ "$build_variant" != "debug" && "$build_variant" != "release_equivalent" ]]
   echo "error: --build-variant must be debug or release_equivalent" >&2
   exit 2
 fi
+if [[ "$build_variant" == "release_equivalent" ]]; then
+  android_build_type="release"
+  android_task_suffix="Release"
+  apple_build_configuration="Release"
+  apple_configuration_slug="release"
+else
+  android_build_type="debug"
+  android_task_suffix="Debug"
+  apple_build_configuration="Debug"
+  apple_configuration_slug="debug"
+fi
+main_apk="$android_dir/app/build/outputs/apk/$android_build_type/app-$android_build_type.apk"
+test_apk="$android_dir/app/build/outputs/apk/androidTest/$android_build_type/app-$android_build_type-androidTest.apk"
 if [[ ! "$base_run_id" =~ ^[A-Za-z0-9_.-]+$ || "${#base_run_id}" -gt 96 ]]; then
   echo "error: run ID must be at most 96 letters, digits, '.', '-' or '_'" >&2
   exit 2
@@ -318,6 +335,12 @@ print_log_tail() {
 
 prepare_builds() {
   local build_private="$output_dir/private/build"
+  local -a android_build_args=(
+    :app:ktlintCheck
+    ":app:assemble$android_task_suffix"
+    ":app:assemble${android_task_suffix}AndroidTest"
+    --no-daemon
+  )
   mkdir -p "$build_private"
   if [[ ! -x "$adb_bin" ]]; then
     echo "error: adb not found at $adb_bin" >&2
@@ -330,24 +353,31 @@ prepare_builds() {
   require_android_network_route || return 1
 
   if [[ "$skip_build" != "1" ]]; then
-    echo "build: Android application and instrumented tests"
+    echo "build: Android $android_build_type application and instrumented tests"
     if ! (
       cd "$android_dir"
       env ANDROID_HOME="$android_home" ANDROID_SDK_ROOT="$android_home" \
-        ./gradlew :app:ktlintCheck :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon
+        ./gradlew \
+          -Penvoix.testBuildType="$android_build_type" \
+          "${android_build_args[@]}"
     ); then
       return 1
     fi
 
-    echo "build: iPhone hosted tests"
-    if ! env ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" ENVOIX_IOS_SIM_DESTINATION="$ios_destination" \
+    echo "build: iPhone $apple_build_configuration hosted tests"
+    if ! env \
+      ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
+      ENVOIX_APPLE_BUILD_CONFIGURATION="$apple_build_configuration" \
+      ENVOIX_IOS_SIM_DESTINATION="$ios_destination" \
       "$repo_root/scripts/apple-dev.sh" ios-test-build hosted -quiet; then
       return 1
     fi
 
     if matrix_uses_macos; then
-      echo "build: Mac hosted tests"
-      if ! env ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
+      echo "build: Mac $apple_build_configuration hosted tests"
+      if ! env \
+        ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
+        ENVOIX_APPLE_BUILD_CONFIGURATION="$apple_build_configuration" \
         "$repo_root/scripts/apple-dev.sh" macos-test-build -quiet; then
         return 1
       fi
@@ -376,8 +406,8 @@ prepare_builds() {
   adb_command shell pm grant dev.envoix.app android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
 }
 
-ios_products="$apple_cache_root/ios-simulator-debug/Build/Products"
-macos_products="$apple_cache_root/macos-debug/Build/Products"
+ios_products="$apple_cache_root/ios-simulator-$apple_configuration_slug/Build/Products"
+macos_products="$apple_cache_root/macos-$apple_configuration_slug/Build/Products"
 ios_xctestrun=""
 macos_xctestrun=""
 ACTIVE_PATCHED_XCTESTRUN=""
@@ -428,13 +458,13 @@ run_apple_method() {
     target="Envoix-iOSUITests"
     destination="$ios_destination"
     product_directory="$ios_products"
-    derived_data="$apple_cache_root/ios-simulator-debug"
+    derived_data="$apple_cache_root/ios-simulator-$apple_configuration_slug"
   else
     source_xctestrun="$macos_xctestrun"
     target="Envoix-macOSUITests"
     destination="$macos_destination"
     product_directory="$macos_products"
-    derived_data="$apple_cache_root/macos-debug"
+    derived_data="$apple_cache_root/macos-$apple_configuration_slug"
   fi
 
   patched="$product_directory/.envoix-matrix-$run_id-$platform-$method.xctestrun"
@@ -513,20 +543,29 @@ run_endpoint_role() {
   local platform="$1"
   local role="$2"
   local scenario="$3"
-  local code="$4"
-  local run_id="$5"
-  local case_id="$6"
-  local repetition="$7"
-  local log_file="$8"
+  local test_layer="$4"
+  local code="$5"
+  local run_id="$6"
+  local case_id="$7"
+  local repetition="$8"
+  local log_file="$9"
   local method private_case_dir
   private_case_dir="$(dirname "$log_file")"
 
   if [[ "$role" == "send" ]]; then
     method="sendScenarioManifestV2Room"
     [[ "$platform" != "android" ]] && method="testSendScenarioManifestV2Room"
+    if [[ "$test_layer" == "l2_physical" ]]; then
+      method="sendScenarioProductActivityRoom"
+      [[ "$platform" != "android" ]] && method="testSendScenarioProductActivityRoom"
+    fi
   else
     method="receiveScenarioManifestV2Room"
     [[ "$platform" != "android" ]] && method="testReceiveScenarioManifestV2Room"
+    if [[ "$test_layer" == "l2_physical" ]]; then
+      method="receiveScenarioProductActivityRoom"
+      [[ "$platform" != "android" ]] && method="testReceiveScenarioProductActivityRoom"
+    fi
   fi
 
   if [[ "$platform" == "android" ]]; then
@@ -672,12 +711,15 @@ remove_endpoint_patch() {
   local platform="$1"
   local role="$2"
   local run_id="$3"
+  local test_layer="$4"
   local method product_directory
   [[ "$platform" == "android" ]] && return
   if [[ "$role" == "send" ]]; then
     method="testSendScenarioManifestV2Room"
+    [[ "$test_layer" == "l2_physical" ]] && method="testSendScenarioProductActivityRoom"
   else
     method="testReceiveScenarioManifestV2Room"
+    [[ "$test_layer" == "l2_physical" ]] && method="testReceiveScenarioProductActivityRoom"
   fi
   if [[ "$platform" == "ios" ]]; then
     product_directory="$ios_products"
@@ -691,6 +733,7 @@ ANDROID_LOGCAT_PID=""
 ACTIVE_RECEIVER_PID=""
 ACTIVE_RECEIVER_PLATFORM=""
 ACTIVE_RECEIVER_RUN_ID=""
+ACTIVE_RECEIVER_TEST_LAYER=""
 ACTIVE_CASE_ID=""
 
 start_android_logcat() {
@@ -722,7 +765,8 @@ cleanup_runner() {
     kill "$ACTIVE_RECEIVER_PID" >/dev/null 2>&1 || true
     wait "$ACTIVE_RECEIVER_PID" >/dev/null 2>&1 || true
     remove_endpoint_patch \
-      "$ACTIVE_RECEIVER_PLATFORM" receive "$ACTIVE_RECEIVER_RUN_ID"
+      "$ACTIVE_RECEIVER_PLATFORM" receive "$ACTIVE_RECEIVER_RUN_ID" \
+      "$ACTIVE_RECEIVER_TEST_LAYER"
   fi
   if [[ -n "$ACTIVE_RECEIVER_RUN_ID" && -n "$ACTIVE_CASE_ID" ]]; then
     remove_android_evidence_files "$ACTIVE_RECEIVER_RUN_ID" "$ACTIVE_CASE_ID"
@@ -749,11 +793,12 @@ run_pair() {
   local sender="$1"
   local receiver="$2"
   local scenario="$3"
-  local code="$4"
-  local run_id="$5"
-  local case_id="$6"
-  local repetition="$7"
-  local private_case_dir="$8"
+  local test_layer="$4"
+  local code="$5"
+  local run_id="$6"
+  local case_id="$7"
+  local repetition="$8"
+  local private_case_dir="$9"
   local sender_log="$private_case_dir/sender.log"
   local receiver_log="$private_case_dir/receiver.log"
   local logcat_log="$private_case_dir/android-logcat.log"
@@ -770,11 +815,13 @@ run_pair() {
   fi
 
   run_endpoint_role \
-    "$receiver" receive "$scenario" "$code" "$run_id" "$case_id" "$repetition" "$receiver_log" &
+    "$receiver" receive "$scenario" "$test_layer" "$code" "$run_id" \
+    "$case_id" "$repetition" "$receiver_log" &
   receiver_pid=$!
   ACTIVE_RECEIVER_PID="$receiver_pid"
   ACTIVE_RECEIVER_PLATFORM="$receiver"
   ACTIVE_RECEIVER_RUN_ID="$run_id"
+  ACTIVE_RECEIVER_TEST_LAYER="$test_layer"
   ACTIVE_CASE_ID="$case_id"
   case "$receiver" in
     android)
@@ -798,7 +845,7 @@ run_pair() {
     kill "$receiver_pid" >/dev/null 2>&1 || true
     wait "$receiver_pid" >/dev/null 2>&1 || true
     ACTIVE_RECEIVER_PID=""
-    remove_endpoint_patch "$receiver" receive "$run_id"
+    remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
     remove_android_evidence_files "$run_id" "$case_id"
@@ -817,7 +864,7 @@ run_pair() {
     kill "$receiver_pid" >/dev/null 2>&1 || true
     wait "$receiver_pid" >/dev/null 2>&1 || true
     ACTIVE_RECEIVER_PID=""
-    remove_endpoint_patch "$receiver" receive "$run_id"
+    remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
     remove_android_evidence_files "$run_id" "$case_id"
@@ -838,7 +885,7 @@ run_pair() {
     kill "$receiver_pid" >/dev/null 2>&1 || true
     wait "$receiver_pid" >/dev/null 2>&1 || true
     ACTIVE_RECEIVER_PID=""
-    remove_endpoint_patch "$receiver" receive "$run_id"
+    remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
     remove_android_evidence_files "$run_id" "$case_id"
@@ -855,7 +902,8 @@ run_pair() {
     sleep "$receiver_settle_seconds"
   fi
   run_endpoint_role \
-    "$sender" send "$scenario" "$pairing_code" "$run_id" "$case_id" "$repetition" "$sender_log" ||
+    "$sender" send "$scenario" "$test_layer" "$pairing_code" "$run_id" \
+    "$case_id" "$repetition" "$sender_log" ||
     sender_status=$?
   pairing_code=""
   if [[ "$sender_status" -ne 0 ]]; then
@@ -863,8 +911,8 @@ run_pair() {
   fi
   wait "$receiver_pid" || receiver_status=$?
   ACTIVE_RECEIVER_PID=""
-  remove_endpoint_patch "$sender" send "$run_id"
-  remove_endpoint_patch "$receiver" receive "$run_id"
+  remove_endpoint_patch "$sender" send "$run_id" "$test_layer"
+  remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
   if [[ "$sender" == "android" ]]; then
     collect_android_evidence \
       send "$run_id" "$case_id" "$repetition" "$private_case_dir" || evidence_status=1
@@ -984,7 +1032,7 @@ mapfile -t execution_rows < <(
 MATRIX_USES_MACOS=0
 requires_execution=0
 for row in "${execution_rows[@]}"; do
-  IFS=$'\t' read -r _ _ sender receiver _ _ disposition <<< "$row"
+  IFS=$'\t' read -r _ _ sender receiver _ _ _ disposition <<< "$row"
   if [[ "$disposition" == "execute" ]]; then
     requires_execution=1
     if [[ "$sender" == "macos" || "$receiver" == "macos" ]]; then
@@ -995,7 +1043,7 @@ done
 
 if [[ "$dry_run" == "1" || "$requires_execution" == "0" ]]; then
   for row in "${execution_rows[@]}"; do
-    IFS=$'\t' read -r case_id repetition _ _ _ _ disposition <<< "$row"
+    IFS=$'\t' read -r case_id repetition _ _ _ _ _ disposition <<< "$row"
     record_execution "$case_id" "$repetition" "$disposition"
   done
   if aggregate_and_check; then
@@ -1024,7 +1072,7 @@ fi
 
 if [[ -n "$preparation_failure" ]]; then
   for row in "${execution_rows[@]}"; do
-    IFS=$'\t' read -r case_id repetition _ _ _ _ disposition <<< "$row"
+    IFS=$'\t' read -r case_id repetition _ _ _ _ _ disposition <<< "$row"
     if [[ "$disposition" == "execute" ]]; then
       record_execution \
         "$case_id" "$repetition" infrastructure_failure "$preparation_failure"
@@ -1038,7 +1086,7 @@ fi
 
 for row in "${execution_rows[@]}"; do
   IFS=$'\t' read -r \
-    case_id repetition sender receiver scenario timeout_seconds disposition <<< "$row"
+    case_id repetition sender receiver scenario timeout_seconds test_layer disposition <<< "$row"
   if [[ "$disposition" != "execute" ]]; then
     record_execution "$case_id" "$repetition" "$disposition"
     continue
@@ -1057,7 +1105,7 @@ for row in "${execution_rows[@]}"; do
   fi
   private_case_dir="$output_dir/private/cases/$case_id/r$repetition"
   echo "case $case_id r$repetition: $sender -> $receiver, scenario=$scenario"
-  if run_pair "$sender" "$receiver" "$scenario" \
+  if run_pair "$sender" "$receiver" "$scenario" "$test_layer" \
     "$CURRENT_CODE" "$CURRENT_RUN_ID" "$case_id" "$repetition" "$private_case_dir"; then
     record_execution "$case_id" "$repetition" pass
     echo "pass: $case_id r$repetition"
