@@ -459,7 +459,13 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 fixture.roots.zip(completed.savedUris).forEach { (root, encodedUri) ->
                     val uri = Uri.parse(encodedUri)
                     assertEquals(root.name, displayName(context, uri))
-                    assertArrayEquals(root.files.single().payload.digest(), streamDigest(context, uri))
+                    assertArrayEquals(
+                        root.files
+                            .single()
+                            .payload
+                            .digest(),
+                        streamDigest(context, uri),
+                    )
                     publishedUris += uri
                 }
                 evidence.recordProductDestination(completed.savedUris.map(Uri::parse))
