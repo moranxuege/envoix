@@ -1,0 +1,38 @@
+[package]
+name = "envoix-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "envoix_ffi"
+crate-type = ["lib", "staticlib"]
+
+[[bin]]
+name = "envoix-bindgen"
+path = "src/bin/envoix-bindgen.rs"
+required-features = ["bindgen-cli"]
+
+[features]
+bindgen-cli = ["uniffi/cli"]
+
+[dependencies]
+async-trait.workspace = true
+envoix-client.workspace = true
+envoix-protocol.workspace = true
+envoix-qr.workspace = true
+envoix-rendezvous-iroh.workspace = true
+envoix-types.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+tokio.workspace = true
+uniffi.workspace = true
+thiserror.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+envoix-error.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"

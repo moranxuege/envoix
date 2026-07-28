@@ -1,0 +1,102 @@
+name: rendezvous server artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+    paths:
+      - '.github/workflows/rendezvous-server-artifact.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'apps/envoix-rendezvous-server/**'
+      - 'crates/envoix-invite/**'
+      - 'crates/envoix-pairing/**'
+      - 'crates/envoix-rendezvous/**'
+      - 'crates/envoix-rendezvous-iroh/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build glibc-compatible Linux broker
+    runs-on: ubuntu-latest
+    container:
+      image: debian:11-slim
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y \
+            binutils \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            pkg-config
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf \
+            https://sh.rustup.rs \
+            -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustc" --version
+
+      - uses: actions/checkout@v4
+
+      - name: Record build ABI
+        run: |
+          rustc --version
+          ldd --version | head -n 1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test rendezvous broker
+        run: |
+          cargo test --locked -p envoix-rendezvous --test room_pairing
+          cargo test --locked -p envoix-rendezvous-iroh --test iroh_loopback
+
+      - name: Build rendezvous server
+        run: cargo build --locked --release -p envoix-rendezvous-server
+
+      - name: Stage and verify artifact
+        run: |
+          mkdir -p dist
+          server="dist/envoix-rendezvous-server-linux-x86_64-glibc231"
+          cp target/release/envoix-rendezvous-server "$server"
+          file "$server"
+          if ! readelf -l "$server" | grep -q \
+            'Requesting program interpreter: /lib64/ld-linux-x86-64.so.2'; then
+            echo "rendezvous server has an unexpected ELF interpreter" >&2
+            exit 1
+          fi
+          max_glibc="$(
+            readelf --version-info "$server" \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
+              | sort -Vu \
+              | tail -n 1
+          )"
+          test -n "$max_glibc"
+          if [ "$(printf '%s\n' "$max_glibc" 2.31 | sort -V | tail -n 1)" != 2.31 ]; then
+            echo "rendezvous server requires unsupported glibc $max_glibc" >&2
+            exit 1
+          fi
+          printf 'maximum required glibc: %s\n' "$max_glibc"
+          ldd "$server" | tee "$server.ldd.txt"
+          readelf --version-info "$server" > "$server.versions.txt"
+          sha256sum "$server" > "$server.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: envoix-rendezvous-server-linux-x86_64-glibc231
+          path: |
+            dist/envoix-rendezvous-server-linux-x86_64-glibc231
+            dist/envoix-rendezvous-server-linux-x86_64-glibc231.sha256
+            dist/envoix-rendezvous-server-linux-x86_64-glibc231.ldd.txt
+            dist/envoix-rendezvous-server-linux-x86_64-glibc231.versions.txt
+          if-no-files-found: error

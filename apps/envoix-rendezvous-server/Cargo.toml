@@ -1,0 +1,26 @@
+[package]
+name = "envoix-rendezvous-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "iroh-node rendezvous server: matches peers by room id and relays their end-to-end pairing handshake."
+
+[dependencies]
+envoix-rendezvous.workspace = true
+envoix-rendezvous-iroh.workspace = true
+anyhow.workspace = true
+axum = "0.8"
+# TLS termination for the log endpoint. `no-provider` plus an explicit
+# ring provider install in main keeps the process-level rustls provider
+# unambiguous next to iroh's rustls/ring dependency tree.
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+clap.workspace = true
+iroh.workspace = true
+maxminddb.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

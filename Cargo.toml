@@ -1,0 +1,85 @@
+[workspace]
+members = [
+    "apps/envoix-cli",
+    "apps/envoix-android-jni",
+    "apps/envoix-rendezvous-server",
+    "crates/envoix-auth",
+    "crates/envoix-client",
+    "crates/envoix-error",
+    "crates/envoix-ffi",
+    "crates/envoix-invite",
+    "crates/envoix-pairing",
+    "crates/envoix-protocol",
+    "crates/envoix-rendezvous",
+    "crates/envoix-rendezvous-iroh",
+    "crates/envoix-qr",
+    "crates/envoix-session",
+    "crates/envoix-transfer",
+    "crates/envoix-types",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+envoix-auth = { path = "crates/envoix-auth" }
+envoix-client = { path = "crates/envoix-client" }
+envoix-error = { path = "crates/envoix-error" }
+envoix-ffi = { path = "crates/envoix-ffi" }
+envoix-invite = { path = "crates/envoix-invite" }
+envoix-pairing = { path = "crates/envoix-pairing" }
+envoix-protocol = { path = "crates/envoix-protocol" }
+envoix-rendezvous = { path = "crates/envoix-rendezvous" }
+envoix-rendezvous-iroh = { path = "crates/envoix-rendezvous-iroh" }
+envoix-qr = { path = "crates/envoix-qr" }
+envoix-session = { path = "crates/envoix-session" }
+envoix-transfer = { path = "crates/envoix-transfer" }
+envoix-types = { path = "crates/envoix-types" }
+async-trait = "0.1"
+anyhow = "1"
+if-addrs = "0.13"
+ipnet = "2"
+maxminddb = "0.29"
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustix = { version = "1.1", features = ["fs"] }
+blake3 = "1"
+chacha20poly1305 = "0.10"
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.3"
+hmac = "0.12"
+hkdf = "0.12"
+iroh = { version = "1", features = ["unstable-custom-transports"] }
+iroh-base = "1"
+iroh-mdns-address-lookup = "0.4"
+n0-future = "0.3"
+n0-error = "1"
+n0-watcher = "1"
+noq-udp = "1.1"
+num_enum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+spake2 = "0.4"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tokio-util = "0.7"
+toml = "0.8"
+uniffi = "0.31"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+unicode-normalization = "0.1"
+zstd = "0.13"
+
+[patch.crates-io]
+# Android kernels can advertise UDP_SEGMENT while the active Wi-Fi path rejects
+# actual GSO sends with EIO. The patched crate keeps ordinary Android UDP socket
+# behavior but schedules one datagram per send.
+noq-udp = { path = "vendor/noq-udp" }

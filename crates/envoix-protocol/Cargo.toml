@@ -1,0 +1,19 @@
+[package]
+name = "envoix-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+envoix-error.workspace = true
+envoix-types.workspace = true
+num_enum.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

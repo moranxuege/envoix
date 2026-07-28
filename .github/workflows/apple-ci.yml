@@ -1,0 +1,260 @@
+name: apple-ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ui_scope:
+        description: UI coverage to run after the hosted tests
+        required: false
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+  RUST_VERSION: 1.96.0
+  CARGO_SWIFT_VERSION: 0.11.1
+  XCODEGEN_VERSION: 2.45.4
+  XCODEGEN_SHA256: 090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef
+  ENVOIX_APPLE_CORE_PROFILE: release
+  ENVOIX_BUILD_CACHE_MIN_FREE_GIB: '1'
+  ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
+
+jobs:
+  macos:
+    name: macOS arm64 build
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      ENVOIX_APPLE_CORE_TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare temporary build paths
+        run: |
+          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache/$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf 'CARGO_INSTALL_ROOT=%s\n' "$RUNNER_TEMP/cargo-tools" >> "$GITHUB_ENV"
+
+      - name: Restore cargo-swift
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/cargo-tools
+          key: apple-cargo-swift-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ env.CARGO_SWIFT_VERSION }}
+
+      - name: Set up pinned Apple tools
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" "$ENVOIX_APPLE_CORE_TARGET"
+          if [[ ! -x "$CARGO_INSTALL_ROOT/bin/cargo-swift" ]]; then
+            cargo install cargo-swift --version "$CARGO_SWIFT_VERSION" --locked
+          fi
+
+          curl -L --fail --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            -o "$RUNNER_TEMP/xcodegen.zip"
+          printf '%s  %s\n' "$XCODEGEN_SHA256" "$RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          printf '%s\n' "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$CARGO_INSTALL_ROOT/bin:$PATH"
+
+          rustc --version
+          cargo swift --version
+          xcodegen --version
+          df -h .
+
+      - name: Build macOS app from generated core
+        run: |
+          scripts/apple-dev.sh macos-build
+          test -x \
+            "$ENVOIX_APPLE_CACHE_ROOT/macos-debug/Build/Products/Debug/Envoix.app/Contents/MacOS/Envoix"
+
+      - name: Report macOS cache size
+        if: always()
+        run: |
+          scripts/apple-dev.sh cache-size
+          df -h .
+
+      - name: Upload macOS build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-macos-logs
+          path: |
+            ${{ env.ENVOIX_APPLE_CACHE_ROOT }}/macos-debug/Logs
+          if-no-files-found: warn
+          retention-days: 14
+
+  ios:
+    name: iOS Simulator hosted and UI tests
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      ENVOIX_APPLE_CORE_TARGET: aarch64-apple-ios-sim
+      ENVOIX_IOS_SIM_DESTINATION: platform=iOS Simulator,OS=26.5,name=iPhone 17 Pro
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare temporary build paths
+        run: |
+          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache/$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf 'CARGO_INSTALL_ROOT=%s\n' "$RUNNER_TEMP/cargo-tools" >> "$GITHUB_ENV"
+
+      - name: Restore cargo-swift
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/cargo-tools
+          key: apple-cargo-swift-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ env.CARGO_SWIFT_VERSION }}
+
+      - name: Set up pinned Apple tools
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" "$ENVOIX_APPLE_CORE_TARGET"
+          if [[ ! -x "$CARGO_INSTALL_ROOT/bin/cargo-swift" ]]; then
+            cargo install cargo-swift --version "$CARGO_SWIFT_VERSION" --locked
+          fi
+
+          curl -L --fail --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            -o "$RUNNER_TEMP/xcodegen.zip"
+          printf '%s  %s\n' "$XCODEGEN_SHA256" "$RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          printf '%s\n' "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$CARGO_INSTALL_ROOT/bin:$PATH"
+
+          rustc --version
+          cargo swift --version
+          xcodegen --version
+          xcrun simctl list devices available
+          df -h .
+
+      - name: Build both iOS test targets once
+        run: scripts/apple-dev.sh ios-test-build all
+
+      - name: Run hosted tests without rebuilding
+        id: hosted_tests
+        env:
+          ENVOIX_XCRESULT_PATH: ${{ runner.temp }}/envoix-ios-hosted.xcresult
+        run: >-
+          scripts/apple-dev.sh ios-test-rerun hosted
+          -skip-testing:Envoix-iOSUITests/WifiAwareCapabilityTests/testPhysicalDeviceReportsWifiAwarePairingCapability
+          -skip-testing:Envoix-iOSUITests/WifiAwarePhysicalTransferTests
+
+      - name: Audit hosted test execution
+        if: always() && steps.hosted_tests.outcome != 'skipped'
+        run: >-
+          scripts/check-apple-test-results.py
+          "${{ runner.temp }}/envoix-ios-hosted.xcresult"
+          --label hosted
+          --minimum-total 18
+          --minimum-executed 15
+          --maximum-skipped 3
+
+      - name: Select UI test scope
+        id: ui_scope
+        env:
+          REQUESTED_UI_SCOPE: ${{ github.event.inputs.ui_scope }}
+        run: |
+          scope="${REQUESTED_UI_SCOPE:-smoke}"
+          case "$scope" in
+            smoke|full) ;;
+            *)
+              echo "error: unsupported UI scope: $scope" >&2
+              exit 2
+              ;;
+          esac
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+
+      - name: Run UI tests without rebuilding (smoke by default; rerun once on failure)
+        id: ui_tests
+        shell: bash
+        env:
+          UI_SCOPE: ${{ steps.ui_scope.outputs.scope }}
+        run: |
+          set +e
+          ui_args=()
+          if [[ "$UI_SCOPE" == "smoke" ]]; then
+            ui_args=(
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testEnglishSendAndReceiveExposeCanonicalInventoryControls
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testSimplifiedChineseSendAndReceiveExposeCanonicalInventoryControls
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testActivityAndSettingsAreSeparatePages
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testUnverifiedNearbyOfferRequiresExplicitAcceptance
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testNearbySendHandoffKeepsEverySourcePickerUsable
+            )
+          fi
+
+          first_result="$RUNNER_TEMP/envoix-ios-ui-first.xcresult"
+          ENVOIX_XCRESULT_PATH="$first_result" scripts/apple-dev.sh ios-test-rerun ui "${ui_args[@]}"
+          first_status=$?
+          if [[ "$first_status" -eq 0 ]]; then
+            echo "result=$first_result" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::warning::${UI_SCOPE} UI test run failed; rerunning once without rebuilding."
+          rerun_result="$RUNNER_TEMP/envoix-ios-ui-rerun.xcresult"
+          ENVOIX_XCRESULT_PATH="$rerun_result" scripts/apple-dev.sh ios-test-rerun ui "${ui_args[@]}"
+          rerun_status=$?
+          echo "result=$rerun_result" >> "$GITHUB_OUTPUT"
+          exit "$rerun_status"
+
+      - name: Audit UI test execution
+        if: always() && steps.ui_tests.outcome != 'skipped'
+        env:
+          UI_SCOPE: ${{ steps.ui_scope.outputs.scope }}
+          UI_RESULT: ${{ steps.ui_tests.outputs.result }}
+        run: |
+          if [[ "$UI_SCOPE" == "smoke" ]]; then
+            scripts/check-apple-test-results.py "$UI_RESULT" \
+              --label ui-smoke \
+              --minimum-total 5 \
+              --minimum-executed 5 \
+              --maximum-skipped 0
+          else
+            scripts/check-apple-test-results.py "$UI_RESULT" \
+              --label ui-full \
+              --minimum-total 2 \
+              --minimum-executed 2 \
+              --maximum-skipped 0
+          fi
+
+      - name: Shut down Simulator
+        if: always()
+        run: xcrun simctl shutdown all
+
+      - name: Report iOS cache size
+        if: always()
+        run: |
+          scripts/apple-dev.sh cache-size
+          df -h .
+
+      - name: Upload iOS test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-ios-test-evidence
+          path: |
+            ${{ runner.temp }}/envoix-ios-hosted.xcresult
+            ${{ runner.temp }}/envoix-ios-ui-*.xcresult
+            ${{ env.ENVOIX_APPLE_CACHE_ROOT }}/ios-simulator-debug/Logs
+          if-no-files-found: warn
+          retention-days: 14

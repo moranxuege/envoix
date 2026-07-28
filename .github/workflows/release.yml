@@ -1,0 +1,139 @@
+name: release
+
+# Builds the envoix CLI (Linux / macOS arm64+x86_64 / Windows) and the Android
+# APK (multi-ABI: arm64-v8a + x86_64, debug-signed).
+#   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
+#   - run manually (Actions -> release -> Run workflow) -> builds everything as
+#     downloadable run artifacts, without publishing a release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create the release
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: envoix-linux-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: envoix-macos-aarch64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            name: envoix-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: envoix-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust (iroh needs >= 1.91)
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustc --version
+
+      - name: Install musl tools
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build envoix CLI
+        run: cargo build --release -p envoix-cli --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/envoix.exe" "dist/${{ matrix.name }}"
+          else
+            cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.name }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}
+          if-no-files-found: error
+
+  android:
+    name: build android apk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Rust + Android targets
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-linux-android x86_64-linux-android
+          rustc --version
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK r26 + SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Build debug APK
+        working-directory: android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
+          ENVOIX_ANDROID_ABIS: arm64-v8a,x86_64
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/envoix-android.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: envoix-android.apk
+          path: dist/envoix-android.apk
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: [build, android]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes --repo "${{ github.repository }}"

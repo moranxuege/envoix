@@ -1,0 +1,34 @@
+# ManifestOfferV2 envelope: magic, version=2, frame type=Offer, payload bytes=281
+454e5632 0002 0001 00000119
+
+# BLAKE3-256 of the canonical Manifest body below
+727938abe4aa6ff971c1dcf8a7b3d369f971f75c712aed9be2e7255b7ccd947d
+
+# job_id="job-v2-fixture!!", generation=7, selection_revision=11, policy=Smart
+6a6f622d76322d666978747572652121 00000007 000000000000000b 02
+
+# Two roots. Each carries its requested top-level name. Root 0 is
+# UserApprovedPartial(inaccessible boundaries=1, omitted=2); root 1 is Complete.
+00000002
+00000000 00000000 00000006 50686f746f73 01 0000000000000001 01 0000000000000002
+00000001 00000003 00000009 6e6f7465732e747874 00
+
+# Four canonical entries
+00000004
+
+# entry 0: root directory "Photos", relative component count=0
+00000000 00000000 00000000 02 0000000000000000 00
+
+# entry 1: empty directory "Photos/Empty", relative components=["Empty"]
+00000001 00000000 00000001 00000005 456d707479 02 0000000000000000 00
+
+# entry 2: "Photos/a.jpg", relative components=["a.jpg"], size=3,
+# digest=Known(0x11 * 32)
+00000002 00000000 00000001 00000005 612e6a7067 01 0000000000000003 01
+1111111111111111111111111111111111111111111111111111111111111111
+
+# entry 3: root file "notes.txt", relative component count=0
+00000003 00000001 00000000 01 0000000000000005 00
+
+# Totals: files=2, directories=2, plaintext bytes=8
+00000002 00000002 0000000000000008
