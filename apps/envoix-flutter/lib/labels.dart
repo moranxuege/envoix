@@ -357,3 +357,11 @@ String scanDeclinedLabel(DeclinedView reason) => switch (reason) {
       DeclinedView.unsupported =>
         'This device has no camera to scan with. Paste the invite instead.',
     };
+
+/// The scanner could not be ASKED. Deliberately not one of the three declines
+/// above: those are the platform answering, this is our own seam failing, and a
+/// user told "this device has no camera" about a bug in our build would have no
+/// reason to report the one thing we need reported.
+const String scanUnreachableLabel =
+    'The scanner could not be reached — this is a fault in Envoix, not your '
+    'device. Paste the invite instead.';

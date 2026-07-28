@@ -31,9 +31,9 @@ class NewTransferSheet extends StatefulWidget {
   final Creator creator;
   final SourcePicker picker;
 
-  /// Asks the platform for a capability. A platform with no adapter for one
-  /// answers `unsupported`, which this screen draws as an absent button rather
-  /// than a broken one.
+  /// Asks the platform for a capability. A platform whose adapter ANSWERS
+  /// `unsupported` gets an absent button rather than a broken one; an adapter
+  /// that could not be asked at all gets a fault, and keeps its button.
   final CapabilityAsk ask;
 
   @override
@@ -58,9 +58,17 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
   /// are three different things to tell a user.
   DeclinedView? _declined;
 
-  /// Set once this platform has said it cannot scan at all. The offer is then
-  /// withdrawn rather than repeatedly failed.
+  /// Set once this platform has ANSWERED that it cannot scan at all. The offer
+  /// is then withdrawn rather than repeatedly failed. Only an adapter's own
+  /// `unsupported` sets this: a scanner we failed to reach has told us nothing
+  /// about the device, and withdrawing on it would hide our own bug behind a
+  /// hardware claim.
   bool _scanUnsupported = false;
+
+  /// Set when the adapter could not be asked at all. Distinct from `_declined`
+  /// because it is not the platform's answer — it is our own seam failing, so
+  /// it reads as a fault and the offer stays.
+  bool _scanUnreachable = false;
 
   String? _sendRequestId;
   String? _joinRequestId;
@@ -144,12 +152,17 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
       switch (answer) {
         case CapabilityProvided(text: final String text):
           _invite.text = text;
+          _scanUnreachable = false;
         case CapabilityDeclined(reason: final DeclinedView reason):
           _declined = reason;
+          _scanUnreachable = false;
           _scanUnsupported = reason == DeclinedView.unsupported;
         case CapabilityUnavailable():
-          // The adapter could not be asked. Not a decline — nothing answered.
-          _scanUnsupported = true;
+          // The adapter could not be asked, so nothing answered — which is a
+          // fault of ours, not a fact about the device. The offer stays: a
+          // withdrawn scanner would make a registration bug look permanent and
+          // unfixable to the one person who could report it.
+          _scanUnreachable = true;
       }
     });
   }
@@ -289,6 +302,24 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
                   child: Text(
                     scanDeclinedLabel(_declined!),
                     style: EnvoixType.subtitle.copyWith(color: tokens.warning),
+                  ),
+                ),
+              ),
+            ],
+            if (_scanUnreachable) ...<Widget>[
+              const SizedBox(height: EnvoixSpace.tight),
+              Semantics(
+                container: true,
+                liveRegion: true,
+                // Not "the scanner answered": it did not.
+                label: 'The scanner could not be reached',
+                value: scanUnreachableLabel,
+                child: ExcludeSemantics(
+                  child: Text(
+                    scanUnreachableLabel,
+                    // Danger, not warning — a decline is a normal answer and
+                    // this is a defect.
+                    style: EnvoixType.subtitle.copyWith(color: tokens.danger),
                   ),
                 ),
               ),

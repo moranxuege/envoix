@@ -77,11 +77,15 @@ object SourcePicks {
                 )
                 true
             }.getOrDefault(false)
-        if (retained) {
-            if (!journal.edit().putString(card, source.toString()).commit()) {
-                // A capability without durable ownership is not retained.
-                releaseGrant(context, source)
-            }
+        if (retained && !journal.edit().putString(card, source.toString()).commit()) {
+            // A capability without durable ownership is not retained. The grant
+            // is gone, so this card holds nothing — returning the URI anyway
+            // would hand back a source we just released, and whether reading it
+            // still works would depend on an ephemeral grant nobody recorded.
+            // Answering "no source" sends the card down its own re-pick path.
+            releaseGrant(context, source)
+            bound.remove(card)
+            return null
         }
         return source
     }

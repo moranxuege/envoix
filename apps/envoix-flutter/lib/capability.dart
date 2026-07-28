@@ -59,9 +59,12 @@ typedef CapabilityAsk = Future<CapabilityAnswer> Function(
 
 /// The real capability client, over the channel the intent lane already uses.
 ///
-/// A platform with no adapter for this method is not an error to show as a
-/// crash: `MissingPluginException` means the same thing `unsupported` does, and
-/// a desktop build that never registers a handler falls back to paste for free.
+/// A platform with no adapter registered for this method is `unavailable`, NOT
+/// `declined(unsupported)`. The two look alike from here and mean opposite
+/// things: `unsupported` is an adapter answering that this device has nothing to
+/// scan with, while a missing handler is our own build failing to register one.
+/// Collapsing them lets a registration bug present itself as a hardware fact —
+/// permanently, since a frontend that believes `unsupported` stops asking.
 Future<CapabilityAnswer> platformCapability(
   CapabilityRequestView capability,
 ) async {
@@ -78,8 +81,8 @@ Future<CapabilityAnswer> platformCapability(
       capabilityMethod,
       Uint8List.fromList(utf8.encode(request)),
     );
-  } on MissingPluginException {
-    return const CapabilityDeclined(DeclinedView.unsupported);
+  } on MissingPluginException catch (error) {
+    return CapabilityUnavailable(error);
   } on PlatformException catch (error) {
     return CapabilityUnavailable(error);
   }

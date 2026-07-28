@@ -2570,6 +2570,44 @@ void main() {
       expect(find.widgetWithText(FilledButton, 'Join'), findsOneWidget);
     });
 
+    testWidgets('a scanner that cannot be reached keeps the offer',
+        (WidgetTester tester) async {
+      final RecordingCreateSink sink =
+          RecordingCreateSink((CreateView create) => null);
+      // `unavailable` is NOT the desktop answer above. Nothing answered at all,
+      // which means our own seam failed — a missing handler, a malformed reply,
+      // an adapter answering a different capability. Withdrawing the button on
+      // it would dress a bug of ours as a fact about the user's hardware, and
+      // do it permanently, since a withdrawn offer is never retried.
+      await openSheet(
+        tester,
+        sink,
+        ask: (CapabilityRequestView capability) async =>
+            const CapabilityUnavailable('no handler is registered'),
+      );
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Scan a code'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(OutlinedButton, 'Scan a code'), findsOneWidget);
+      expect(find.text(scanUnreachableLabel), findsOneWidget);
+      // And it must never borrow one of the platform's three answers.
+      for (final String declined in declineAnswers.values) {
+        expect(find.text(declined), findsNothing);
+      }
+      expect(sink.requested, isEmpty);
+    });
+
+    test('a platform with no handler registered is unavailable, not unsupported',
+        () async {
+      // The seam's own failure mode, at the level that produces it. With no
+      // mock handler the channel raises `MissingPluginException`, which is
+      // exactly what a build that forgot to register the adapter does.
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final CapabilityAnswer answer =
+          await platformCapability(CapabilityRequestView.scanInvite);
+      expect(answer, isA<CapabilityUnavailable>());
+      expect(answer, isNot(isA<CapabilityDeclined>()));
+    });
+
     testWidgets('a channel that no longer spells an invite still shows its code',
         (WidgetTester tester) async {
       final Attachment attachment = Attachment()
