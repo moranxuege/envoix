@@ -6,6 +6,7 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 android_dir="$repo_root/android"
 registry="$repo_root/tests/e2e/matrix/cases.v1.json"
 contract="$repo_root/scripts/matrix_contract.py"
+apple_evidence="$repo_root/scripts/apple_matrix_evidence.py"
 
 adb_bin="${ADB:-${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb}"
 adb_serial="${ANDROID_SERIAL:-}"
@@ -412,8 +413,15 @@ run_apple_method() {
   local scenario="$3"
   local code="$4"
   local run_id="$5"
-  local log_file="$6"
-  local source_xctestrun target destination product_directory derived_data patched status=0
+  local case_id="$6"
+  local repetition="$7"
+  local role="$8"
+  local private_case_dir="$9"
+  local log_file="${10}"
+  local endpoint_role="sender"
+  local source_xctestrun target destination product_directory derived_data patched result_bundle status=0
+
+  [[ "$role" == "receive" ]] && endpoint_role="receiver"
 
   if [[ "$platform" == "ios" ]]; then
     source_xctestrun="$ios_xctestrun"
@@ -430,10 +438,18 @@ run_apple_method() {
   fi
 
   patched="$product_directory/.envoix-matrix-$run_id-$platform-$method.xctestrun"
+  result_bundle="$private_case_dir/apple-$endpoint_role.xcresult"
+  if [[ -e "$patched" || -e "$result_bundle" ]]; then
+    echo "error: refusing to overwrite existing Apple matrix test artifact" > "$log_file"
+    return 20
+  fi
   cp "$source_xctestrun" "$patched"
   ACTIVE_PATCHED_XCTESTRUN="$patched"
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE 1
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_RUN_ID "$run_id"
+  set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_CASE_ID "$case_id"
+  set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_REPETITION "$repetition"
+  set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_BUILD_VARIANT "$build_variant"
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_SCENARIO "$scenario"
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_CODE "$code"
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_LARGE_BYTES "$large_bytes"
@@ -446,6 +462,7 @@ run_apple_method() {
     -derivedDataPath "$derived_data" \
     -parallel-testing-enabled NO \
     -only-testing:"$target/ManifestV2PhysicalTransferTests/$method" \
+    -resultBundlePath "$result_bundle" \
     > "$log_file" 2>&1 || status=$?
   rm -f "$patched"
   ACTIVE_PATCHED_XCTESTRUN=""
@@ -501,7 +518,8 @@ run_endpoint_role() {
   local case_id="$6"
   local repetition="$7"
   local log_file="$8"
-  local method
+  local method private_case_dir
+  private_case_dir="$(dirname "$log_file")"
 
   if [[ "$role" == "send" ]]; then
     method="sendScenarioManifestV2Room"
@@ -515,11 +533,13 @@ run_endpoint_role() {
     run_android_method \
       "$method" "$scenario" "$code" "$run_id" "$case_id" "$repetition" "$log_file"
   else
-    run_apple_method "$platform" "$method" "$scenario" "$code" "$run_id" "$log_file"
+    run_apple_method \
+      "$platform" "$method" "$scenario" "$code" "$run_id" \
+      "$case_id" "$repetition" "$role" "$private_case_dir" "$log_file"
   fi
 }
 
-ANDROID_EVIDENCE_ERROR=""
+ENDPOINT_EVIDENCE_ERROR=""
 
 collect_android_evidence() {
   local role="$1"
@@ -539,7 +559,7 @@ collect_android_evidence() {
   adb_command exec-out run-as dev.envoix.app cat "$app_path" \
     > "$private_path" 2>/dev/null || read_status=$?
   if [[ "$read_status" -ne 0 || ! -s "$private_path" ]]; then
-    ANDROID_EVIDENCE_ERROR="missing_android_endpoint_result"
+    ENDPOINT_EVIDENCE_ERROR="missing_android_endpoint_result"
     validation_status=1
   elif ! python3 "$contract" validate-endpoint-result "$private_path" \
     --run-id "$run_id" \
@@ -548,7 +568,7 @@ collect_android_evidence() {
     --role "$endpoint_role" \
     --platform android \
     --output "$public_path"; then
-    ANDROID_EVIDENCE_ERROR="invalid_android_endpoint_result"
+    ENDPOINT_EVIDENCE_ERROR="invalid_android_endpoint_result"
     validation_status=1
   else
     rm -f "$private_path"
@@ -564,8 +584,69 @@ collect_android_evidence() {
     rmdir "files/envoix-matrix/$run_id" \
     >/dev/null 2>&1 || true
   if [[ "$cleanup_status" -ne 0 ]]; then
-    ANDROID_EVIDENCE_ERROR="android_endpoint_cleanup_failed"
+    ENDPOINT_EVIDENCE_ERROR="android_endpoint_cleanup_failed"
     return 1
+  fi
+  return "$validation_status"
+}
+
+collect_apple_evidence() {
+  local platform="$1"
+  local role="$2"
+  local run_id="$3"
+  local case_id="$4"
+  local repetition="$5"
+  local private_case_dir="$6"
+  local endpoint_role="sender"
+  local result_bundle export_directory export_log private_path public_path
+  local extraction_status=0 validation_status=0
+
+  [[ "$role" == "receive" ]] && endpoint_role="receiver"
+  result_bundle="$private_case_dir/apple-$endpoint_role.xcresult"
+  export_directory="$private_case_dir/apple-$endpoint_role-attachments"
+  export_log="$private_case_dir/apple-$endpoint_role-attachment-export.log"
+  private_path="$private_case_dir/apple-$endpoint_role.json"
+  public_path="$output_dir/cases/$case_id/r$repetition/$endpoint_role.json"
+
+  if [[ ! -d "$result_bundle" ]]; then
+    ENDPOINT_EVIDENCE_ERROR="missing_apple_result_bundle"
+    return 1
+  fi
+  if [[ -e "$export_directory" ]]; then
+    ENDPOINT_EVIDENCE_ERROR="apple_attachment_export_conflict"
+    return 1
+  fi
+  if ! xcrun xcresulttool export attachments \
+      --path "$result_bundle" \
+      --output-path "$export_directory" \
+      > "$export_log" 2>&1; then
+    ENDPOINT_EVIDENCE_ERROR="apple_attachment_export_failed"
+    return 1
+  fi
+  python3 "$apple_evidence" "$export_directory" \
+    --run-id "$run_id" \
+    --case "$case_id" \
+    --repetition "$repetition" \
+    --role "$endpoint_role" \
+    --platform "$platform" \
+    --output "$private_path" || extraction_status=1
+  if [[ "$extraction_status" -ne 0 || ! -s "$private_path" ]]; then
+    ENDPOINT_EVIDENCE_ERROR="missing_apple_endpoint_result"
+    validation_status=1
+  elif ! python3 "$contract" validate-endpoint-result "$private_path" \
+    --run-id "$run_id" \
+    --case "$case_id" \
+    --repetition "$repetition" \
+    --role "$endpoint_role" \
+    --platform "$platform" \
+    --output "$public_path"; then
+    ENDPOINT_EVIDENCE_ERROR="invalid_apple_endpoint_result"
+    validation_status=1
+  fi
+
+  if [[ "$validation_status" -eq 0 ]]; then
+    rm -f "$private_path" "$export_log"
+    rm -rf -- "$result_bundle" "$export_directory"
   fi
   return "$validation_status"
 }
@@ -681,6 +762,7 @@ run_pair() {
 
   LAST_FAILURE_STATUS=""
   LAST_FAILURE_CODE=""
+  ENDPOINT_EVIDENCE_ERROR=""
   mkdir -p "$private_case_dir"
 
   if [[ "$sender" == "android" || "$receiver" == "android" ]]; then
@@ -786,10 +868,16 @@ run_pair() {
   if [[ "$sender" == "android" ]]; then
     collect_android_evidence \
       send "$run_id" "$case_id" "$repetition" "$private_case_dir" || evidence_status=1
+  else
+    collect_apple_evidence \
+      "$sender" send "$run_id" "$case_id" "$repetition" "$private_case_dir" || evidence_status=1
   fi
   if [[ "$receiver" == "android" ]]; then
     collect_android_evidence \
       receive "$run_id" "$case_id" "$repetition" "$private_case_dir" || evidence_status=1
+  else
+    collect_apple_evidence \
+      "$receiver" receive "$run_id" "$case_id" "$repetition" "$private_case_dir" || evidence_status=1
   fi
   ACTIVE_CASE_ID=""
   stop_android_tests
@@ -806,7 +894,7 @@ run_pair() {
 
   if [[ "$evidence_status" -ne 0 ]]; then
     LAST_FAILURE_STATUS="infrastructure_failure"
-    LAST_FAILURE_CODE="$ANDROID_EVIDENCE_ERROR"
+    LAST_FAILURE_CODE="$ENDPOINT_EVIDENCE_ERROR"
     return 1
   fi
 
