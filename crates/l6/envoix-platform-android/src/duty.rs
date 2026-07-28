@@ -4,14 +4,21 @@
 //! service that executes platform capabilities. It is not the frontend
 //! surface: frontends observe duties through the generated read contract and
 //! never execute them. Values still cross a language boundary, so every field
-//! is bounded, identifiers use the same fixed lowercase-hex convention as the
-//! generated contracts (never JSON numbers wider than u32), and unknown fields
-//! are rejected.
+//! Every frame on it is the GENERATED duty contract (`schema/duty.schema`).
+//! These types are the domain side; `to_view`/`from_view` are the only crossing,
+//! and the generated codec is the only encoder. That is deliberate: this lane
+//! previously had a hand-written encoder here and a hand-written decoder in
+//! Kotlin, and they disagreed about the shape of a notice for as long as both
+//! existed.
 
+use envoix_bindings::duty::{
+    DutyBody, DutyError, DutyFrame, DutyOrderView, DutyProvenanceView, DutyReportView,
+    ForegroundWorkView, LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView,
+    OutcomeCodeView, PublicationWorkView, WorkView, decode_duty_frame, encode_duty_frame,
+};
 use envoix_capabilities::{Duty, DutyKind, DutyProvenance, DutyResult};
 use envoix_outcomes::OutcomeCode;
 use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId};
-use serde::{Deserialize, Serialize};
 
 /// Longest permitted staged-artifact relative path, in UTF-8 bytes.
 pub const MAX_STAGED_PATH_BYTES: usize = 512;
@@ -32,8 +39,7 @@ pub enum LaneError {
 }
 
 /// Duty provenance in its lane encoding: hex identifiers, u32 generation.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WireProvenance {
     /// `RecordId` as 16 lowercase hex digits.
     pub card: WireHex16,
@@ -63,6 +69,24 @@ impl WireProvenance {
     /// MediaStore row across a crash, so replay reuses that row instead of
     /// inserting a duplicate. The Kotlin executor derives the identical string
     /// from the wire provenance it receives (`<card>-<gen:08x>-<request>`).
+    fn to_view(self) -> DutyProvenanceView {
+        DutyProvenanceView {
+            card: String::from(self.card),
+            generation: self.generation,
+            request: String::from(self.request),
+        }
+    }
+
+    /// The hex bounds are the contract's; only the parse back to integers can
+    /// still fail, and a `hex16`/`hex32` the codec accepted always parses.
+    fn from_view(view: &DutyProvenanceView) -> Result<Self, LaneError> {
+        Ok(Self {
+            card: WireHex16::try_from(view.card.clone()).map_err(|_| LaneError::Malformed)?,
+            generation: view.generation,
+            request: WireHex32::try_from(view.request.clone()).map_err(|_| LaneError::Malformed)?,
+        })
+    }
+
     pub fn recovery_key(&self) -> String {
         format!(
             "{}-{:08x}-{}",
@@ -76,8 +100,7 @@ impl WireProvenance {
 macro_rules! wire_hex {
     ($name:ident, $inner:ty, $digits:literal) => {
         /// A fixed-width lowercase-hex identifier in its lane encoding.
-        #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-        #[serde(try_from = "String", into = "String")]
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         pub struct $name($inner);
 
         impl $name {
@@ -161,8 +184,7 @@ pub fn platform_work(duty: Duty) -> Option<Work> {
 ///
 /// The kind is derived from the variant, so a payload can never disagree with
 /// the duty kind it serves.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Work {
     /// Bind the document the user picked to the card this duty names, and hold
     /// a read grant on it. The provenance IS the payload: the platform already
@@ -213,6 +235,80 @@ impl Work {
         }
     }
 
+    /// This lane's work as the contract spells it.
+    ///
+    /// Exhaustive both ways, so a new `Work` variant cannot reach the wire
+    /// without a matching arm and a schema version to carry it — which is the
+    /// whole difference from the hand-written encoder this replaced.
+    fn to_view(&self) -> WorkView {
+        match self {
+            Self::SourceHandle => WorkView::SourceHandle,
+            Self::Grant => WorkView::Grant,
+            Self::Staging => WorkView::Staging,
+            Self::Courier => WorkView::Courier,
+            Self::OpenShare => WorkView::OpenShare,
+            Self::Publication {
+                staged,
+                display_name,
+                total_bytes,
+            } => WorkView::Publication(PublicationWorkView {
+                staged: staged.clone(),
+                display_name: display_name.clone(),
+                // The contract's horizon is u63 and its encoder range-checks
+                // this, so a legacy value above 2^63-1 is refused there rather
+                // than bounded twice in two places that could disagree.
+                total_bytes: *total_bytes,
+            }),
+            Self::Foreground { active_transfers } => WorkView::Foreground(ForegroundWorkView {
+                active_transfers: *active_transfers,
+            }),
+            Self::Notification { notice } => WorkView::Notification(NotificationWorkView {
+                notice: match notice {
+                    Notice::TransferComplete => NoticeView::TransferComplete,
+                    Notice::TransferFailed => NoticeView::TransferFailed,
+                    Notice::ActionNeeded => NoticeView::ActionNeeded,
+                },
+            }),
+            Self::Lock { hold } => WorkView::Lock(LockWorkView {
+                // The boolean stops here. Past this point the lane carries a
+                // named directive, which has no value to silently default to.
+                directive: if *hold {
+                    LockDirectiveView::Hold
+                } else {
+                    LockDirectiveView::Release
+                },
+            }),
+        }
+    }
+
+    fn from_view(view: WorkView) -> Self {
+        match view {
+            WorkView::SourceHandle => Self::SourceHandle,
+            WorkView::Grant => Self::Grant,
+            WorkView::Staging => Self::Staging,
+            WorkView::Courier => Self::Courier,
+            WorkView::OpenShare => Self::OpenShare,
+            WorkView::Publication(payload) => Self::Publication {
+                staged: payload.staged,
+                display_name: payload.display_name,
+                total_bytes: payload.total_bytes,
+            },
+            WorkView::Foreground(payload) => Self::Foreground {
+                active_transfers: payload.active_transfers,
+            },
+            WorkView::Notification(payload) => Self::Notification {
+                notice: match payload.notice {
+                    NoticeView::TransferComplete => Notice::TransferComplete,
+                    NoticeView::TransferFailed => Notice::TransferFailed,
+                    NoticeView::ActionNeeded => Notice::ActionNeeded,
+                },
+            },
+            WorkView::Lock(payload) => Self::Lock {
+                hold: matches!(payload.directive, LockDirectiveView::Hold),
+            },
+        }
+    }
+
     fn within_bounds(&self) -> bool {
         match self {
             Self::Publication {
@@ -233,9 +329,52 @@ impl Work {
     }
 }
 
+/// The contract's failure, in this lane's vocabulary. The generated codec owns
+/// every shape, range and bound question; this only renames the answer.
+fn lane_error(error: DutyError) -> LaneError {
+    match error {
+        DutyError::FrameTooLarge => LaneError::FrameTooLarge,
+        DutyError::Range { .. } | DutyError::Bound { .. } => LaneError::Bounds,
+        _ => LaneError::Malformed,
+    }
+}
+
+fn outcome_to_view(outcome: OutcomeCode) -> OutcomeCodeView {
+    match outcome {
+        OutcomeCode::Completed => OutcomeCodeView::Completed,
+        OutcomeCode::Cancelled => OutcomeCodeView::Cancelled,
+        OutcomeCode::Paused => OutcomeCodeView::Paused,
+        OutcomeCode::PeerLost => OutcomeCodeView::PeerLost,
+        OutcomeCode::Timeout => OutcomeCodeView::Timeout,
+        OutcomeCode::Unauthenticated => OutcomeCodeView::Unauthenticated,
+        OutcomeCode::VersionMismatch => OutcomeCodeView::VersionMismatch,
+        OutcomeCode::StorageFault => OutcomeCodeView::StorageFault,
+        OutcomeCode::PublishFailed => OutcomeCodeView::PublishFailed,
+        OutcomeCode::SourceUnreadable => OutcomeCodeView::SourceUnreadable,
+        OutcomeCode::NetworkUnreachable => OutcomeCodeView::NetworkUnreachable,
+        OutcomeCode::Internal => OutcomeCodeView::Internal,
+    }
+}
+
+fn outcome_from_view(view: OutcomeCodeView) -> OutcomeCode {
+    match view {
+        OutcomeCodeView::Completed => OutcomeCode::Completed,
+        OutcomeCodeView::Cancelled => OutcomeCode::Cancelled,
+        OutcomeCodeView::Paused => OutcomeCode::Paused,
+        OutcomeCodeView::PeerLost => OutcomeCode::PeerLost,
+        OutcomeCodeView::Timeout => OutcomeCode::Timeout,
+        OutcomeCodeView::Unauthenticated => OutcomeCode::Unauthenticated,
+        OutcomeCodeView::VersionMismatch => OutcomeCode::VersionMismatch,
+        OutcomeCodeView::StorageFault => OutcomeCode::StorageFault,
+        OutcomeCodeView::PublishFailed => OutcomeCode::PublishFailed,
+        OutcomeCodeView::SourceUnreadable => OutcomeCode::SourceUnreadable,
+        OutcomeCodeView::NetworkUnreachable => OutcomeCode::NetworkUnreachable,
+        OutcomeCodeView::Internal => OutcomeCode::Internal,
+    }
+}
+
 /// A user-visible notice class. Free-form text never crosses the lane.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Notice {
     TransferComplete,
     TransferFailed,
@@ -243,8 +382,7 @@ pub enum Notice {
 }
 
 /// One dispatched platform work item.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkOrder {
     pub provenance: WireProvenance,
     pub work: Work,
@@ -266,28 +404,37 @@ impl WorkOrder {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, LaneError> {
-        let bytes = serde_json::to_vec(self).map_err(|_| LaneError::Malformed)?;
-        if bytes.len() > MAX_LANE_FRAME_BYTES {
-            return Err(LaneError::FrameTooLarge);
-        }
-        Ok(bytes)
+        let frame = DutyFrame {
+            body: DutyBody::Order(DutyOrderView {
+                provenance: self.provenance.to_view(),
+                work: self.work.to_view(),
+            }),
+        };
+        encode_duty_frame(&frame).map_err(lane_error)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, LaneError> {
-        if bytes.len() > MAX_LANE_FRAME_BYTES {
-            return Err(LaneError::FrameTooLarge);
-        }
-        let order: Self = serde_json::from_slice(bytes).map_err(|_| LaneError::Malformed)?;
-        if !order.work.within_bounds() {
+        let DutyBody::Order(order) = decode_duty_frame(bytes).map_err(lane_error)?.body else {
+            // A report is a well-formed frame that is not an order. Saying
+            // "malformed" would blame the encoder for a routing mistake.
+            return Err(LaneError::KindMismatch);
+        };
+        let work = Work::from_view(order.work);
+        // The contract bounds every field; these are the invariants above it
+        // that the schema language deliberately does not spell (a relative
+        // staged name, a leaf with no separator).
+        if !work.within_bounds() {
             return Err(LaneError::Bounds);
         }
-        Ok(order)
+        Ok(Self {
+            provenance: WireProvenance::from_view(&order.provenance)?,
+            work,
+        })
     }
 }
 
 /// The service's typed answer for one executed work order.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkReport {
     pub provenance: WireProvenance,
     pub outcome: OutcomeCode,
@@ -310,17 +457,22 @@ impl WorkReport {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, LaneError> {
-        let bytes = serde_json::to_vec(self).map_err(|_| LaneError::Malformed)?;
-        if bytes.len() > MAX_LANE_FRAME_BYTES {
-            return Err(LaneError::FrameTooLarge);
-        }
-        Ok(bytes)
+        let frame = DutyFrame {
+            body: DutyBody::Report(DutyReportView {
+                provenance: self.provenance.to_view(),
+                outcome: outcome_to_view(self.outcome),
+            }),
+        };
+        encode_duty_frame(&frame).map_err(lane_error)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, LaneError> {
-        if bytes.len() > MAX_LANE_FRAME_BYTES {
-            return Err(LaneError::FrameTooLarge);
-        }
-        serde_json::from_slice(bytes).map_err(|_| LaneError::Malformed)
+        let DutyBody::Report(report) = decode_duty_frame(bytes).map_err(lane_error)?.body else {
+            return Err(LaneError::KindMismatch);
+        };
+        Ok(Self {
+            provenance: WireProvenance::from_view(&report.provenance)?,
+            outcome: outcome_from_view(report.outcome),
+        })
     }
 }

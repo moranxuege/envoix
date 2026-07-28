@@ -9,6 +9,7 @@ layer = "L6"
 role = "adapter"
 
 [dependencies]
+envoix-bindings = { path = "../../l5/envoix-bindings" }
 envoix-capabilities = { path = "../../l1/envoix-capabilities" }
 envoix-outcomes = { path = "../../l0/envoix-outcomes" }
 envoix-types = { path = "../../l0/envoix-types" }

@@ -850,53 +850,75 @@ fn one_activity_means_one_frontend() {
     );
 }
 
-/// The Kotlin service executor and the Rust dispatch set are ONE set. A duty
-/// the host dispatches but Kotlin drops is never reported, never admitted, and
-/// stays in flight forever; a kind Kotlin handles but nothing dispatches is
-/// dead platform code. Both directions are pinned here against the executor
-/// source itself.
+/// Three sets, not one, and the relations between them.
+///
+/// The gate this replaces called `EXECUTED_KINDS` "the ONE source of truth" and
+/// compared it against `when` labels scraped out of Kotlin SOURCE TEXT. That
+/// conflated three different facts and could not see the one that mattered: it
+/// stayed green for as long as Rust encoded a notice as a string while Kotlin
+/// read it as an object, because the LABELS agreed the whole time.
+///
+/// The three facts are:
+///   - the schema VOCABULARY: every arm `WorkView` can carry (9);
+///   - what the executor SUPPORTS: `EXECUTED_KINDS` (6);
+///   - what the authority EMITS today: what `platform_work` can build (2).
+///
+/// Only the containments are invariants. Equality between any two of them is
+/// not, and asserting it is what made the old gate lie.
 #[test]
-fn kotlin_executor_handles_exactly_the_executed_kinds() {
+fn emitted_kinds_are_supported_and_supported_kinds_are_in_the_vocabulary() {
     const KOTLIN_EXECUTOR: &str = include_str!(
         "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/DutyExecutor.kt"
     );
 
+    let vocabulary: Vec<DutyKind> = DutyKind::ALL.to_vec();
+    let emitted: Vec<DutyKind> = DutyKind::ALL
+        .into_iter()
+        .filter(|kind| {
+            platform_work(Duty {
+                provenance: provenance(0x50),
+                kind: *kind,
+            })
+            .is_some()
+        })
+        .collect();
+
+    for kind in &emitted {
+        assert!(
+            EXECUTED_KINDS.contains(kind),
+            "{kind:?} is dispatched by the authority but not supported by the executor: \
+             it would be reported by nobody and stay in flight forever"
+        );
+    }
+    for kind in EXECUTED_KINDS {
+        assert!(
+            vocabulary.contains(&kind),
+            "{kind:?} is supported by the executor but absent from the duty vocabulary"
+        );
+    }
+    // The numbers are recorded so a change to any of the three is a deliberate
+    // edit here rather than a silent drift, WITHOUT claiming they are equal.
+    assert_eq!(emitted.len(), 2, "kinds the authority can build today");
+    assert_eq!(EXECUTED_KINDS.len(), 6, "kinds the executor supports");
+    assert_eq!(vocabulary.len(), 9, "kinds the duty vocabulary carries");
+
+    // Kotlin now dispatches on the generated sealed `WorkView`, so the KOTLIN
+    // COMPILER enforces exhaustiveness — a new arm fails the build rather than
+    // falling into a default. This only guards against reintroducing the
+    // default that made that impossible.
     let dispatch = KOTLIN_EXECUTOR
-        .split_once("when (work.optString(\"kind\"))")
-        .expect("the executor dispatches on the work kind")
+        .split_once("when (val work = issued.work)")
+        .expect("the executor dispatches on the generated work view")
         .1;
     let dispatch = dispatch
-        .split_once("else ->")
-        .expect("the executor has an unhandled-kind default")
+        .split_once("\n    }")
+        .expect("the dispatch closes")
         .0;
-    let mut handled: Vec<String> = dispatch
-        .lines()
-        .filter_map(|line| {
-            let label = line.trim().split_once(" ->")?.0;
-            Some(label.strip_prefix('"')?.strip_suffix('"')?.to_owned())
-        })
-        .collect();
-    handled.sort();
+    assert!(
+        !dispatch.contains("else ->"),
+        "an `else` arm would restore the silent default the sealed type removes"
+    );
 
-    let mut executed: Vec<String> = EXECUTED_KINDS
-        .iter()
-        .map(|kind| {
-            serde_json::to_value(kind)
-                .expect("a duty kind serializes")
-                .as_str()
-                .expect("as a string")
-                .to_owned()
-        })
-        .collect();
-    executed.sort();
-    assert_eq!(handled, executed, "Kotlin executor vs EXECUTED_KINDS");
-
-    // Handling a kind is not executing it honestly. The source duty's whole
-    // job is to answer whether a readable source is actually held for the card,
-    // so its arm must consult the platform rather than report success on
-    // arrival — the difference between "the file is there" and "we were asked".
-    // A device is what proves the Android calls behave; this proves the Kotlin
-    // asks the question at all, which is the half that can rot silently.
     let bind = KOTLIN_EXECUTOR
         .split_once("private fun bindSource(")
         .expect("the executor binds a picked source")
@@ -915,13 +937,13 @@ fn kotlin_executor_handles_exactly_the_executed_kinds() {
     // answers `completed`. Counting rather than matching a shape, so reformatting
     // the arm is free while collapsing a failure into success is not.
     assert_eq!(
-        bind.matches("\"source_unreadable\"").count(),
+        bind.matches("OutcomeCodeView.SOURCE_UNREADABLE").count(),
         2,
         "bindSource has {} unreadable answers, not two: {bind}",
-        bind.matches("\"source_unreadable\"").count()
+        bind.matches("OutcomeCodeView.SOURCE_UNREADABLE").count()
     );
     assert_eq!(
-        bind.matches("\"completed\"").count(),
+        bind.matches("OutcomeCodeView.COMPLETED").count(),
         1,
         "bindSource claims success on more than the one path that earns it"
     );

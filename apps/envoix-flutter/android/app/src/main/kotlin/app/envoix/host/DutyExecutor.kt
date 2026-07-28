@@ -8,7 +8,15 @@ import android.database.sqlite.SQLiteConstraintException
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.MediaStore
-import org.json.JSONObject
+import com.envoix.bindings.duty.DutyBody
+import com.envoix.bindings.duty.DutyProvenanceView
+import com.envoix.bindings.duty.DutyReportView
+import com.envoix.bindings.duty.EnvoixDutyCodec
+import com.envoix.bindings.duty.LockDirectiveView
+import com.envoix.bindings.duty.NoticeView
+import com.envoix.bindings.duty.OutcomeCodeView
+import com.envoix.bindings.duty.PublicationWorkView
+import com.envoix.bindings.duty.WorkView
 import java.io.File
 
 /**
@@ -32,39 +40,50 @@ class DutyExecutor(
     private val publicationJournal =
         context.getSharedPreferences("envoix-publication-journal", Context.MODE_PRIVATE)
 
-    /** Executes one encoded work order; null = leave the duty outstanding. */
+    /**
+     * Executes one encoded work order; null = leave the duty outstanding.
+     *
+     * The order arrives as a generated duty frame and is decoded by the codec
+     * the Rust authority encodes with. Nothing here asks whether a field is a
+     * string or an object: that question is what the two hand-written codecs
+     * this replaced answered differently, silently, for every notification.
+     */
     fun execute(order: ByteArray): ByteArray? {
-        val parsed =
-            runCatching { JSONObject(String(order, Charsets.UTF_8)) }.getOrNull() ?: return null
-        val work = parsed.optJSONObject("work") ?: return null
-        val provenance = parsed.optJSONObject("provenance") ?: return null
+        val frame =
+            runCatching { EnvoixDutyCodec.decode(String(order, Charsets.UTF_8)) }.getOrNull()
+                ?: return null
+        // A report is a well-formed frame this side does not receive.
+        val issued = (frame.body as? DutyBody.Order)?.value ?: return null
         val outcome =
-            when (work.optString("kind")) {
-                "notification" -> postNotice(provenance, work.optJSONObject("notice"))
-                "lock" -> holdLock(work.optBoolean("hold"))
-                "foreground" -> "completed" // the service asserts foreground on boot
-                "publication" -> publish(work, provenance) ?: return null
-                "courier" -> carryReceipt()
-                "source_handle" -> bindSource(provenance)
-                else -> return null
+            when (val work = issued.work) {
+                is WorkView.Notification -> postNotice(issued.provenance, work.value.notice)
+                is WorkView.Lock -> holdLock(work.value.directive)
+                is WorkView.Foreground -> OutcomeCodeView.COMPLETED // asserted on boot
+                is WorkView.Publication ->
+                    publish(work.value, issued.provenance) ?: return null
+                WorkView.Courier -> carryReceipt()
+                WorkView.SourceHandle -> bindSource(issued.provenance)
+                // Shapes the vocabulary carries that this platform does not
+                // execute. Leaving them outstanding is the honest answer; the
+                // duty is re-delivered on the next attachment.
+                WorkView.Grant, WorkView.Staging, WorkView.OpenShare -> return null
             }
-        val report = JSONObject()
-        report.put("provenance", provenance)
-        report.put("outcome", outcome)
-        return report.toString().toByteArray(Charsets.UTF_8)
+        return EnvoixDutyCodec
+            .encode(DutyReportView(provenance = issued.provenance, outcome = outcome))
+            .toByteArray(Charsets.UTF_8)
     }
 
     private fun postNotice(
-        provenance: JSONObject,
-        notice: Any?,
-    ): String {
+        provenance: DutyProvenanceView,
+        notice: NoticeView,
+    ): OutcomeCodeView {
         val manager =
             context.getSystemService(android.app.NotificationManager::class.java)
         val text =
-            when (notice?.toString()) {
-                "\"transfer_complete\"", "transfer_complete" -> "Transfer complete"
-                "\"transfer_failed\"", "transfer_failed" -> "Transfer failed"
-                else -> "Envoix needs your attention"
+            when (notice) {
+                NoticeView.TRANSFER_COMPLETE -> "Transfer complete"
+                NoticeView.TRANSFER_FAILED -> "Transfer failed"
+                NoticeView.ACTION_NEEDED -> "Envoix needs your attention"
             }
         val notification =
             Notification
@@ -73,8 +92,8 @@ class DutyExecutor(
                 .setContentTitle("Envoix")
                 .setContentText(text)
                 .build()
-        manager.notify(noticeId(provenance.optString("card")), notification)
-        return "completed"
+        manager.notify(noticeId(provenance.card), notification)
+        return OutcomeCodeView.COMPLETED
     }
 
     /**
@@ -83,7 +102,7 @@ class DutyExecutor(
      * generation and re-issued on the next restore. Reporting "completed" would
      * tell the reducer a receipt was delivered when none was.
      */
-    private fun carryReceipt(): String = "internal"
+    private fun carryReceipt(): OutcomeCodeView = OutcomeCodeView.INTERNAL
 
     /**
      * Binds the document the user picked to the card that asked for it and
@@ -95,14 +114,18 @@ class DutyExecutor(
      * a process death lost it, or nothing was ever chosen — reports the honest
      * `source_unreadable`, which is the outcome that means "re-pick".
      */
-    private fun bindSource(provenance: JSONObject): String {
-        val card = provenance.optString("card")
-        val source = SourcePicks.claim(context, card) ?: return "source_unreadable"
-        return if (SourcePicks.readable(context, source)) "completed" else "source_unreadable"
+    private fun bindSource(provenance: DutyProvenanceView): OutcomeCodeView {
+        val source =
+            SourcePicks.claim(context, provenance.card) ?: return OutcomeCodeView.SOURCE_UNREADABLE
+        return if (SourcePicks.readable(context, source)) {
+            OutcomeCodeView.COMPLETED
+        } else {
+            OutcomeCodeView.SOURCE_UNREADABLE
+        }
     }
 
-    private fun holdLock(hold: Boolean): String {
-        if (hold) {
+    private fun holdLock(directive: LockDirectiveView): OutcomeCodeView {
+        if (directive == LockDirectiveView.HOLD) {
             if (wakeLock == null) {
                 val power = context.getSystemService(PowerManager::class.java)
                 wakeLock =
@@ -115,7 +138,7 @@ class DutyExecutor(
             wakeLock?.release()
             wakeLock = null
         }
-        return "completed"
+        return OutcomeCodeView.COMPLETED
     }
 
     /**
@@ -128,11 +151,11 @@ class DutyExecutor(
      * staged copy exists — the F2 pick/staging flow provides its real payload.
      */
     private fun publish(
-        work: JSONObject,
-        provenance: JSONObject,
-    ): String? {
-        val staged = work.optString("staged").ifEmpty { return null }
-        val displayName = work.optString("display_name").ifEmpty { return null }
+        work: PublicationWorkView,
+        provenance: DutyProvenanceView,
+    ): OutcomeCodeView? {
+        val staged = work.staged.ifEmpty { return null }
+        val displayName = work.displayName.ifEmpty { return null }
         val source = File(File(context.filesDir, EnvoixHostService.STORAGE_ROOT), staged)
         if (!source.isFile) {
             return null
@@ -164,7 +187,7 @@ class DutyExecutor(
                 .putString("$prefix.state", "committed")
                 .commit(),
         )
-        return "completed"
+        return OutcomeCodeView.COMPLETED
     }
 
     /**
@@ -289,11 +312,11 @@ class DutyExecutor(
     private fun noticeId(card: String): Int = card.hashCode() or Int.MIN_VALUE
 
     /** Mirrors the Rust `WireProvenance::recovery_key` (`<card>-<gen:08x>-<request>`). */
-    private fun recoveryKey(provenance: JSONObject): String =
+    private fun recoveryKey(provenance: DutyProvenanceView): String =
         "%s-%08x-%s".format(
-            provenance.optString("card"),
-            provenance.optLong("generation"),
-            provenance.optString("request"),
+            provenance.card,
+            provenance.generation,
+            provenance.request,
         )
 
     companion object {
