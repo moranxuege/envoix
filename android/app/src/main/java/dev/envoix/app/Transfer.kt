@@ -86,7 +86,7 @@ data class Transfer(
      * Null identifies legacy/incomplete records whose UI must use a fallback. */
     val savedDestinationLabel: String? = null,
     /** The name the received file was actually saved under — may differ from
-     *  [fileName] (the transfer identity) after a collision bump, e.g. "photo (1).jpg". */
+     *  [fileName] (a non-unique source/display name) after a collision bump, e.g. "photo (1).jpg". */
     val savedName: String? = null,
     /** Stable machine cause; never reconstructed from [error]. */
     val failureCause: String? = null,
