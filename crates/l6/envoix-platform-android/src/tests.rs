@@ -902,16 +902,25 @@ fn emitted_kinds_are_supported_and_supported_kinds_are_in_the_vocabulary() {
     assert_eq!(EXECUTED_KINDS.len(), 6, "kinds the executor supports");
     assert_eq!(vocabulary.len(), 9, "kinds the duty vocabulary carries");
 
-    // Kotlin now dispatches on the generated sealed `WorkView`, so the KOTLIN
-    // COMPILER enforces exhaustiveness — a new arm fails the build rather than
-    // falling into a default. This only guards against reintroducing the
-    // default that made that impossible.
-    let dispatch = KOTLIN_EXECUTOR
+    // The decision now lives in an Android-free router, dispatching on the
+    // generated sealed `WorkView`, so the KOTLIN COMPILER enforces
+    // exhaustiveness — a new arm fails the build rather than falling into a
+    // default. This guards the two things a compiler cannot: that the default
+    // is not reintroduced, and that the executor still delegates rather than
+    // growing a second dispatch beside the router's.
+    const KOTLIN_ROUTER: &str = include_str!(
+        "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/DutyRouter.kt"
+    );
+    assert!(
+        KOTLIN_EXECUTOR.contains("DutyRouter.route(order, this)"),
+        "the executor must delegate the decision, not re-implement it"
+    );
+    let dispatch = KOTLIN_ROUTER
         .split_once("when (val work = issued.work)")
-        .expect("the executor dispatches on the generated work view")
+        .expect("the router dispatches on the generated work view")
         .1;
     let dispatch = dispatch
-        .split_once("\n    }")
+        .split_once("\n        }")
         .expect("the dispatch closes")
         .0;
     assert!(
@@ -920,7 +929,7 @@ fn emitted_kinds_are_supported_and_supported_kinds_are_in_the_vocabulary() {
     );
 
     let bind = KOTLIN_EXECUTOR
-        .split_once("private fun bindSource(")
+        .split_once("override fun bindSource(")
         .expect("the executor binds a picked source")
         .1
         .split_once("\n    }")

@@ -8,15 +8,11 @@ import android.database.sqlite.SQLiteConstraintException
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.MediaStore
-import com.envoix.bindings.duty.DutyBody
 import com.envoix.bindings.duty.DutyProvenanceView
-import com.envoix.bindings.duty.DutyReportView
-import com.envoix.bindings.duty.EnvoixDutyCodec
 import com.envoix.bindings.duty.LockDirectiveView
 import com.envoix.bindings.duty.NoticeView
 import com.envoix.bindings.duty.OutcomeCodeView
 import com.envoix.bindings.duty.PublicationWorkView
-import com.envoix.bindings.duty.WorkView
 import java.io.File
 
 /**
@@ -34,7 +30,7 @@ import java.io.File
  */
 class DutyExecutor(
     private val context: Context,
-) {
+) : DutyEffects {
     private var wakeLock: PowerManager.WakeLock? = null
     private val resolver = context.contentResolver
     private val publicationJournal =
@@ -43,37 +39,12 @@ class DutyExecutor(
     /**
      * Executes one encoded work order; null = leave the duty outstanding.
      *
-     * The order arrives as a generated duty frame and is decoded by the codec
-     * the Rust authority encodes with. Nothing here asks whether a field is a
-     * string or an object: that question is what the two hand-written codecs
-     * this replaced answered differently, silently, for every notification.
+     * The decision is [DutyRouter]'s and is Android-free, so it can be executed
+     * and asserted off-device. This class supplies the effects.
      */
-    fun execute(order: ByteArray): ByteArray? {
-        val frame =
-            runCatching { EnvoixDutyCodec.decode(String(order, Charsets.UTF_8)) }.getOrNull()
-                ?: return null
-        // A report is a well-formed frame this side does not receive.
-        val issued = (frame.body as? DutyBody.Order)?.value ?: return null
-        val outcome =
-            when (val work = issued.work) {
-                is WorkView.Notification -> postNotice(issued.provenance, work.value.notice)
-                is WorkView.Lock -> holdLock(work.value.directive)
-                is WorkView.Foreground -> OutcomeCodeView.COMPLETED // asserted on boot
-                is WorkView.Publication ->
-                    publish(work.value, issued.provenance) ?: return null
-                WorkView.Courier -> carryReceipt()
-                WorkView.SourceHandle -> bindSource(issued.provenance)
-                // Shapes the vocabulary carries that this platform does not
-                // execute. Leaving them outstanding is the honest answer; the
-                // duty is re-delivered on the next attachment.
-                WorkView.Grant, WorkView.Staging, WorkView.OpenShare -> return null
-            }
-        return EnvoixDutyCodec
-            .encode(DutyReportView(provenance = issued.provenance, outcome = outcome))
-            .toByteArray(Charsets.UTF_8)
-    }
+    fun execute(order: ByteArray): ByteArray? = DutyRouter.route(order, this)
 
-    private fun postNotice(
+    override fun postNotice(
         provenance: DutyProvenanceView,
         notice: NoticeView,
     ): OutcomeCodeView {
@@ -97,12 +68,20 @@ class DutyExecutor(
     }
 
     /**
+     * The service enters the foreground when it starts and stays there while it
+     * runs, so this duty is an acknowledgement rather than a transition. The
+     * count is accepted and unused: what it would change is already true.
+     */
+    override fun assertForeground(activeTransfers: Long): OutcomeCodeView =
+        OutcomeCodeView.COMPLETED
+
+    /**
      * The receipt courier. No platform carrier exists yet (F2/F3 wire the real
      * one), so the honest report is a failure: the duty is discharged for this
      * generation and re-issued on the next restore. Reporting "completed" would
      * tell the reducer a receipt was delivered when none was.
      */
-    private fun carryReceipt(): OutcomeCodeView = OutcomeCodeView.INTERNAL
+    override fun carryReceipt(): OutcomeCodeView = OutcomeCodeView.INTERNAL
 
     /**
      * Binds the document the user picked to the card that asked for it and
@@ -114,7 +93,7 @@ class DutyExecutor(
      * a process death lost it, or nothing was ever chosen — reports the honest
      * `source_unreadable`, which is the outcome that means "re-pick".
      */
-    private fun bindSource(provenance: DutyProvenanceView): OutcomeCodeView {
+    override fun bindSource(provenance: DutyProvenanceView): OutcomeCodeView {
         val source =
             SourcePicks.claim(context, provenance.card) ?: return OutcomeCodeView.SOURCE_UNREADABLE
         return if (SourcePicks.readable(context, source)) {
@@ -124,7 +103,7 @@ class DutyExecutor(
         }
     }
 
-    private fun holdLock(directive: LockDirectiveView): OutcomeCodeView {
+    override fun holdLock(directive: LockDirectiveView): OutcomeCodeView {
         if (directive == LockDirectiveView.HOLD) {
             if (wakeLock == null) {
                 val power = context.getSystemService(PowerManager::class.java)
@@ -150,7 +129,7 @@ class DutyExecutor(
      * committed row is verified. Returns null (duty left outstanding) until the
      * staged copy exists — the F2 pick/staging flow provides its real payload.
      */
-    private fun publish(
+    override fun publish(
         work: PublicationWorkView,
         provenance: DutyProvenanceView,
     ): OutcomeCodeView? {
