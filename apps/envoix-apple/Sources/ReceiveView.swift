@@ -955,7 +955,8 @@ struct ReceiveView: View {
                             outputDir: prepared.url.path,
                             invite: joiningInvite,
                             settings: settings,
-                            destinationAccess: prepared.access
+                            destinationAccess: prepared.access,
+                            nearbyWifiAwareDeviceID: nearbySelection?.nearbyWifiAwareDeviceID
                         )
                         guard let activity = viewModel.transferActivity,
                               activity.state != .failed else {
@@ -1047,6 +1048,7 @@ struct ReceiveView: View {
                     code: code,
                     settings: settings,
                     destinationAccess: prepared.access,
+                    nearbyWifiAwareDeviceID: nearbySelection?.nearbyWifiAwareDeviceID,
                     rememberLabel: rememberAfterPairing ? rememberLabel : nil
                 )
             }
@@ -1086,6 +1088,7 @@ struct ReceiveView: View {
                 invite: joiningInvite,
                 settings: settings,
                 destinationAccess: prepared.access,
+                nearbyWifiAwareDeviceID: nearbySelection?.nearbyWifiAwareDeviceID,
                 rememberLabel: rememberAfterPairing ? rememberLabel : nil
             )
         } catch {

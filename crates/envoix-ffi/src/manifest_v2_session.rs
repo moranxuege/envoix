@@ -11,13 +11,18 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_client::api::{
     AuthenticationHandler, AuthenticationOutcome, DestinationDecisionV2, DestinationRequestV2,
-    EventSink, InvitationConsumption, PairingConfig, PeerSource, PendingManifestV2Receive,
-    RendezvousCause, SessionError, TransferCancelToken, TransferEvent, acquire_invitation,
-    acquire_remembered_credential, acquire_shared_token, parse_broker_addr,
-    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_remembered,
+    EventSink, InvitationConsumption, InvitationLease, PairingConfig, PeerSource,
+    PendingManifestV2Receive, PendingNativeManifestV2Receive, RendezvousCause, SessionError,
+    TransferCancelToken, TransferEvent, acquire_invitation, acquire_remembered_credential,
+    acquire_shared_token, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    receive_manifest_v2_offer_over_datagram_transport,
+    receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
+    receive_manifest_v2_offer_via_room_hybrid_with_authentication,
     receive_manifest_v2_offer_via_room_with_authentication,
     receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
-    send_manifest_v2_manual, send_manifest_v2_via_remembered,
+    send_manifest_v2_manual, send_manifest_v2_over_datagram_transport,
+    send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
+    send_manifest_v2_via_room_hybrid_with_authentication,
     send_manifest_v2_via_room_with_authentication,
 };
 use envoix_types::{DataPath, PairingStep};
@@ -27,9 +32,10 @@ use tokio::task::JoinSet;
 use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiConnectionPathEvent, FfiConnectionPathEventKind,
     FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailurePhase,
-    FfiManifestV2Phase, FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure,
-    FfiTransferJobV2, FfiTransferRequest, TransferObserver, build_client_for_request,
-    on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
+    FfiManifestV2Phase, FfiNativeDatagramTransport, FfiNativeDuplexTransport, FfiPathPolicy,
+    FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferMode,
+    FfiTransferRequest, TransferObserver, build_client_for_request, core_datagram_transport,
+    core_native_transport, on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
     transfer_options_for_request,
 };
 
@@ -84,6 +90,18 @@ pub struct FfiManifestV2Completion {
     pub saved_paths: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiSelectedDataPath {
+    Unknown,
+    WifiAware,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiNativeManifestV2Completion {
+    pub transfer: FfiManifestV2Completion,
+    pub selected_path: FfiSelectedDataPath,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiDestinationRequestV2 {
     pub target_directory: String,
@@ -120,17 +138,64 @@ impl FfiManifestV2Cancellation {
 
 #[derive(uniffi::Object)]
 pub struct FfiPendingManifestV2Receive {
-    pending: Mutex<Option<PendingManifestV2Receive>>,
+    pending: Mutex<Option<CorePendingManifestV2Receive>>,
     summary: FfiManifestOfferSummaryV2,
     entries: Vec<FfiManifestOfferEntryV2>,
     state_directory: PathBuf,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    selected_path: FfiSelectedDataPath,
+}
+
+enum CorePendingManifestV2Receive {
+    Iroh(Box<PendingManifestV2Receive>),
+    Native(Box<PendingNativeManifestV2Receive>),
+}
+
+enum FfiPlatformManifestTransport {
+    Datagram {
+        transport: Arc<dyn FfiNativeDatagramTransport>,
+        maximum_datagram_size: u32,
+    },
+    Stream(Arc<dyn FfiNativeDuplexTransport>),
+}
+
+impl CorePendingManifestV2Receive {
+    fn offer(&self) -> &envoix_protocol::manifest_v2::ManifestOfferV2 {
+        match self {
+            Self::Iroh(pending) => pending.offer(),
+            Self::Native(pending) => pending.offer(),
+        }
+    }
+
+    async fn receive(
+        self,
+        destination: DestinationRequestV2,
+        state_directory: PathBuf,
+        cancellation: &TransferCancelToken,
+    ) -> Result<envoix_client::api::ReceiverManifestV2SessionSummary, SessionError> {
+        match self {
+            Self::Iroh(pending) => {
+                pending
+                    .receive(destination, state_directory, cancellation)
+                    .await
+            }
+            Self::Native(pending) => {
+                pending
+                    .receive(destination, state_directory, cancellation)
+                    .await
+            }
+        }
+    }
 }
 
 #[uniffi::export]
 impl FfiPendingManifestV2Receive {
     pub fn summary(&self) -> FfiManifestOfferSummaryV2 {
         self.summary.clone()
+    }
+
+    pub fn selected_path(&self) -> FfiSelectedDataPath {
+        self.selected_path
     }
 
     /// Bounded projection for native large-tree UIs.
@@ -223,6 +288,7 @@ fn project_connection_path(
     let path_kind = match path {
         DataPath::Direct { .. } => FfiDataPathKind::Direct,
         DataPath::Relay { .. } => FfiDataPathKind::Relay,
+        DataPath::WifiAware => FfiDataPathKind::WifiAware,
         DataPath::Other { .. } => FfiDataPathKind::Other,
     };
     FfiConnectionPathEvent {
@@ -478,6 +544,212 @@ pub async fn send_transfer_job_v2(
     .await
 }
 
+/// Runs a Nearby Room transfer on one iroh endpoint carrying Wi-Fi Aware,
+/// direct IP, and relay candidates. The authenticated Room peer must be the
+/// same endpoint discovered during Wi-Fi Aware bootstrap.
+#[allow(clippy::too_many_arguments)]
+#[uniffi::export]
+pub async fn send_transfer_job_v2_nearby_hybrid(
+    job: Arc<FfiTransferJobV2>,
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDatagramTransport>,
+    maximum_datagram_size: u32,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<FfiManifestV2Completion, EnvoixError> {
+    spawn_on_ffi_runtime(async move {
+        if request.direction != FfiTransferDirection::Send {
+            return Err(EnvoixError::Operation {
+                reason: "send_transfer_job_v2_nearby_hybrid requires a send request".into(),
+            });
+        }
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let (broker, lease, config) = nearby_hybrid_room_context(&settings, &request)?;
+        let job = job.clone_sealed_job().await?;
+        let manifest = job
+            .manifest()
+            .expect("clone_sealed_job guarantees a manifest")
+            .clone();
+        observer.on_started(
+            u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+            manifest.totals.total_plaintext_bytes,
+        );
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+            observer: observer.clone(),
+        });
+        let authentication = NativeAuthentication::invitation(
+            observer.clone(),
+            request.remember_consent,
+            lease.consumption(),
+        );
+        let result = send_manifest_v2_via_room_hybrid_with_authentication(
+            core_datagram_transport(transport),
+            maximum_datagram_size,
+            broker,
+            lease.bootstrap().clone(),
+            &job,
+            state_directory,
+            config,
+            events,
+            &cancellation.token,
+            &authentication,
+        )
+        .await;
+        if result.is_ok() || authentication.authenticated() {
+            lease.consume();
+        }
+        let summary = result.map_err(|error| {
+            report_v2_failure(
+                observer.as_ref(),
+                &error,
+                FfiTransferDirection::Send,
+                FfiFailurePhase::Transferring,
+            );
+            op_err(error)
+        })?;
+        observer.on_phase(FfiManifestV2Phase::Delivered);
+        observer.on_completed(manifest.totals.total_plaintext_bytes);
+        Ok(FfiManifestV2Completion {
+            job_id: encode_job_id(manifest.job_id),
+            entry_count: u32::try_from(summary.data_plane.entry_results.len()).unwrap_or(u32::MAX),
+            total_plaintext_bytes: manifest.totals.total_plaintext_bytes,
+            delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
+            saved_paths: Vec::new(),
+        })
+    })
+    .await
+}
+
+/// Runs the canonical sender over a platform-established Wi-Fi Aware stream.
+/// The invitation token still authenticates both peers inside Rust.
+#[uniffi::export]
+pub async fn send_transfer_job_v2_over_native_transport(
+    job: Arc<FfiTransferJobV2>,
+    pairing_token: String,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDuplexTransport>,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<FfiNativeManifestV2Completion, EnvoixError> {
+    send_transfer_job_v2_over_platform_transport(
+        job,
+        pairing_token,
+        state_directory,
+        FfiPlatformManifestTransport::Stream(transport),
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+/// Runs the canonical sender over iroh QUIC carried by a
+/// platform-established Wi-Fi Aware datagram channel.
+#[uniffi::export]
+pub async fn send_transfer_job_v2_over_datagram_transport(
+    job: Arc<FfiTransferJobV2>,
+    pairing_token: String,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDatagramTransport>,
+    maximum_datagram_size: u32,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<FfiNativeManifestV2Completion, EnvoixError> {
+    send_transfer_job_v2_over_platform_transport(
+        job,
+        pairing_token,
+        state_directory,
+        FfiPlatformManifestTransport::Datagram {
+            transport,
+            maximum_datagram_size,
+        },
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+async fn send_transfer_job_v2_over_platform_transport(
+    job: Arc<FfiTransferJobV2>,
+    pairing_token: String,
+    state_directory: String,
+    transport: FfiPlatformManifestTransport,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<FfiNativeManifestV2Completion, EnvoixError> {
+    spawn_on_ffi_runtime(async move {
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let pairing = PairingConfig::spake2_shared_token(pairing_token).map_err(op_err)?;
+        let job = job.clone_sealed_job().await?;
+        let manifest = job
+            .manifest()
+            .expect("clone_sealed_job guarantees a manifest")
+            .clone();
+        observer.on_started(
+            u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+            manifest.totals.total_plaintext_bytes,
+        );
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+            observer: observer.clone(),
+        });
+        let result = match transport {
+            FfiPlatformManifestTransport::Datagram {
+                transport,
+                maximum_datagram_size,
+            } => {
+                send_manifest_v2_over_datagram_transport(
+                    core_datagram_transport(transport),
+                    maximum_datagram_size,
+                    &job,
+                    state_directory,
+                    &pairing,
+                    events,
+                    &cancellation.token,
+                )
+                .await
+            }
+            FfiPlatformManifestTransport::Stream(transport) => {
+                send_manifest_v2_over_native_transport(
+                    core_native_transport(transport),
+                    &job,
+                    state_directory,
+                    &pairing,
+                    events,
+                    &cancellation.token,
+                )
+                .await
+            }
+        };
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(error) => {
+                report_v2_failure(
+                    observer.as_ref(),
+                    &error,
+                    FfiTransferDirection::Send,
+                    FfiFailurePhase::Transferring,
+                );
+                return Err(op_err(error));
+            }
+        };
+        observer.on_phase(FfiManifestV2Phase::Delivered);
+        observer.on_completed(manifest.totals.total_plaintext_bytes);
+        Ok(FfiNativeManifestV2Completion {
+            transfer: FfiManifestV2Completion {
+                job_id: encode_job_id(manifest.job_id),
+                entry_count: u32::try_from(summary.data_plane.entry_results.len())
+                    .unwrap_or(u32::MAX),
+                total_plaintext_bytes: manifest.totals.total_plaintext_bytes,
+                delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
+                saved_paths: Vec::new(),
+            },
+            selected_path: FfiSelectedDataPath::WifiAware,
+        })
+    })
+    .await
+}
+
 #[uniffi::export]
 pub async fn receive_transfer_offer_v2(
     settings: EnvoixRuntimeSettings,
@@ -503,6 +775,169 @@ pub async fn receive_transfer_offer_v2(
             observer,
         )
         .await
+    })
+    .await
+}
+
+/// Receives a Nearby Room offer on one iroh endpoint carrying Wi-Fi Aware,
+/// direct IP, and relay candidates.
+#[uniffi::export]
+pub async fn receive_transfer_offer_v2_nearby_hybrid(
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDatagramTransport>,
+    maximum_datagram_size: u32,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    spawn_on_ffi_runtime(async move {
+        if request.direction != FfiTransferDirection::Receive {
+            return Err(EnvoixError::Operation {
+                reason: "receive_transfer_offer_v2_nearby_hybrid requires a receive request".into(),
+            });
+        }
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let (broker, lease, config) = nearby_hybrid_room_context(&settings, &request)?;
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+            observer: observer.clone(),
+        });
+        let authentication = NativeAuthentication::invitation(
+            observer.clone(),
+            request.remember_consent,
+            lease.consumption(),
+        );
+        let result = receive_manifest_v2_offer_via_room_hybrid_with_authentication(
+            core_datagram_transport(transport),
+            maximum_datagram_size,
+            broker,
+            lease.bootstrap().clone(),
+            listen_addrs(&config),
+            config,
+            events,
+            &cancellation.token,
+            &authentication,
+        )
+        .await;
+        if result.is_ok() || authentication.authenticated() {
+            lease.consume();
+        }
+        let pending = result.map_err(|error| {
+            report_v2_failure(
+                observer.as_ref(),
+                &error,
+                FfiTransferDirection::Receive,
+                FfiFailurePhase::Connecting,
+            );
+            op_err(error)
+        })?;
+        Ok(Arc::new(project_pending_offer(
+            CorePendingManifestV2Receive::Iroh(Box::new(pending)),
+            state_directory,
+            cancellation,
+            FfiSelectedDataPath::Unknown,
+        )))
+    })
+    .await
+}
+
+/// Authenticates and projects a canonical receiver offer over a
+/// platform-established Wi-Fi Aware stream. No payload is accepted until the
+/// returned pending offer receives a destination decision.
+#[uniffi::export]
+pub async fn receive_transfer_offer_v2_over_native_transport(
+    pairing_token: String,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDuplexTransport>,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    receive_transfer_offer_v2_over_platform_transport(
+        pairing_token,
+        state_directory,
+        FfiPlatformManifestTransport::Stream(transport),
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+/// Authenticates and projects a canonical receiver offer over iroh QUIC
+/// carried by a platform-established Wi-Fi Aware datagram channel.
+#[uniffi::export]
+pub async fn receive_transfer_offer_v2_over_datagram_transport(
+    pairing_token: String,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDatagramTransport>,
+    maximum_datagram_size: u32,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    receive_transfer_offer_v2_over_platform_transport(
+        pairing_token,
+        state_directory,
+        FfiPlatformManifestTransport::Datagram {
+            transport,
+            maximum_datagram_size,
+        },
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+async fn receive_transfer_offer_v2_over_platform_transport(
+    pairing_token: String,
+    state_directory: String,
+    transport: FfiPlatformManifestTransport,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    spawn_on_ffi_runtime(async move {
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let pairing = PairingConfig::spake2_shared_token(pairing_token).map_err(op_err)?;
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+            observer: observer.clone(),
+        });
+        let pending = match transport {
+            FfiPlatformManifestTransport::Datagram {
+                transport,
+                maximum_datagram_size,
+            } => receive_manifest_v2_offer_over_datagram_transport(
+                core_datagram_transport(transport),
+                maximum_datagram_size,
+                &pairing,
+                events,
+                &cancellation.token,
+            )
+            .await
+            .map(|pending| CorePendingManifestV2Receive::Iroh(Box::new(pending))),
+            FfiPlatformManifestTransport::Stream(transport) => {
+                receive_manifest_v2_offer_over_native_transport(
+                    core_native_transport(transport),
+                    &pairing,
+                    events,
+                    &cancellation.token,
+                )
+                .await
+                .map(|pending| CorePendingManifestV2Receive::Native(Box::new(pending)))
+            }
+        }
+        .map_err(|error| {
+            report_v2_failure(
+                observer.as_ref(),
+                &error,
+                FfiTransferDirection::Receive,
+                FfiFailurePhase::Connecting,
+            );
+            op_err(error)
+        })?;
+        Ok(Arc::new(project_pending_offer(
+            pending,
+            state_directory,
+            cancellation,
+            FfiSelectedDataPath::WifiAware,
+        )))
     })
     .await
 }
@@ -540,9 +975,10 @@ async fn receive_offer_from_attempts(
             op_err(error)
         })?;
         return Ok(Arc::new(project_pending_offer(
-            pending,
+            CorePendingManifestV2Receive::Iroh(Box::new(pending)),
             state_directory,
             cancellation,
+            FfiSelectedDataPath::Unknown,
         )));
     }
 
@@ -579,9 +1015,10 @@ async fn receive_offer_from_attempts(
                     }
                     while routes.join_next().await.is_some() {}
                     return Ok(Arc::new(project_pending_offer(
-                        pending,
+                        CorePendingManifestV2Receive::Iroh(Box::new(pending)),
                         state_directory,
                         cancellation,
+                        FfiSelectedDataPath::Unknown,
                     )));
                 }
                 Some(Ok((_, Err(error @ SessionError::InvitationConsumed(_))))) => {
@@ -661,6 +1098,54 @@ async fn receive_one_offer_attempt(
         request.remember_consent,
     )
     .await
+}
+
+fn nearby_hybrid_room_context(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> Result<
+    (
+        envoix_client::api::EndpointAddr,
+        InvitationLease,
+        envoix_client::api::SessionConfig,
+    ),
+    EnvoixError,
+> {
+    if !matches!(
+        request.mode,
+        FfiTransferMode::Room | FfiTransferMode::Invite
+    ) {
+        return Err(EnvoixError::Operation {
+            reason: "Nearby hybrid transport requires a one-time invitation".into(),
+        });
+    }
+    if request.path_policy == FfiPathPolicy::RelayOnly {
+        return Err(EnvoixError::Operation {
+            reason: "Nearby hybrid transport is incompatible with relay-only routing".into(),
+        });
+    }
+    if !request.rendezvous.use_room || !request.rendezvous.internet_available {
+        return Err(EnvoixError::Operation {
+            reason: "Nearby hybrid transport requires an available Room rendezvous route".into(),
+        });
+    }
+    let (secret_ref, broker) = peer_sources_for_request(settings, request)?
+        .into_iter()
+        .find_map(|attempt| match attempt.source {
+            PeerSource::Invitation {
+                secret_ref, broker, ..
+            } => Some((secret_ref, broker)),
+            _ => None,
+        })
+        .ok_or_else(|| EnvoixError::Operation {
+            reason: "Nearby hybrid transport has no invitation rendezvous route".into(),
+        })?;
+    let lease = acquire_invitation(&secret_ref).map_err(op_err)?;
+    let options = transfer_options_for_request(settings, request, None)?;
+    let client = build_client_for_request(settings, request)?;
+    let config = client.session_config(&options);
+    let broker = parse_broker_addr(&broker, options.relay.as_deref()).map_err(op_err)?;
+    Ok((broker, lease, config))
 }
 
 async fn send_attempt(
@@ -918,9 +1403,10 @@ async fn receive_offer_attempt(
 }
 
 fn project_pending_offer(
-    pending: PendingManifestV2Receive,
+    pending: CorePendingManifestV2Receive,
     state_directory: PathBuf,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    selected_path: FfiSelectedDataPath,
 ) -> FfiPendingManifestV2Receive {
     let manifest = &pending.offer().manifest;
     let total = manifest.totals.total_plaintext_bytes;
@@ -963,6 +1449,7 @@ fn project_pending_offer(
         entries,
         state_directory,
         cancellation,
+        selected_path,
     }
 }
 
@@ -1359,6 +1846,30 @@ mod tests {
 
     use super::*;
 
+    fn nearby_request() -> FfiTransferRequest {
+        FfiTransferRequest {
+            direction: FfiTransferDirection::Send,
+            mode: FfiTransferMode::Room,
+            peer_descriptor: String::new(),
+            invite: String::new(),
+            code: String::new(),
+            token: String::new(),
+            remember_consent: false,
+            remembered_credential_ref: String::new(),
+            remembered_generation: 0,
+            remembered_previous_generation: None,
+            broker: String::new(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            rendezvous: super::super::FfiRendezvousPlan {
+                use_room: true,
+                use_mdns: true,
+                internet_available: true,
+            },
+        }
+    }
+
     #[derive(Default)]
     struct RecordingObserver {
         failure: StdMutex<Option<FfiTransferFailure>>,
@@ -1420,6 +1931,22 @@ mod tests {
             io_failure_recovery(FfiTransferDirection::Send),
             FfiRecoveryAction::Retry
         );
+    }
+
+    #[test]
+    fn nearby_hybrid_rejects_non_room_and_relay_only_requests() {
+        let settings = EnvoixRuntimeSettings::default();
+        let mut request = nearby_request();
+        request.mode = FfiTransferMode::Mdns;
+        assert!(nearby_hybrid_room_context(&settings, &request).is_err());
+
+        request = nearby_request();
+        request.path_policy = FfiPathPolicy::RelayOnly;
+        assert!(nearby_hybrid_room_context(&settings, &request).is_err());
+
+        request = nearby_request();
+        request.rendezvous.internet_available = false;
+        assert!(nearby_hybrid_room_context(&settings, &request).is_err());
     }
 
     #[test]
@@ -1536,6 +2063,7 @@ mod tests {
         let relay = DataPath::Relay {
             url: "https://sensitive-relay.example".into(),
         };
+        let wifi_aware = DataPath::WifiAware;
         let other = DataPath::Other {
             description: "sensitive transport details".into(),
         };
@@ -1543,6 +2071,7 @@ mod tests {
         let projections = [
             project_connection_path(&direct, FfiConnectionPathEventKind::Selected),
             project_connection_path(&relay, FfiConnectionPathEventKind::Changed),
+            project_connection_path(&wifi_aware, FfiConnectionPathEventKind::Changed),
             project_connection_path(&other, FfiConnectionPathEventKind::Changed),
         ];
 
@@ -1552,7 +2081,8 @@ mod tests {
             FfiConnectionPathEventKind::Selected
         );
         assert_eq!(projections[1].path_kind, FfiDataPathKind::Relay);
-        assert_eq!(projections[2].path_kind, FfiDataPathKind::Other);
+        assert_eq!(projections[2].path_kind, FfiDataPathKind::WifiAware);
+        assert_eq!(projections[3].path_kind, FfiDataPathKind::Other);
         let rendered = format!("{projections:?}");
         assert!(!rendered.contains("198.51.100.42"));
         assert!(!rendered.contains("sensitive-relay.example"));

@@ -15,6 +15,7 @@ class ConnectionPathPresentationTest {
                 "direct (198.51.100.42:4242)" to ConnectionPathKind.Direct,
                 "relay" to ConnectionPathKind.Relay,
                 "relay (https://private-relay.example)" to ConnectionPathKind.Relay,
+                "wifi_aware" to ConnectionPathKind.WifiAware,
                 "custom transport details" to ConnectionPathKind.Other,
             )
 

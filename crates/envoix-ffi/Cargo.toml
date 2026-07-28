@@ -17,7 +17,9 @@ required-features = ["bindgen-cli"]
 bindgen-cli = ["uniffi/cli"]
 
 [dependencies]
+async-trait.workspace = true
 envoix-client.workspace = true
+envoix-protocol.workspace = true
 envoix-qr.workspace = true
 envoix-rendezvous-iroh.workspace = true
 envoix-types.workspace = true

@@ -37,6 +37,7 @@ enum ConnectionPathPresentationPolicy {
         switch path {
         case .direct: return AppText.value("Direct path", "直连链路", language: language)
         case .relay: return AppText.value("Relay path", "中继链路", language: language)
+        case .wifiAware: return AppText.value("Wi-Fi Aware path", "Wi-Fi Aware 链路", language: language)
         case .other: return AppText.value("Other path", "其他链路", language: language)
         }
     }

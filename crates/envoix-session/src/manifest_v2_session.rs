@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use envoix_error::{CoreError, TransferCause};
-use envoix_protocol::manifest_v2::{ContentDigestV2, ManifestOfferV2, build_manifest_offer_v2};
+use envoix_protocol::FrameConnection;
+use envoix_protocol::manifest_v2::{
+    ContentDigestV2, ManifestOfferV2, ManifestV2, build_manifest_offer_v2,
+};
 use envoix_protocol::manifest_v2_frames::{
     ManifestV2Frame, ManifestV2FrameConnection, ResumeRequestV2,
     canonical_manifest_v2_frame_body_digest,
@@ -18,14 +21,23 @@ use envoix_transfer::{
     SenderDataPlaneSummaryV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderResumeIntentV2,
     SenderTransferPhaseV2, TransferJobError, sender_resume_intent,
 };
-use envoix_types::{TransferDirection, TransferId};
+use envoix_types::{DataPath, TransferDirection, TransferId};
+use iroh::Endpoint;
 
 use crate::connection::IrohFrameConnection;
+use crate::datagram_transport::{
+    DatagramTransportBridge, DatagramTransportRole, PlatformDatagramTransport,
+    bind_datagram_endpoint,
+};
+use crate::native_transport::{
+    NativeFrameConnection, NativeTransportRole, PlatformDuplexTransport,
+};
 use crate::{
-    AuthenticationHandler, BoundEndpoint, EventSink, NoopAuthenticationHandler, PairingConfig,
-    PeerDescriptor, SessionConfig, SessionError, TransferCancelToken, TransferProtocol,
-    auth_bounded, authenticate_receiver_with_remember, authenticate_sender_with_remember,
-    dial_peer_addr_for_protocol, interrupted_error, peer_addr_from_descriptor,
+    AuthenticationHandler, BoundEndpoint, DEFAULT_DATA_STREAM_WINDOW, EventSink,
+    NoopAuthenticationHandler, PairingConfig, PeerDescriptor, SessionConfig, SessionError,
+    TransferCancelToken, TransferProtocol, auth_bounded, authenticate_receiver_with_remember,
+    authenticate_sender_with_remember, dial_peer_addr_for_protocol, interrupted_error,
+    peer_addr_from_descriptor,
 };
 
 struct SessionManifestV2Progress {
@@ -98,6 +110,15 @@ pub struct PendingManifestV2Receive {
     offer: ManifestOfferV2,
     resume_request: Option<ResumeRequestV2>,
     events: Arc<dyn EventSink>,
+    datagram_bridge: Option<DatagramTransportBridge>,
+}
+
+/// An authenticated Wi-Fi Aware offer backed by a platform-owned byte stream.
+pub struct PendingNativeManifestV2Receive {
+    connection: NativeFrameConnection,
+    offer: ManifestOfferV2,
+    resume_request: Option<ResumeRequestV2>,
+    events: Arc<dyn EventSink>,
 }
 
 impl std::fmt::Debug for PendingManifestV2Receive {
@@ -110,6 +131,10 @@ impl std::fmt::Debug for PendingManifestV2Receive {
 }
 
 impl PendingManifestV2Receive {
+    pub(crate) fn attach_datagram_bridge(&mut self, bridge: DatagramTransportBridge) {
+        self.datagram_bridge = Some(bridge);
+    }
+
     pub fn offer(&self) -> &ManifestOfferV2 {
         &self.offer
     }
@@ -160,6 +185,67 @@ impl PendingManifestV2Receive {
             }
         }
         self.bound_endpoint.local_endpoint.close().await;
+        if let Some(bridge) = self.datagram_bridge.take() {
+            bridge.close().await;
+        }
+        result
+    }
+}
+
+impl std::fmt::Debug for PendingNativeManifestV2Receive {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingNativeManifestV2Receive")
+            .field("offer", &self.offer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PendingNativeManifestV2Receive {
+    pub fn offer(&self) -> &ManifestOfferV2 {
+        &self.offer
+    }
+
+    pub async fn receive(
+        self,
+        destination: DestinationRequestV2,
+        state_directory: PathBuf,
+        cancel: &TransferCancelToken,
+    ) -> Result<ReceiverManifestV2SessionSummary, SessionError> {
+        self.receive_with_result_gate(
+            destination,
+            state_directory,
+            &NoopManifestV2ResultGate,
+            cancel,
+        )
+        .await
+    }
+
+    pub async fn receive_with_result_gate(
+        mut self,
+        destination: DestinationRequestV2,
+        state_directory: PathBuf,
+        result_gate: &dyn ManifestV2ResultGate,
+        cancel: &TransferCancelToken,
+    ) -> Result<ReceiverManifestV2SessionSummary, SessionError> {
+        let result = tokio::select! {
+            result = receive_after_offer(
+                &self.offer,
+                self.resume_request.as_ref(),
+                destination,
+                state_directory,
+                &mut self.connection,
+                self.events.clone(),
+                result_gate,
+            ) => result,
+            () = cancel.cancelled() => Err(interrupted_error(cancel)),
+        };
+        match &result {
+            Ok(_) => self.connection.await_peer_close().await,
+            Err(_) => {
+                let _ = ManifestV2FrameConnection::close(&mut self.connection).await;
+            }
+        }
         result
     }
 }
@@ -219,9 +305,186 @@ pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
     cancel: &TransferCancelToken,
     authentication: &dyn AuthenticationHandler,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
-    let manifest = job.manifest().ok_or_else(|| {
-        CoreError::InvalidInput("transfer job must be sealed before dialing".into())
-    })?;
+    let local_endpoint = super::build_dial_endpoint(
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
+    send_manifest_v2_from_endpoint_with_authentication(
+        local_endpoint,
+        peer_addr,
+        job,
+        state_directory,
+        pairing,
+        events,
+        cancel,
+        authentication,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_manifest_v2_from_endpoint_with_authentication(
+    local_endpoint: Endpoint,
+    peer_addr: iroh::EndpointAddr,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    sealed_manifest(job)?;
+    events.on_event(envoix_transfer::TransferEvent::Connecting);
+    let mut connection = match dial_peer_addr_for_protocol(
+        local_endpoint.clone(),
+        peer_addr,
+        TransferProtocol::ManifestV2,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            local_endpoint.close().await;
+            return Err(error);
+        }
+    };
+    connection.watch_path(events.clone());
+    let result = send_manifest_v2_over_connection_with_authentication(
+        job,
+        state_directory,
+        pairing,
+        events,
+        cancel,
+        &mut connection,
+        authentication,
+    )
+    .await;
+    let _ = ManifestV2FrameConnection::close(&mut connection).await;
+    local_endpoint.close().await;
+    result
+}
+
+pub async fn send_manifest_v2_over_native_transport(
+    transport: Arc<dyn PlatformDuplexTransport>,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    sealed_manifest(job)?;
+    events.on_event(envoix_transfer::TransferEvent::Connecting);
+    let mut connection =
+        NativeFrameConnection::connect(transport, NativeTransportRole::Client, cancel).await?;
+    events.on_event(envoix_transfer::TransferEvent::Connected {
+        path: DataPath::WifiAware,
+    });
+    let result = send_manifest_v2_over_connection(
+        job,
+        state_directory,
+        pairing,
+        events,
+        cancel,
+        &mut connection,
+    )
+    .await;
+    let _ = ManifestV2FrameConnection::close(&mut connection).await;
+    result
+}
+
+/// Runs the canonical sender over iroh QUIC carried by a platform-established
+/// Wi-Fi Aware datagram channel.
+pub async fn send_manifest_v2_over_datagram_transport(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    maximum_datagram_size: u32,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    sealed_manifest(job)?;
+    events.on_event(envoix_transfer::TransferEvent::Connecting);
+    let datagram = bind_datagram_endpoint(
+        transport,
+        DatagramTransportRole::Client,
+        maximum_datagram_size,
+        DEFAULT_DATA_STREAM_WINDOW,
+        cancel,
+    )
+    .await?;
+    let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
+    let mut connection = match dial_peer_addr_for_protocol(
+        local_endpoint.clone(),
+        datagram.peer_addr,
+        TransferProtocol::ManifestV2,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            local_endpoint.close().await;
+            datagram.bridge.close().await;
+            return Err(error);
+        }
+    };
+    connection.watch_path(events.clone());
+    let result = send_manifest_v2_over_connection(
+        job,
+        state_directory,
+        pairing,
+        events,
+        cancel,
+        &mut connection,
+    )
+    .await;
+    let _ = ManifestV2FrameConnection::close(&mut connection).await;
+    local_endpoint.close().await;
+    datagram.bridge.close().await;
+    result
+}
+
+async fn send_manifest_v2_over_connection<Connection>(
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    connection: &mut Connection,
+) -> Result<SenderManifestV2SessionSummary, SessionError>
+where
+    Connection: FrameConnection + ManifestV2FrameConnection,
+{
+    send_manifest_v2_over_connection_with_authentication(
+        job,
+        state_directory,
+        pairing,
+        events,
+        cancel,
+        connection,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_manifest_v2_over_connection_with_authentication<Connection>(
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    connection: &mut Connection,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<SenderManifestV2SessionSummary, SessionError>
+where
+    Connection: FrameConnection + ManifestV2FrameConnection,
+{
+    let manifest = sealed_manifest(job)?;
     let offer = build_manifest_offer_v2(manifest.clone())
         .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
     let store = SenderDeliveryStoreV2::new(state_directory.join("sender-delivery"));
@@ -237,54 +500,15 @@ pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
         .validate_offer(&offer)
         .map_err(session_delivery_error)?;
     store.save(&record).await.map_err(session_delivery_error)?;
-    events.on_event(envoix_transfer::TransferEvent::Connecting);
-    let local_endpoint = super::build_dial_endpoint(
-        &config.identity,
-        &config.data_relay(),
-        config.relay_only,
-        &config.candidates,
-        config.data_stream_window,
-    )
-    .await?;
-    let mut connection = match dial_peer_addr_for_protocol(
-        local_endpoint.clone(),
-        peer_addr,
-        TransferProtocol::ManifestV2,
-    )
-    .await
-    {
-        Ok(connection) => connection,
-        Err(error) => {
-            local_endpoint.close().await;
-            return Err(error);
-        }
-    };
-    connection.watch_path(events.clone());
-    let outcome = match auth_bounded(
-        authenticate_sender_with_remember(
-            &mut connection,
-            pairing,
-            authentication.remember_consent(),
-        ),
+    let outcome = auth_bounded(
+        authenticate_sender_with_remember(connection, pairing, authentication.remember_consent()),
         cancel,
     )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let _ = ManifestV2FrameConnection::close(&mut connection).await;
-            local_endpoint.close().await;
-            return Err(error);
-        }
-    };
-    if let Err(error) = authentication.on_authenticated(outcome) {
-        let _ = ManifestV2FrameConnection::close(&mut connection).await;
-        local_endpoint.close().await;
-        return Err(error);
-    }
+    .await?;
+    authentication.on_authenticated(outcome)?;
     let progress =
         SessionManifestV2Progress::new(events.clone(), identity, TransferDirection::Send);
-    let result = tokio::select! {
+    tokio::select! {
         result = async {
             let data_plane = match record.phase() {
                 SenderTransferPhaseV2::Offering | SenderTransferPhaseV2::Transferring => {
@@ -292,21 +516,17 @@ pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
                         job,
                         &mut record,
                         &store,
-                        &mut connection,
+                        connection,
                         &progress,
                     )
-                        .await
-                        .map_err(session_sender_data_error)?
+                    .await
+                    .map_err(session_sender_data_error)?
                 }
                 SenderTransferPhaseV2::WaitingForReceiverSave
                 | SenderTransferPhaseV2::Delivered => {
-                    ManifestV2DataPlane::establish_sender_reconnect(
-                        job,
-                        &record,
-                        &mut connection,
-                    )
-                    .await
-                    .map_err(session_sender_data_error)?;
+                    ManifestV2DataPlane::establish_sender_reconnect(job, &record, connection)
+                        .await
+                        .map_err(session_sender_data_error)?;
                     record.completed_data_summary().ok_or_else(|| {
                         CoreError::Protocol(
                             "sender delivery phase has no durable result summary".into(),
@@ -325,7 +545,7 @@ pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
             let proof = ManifestV2DeliveryAuthority::sender_confirm_delivery(
                 &mut record,
                 &store,
-                &mut connection,
+                connection,
             )
             .await
             .map_err(session_delivery_error)?;
@@ -340,10 +560,12 @@ pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
             })
         } => result,
         () = cancel.cancelled() => Err(interrupted_error(cancel)),
-    };
-    let _ = ManifestV2FrameConnection::close(&mut connection).await;
-    local_endpoint.close().await;
-    result
+    }
+}
+
+fn sealed_manifest(job: &CanonicalTransferJob) -> Result<&ManifestV2, CoreError> {
+    job.manifest()
+        .ok_or_else(|| CoreError::InvalidInput("transfer job must be sealed before dialing".into()))
 }
 
 pub async fn receive_manifest_v2_offer(
@@ -435,8 +657,103 @@ pub async fn receive_manifest_v2_offer_with_authentication(
             }
         }
     };
+    let (offer, resume_request) = receive_authenticated_offer(&mut connection, cancel).await?;
+    Ok(PendingManifestV2Receive {
+        bound_endpoint,
+        connection,
+        offer,
+        resume_request,
+        events,
+        datagram_bridge: None,
+    })
+}
+
+/// Authenticates and returns a pending Manifest v2 offer over iroh QUIC
+/// carried by a platform-established Wi-Fi Aware datagram channel.
+pub async fn receive_manifest_v2_offer_over_datagram_transport(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    maximum_datagram_size: u32,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    events.on_event(envoix_transfer::TransferEvent::Connecting);
+    let datagram = bind_datagram_endpoint(
+        transport,
+        DatagramTransportRole::Server,
+        maximum_datagram_size,
+        DEFAULT_DATA_STREAM_WINDOW,
+        cancel,
+    )
+    .await?;
+    let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
+    match receive_manifest_v2_offer(datagram.bound_endpoint, pairing, events, cancel).await {
+        Ok(mut pending) => {
+            pending.attach_datagram_bridge(datagram.bridge);
+            Ok(pending)
+        }
+        Err(error) => {
+            local_endpoint.close().await;
+            datagram.bridge.close().await;
+            Err(error)
+        }
+    }
+}
+
+pub async fn receive_manifest_v2_offer_over_native_transport(
+    transport: Arc<dyn PlatformDuplexTransport>,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingNativeManifestV2Receive, SessionError> {
+    events.on_event(envoix_transfer::TransferEvent::Connecting);
+    let mut connection =
+        NativeFrameConnection::connect(transport, NativeTransportRole::Server, cancel).await?;
+    events.on_event(envoix_transfer::TransferEvent::Connected {
+        path: DataPath::WifiAware,
+    });
+    let outcome = match auth_bounded(
+        authenticate_receiver_with_remember(&mut connection, pairing, false),
+        cancel,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = ManifestV2FrameConnection::close(&mut connection).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = NoopAuthenticationHandler.on_authenticated(outcome) {
+        let _ = ManifestV2FrameConnection::close(&mut connection).await;
+        return Err(error);
+    }
+    let (offer, resume_request) = match receive_authenticated_offer(&mut connection, cancel).await {
+        Ok(offer) => offer,
+        Err(error) => {
+            let _ = ManifestV2FrameConnection::close(&mut connection).await;
+            return Err(error);
+        }
+    };
+    Ok(PendingNativeManifestV2Receive {
+        connection,
+        offer,
+        resume_request,
+        events,
+    })
+}
+
+async fn receive_authenticated_offer<Connection>(
+    connection: &mut Connection,
+    cancel: &TransferCancelToken,
+) -> Result<(ManifestOfferV2, Option<ResumeRequestV2>), SessionError>
+where
+    Connection: ManifestV2FrameConnection,
+{
     let (offer, resume_request) = match tokio::select! {
-        result = connection.recv_manifest_v2_frame() => result.map_err(|error| CoreError::Protocol(error.to_string()))?,
+        result = connection.recv_manifest_v2_frame() => {
+            result.map_err(|error| CoreError::Protocol(error.to_string()))?
+        }
         () = cancel.cancelled() => return Err(interrupted_error(cancel)),
     } {
         ManifestV2Frame::Offer(offer) => (offer, None),
@@ -458,24 +775,21 @@ pub async fn receive_manifest_v2_offer_with_authentication(
             "Manifest v2 structural digest does not match its canonical manifest".into(),
         ));
     }
-    Ok(PendingManifestV2Receive {
-        bound_endpoint,
-        connection,
-        offer,
-        resume_request,
-        events,
-    })
+    Ok((offer, resume_request))
 }
 
-async fn receive_after_offer(
+async fn receive_after_offer<Connection>(
     offer: &ManifestOfferV2,
     resume_request: Option<&ResumeRequestV2>,
     destination: DestinationRequestV2,
     state_directory: PathBuf,
-    connection: &mut IrohFrameConnection,
+    connection: &mut Connection,
     events: Arc<dyn EventSink>,
     result_gate: &dyn ManifestV2ResultGate,
-) -> Result<ReceiverManifestV2SessionSummary, SessionError> {
+) -> Result<ReceiverManifestV2SessionSummary, SessionError>
+where
+    Connection: ManifestV2FrameConnection,
+{
     let identity = envoix_protocol::manifest_v2_frames::JobGenerationV2 {
         job_id: offer.manifest.job_id,
         generation: offer.manifest.generation,

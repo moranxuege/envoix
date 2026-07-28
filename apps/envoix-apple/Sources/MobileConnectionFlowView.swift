@@ -1141,7 +1141,10 @@ struct MobileConnectionFlowView: View {
             discoveryPeerKey: pending.offer.senderPeerKey,
             displayName: pending.offer.senderDisplayName,
             sources: [pending.offer.source],
-            nearbyInviteRoute: capturedRoute
+            nearbyInviteRoute: capturedRoute,
+            nearbyWifiAwareDeviceID: uniqueNearbyWifiAwareDeviceID(
+                in: nearbyCoordinator.state.pairedDevices
+            )
         )
         let action = ConnectionWorkflowPolicy.localAction(
             forLocalRole: parsed.joinerRole
@@ -1446,7 +1449,9 @@ struct MobileConnectionFlowView: View {
                         invite: offer.transferInvite,
                         offer: offer,
                         settings: settings,
-                        destinationAccess: destination.access
+                        destinationAccess: destination.access,
+                        nearbyWifiAwareDeviceID: workflow.room?
+                            .nearbySelection?.nearbyWifiAwareDeviceID
                     )
                 },
                 acceptOffer: {

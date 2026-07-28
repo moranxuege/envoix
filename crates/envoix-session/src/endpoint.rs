@@ -2,15 +2,24 @@ use envoix_error::CoreError;
 use envoix_protocol::{PeerDescriptor, TransferProtocol};
 #[cfg(any(target_os = "ios", target_os = "android"))]
 use iroh::dns::{BoxIter, DnsError, DnsResolver, Resolver, TxtRecordData};
-use iroh::endpoint::{BindOpts, QuicTransportConfig, RelayMode, VarInt, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr, Watcher as _};
+use iroh::endpoint::transports::{
+    Addr, CustomTransport, PathSelection, PathSelectionContext, PathSelector,
+};
+use iroh::endpoint::{
+    BindOpts, QuicTransportConfig, QuicTransportConfigBuilder, RelayMode, VarInt, presets,
+};
+use iroh::{
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, SecretKey, TransportAddr, Watcher as _,
+};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 #[cfg(any(target_os = "ios", target_os = "android"))]
 use n0_future::boxed::BoxFuture;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 use crate::candidates::CandidateFilter;
 use crate::connection::IrohFrameConnection;
+use crate::datagram_transport::WIFI_AWARE_TRANSPORT_ID;
 use crate::identity::{IdentityConfig, load_secret_key};
 use crate::{EventSink, SessionError, TransferEvent};
 
@@ -454,17 +463,7 @@ impl BoundEndpoint {
     /// dial. Direct addrs pass through the candidate filter; the relay home is
     /// always kept (filtering candidates must not remove the relay fallback).
     pub fn endpoint_addr(&self) -> EndpointAddr {
-        let addr = self.local_endpoint.addr();
-        if self.candidates.is_empty() {
-            return addr;
-        }
-        let ips = self
-            .candidates
-            .apply(addr.ip_addrs().copied())
-            .into_iter()
-            .map(TransportAddr::Ip);
-        let relays = addr.relay_urls().cloned().map(TransportAddr::Relay);
-        EndpointAddr::from_parts(self.local_endpoint.id(), ips.chain(relays))
+        filter_endpoint_addr(self.local_endpoint.addr(), &self.candidates)
     }
 
     /// Wait until this endpoint has learned an address worth advertising.
@@ -559,12 +558,30 @@ impl BoundEndpoint {
     }
 }
 
+fn filter_endpoint_addr(addr: EndpointAddr, candidates: &CandidateFilter) -> EndpointAddr {
+    if candidates.is_empty() {
+        return addr;
+    }
+    let id = addr.id;
+    let ips = candidates
+        .apply(addr.ip_addrs().copied())
+        .into_iter()
+        .map(TransportAddr::Ip);
+    let non_ips = addr
+        .addrs
+        .iter()
+        .filter(|addr| !matches!(addr, TransportAddr::Ip(_)))
+        .cloned();
+    EndpointAddr::from_parts(id, ips.chain(non_ips))
+}
+
 fn endpoint_addr_shape(addr: &EndpointAddr) -> String {
     format!(
-        "endpoint={} direct={} relay={}",
+        "endpoint={} direct={} relay={} custom={}",
         short_endpoint_id(&addr.id.to_string()),
         addr.ip_addrs().count(),
-        addr.relay_urls().count()
+        addr.relay_urls().count(),
+        addr.addrs.iter().filter(|addr| addr.is_custom()).count()
     )
 }
 
@@ -720,6 +737,14 @@ pub const DEFAULT_DATA_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 pub const MIN_DATA_STREAM_WINDOW: u32 = 1024 * 1024;
 pub const MAX_DATA_STREAM_WINDOW: u32 = 128 * 1024 * 1024;
 
+/// Conservative UDP payload shared by IP and Wi-Fi Aware hybrid paths.
+pub(crate) const HYBRID_DATA_MTU: u16 = 1_200;
+/// Nearby hybrid endpoints allow three idle probes before retiring a path.
+pub(crate) const HYBRID_PATH_KEEP_ALIVE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2);
+pub(crate) const HYBRID_PATH_MAX_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(6);
+
 /// QUIC transport tuning for high-latency links (e.g. trans-Pacific, ~280 ms RTT).
 ///
 /// quinn's default per-stream receive window is sized for a 100 ms / 100 Mbit
@@ -732,15 +757,81 @@ pub const MAX_DATA_STREAM_WINDOW: u32 = 128 * 1024 * 1024;
 /// `window` is frozen per session (carried on [`crate::SessionConfig`]), never a
 /// global: it never enters the wire header, resume state, or any hash, so it
 /// affects throughput only — concurrent sessions each keep their own value.
-fn data_transport_config(window: u32) -> QuicTransportConfig {
-    let builder = QuicTransportConfig::builder()
+pub(crate) fn data_transport_config(window: u32) -> QuicTransportConfig {
+    data_transport_config_builder(window).build()
+}
+
+pub(crate) fn fixed_mtu_data_transport_config(
+    window: u32,
+    maximum_datagram_size: u16,
+) -> QuicTransportConfig {
+    fixed_mtu_data_transport_config_builder(window, maximum_datagram_size).build()
+}
+
+pub(crate) fn hybrid_data_transport_config(window: u32) -> QuicTransportConfig {
+    fixed_mtu_data_transport_config_builder(window, HYBRID_DATA_MTU)
+        .default_path_keep_alive_interval(HYBRID_PATH_KEEP_ALIVE_INTERVAL)
+        .default_path_max_idle_timeout(HYBRID_PATH_MAX_IDLE_TIMEOUT)
+        .build()
+}
+
+#[derive(Debug)]
+pub(crate) struct PreferWifiAwarePath;
+
+impl PathSelector for PreferWifiAwarePath {
+    fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
+        let mut selection = PathSelection::none();
+        let mut wifi_aware = None;
+        let mut fallback = None;
+        for path in context.paths() {
+            if matches!(
+                path.network_path().remote(),
+                Addr::Custom(addr) if addr.id() == WIFI_AWARE_TRANSPORT_ID
+            ) {
+                wifi_aware = Some(path);
+            } else if let Some(stats) = path.stats() {
+                // `false < true` keeps direct/custom fallbacks ahead of relay,
+                // then RTT orders paths within the same class.
+                let key = (
+                    matches!(path.network_path().remote(), Addr::Relay(..)),
+                    stats.rtt,
+                );
+                if fallback
+                    .as_ref()
+                    .is_none_or(|(_, best_key)| key < *best_key)
+                {
+                    fallback = Some((path, key));
+                }
+            }
+        }
+
+        if let Some(path) = wifi_aware.as_ref() {
+            selection.set(path);
+        } else if let Some((path, _)) = fallback.as_ref() {
+            selection.set(path);
+        }
+        selection
+    }
+}
+
+fn fixed_mtu_data_transport_config_builder(
+    window: u32,
+    maximum_datagram_size: u16,
+) -> QuicTransportConfigBuilder {
+    data_transport_config_builder(window)
+        .initial_mtu(maximum_datagram_size)
+        .min_mtu(maximum_datagram_size)
+        .mtu_discovery_config(None)
+}
+
+fn data_transport_config_builder(window: u32) -> QuicTransportConfigBuilder {
+    QuicTransportConfig::builder()
         .stream_receive_window(VarInt::from_u32(window))
-        .send_window(window as u64);
+        .send_window(window as u64)
     // Keep noq's stable CUBIC default. noq-proto 1.0.x BBRv3 can underflow in
     // `inflight_at_loss` on a lossy path and panic the whole mobile process.
     // BBRv3 must not be re-enabled until that upstream invariant is fixed and
     // covered by a lossy-link regression test.
-    builder.build()
 }
 
 // Endpoint knobs are independent flags/handles; the v2 accept/dial wrappers
@@ -757,6 +848,55 @@ pub(crate) async fn build_endpoint(
     window: u32,
 ) -> Result<Endpoint, SessionError> {
     let secret_key = load_secret_key(identity).await?;
+    build_endpoint_with_secret(
+        local_listen_addrs,
+        secret_key,
+        accepted_alpns,
+        advertise_self,
+        relay,
+        relay_only,
+        candidates,
+        data_transport_config(window),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn build_manifest_v2_hybrid_endpoint(
+    local_listen_addrs: Option<BindAddrs>,
+    secret_key: SecretKey,
+    relay: &Option<String>,
+    candidates: &CandidateFilter,
+    window: u32,
+    custom_transport: Arc<dyn CustomTransport>,
+) -> Result<Endpoint, SessionError> {
+    let accepted_alpns = [TransferProtocol::ManifestV2.alpn().to_vec()];
+    build_endpoint_with_secret(
+        local_listen_addrs,
+        secret_key,
+        &accepted_alpns,
+        false,
+        relay,
+        false,
+        candidates,
+        hybrid_data_transport_config(window),
+        Some(custom_transport),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_endpoint_with_secret(
+    local_listen_addrs: Option<BindAddrs>,
+    secret_key: SecretKey,
+    accepted_alpns: &[Vec<u8>],
+    advertise_self: bool,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+    transport_config: QuicTransportConfig,
+    custom_transport: Option<Arc<dyn CustomTransport>>,
+) -> Result<Endpoint, SessionError> {
     let builder = Endpoint::builder(presets::N0);
     // Defined by build.rs only when the NAT harness supplies its generated CA.
     #[cfg(envoix_nat_test_local_ca)]
@@ -770,7 +910,7 @@ pub(crate) async fn build_endpoint(
     let mut builder = builder
         .secret_key(secret_key)
         .relay_mode(relay_mode(relay)?)
-        .transport_config(data_transport_config(window))
+        .transport_config(transport_config)
         .clear_address_lookup();
     #[cfg(any(target_os = "ios", target_os = "android"))]
     {
@@ -781,6 +921,11 @@ pub(crate) async fn build_endpoint(
     }
     if advertise_self {
         builder = builder.address_lookup(MdnsAddressLookup::builder().advertise(true));
+    }
+    if let Some(custom_transport) = custom_transport {
+        builder = builder
+            .add_custom_transport(custom_transport)
+            .path_selector(Arc::new(PreferWifiAwarePath));
     }
     if relay_only {
         // Bind no IP transport, so this endpoint can only reach peers through the
@@ -823,4 +968,28 @@ pub(crate) async fn build_endpoint(
         .bind()
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh_base::CustomAddr;
+
+    use super::*;
+
+    #[test]
+    fn candidate_filter_keeps_wifi_aware_custom_address() {
+        let id = SecretKey::generate().public();
+        let ip = TransportAddr::Ip("127.0.0.1:4242".parse().unwrap());
+        let custom = TransportAddr::Custom(CustomAddr::from_parts(
+            WIFI_AWARE_TRANSPORT_ID,
+            id.as_bytes(),
+        ));
+        let filter = CandidateFilter::from_lists(&[], &["127.0.0.0/8".to_string()]).unwrap();
+
+        let filtered =
+            filter_endpoint_addr(EndpointAddr::from_parts(id, [ip, custom.clone()]), &filter);
+
+        assert_eq!(filtered.addrs.len(), 1);
+        assert!(filtered.addrs.contains(&custom));
+    }
 }

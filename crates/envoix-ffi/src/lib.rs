@@ -17,10 +17,14 @@ use envoix_client::api::{
 
 uniffi::setup_scaffolding!();
 
+mod datagram_transport;
+pub use datagram_transport::*;
 mod manifest_v2_job;
 pub use manifest_v2_job::*;
 mod manifest_v2_session;
 pub use manifest_v2_session::*;
+mod native_transport;
+pub use native_transport::*;
 mod nearby_invite;
 pub use nearby_invite::*;
 mod room_control;
@@ -381,6 +385,7 @@ pub struct FfiTransferFailure {
 pub enum FfiDataPathKind {
     Direct,
     Relay,
+    WifiAware,
     Other,
 }
 
@@ -431,6 +436,9 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "manifest_v2_session".into(),
             "paged_transfer_inventory_v2".into(),
             "delivery_proof_v2".into(),
+            "native_duplex_transport_v1".into(),
+            "wifi_aware_manifest_v2".into(),
+            "wifi_aware_nearby_hybrid_v1".into(),
             "structured_connection_path".into(),
             "foreground_room_control_v4".into(),
             "remembered_room_control_v1".into(),

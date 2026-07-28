@@ -26,6 +26,7 @@ struct ConnectionHubView: View {
     let onSelectPeer: (NearbyPairingSelection) -> Void
 
     @State private var isNameEditorPresented = false
+    @State private var isNearbySetupPresented = false
     @State private var editedDisplayName = ""
 
     var body: some View {
@@ -55,7 +56,12 @@ struct ConnectionHubView: View {
                 } else {
                     ForEach(coordinator.state.peers) { peer in
                         Button {
-                            onSelectPeer(NearbyPairingSelection(peer: peer))
+                            onSelectPeer(NearbyPairingSelection(
+                                peer: peer,
+                                nearbyWifiAwareDeviceID: uniqueNearbyWifiAwareDeviceID(
+                                    in: coordinator.state.pairedDevices
+                                )
+                            ))
                         } label: {
                             peerCard(peer)
                         }
@@ -526,6 +532,7 @@ struct ConnectionHubView: View {
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.text)
             Spacer()
+            nearbySetupButton
             Button(action: coordinator.restart) {
                 Image(systemName: "arrow.clockwise")
                     .font(.body.weight(.semibold))
@@ -538,6 +545,51 @@ struct ConnectionHubView: View {
             .accessibilityIdentifier("nearby_restart")
         }
         .padding(.top, 4)
+    }
+
+    @ViewBuilder
+    private var nearbySetupButton: some View {
+        #if canImport(DeviceDiscoveryUI) && canImport(WiFiAware)
+        if #available(iOS 26.0, *),
+           coordinator.state.statuses[.wifiAware]?.availability != .unsupported,
+           uniqueNearbyWifiAwareDeviceID(in: coordinator.state.pairedDevices) == nil {
+            Button {
+                isNearbySetupPresented = true
+            } label: {
+                Image(systemName: "link.badge.plus")
+                    .font(.body.weight(.semibold))
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accentStrong)
+            .accessibilityLabel(AppText.value(
+                "Set up a nearby device",
+                "设置附近设备",
+                language: language
+            ))
+            .accessibilityIdentifier("nearby_setup")
+            .sheet(isPresented: $isNearbySetupPresented) {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(AppText.value("Nearby setup", "附近设备设置", language: language))
+                        .font(.title2.weight(.bold))
+                        .foregroundStyle(Theme.text)
+                    Text(AppText.value(
+                        "Pair once to let Nearby choose the fastest available local path automatically.",
+                        "只需配对一次，附近传输便会自动选择最快的本地路径。",
+                        language: language
+                    ))
+                    .font(.body)
+                    .foregroundStyle(Theme.muted)
+                    AppleWifiAwarePairingControls(language: language)
+                    Spacer(minLength: 0)
+                }
+                .padding(20)
+                .background(Theme.bg)
+                .presentationDetents([.medium])
+            }
+        }
+        #endif
     }
 
     private var nearbyEmptyState: some View {

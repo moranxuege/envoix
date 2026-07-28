@@ -2,9 +2,11 @@
 
 mod candidates;
 mod connection;
+mod datagram_transport;
 mod endpoint;
 mod identity;
 mod manifest_v2_session;
+mod native_transport;
 mod nearby_invite;
 mod room;
 mod room_control;
@@ -49,6 +51,7 @@ use n0_future::StreamExt;
 
 pub use candidates::CandidateFilter;
 use connection::IrohFrameConnection;
+pub use datagram_transport::PlatformDatagramTransport;
 pub use endpoint::{
     BindAddrs, BoundEndpoint, DEFAULT_DATA_STREAM_WINDOW, MAX_DATA_STREAM_WINDOW,
     MIN_DATA_STREAM_WINDOW, parse_broker_addr,
@@ -59,10 +62,17 @@ use endpoint::{
 };
 pub use identity::{IdentityConfig, MemoryIdentity};
 pub use manifest_v2_session::{
-    PendingManifestV2Receive, ReceiverManifestV2SessionSummary, SenderManifestV2SessionSummary,
-    receive_manifest_v2_offer, receive_manifest_v2_offer_with_authentication,
-    send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr,
+    PendingManifestV2Receive, PendingNativeManifestV2Receive, ReceiverManifestV2SessionSummary,
+    SenderManifestV2SessionSummary, receive_manifest_v2_offer,
+    receive_manifest_v2_offer_over_datagram_transport,
+    receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_with_authentication,
+    send_manifest_v2_manual, send_manifest_v2_over_datagram_transport,
+    send_manifest_v2_over_native_transport, send_manifest_v2_to_endpoint_addr,
     send_manifest_v2_to_endpoint_addr_with_authentication,
+};
+pub use native_transport::{
+    NATIVE_TRANSPORT_IO_CHUNK_BYTES, NativeFrameConnection, NativeTransportRead,
+    NativeTransportRole, PlatformDuplexTransport,
 };
 pub use nearby_invite::{
     MAX_NEARBY_INVITE_BYTES, NEARBY_INVITE_ALPN, NearbyInvite, NearbyInviteEndpoint,
@@ -70,8 +80,12 @@ pub use nearby_invite::{
 };
 pub use room::{
     receive_manifest_v2_offer_via_remembered, receive_manifest_v2_offer_via_room,
+    receive_manifest_v2_offer_via_room_hybrid,
+    receive_manifest_v2_offer_via_room_hybrid_with_authentication,
     receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_via_remembered,
-    send_manifest_v2_via_room, send_manifest_v2_via_room_with_authentication,
+    send_manifest_v2_via_room, send_manifest_v2_via_room_hybrid,
+    send_manifest_v2_via_room_hybrid_with_authentication,
+    send_manifest_v2_via_room_with_authentication,
 };
 pub use room_control::{
     ROOM_CONTROL_ALPN, RememberedRoomControlConnectError, RememberedRoomControlRole,

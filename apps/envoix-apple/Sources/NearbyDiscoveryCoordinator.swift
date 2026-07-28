@@ -10,6 +10,7 @@ struct NearbyDiscoveryState {
     var isActive: Bool
     var nowMilliseconds: Int64
     var peers: [NearbyDiscoveredPeer]
+    var pairedDevices: [NearbyPairedDevice]
     var statuses: [NearbyDiscoverySource: NearbyProviderStatus]
     var incomingRendezvousOffer: NearbyRendezvousOffer?
 }
@@ -54,6 +55,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
             isActive: false,
             nowMilliseconds: now,
             peers: [],
+            pairedDevices: [],
             statuses: Dictionary(uniqueKeysWithValues: NearbyDiscoverySource.allCases.map { source in
                 (source, NearbyProviderStatus(
                     source: source,
@@ -78,6 +80,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         registry.clear()
         state.isActive = true
         state.peers = []
+        state.pairedDevices = []
         state.incomingRendezvousOffer = nil
         providers = providerFactory(identity)
         providers.forEach { provider in
@@ -110,6 +113,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         registry.clear()
         state.isActive = false
         state.peers = []
+        state.pairedDevices = []
         state.incomingRendezvousOffer = nil
         for source in NearbyDiscoverySource.allCases {
             state.statuses[source] = NearbyProviderStatus(
@@ -201,6 +205,9 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
             if registry.upsert(observation) {
                 refreshPeers()
             }
+        case .pairedDevices(let source, let devices):
+            guard started else { return }
+            replacePairedDevices(from: source, with: devices)
         case .status(let status):
             state.statuses[status.source] = status
             if lastLoggedAvailability[status.source] != status.availability {
@@ -221,6 +228,27 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         state.peers = registry.peers(nowMilliseconds: now)
     }
 
+    private func replacePairedDevices(
+        from source: NearbyDiscoverySource,
+        with devices: [NearbyPairedDevice]
+    ) {
+        guard devices.count <= NearbyPairedDevice.maximumSnapshotCount else {
+            logger.error("PAIRING provider=\(source.logName, privacy: .public) rejected=snapshot_limit")
+            return
+        }
+        guard devices.allSatisfy({ $0.source == source }) else {
+            logger.error("PAIRING provider=\(source.logName, privacy: .public) rejected=source_mismatch")
+            return
+        }
+        var seen = Set<String>()
+        let replacement = devices
+            .filter { seen.insert($0.id).inserted }
+            .sorted { $0.id < $1.id }
+        state.pairedDevices.removeAll { $0.source == source }
+        state.pairedDevices.append(contentsOf: replacement)
+        state.pairedDevices.sort { $0.id < $1.id }
+    }
+
     private static func monotonicMilliseconds() -> Int64 {
         Int64(ProcessInfo.processInfo.systemUptime * 1_000)
     }
@@ -237,12 +265,35 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
             ]
         }
         #endif
-        return [
+        var providers: [NearbyDiscoveryProvider] = [
             AppleBluetoothDiscoveryProvider(identity: identity),
             AppleBonjourDiscoveryProvider(identity: identity),
-            ReservedNearbyDiscoveryProvider(),
         ]
+        #if canImport(WiFiAware)
+        if #available(iOS 26.0, *) {
+            providers.append(AppleWifiAwarePairingProvider())
+        } else {
+            providers.append(UnsupportedWifiAwareDiscoveryProvider())
+        }
+        #else
+        providers.append(UnsupportedWifiAwareDiscoveryProvider())
+        #endif
+        return providers
     }
+}
+
+final class UnsupportedWifiAwareDiscoveryProvider: NearbyDiscoveryProvider {
+    let source = NearbyDiscoverySource.wifiAware
+
+    func start(sink: @escaping (NearbyDiscoveryEvent) -> Void) {
+        sink(.status(NearbyProviderStatus(
+            source: source,
+            availability: .unsupported,
+            detail: .wifiAwareUnsupported
+        )))
+    }
+
+    func stop() {}
 }
 
 final class ReservedNearbyDiscoveryProvider: NearbyDiscoveryProvider {
@@ -265,8 +316,11 @@ final class ReservedNearbyDiscoveryProvider: NearbyDiscoveryProvider {
 
 #if DEBUG
 private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
+    private static let observationRefreshInterval: TimeInterval = 5
+
     let source: NearbyDiscoverySource
     private var sink: ((NearbyDiscoveryEvent) -> Void)?
+    private var observationRefreshTimer: Timer?
 
     init(source: NearbyDiscoverySource) {
         self.source = source
@@ -276,14 +330,12 @@ private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
         self.sink = sink
         let detail: NearbyProviderDetail = source == .bluetooth ? .bluetoothReady : .localNetworkReady
         sink(.status(NearbyProviderStatus(source: source, availability: .ready, detail: detail)))
-        sink(.observation(NearbyDiscoveryObservation(
-            peerKey: "0011223344556677",
-            source: source,
-            seenAtMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000),
-            displayName: source == .mdns ? "Nearby test device" : nil,
-            rssi: source == .bluetooth ? -48 : nil,
-            inviteRoute: source == .mdns ? Self.fixtureInviteRoute : nil
-        )))
+        emitObservation()
+        let timer = Timer(timeInterval: Self.observationRefreshInterval, repeats: true) { [weak self] _ in
+            self?.emitObservation()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        observationRefreshTimer = timer
         if source == .bluetooth,
            ProcessInfo.processInfo.arguments.contains("--ui-testing-incoming-nearby-offer"),
            let invite = try? makePairingInvite(role: .send, broker: "", relay: "") {
@@ -299,7 +351,21 @@ private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
     }
 
     func stop() {
+        observationRefreshTimer?.invalidate()
+        observationRefreshTimer = nil
         sink = nil
+    }
+
+    private func emitObservation() {
+        guard let sink else { return }
+        sink(.observation(NearbyDiscoveryObservation(
+            peerKey: "0011223344556677",
+            source: source,
+            seenAtMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000),
+            displayName: source == .mdns ? "Nearby test device" : nil,
+            rssi: source == .bluetooth ? -48 : nil,
+            inviteRoute: source == .mdns ? Self.fixtureInviteRoute : nil
+        )))
     }
 
     func offerInvite(

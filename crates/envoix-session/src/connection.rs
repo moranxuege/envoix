@@ -15,6 +15,8 @@ use iroh::endpoint::{Connection, RecvStream, SendStream, VarInt};
 use iroh::{Endpoint, TransportAddr};
 use tokio::task::JoinHandle;
 
+use crate::datagram_transport::WIFI_AWARE_TRANSPORT_ID;
+
 const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Cap on how long the side that sent the final frame waits for the peer to
 /// close before closing itself, so a peer that never closes cannot hang us.
@@ -51,6 +53,9 @@ fn selected_path(connection: &Connection) -> Option<DataPath> {
                 TransportAddr::Relay(url) => DataPath::Relay {
                     url: url.to_string(),
                 },
+                TransportAddr::Custom(addr) if addr.id() == WIFI_AWARE_TRANSPORT_ID => {
+                    DataPath::WifiAware
+                }
                 other => DataPath::Other {
                     description: format!("{other:?}"),
                 },

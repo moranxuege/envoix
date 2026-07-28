@@ -35,10 +35,10 @@ final class ManifestV2AppUITests: XCTestCase {
     }
 
     func testNearbySendHandoffKeepsEverySourcePickerUsable() {
-        for pickerIdentifier in [
-            "send_photo_picker",
-            "send_file_picker",
-            "send_folder_picker",
+        for (pickerIdentifier, sheetIdentifier) in [
+            ("send_photo_picker", "send_photo_picker_sheet"),
+            ("send_file_picker", "send_file_picker_sheet"),
+            ("send_folder_picker", "send_folder_picker_sheet"),
         ] {
             launch(
                 language: "en",
@@ -46,7 +46,10 @@ final class ManifestV2AppUITests: XCTestCase {
                 extraArguments: ["--ui-testing-discovery-fixtures"]
             )
             openNearbySend()
-            assertPickerCanPresent(from: pickerIdentifier)
+            assertPickerCanPresent(
+                from: pickerIdentifier,
+                sheetIdentifier: sheetIdentifier
+            )
             app.terminate()
         }
     }
@@ -69,7 +72,9 @@ final class ManifestV2AppUITests: XCTestCase {
         button("mobile_page_back").tap()
         element("connection_hub").assertExists()
 
-        button("nearby_peer_card").tap()
+        let nearbyPeer = button("nearby_peer_card")
+        nearbyPeer.assertExists()
+        nearbyPeer.tap()
         element("one_time_room").assertExists()
         button("open_activity").tap()
         element("activity_page").assertExists()
@@ -135,7 +140,9 @@ final class ManifestV2AppUITests: XCTestCase {
         element("nearby_display_name").assertExists()
         element("nearby_visibility_menu").assertExists()
 
-        button("nearby_peer_card").tap()
+        let nearbyPeer = button("nearby_peer_card")
+        nearbyPeer.assertExists()
+        nearbyPeer.tap()
         element("one_time_room").assertExists()
         element("room_context_authenticated").assertExists()
 
@@ -158,7 +165,9 @@ final class ManifestV2AppUITests: XCTestCase {
 
     private func openNearbySend() {
         element("connection_hub").assertExists()
-        button("nearby_peer_card").tap()
+        let nearbyPeer = button("nearby_peer_card")
+        nearbyPeer.assertExists()
+        nearbyPeer.tap()
         element("one_time_room").assertExists()
         element("room_context_authenticated").assertExists()
         button("room_add_files").tap()
@@ -166,26 +175,19 @@ final class ManifestV2AppUITests: XCTestCase {
         XCTAssertFalse(element("nearby_invite_delivery_progress").exists)
     }
 
-    private func assertPickerCanPresent(from identifier: String) {
+    private func assertPickerCanPresent(
+        from identifier: String,
+        sheetIdentifier: String
+    ) {
         let source = button(identifier)
         source.assertExists()
         XCTAssertTrue(source.isEnabled)
         XCTAssertTrue(source.isHittable)
         source.tap()
 
-        // Photos and Documents are external system surfaces. Their controls
-        // and provider contents vary across clean simulator runtimes, so the
-        // application contract ends when its source control is covered by the
-        // presented modal.
-        let presented = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND hittable == false"),
-            object: source
-        )
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [presented], timeout: 5),
-            .completed,
-            "Picker did not cover source control: \(identifier)"
-        )
+        // System picker remote views can keep their covered source marked
+        // hittable. The app-owned sheet is the stable handoff contract.
+        element(sheetIdentifier).assertExists()
     }
 
     private func element(_ identifier: String) -> XCUIElement {

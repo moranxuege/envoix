@@ -158,6 +158,7 @@ struct SendView: View {
                     isFileImporterPresented = false
                 }
             )
+            .accessibilityIdentifier("send_file_picker_sheet")
         }
         .sheet(isPresented: $isFolderPickerPresented) {
             MultiFolderPickerSheet(
@@ -172,6 +173,7 @@ struct SendView: View {
                     isFolderPickerPresented = false
                 }
             )
+            .accessibilityIdentifier("send_folder_picker_sheet")
         }
         .sheet(isPresented: $isPhotoPickerPresented) {
             PhotoPickerSheet(
@@ -185,6 +187,7 @@ struct SendView: View {
                     isPhotoPickerPresented = false
                 }
             )
+            .accessibilityIdentifier("send_photo_picker_sheet")
         }
         .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onAppear(perform: applyInitialPairingInputIfNeeded)
@@ -1494,6 +1497,7 @@ struct SendView: View {
             code: code,
             settings: settings,
             sourceAccess: access,
+            nearbyWifiAwareDeviceID: nearbySelection?.nearbyWifiAwareDeviceID,
             rememberLabel: rememberAfterPairing ? rememberLabel : nil
         )
     }
@@ -1505,6 +1509,7 @@ struct SendView: View {
             invite: invite,
             settings: settings,
             sourceAccess: access,
+            nearbyWifiAwareDeviceID: nearbySelection?.nearbyWifiAwareDeviceID,
             rememberLabel: rememberAfterPairing ? rememberLabel : nil
         )
     }

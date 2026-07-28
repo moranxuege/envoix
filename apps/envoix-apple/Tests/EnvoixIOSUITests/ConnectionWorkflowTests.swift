@@ -580,6 +580,13 @@ final class ConnectionWorkflowTests: XCTestCase {
             ),
             "中继链路 · 已切换"
         )
+        XCTAssertEqual(
+            ConnectionPathPresentationPolicy.label(
+                for: FfiConnectionPathEvent(pathKind: .wifiAware, eventKind: .selected),
+                language: "en"
+            ),
+            "Wi-Fi Aware path"
+        )
     }
 
     func testRoomControlDoesNotOpenRoomBeforeConnectedEvent() async throws {

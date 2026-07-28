@@ -7,6 +7,7 @@ internal enum class ConnectionPathKind(
 ) {
     Direct("direct"),
     Relay("relay"),
+    WifiAware("wifi_aware"),
     Other("other"),
     ;
 
@@ -25,6 +26,9 @@ internal enum class ConnectionPathKind(
                 normalized == Relay.wire ||
                     normalized.startsWith("relay ") ||
                     normalized.startsWith("relay(") -> Relay
+                normalized == WifiAware.wire ||
+                    normalized == "wifi aware" ||
+                    normalized == "wifi-aware" -> WifiAware
                 else -> Other
             }
         }
@@ -38,6 +42,7 @@ internal fun connectionPathLabel(
     when (ConnectionPathKind.fromWireOrLegacy(value)) {
         ConnectionPathKind.Direct -> AppText.value("Direct path", "直连路径", language)
         ConnectionPathKind.Relay -> AppText.value("Relay path", "中继路径", language)
+        ConnectionPathKind.WifiAware -> AppText.value("Wi-Fi Aware path", "Wi-Fi Aware 路径", language)
         ConnectionPathKind.Other -> AppText.value("Other path", "其他路径", language)
         null -> null
     }

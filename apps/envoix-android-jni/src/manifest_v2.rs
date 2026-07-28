@@ -9,14 +9,16 @@ use envoix_client::api::{
     CompressionPolicyV2, DestinationDecisionV2, DestinationRequestV2, EventSink,
     InvitationBootstrap, InvitationConsumption, InviteSecretRef, JobIdV2, JobLifecycle,
     LocalSourceOrigin, ManifestV2DataError, ManifestV2ProgressPhase, ManifestV2ResultGate,
-    PairingConfig, PendingManifestV2Receive, ProviderSourceIssue, RememberedCredentialRef,
-    RootPlanV2, SavedEntryV2, SenderManifestV2SessionSummary, SessionError, SourceDecision,
-    SourceIssueKind, SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent,
-    TransferJobStore, TransferOptions, acquire_invitation, acquire_remembered_credential,
-    local_allocatable_bytes, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
-    receive_manifest_v2_offer_via_remembered,
+    NativeTransportRead, PairingConfig, PendingManifestV2Receive, PendingNativeManifestV2Receive,
+    PlatformDuplexTransport, ProviderSourceIssue, RememberedCredentialRef, RootPlanV2,
+    SavedEntryV2, SenderManifestV2SessionSummary, SessionError, SourceDecision, SourceIssueKind,
+    SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent, TransferJobStore,
+    TransferOptions, acquire_invitation, acquire_remembered_credential, local_allocatable_bytes,
+    parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
     receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_enable_mdns,
-    send_manifest_v2_via_remembered, send_manifest_v2_via_room_with_authentication,
+    send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
+    send_manifest_v2_via_room_with_authentication,
 };
 #[cfg(test)]
 use envoix_error::RendezvousCause;
@@ -24,7 +26,7 @@ use envoix_error::{CoreError, TransferCause};
 use envoix_protocol::manifest_v2::{ManifestEntryKindV2, ManifestV2};
 use envoix_types::{DataPath, PairingStep};
 use jni::JNIEnv;
-use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
 use jni::sys::{jlong, jstring};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -336,6 +338,143 @@ impl EventSink for AndroidEvents {
     }
 }
 
+struct AndroidNativeTransport {
+    vm: Arc<JavaVM>,
+    transport: Arc<GlobalRef>,
+}
+
+enum AndroidPendingManifestV2Receive {
+    Iroh(Box<PendingManifestV2Receive>),
+    Native(Box<PendingNativeManifestV2Receive>),
+}
+
+impl AndroidPendingManifestV2Receive {
+    fn offer(&self) -> &envoix_protocol::manifest_v2::ManifestOfferV2 {
+        match self {
+            Self::Iroh(pending) => pending.offer(),
+            Self::Native(pending) => pending.offer(),
+        }
+    }
+
+    async fn receive_with_result_gate(
+        self,
+        destination: DestinationRequestV2,
+        state_directory: PathBuf,
+        result_gate: &dyn ManifestV2ResultGate,
+        cancel: &TransferCancelToken,
+    ) -> Result<envoix_client::api::ReceiverManifestV2SessionSummary, CoreError> {
+        match self {
+            Self::Iroh(pending) => {
+                pending
+                    .receive_with_result_gate(destination, state_directory, result_gate, cancel)
+                    .await
+            }
+            Self::Native(pending) => {
+                pending
+                    .receive_with_result_gate(destination, state_directory, result_gate, cancel)
+                    .await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl PlatformDuplexTransport for AndroidNativeTransport {
+    async fn send(&self, bytes: Vec<u8>) -> Result<(), CoreError> {
+        let vm = self.vm.clone();
+        let transport = self.transport.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut env = vm.attach_current_thread().map_err(native_transport_error)?;
+            let bytes = env
+                .byte_array_from_slice(&bytes)
+                .map_err(native_transport_error)?;
+            let bytes_object = JObject::from(bytes);
+            env.call_method(
+                transport.as_obj(),
+                "send",
+                "([B)V",
+                &[JValue::Object(&bytes_object)],
+            )
+            .map_err(|error| clear_native_transport_exception(&mut env, error))?;
+            Ok(())
+        })
+        .await
+        .map_err(native_transport_task_error)?
+    }
+
+    async fn receive(&self, max_bytes: u32) -> Result<NativeTransportRead, CoreError> {
+        let bound = i32::try_from(max_bytes).map_err(|_| {
+            CoreError::InvalidInput("native transport read bound exceeds Android Int".into())
+        })?;
+        let vm = self.vm.clone();
+        let transport = self.transport.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut env = vm.attach_current_thread().map_err(native_transport_error)?;
+            let value = env
+                .call_method(
+                    transport.as_obj(),
+                    "receive",
+                    "(I)[B",
+                    &[JValue::Int(bound)],
+                )
+                .map_err(|error| clear_native_transport_exception(&mut env, error))?
+                .l()
+                .map_err(native_transport_error)?;
+            if value.is_null() {
+                return Ok(NativeTransportRead {
+                    bytes: Vec::new(),
+                    end_of_stream: true,
+                });
+            }
+            let bytes = env
+                .convert_byte_array(JByteArray::from(value))
+                .map_err(native_transport_error)?;
+            if bytes.len() > max_bytes as usize {
+                return Err(CoreError::Transport(
+                    "Android Wi-Fi Aware transport exceeded its read bound".into(),
+                ));
+            }
+            Ok(NativeTransportRead {
+                bytes,
+                end_of_stream: false,
+            })
+        })
+        .await
+        .map_err(native_transport_task_error)?
+    }
+
+    async fn close(&self) -> Result<(), CoreError> {
+        let vm = self.vm.clone();
+        let transport = self.transport.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut env = vm.attach_current_thread().map_err(native_transport_error)?;
+            env.call_method(transport.as_obj(), "close", "()V", &[])
+                .map_err(|error| clear_native_transport_exception(&mut env, error))?;
+            Ok(())
+        })
+        .await
+        .map_err(native_transport_task_error)?
+    }
+}
+
+fn native_transport_error(error: impl std::fmt::Display) -> CoreError {
+    CoreError::Transport(format!("Android Wi-Fi Aware transport failed: {error}"))
+}
+
+fn native_transport_task_error(error: tokio::task::JoinError) -> CoreError {
+    CoreError::Transport(format!(
+        "Android Wi-Fi Aware transport task failed: {error}"
+    ))
+}
+
+fn clear_native_transport_exception(env: &mut JNIEnv<'_>, error: jni::errors::Error) -> CoreError {
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+        return CoreError::Transport("Android Wi-Fi Aware transport threw an exception".into());
+    }
+    native_transport_error(error)
+}
+
 fn connection_path_event(path: &DataPath, event_kind: &'static str) -> Value {
     json!({
         "notice":"manifest_v2",
@@ -349,6 +488,7 @@ fn data_path_kind(path: &DataPath) -> &'static str {
     match path {
         DataPath::Direct { .. } => "direct",
         DataPath::Relay { .. } => "relay",
+        DataPath::WifiAware => "wifi_aware",
         DataPath::Other { .. } => "other",
     }
 }
@@ -765,6 +905,95 @@ pub extern "system" fn Java_dev_envoix_app_Native_startManifestV2Session(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_startManifestV2NativeSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    params_json: JString,
+    pairing_token: JString,
+    transport: JObject,
+    callback: JObject,
+) {
+    let params_json = jstr(&mut env, &params_json);
+    let pairing_token = jstr(&mut env, &pairing_token);
+    let Some(vm) = java_vm_or_log(&env, "startManifestV2NativeSession") else {
+        return;
+    };
+    let Some(transport) = callback_or_log(&env, &transport, "startManifestV2NativeSession") else {
+        return;
+    };
+    let Some(callback) = callback_or_log(&env, &callback, "startManifestV2NativeSession") else {
+        return;
+    };
+    let params: StartParams = match serde_json::from_str(&params_json) {
+        Ok(params) => params,
+        Err(error) => {
+            emit_failed_manifest(&vm, &callback, "invalid Manifest v2 params", error);
+            return;
+        }
+    };
+    if params.direction != "send" && params.direction != "receive" {
+        emit_failed_manifest(
+            &vm,
+            &callback,
+            "invalid Manifest v2 direction",
+            params.direction,
+        );
+        return;
+    }
+    let token = TransferCancelToken::new();
+    let Ok(mut cancels) = manifest_cancels().lock() else {
+        emit_failed_manifest(&vm, &callback, "Manifest v2 registry unavailable", id);
+        return;
+    };
+    if cancels.insert(id, token.clone()).is_some() {
+        emit_failed_manifest(&vm, &callback, "Manifest v2 session is already active", id);
+        return;
+    }
+    drop(cancels);
+    let vm = Arc::new(vm);
+    let transport = Arc::new(transport);
+    let callback = Arc::new(callback);
+    runtime().spawn(async move {
+        let result = run_native_session(
+            id,
+            &params,
+            pairing_token,
+            vm.clone(),
+            transport,
+            callback.clone(),
+            &token,
+        )
+        .await;
+        if let Err(error) = result {
+            let fact = error_fact(&error, &params.direction);
+            emit(
+                vm.as_ref(),
+                callback.as_ref(),
+                &json!({
+                    "notice":"manifest_v2",
+                    "state":"failed",
+                    "cause":fact.cause,
+                    "detail":fact.detail,
+                    "retryable":fact.retryable,
+                    "recovery_action":fact.recovery_action,
+                })
+                .to_string(),
+            );
+        }
+        if let Ok(mut map) = manifest_cancels().lock() {
+            map.remove(&id);
+        }
+        if let Ok(mut map) = receive_decisions().lock() {
+            map.remove(&id);
+        }
+        if let Ok(mut map) = offer_inventories().lock() {
+            map.remove(&id);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_continueManifestV2Receive(
     mut env: JNIEnv,
     _class: JClass,
@@ -835,6 +1064,83 @@ pub extern "system" fn Java_dev_envoix_app_Native_cancelManifestV2Session(
     {
         token.cancel();
     }
+}
+
+async fn run_native_session(
+    id: i64,
+    params: &StartParams,
+    pairing_token: String,
+    vm: Arc<JavaVM>,
+    transport: Arc<GlobalRef>,
+    callback: Arc<GlobalRef>,
+    cancel: &TransferCancelToken,
+) -> Result<(), CoreError> {
+    require_directory(&params.state_directory, "state directory")
+        .map_err(CoreError::InvalidInput)?;
+    require_directory(&params.job_store_directory, "job store directory")
+        .map_err(CoreError::InvalidInput)?;
+    let pairing = PairingConfig::spake2_shared_token(pairing_token)?;
+    let events: Arc<dyn EventSink> = Arc::new(AndroidEvents {
+        vm: vm.clone(),
+        callback: callback.clone(),
+    });
+    let transport: Arc<dyn PlatformDuplexTransport> = Arc::new(AndroidNativeTransport {
+        vm: vm.clone(),
+        transport,
+    });
+
+    if params.direction == "send" {
+        let job_id = params
+            .job_id
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidInput("send requires job_id".into()))?;
+        let store = TransferJobStore::new(&params.job_store_directory);
+        let mut job = load_job(&store, job_id)
+            .await
+            .map_err(CoreError::InvalidInput)?;
+        if job.manifest().is_none() {
+            job.seal_for_send()
+                .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
+            store
+                .save(&job)
+                .await
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
+        send_manifest_v2_over_native_transport(
+            transport,
+            &job,
+            PathBuf::from(&params.state_directory),
+            &pairing,
+            events,
+            cancel,
+        )
+        .await?;
+        emit(
+            vm.as_ref(),
+            callback.as_ref(),
+            &json!({
+                "notice":"manifest_v2",
+                "state":"completed",
+                "job_id":job_id,
+                "path":"wifi_aware",
+            })
+            .to_string(),
+        );
+        return Ok(());
+    }
+
+    let pending =
+        receive_manifest_v2_offer_over_native_transport(transport, &pairing, events, cancel)
+            .await?;
+    complete_receive(
+        id,
+        params,
+        vm,
+        callback,
+        cancel,
+        AndroidPendingManifestV2Receive::Native(Box::new(pending)),
+    )
+    .await
 }
 
 async fn run_session(
@@ -1016,6 +1322,25 @@ async fn run_session(
         }
         result?
     };
+    complete_receive(
+        id,
+        params,
+        vm,
+        callback,
+        cancel,
+        AndroidPendingManifestV2Receive::Iroh(Box::new(pending)),
+    )
+    .await
+}
+
+async fn complete_receive(
+    id: i64,
+    params: &StartParams,
+    vm: Arc<JavaVM>,
+    callback: Arc<GlobalRef>,
+    cancel: &TransferCancelToken,
+    pending: AndroidPendingManifestV2Receive,
+) -> Result<(), CoreError> {
     let manifest = &pending.offer().manifest;
     let inventory = manifest
         .entries

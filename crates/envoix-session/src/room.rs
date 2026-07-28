@@ -21,6 +21,11 @@ use envoix_transfer::{SenderDeliveryStoreV2, SenderTransferPhaseV2};
 use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
+use crate::datagram_transport::{
+    DatagramTransportRole, PlatformDatagramTransport, WIFI_AWARE_TRANSPORT_ID,
+    bind_hybrid_datagram_endpoint,
+};
+use crate::manifest_v2_session::send_manifest_v2_from_endpoint_with_authentication;
 use crate::{
     AuthenticationHandler, AuthenticationOutcome, BindAddrs, BoundEndpoint, CanonicalTransferJob,
     EventSink, NoopAuthenticationHandler, PairingConfig, PendingManifestV2Receive,
@@ -435,6 +440,121 @@ pub async fn receive_manifest_v2_offer_via_room_with_authentication(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn receive_manifest_v2_offer_via_room_hybrid(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    maximum_datagram_size: u32,
+    broker: EndpointAddr,
+    bootstrap: InvitationBootstrap,
+    listen_addrs: impl Into<BindAddrs>,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    receive_manifest_v2_offer_via_room_hybrid_with_authentication(
+        transport,
+        maximum_datagram_size,
+        broker,
+        bootstrap,
+        listen_addrs,
+        config,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn receive_manifest_v2_offer_via_room_hybrid_with_authentication(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    maximum_datagram_size: u32,
+    broker: EndpointAddr,
+    bootstrap: InvitationBootstrap,
+    listen_addrs: impl Into<BindAddrs>,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    require_bootstrap_role(&bootstrap, TransferRole::Receiver)?;
+    // Both roles must finish the platform datagram bootstrap before joining
+    // the Room; the sender follows this same order and cannot match us earlier.
+    let datagram = bind_hybrid_datagram_endpoint(
+        transport,
+        DatagramTransportRole::Server,
+        maximum_datagram_size,
+        Some(listen_addrs.into()),
+        &config,
+        cancel,
+    )
+    .await?;
+    events.on_event(TransferEvent::Diagnostic {
+        message: "Nearby hybrid endpoint admitted Wi-Fi Aware with iroh IP fallback discovery"
+            .into(),
+    });
+    let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
+    let (rdz, control) =
+        match authenticate_room(broker, &bootstrap, &config, events.as_ref(), cancel, None).await {
+            Ok(pairing) => pairing,
+            Err(error) => {
+                local_endpoint.close().await;
+                datagram.bridge.close().await;
+                return Err(error);
+            }
+        };
+    if let Err(error) = validate_authenticated_context(&bootstrap, &control) {
+        local_endpoint.close().await;
+        datagram.bridge.close().await;
+        rdz.close().await;
+        return Err(error);
+    }
+    let auth = match complete_receiver_pairing(
+        control,
+        &datagram.bound_endpoint,
+        &bootstrap,
+        &config,
+        events.as_ref(),
+        cancel,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(error) => {
+            local_endpoint.close().await;
+            datagram.bridge.close().await;
+            rdz.close().await;
+            return Err(error);
+        }
+    };
+    rdz.close().await;
+    let authentication = TrackedAuthentication::new(authentication);
+    let result = receive_manifest_v2_offer_with_authentication(
+        datagram.bound_endpoint,
+        &auth,
+        events,
+        cancel,
+        &authentication,
+    )
+    .await;
+    let result = if authentication.authenticated() {
+        result.map_err(invitation_consumed)
+    } else {
+        result
+    };
+    match result {
+        Ok(mut pending) => {
+            pending.attach_datagram_bridge(datagram.bridge);
+            Ok(pending)
+        }
+        Err(error) => {
+            local_endpoint.close().await;
+            datagram.bridge.close().await;
+            Err(error)
+        }
+    }
+}
+
 /// Receives through a high-entropy remembered-device rendezvous. The receiver
 /// always advertises as the control responder.
 #[allow(clippy::too_many_arguments)]
@@ -653,6 +773,133 @@ pub async fn send_manifest_v2_via_remembered(
         authentication,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn send_manifest_v2_via_room_hybrid(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    maximum_datagram_size: u32,
+    broker: EndpointAddr,
+    bootstrap: InvitationBootstrap,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    send_manifest_v2_via_room_hybrid_with_authentication(
+        transport,
+        maximum_datagram_size,
+        broker,
+        bootstrap,
+        job,
+        state_directory,
+        config,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn send_manifest_v2_via_room_hybrid_with_authentication(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    maximum_datagram_size: u32,
+    broker: EndpointAddr,
+    bootstrap: InvitationBootstrap,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    require_bootstrap_role(&bootstrap, TransferRole::Sender)?;
+    let datagram = bind_hybrid_datagram_endpoint(
+        transport,
+        DatagramTransportRole::Client,
+        maximum_datagram_size,
+        None,
+        &config,
+        cancel,
+    )
+    .await?;
+    events.on_event(TransferEvent::Diagnostic {
+        message: "Nearby hybrid endpoint admitted Wi-Fi Aware with iroh IP fallback discovery"
+            .into(),
+    });
+    let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
+    let pairing = match pair_room_sender(broker, &bootstrap, &config, events.as_ref(), cancel).await
+    {
+        Ok(pairing) => pairing,
+        Err(error) => {
+            local_endpoint.close().await;
+            datagram.bridge.close().await;
+            return Err(error);
+        }
+    };
+    let peer = match wifi_aware_first_peer(&pairing.peer, &datagram.peer_addr) {
+        Ok(peer) => peer,
+        Err(error) => {
+            local_endpoint.close().await;
+            datagram.bridge.close().await;
+            return Err(error);
+        }
+    };
+    let authentication = TrackedAuthentication::new(authentication);
+    let result = send_manifest_v2_from_endpoint_with_authentication(
+        local_endpoint,
+        peer,
+        job,
+        state_directory,
+        &pairing.auth,
+        events,
+        cancel,
+        &authentication,
+    )
+    .await;
+    datagram.bridge.close().await;
+    if authentication.authenticated() {
+        result.map_err(invitation_consumed)
+    } else {
+        result
+    }
+}
+
+/// Builds the first-hop address for a Nearby hybrid connection.
+///
+/// The authenticated Room address is used for the identity check, but its IP
+/// and relay addresses are not raced against the already-ready custom path.
+/// Once QUIC is established, iroh's NAT traversal validates an IP backup on
+/// that same connection.
+fn wifi_aware_first_peer(
+    room_peer: &EndpointAddr,
+    wifi_aware_peer: &EndpointAddr,
+) -> Result<EndpointAddr, SessionError> {
+    if room_peer.id != wifi_aware_peer.id {
+        return Err(CoreError::Crypto(
+            "Wi-Fi Aware peer identity does not match the authenticated room peer".into(),
+        ));
+    }
+    let custom_addrs = wifi_aware_peer
+        .addrs
+        .iter()
+        .filter(|addr| {
+            matches!(
+                addr,
+                iroh::TransportAddr::Custom(custom)
+                    if custom.id() == WIFI_AWARE_TRANSPORT_ID
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if custom_addrs.is_empty() {
+        return Err(CoreError::InvalidInput(
+            "Wi-Fi Aware bootstrap produced no custom peer address".into(),
+        ));
+    }
+    Ok(EndpointAddr::from_parts(room_peer.id, custom_addrs))
 }
 
 fn should_retry_room_with_relay(

@@ -5,9 +5,12 @@ from pathlib import Path
 import sys
 
 # Keep this explicit so a new callback interface cannot silently bypass the
-# reviewed Swift concurrency annotation below. Manifest v2 exposes only the
-# canonical TransferObserver callback interface.
-EXPECTED_CALLBACK_VTABLES = 1
+# reviewed Swift concurrency annotation below.
+EXPECTED_CALLBACK_INTERFACES = (
+    "FfiNativeDatagramTransport",
+    "FfiNativeDuplexTransport",
+    "TransferObserver",
+)
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -49,12 +52,22 @@ def main() -> None:
     nonisolated(unsafe) static let vtablePtr: UnsafePointer<"""
     raw_count = text.count(old_vtable)
     reviewed_count = text.count(new_vtable)
-    if raw_count + reviewed_count != EXPECTED_CALLBACK_VTABLES:
+    expected_vtables = len(EXPECTED_CALLBACK_INTERFACES)
+    if raw_count + reviewed_count != expected_vtables:
         raise SystemExit(
             "error: expected "
-            f"{EXPECTED_CALLBACK_VTABLES} callback vtables, found "
+            f"{expected_vtables} callback vtables, found "
             f"{raw_count + reviewed_count}"
         )
+    for interface in EXPECTED_CALLBACK_INTERFACES:
+        marker = (
+            "static let vtablePtr: "
+            f"UnsafePointer<UniffiVTableCallbackInterface{interface}>"
+        )
+        if text.count(marker) != 1:
+            raise SystemExit(
+                f"error: expected one reviewed callback vtable for {interface}"
+            )
     text = text.replace(old_vtable, new_vtable)
     text = "\n".join(line.rstrip() for line in text.splitlines()) + "\n"
     path.write_text(text)
