@@ -606,3 +606,99 @@ impl std::fmt::Display for AmbiguousError {
 }
 
 impl std::error::Error for AmbiguousError {}
+
+// ---- EH-01: the state frame, and what it decides before the payload ----
+
+/// THE defect, tested at the seam where it actually lived.
+///
+/// `load_image` used to run the positional decoder over the whole body and only
+/// then compare the schema string it found inside. So a build whose shape had
+/// moved interpreted old bytes under its own layout and answered
+/// `CorruptState` — the version it needed was behind the parse it was meant to
+/// guard.
+///
+/// The payload here is bytes the current decoder CANNOT parse. Answering
+/// `UnsupportedStateSchema` is therefore only possible if the version was read
+/// first; a reader that decoded the payload before checking would have to say
+/// `CorruptState`.
+#[test]
+fn an_unknown_version_is_answered_before_its_payload_is_decoded() {
+    let card = RecordId::new(71);
+    let mut framed = crate::state_envelope::wrap(b"\xff\xff\xff\xff undecodable");
+    // Bump the version in place: magic(4) + schema_len(2) + schema.
+    let at = 4 + 2 + crate::identifiers::OPERATION_STORE_STATE_SCHEMA_ID.len();
+    framed[at..at + 4].copy_from_slice(&99u32.to_be_bytes());
+
+    let mut backend = InMemoryStorage::new();
+    let lease = match backend.acquire_writer(card).expect("lease") {
+        LeaseAcquisition::Acquired(lease) => lease,
+        LeaseAcquisition::Busy => panic!("a fresh backend is not busy"),
+    };
+    let mut transaction = backend.begin(&lease).expect("begin");
+    transaction.put_operation(OperationEnvelope::new(framed).expect("envelope"));
+    transaction.commit(Durability::Buffered).expect("commit");
+    backend.release_writer(lease).expect("release");
+
+    assert!(
+        matches!(
+            OperationStore::open(backend, card),
+            Err(StoreError::UnsupportedStateSchema)
+        ),
+        "an unreadable version must be typed as a version, not as corruption"
+    );
+}
+
+/// A pre-frame body is recognisably not ours. It must never be handed to the
+/// current decoder on the chance that it fits: the old layout begins with the
+/// u32 length of its schema string, which is not the magic.
+#[test]
+fn a_body_without_the_frame_is_never_decoded_as_one() {
+    let legacy =
+        crate::codec::to_vec(&crate::StoreImage::empty(RecordId::new(1))).expect("encodes");
+    assert!(matches!(
+        crate::state_envelope::unwrap(&legacy),
+        Err(crate::state_envelope::StateEnvelopeError::NotEnveloped)
+    ));
+}
+
+/// Trailing bytes mean the writer and this reader disagree about where the
+/// image ends. Accepting the declared prefix would turn that disagreement into
+/// a successful load of the wrong thing.
+#[test]
+fn the_declared_payload_length_must_be_exact() {
+    let mut framed = crate::state_envelope::wrap(b"payload");
+    framed.push(0);
+    assert!(matches!(
+        crate::state_envelope::unwrap(&framed),
+        Err(crate::state_envelope::StateEnvelopeError::Malformed)
+    ));
+
+    let framed = crate::state_envelope::wrap(b"payload");
+    for truncated in 1..framed.len() {
+        assert!(
+            crate::state_envelope::unwrap(&framed[..truncated]).is_err(),
+            "a frame cut at {truncated} bytes must not decode"
+        );
+    }
+}
+
+/// The frame's bytes, stated exactly. Any layout change — a reordered header
+/// field, a different width, a renamed schema — fails here, which is what makes
+/// a version bump a deliberate act rather than something to forget.
+#[test]
+fn the_state_frame_has_a_byte_exact_layout() {
+    let framed = crate::state_envelope::wrap(b"ab");
+    let schema = crate::identifiers::OPERATION_STORE_STATE_SCHEMA_ID.as_bytes();
+    let mut expected = Vec::new();
+    expected.extend_from_slice(b"EVOS");
+    expected.extend_from_slice(&(schema.len() as u16).to_be_bytes());
+    expected.extend_from_slice(schema);
+    expected.extend_from_slice(&crate::state_envelope::STATE_FORMAT_VERSION.to_be_bytes());
+    expected.extend_from_slice(&2u32.to_be_bytes());
+    expected.extend_from_slice(b"ab");
+    assert_eq!(framed, expected);
+    assert_eq!(
+        crate::state_envelope::unwrap(&framed).expect("round trips"),
+        b"ab"
+    );
+}

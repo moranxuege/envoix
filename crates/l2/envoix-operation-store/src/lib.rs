@@ -3,7 +3,9 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+use state_envelope::StateEnvelopeError;
 pub mod identifiers;
+mod state_envelope;
 
 #[cfg(test)]
 mod tests;
@@ -616,7 +618,8 @@ impl<S: Storage> OperationStore<S> {
     ) -> Result<CommitReceipt, StoreError<S::Error>> {
         validate_image(&candidate, self.card)?;
         let encoded = codec::to_vec(&candidate).map_err(|_| StoreError::CorruptState)?;
-        let envelope = OperationEnvelope::new(encoded).map_err(StoreError::Envelope)?;
+        let envelope =
+            OperationEnvelope::new(state_envelope::wrap(&encoded)).map_err(StoreError::Envelope)?;
         let lease = match self
             .storage
             .acquire_writer(self.card)
@@ -665,8 +668,20 @@ fn load_image<S: Storage>(
         .map_err(StoreError::Backend)?
     {
         LoadOutcome::Loaded(envelope) => {
-            let image = codec::from_slice(envelope.body().as_bytes())
-                .map_err(|_| StoreError::CorruptState)?;
+            // Identity and version are decided here, before a byte of the
+            // positional payload is interpreted (EH-01).
+            let payload =
+                state_envelope::unwrap(envelope.body().as_bytes()).map_err(
+                    |error| match error {
+                        StateEnvelopeError::UnsupportedVersion { .. } => {
+                            StoreError::UnsupportedStateSchema
+                        }
+                        StateEnvelopeError::NotEnveloped | StateEnvelopeError::Malformed => {
+                            StoreError::CorruptState
+                        }
+                    },
+                )?;
+            let image = codec::from_slice(payload).map_err(|_| StoreError::CorruptState)?;
             validate_image(&image, card)?;
             Ok(image)
         }
