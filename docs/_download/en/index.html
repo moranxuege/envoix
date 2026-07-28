@@ -173,7 +173,6 @@
     .android-option { padding: 13px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, 0.018); }
     .option-label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 9px; color: var(--muted); font-size: 0.72rem; font-weight: 800; }
     .option-label strong { color: var(--green); }
-    .option-label .experimental { color: var(--amber); }
 
     .testflight-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 0 0 16px; padding: 0; list-style: none; color: var(--muted); font-size: 0.72rem; }
     .testflight-details li { padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255, 255, 255, 0.018); }
@@ -243,7 +242,7 @@
         <strong>Current release status</strong>
         <ul class="status-list">
           <li><span class="dot"></span>macOS is signed and Apple-notarized</li>
-          <li><span class="dot"></span>Stable and experimental Android builds</li>
+          <li><span class="dot"></span>Android v0.2.0 stable build is available</li>
           <li><span class="dot waiting"></span>iOS TestFlight access by request</li>
         </ul>
       </aside>
@@ -267,25 +266,21 @@
         <article class="card">
           <div class="card-top"><span class="platform-mark">APK</span><span class="tag ready">Sideload</span></div>
           <h3>Android</h3>
-          <p class="version">Stable and experimental builds</p>
-          <p class="description">Use the stable build for regular testing. Choose the experimental build only when you need the latest changes.</p>
+          <p class="version">v0.2.0 · Stable</p>
+          <p class="description">The current stable build for regular testing, including the complete v0.2.0 cross-platform transfer and Nearby features.</p>
           <div class="android-options">
             <div class="android-option">
-              <div class="option-label"><span>v0.1.0</span><strong>Recommended stable</strong></div>
+              <div class="option-label"><span>v0.2.0</span><strong>Recommended stable</strong></div>
               <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">Download stable APK</a>
             </div>
-            <div class="android-option">
-              <div class="option-label"><span>v0.2.0</span><span class="experimental">Experimental</span></div>
-              <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android-v0.2.0.apk">Download experimental APK</a>
-            </div>
           </div>
-          <p class="microcopy">Current APKs use a debug key and are intended for testing and manual installation only.</p>
+          <p class="microcopy">This APK uses a test signing key and is intended for testing and manual installation. If an upgrade from the old v0.1.0 demo reports an incompatible signature, uninstall it first; uninstalling removes local app data.</p>
         </article>
 
         <article class="card">
           <div class="card-top"><span class="platform-mark">iOS</span><span class="tag waiting">TestFlight</span></div>
           <h3>iPhone and iPad</h3>
-          <p class="version">v0.2.0 (1) · Access by request</p>
+          <p class="version">v0.2.0 (2) · Access by request</p>
           <p class="description">App Store Connect team members can join internal testing. Other applicants can receive an email invitation when external testing opens.</p>
           <ul class="testflight-details" aria-label="Information required for a test request">
             <li>Apple Account email</li><li>Device model</li><li>iOS or iPadOS version</li><li>Testing purpose</li>
@@ -308,7 +303,7 @@
           <h3>The same transfer core, in your terminal.</h3>
           <p>The command is <strong>envoix</strong> and can be built from source on macOS, Linux, and Windows.</p>
           <div class="cli-meta"><span class="tag ready">Rust 1.91+</span><span class="tag">macOS</span><span class="tag">Linux</span><span class="tag">Windows</span></div>
-          <a class="cli-link" href="https://github.com/ECE4410J-NUUB/envoix/tree/dev/apps/envoix-cli">View CLI source and documentation →</a>
+          <a class="cli-link" href="https://github.com/ECE4410J-NUUB/envoix/tree/v0.2.0/apps/envoix-cli">View CLI source and documentation →</a>
         </div>
         <div class="terminal" aria-label="CLI installation and usage examples">
           <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>

@@ -348,7 +348,6 @@
     }
 
     .option-label strong { color: var(--green); }
-    .option-label .experimental { color: var(--amber); }
 
     .testflight-details {
       display: grid;
@@ -547,7 +546,7 @@
         <strong>当前发布状态</strong>
         <ul class="status-list">
           <li><span class="dot"></span>macOS 已签名并通过 Apple 公证</li>
-          <li><span class="dot"></span>Android 稳定版与实验版可下载</li>
+          <li><span class="dot"></span>Android v0.2.0 稳定版可下载</li>
           <li><span class="dot waiting"></span>iOS TestFlight 采用申请邀请</li>
         </ul>
       </aside>
@@ -581,19 +580,15 @@
             <span class="tag ready">Sideload</span>
           </div>
           <h3>Android</h3>
-          <p class="version">稳定版与实验版</p>
-          <p class="description">演示和日常试用优先选择稳定版；需要体验最新改动时再选择实验版。</p>
+          <p class="version">v0.2.0 · 稳定版</p>
+          <p class="description">适合日常试用的当前稳定构建，包含 v0.2.0 的完整跨平台传输与 Nearby 功能。</p>
           <div class="android-options">
             <div class="android-option">
-              <div class="option-label"><span>v0.1.0</span><strong>推荐稳定版</strong></div>
+              <div class="option-label"><span>v0.2.0</span><strong>推荐稳定版</strong></div>
               <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">下载稳定版 APK</a>
             </div>
-            <div class="android-option">
-              <div class="option-label"><span>v0.2.0</span><span class="experimental">实验版</span></div>
-              <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android-v0.2.0.apk">下载实验版 APK</a>
-            </div>
           </div>
-          <p class="microcopy">当前 APK 使用调试密钥，仅供测试和手动安装。</p>
+          <p class="microcopy">当前 APK 使用测试签名，仅供测试和手动安装。从旧 v0.1.0 演示版升级若提示签名不兼容，需要先卸载旧版；卸载会清除应用本地数据。</p>
         </article>
 
         <article class="card">
@@ -602,7 +597,7 @@
             <span class="tag waiting">TestFlight</span>
           </div>
           <h3>iPhone 与 iPad</h3>
-          <p class="version">v0.2.0 (1) · 申请邀请</p>
+          <p class="version">v0.2.0 (2) · 申请邀请</p>
           <p class="description">App Store Connect 团队成员可加入内部测试组；其他申请者将在外部测试开放后通过邮件邀请。</p>
           <ul class="testflight-details" aria-label="申请时需要提供的信息">
             <li>Apple Account 邮箱</li>
@@ -637,7 +632,7 @@
             <span class="tag">Linux</span>
             <span class="tag">Windows</span>
           </div>
-          <a class="cli-link" href="https://github.com/ECE4410J-NUUB/envoix/tree/dev/apps/envoix-cli">查看 CLI 源码与文档 →</a>
+          <a class="cli-link" href="https://github.com/ECE4410J-NUUB/envoix/tree/v0.2.0/apps/envoix-cli">查看 CLI 源码与文档 →</a>
         </div>
 
         <div class="terminal" aria-label="CLI 安装与使用示例">
