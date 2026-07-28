@@ -19,11 +19,14 @@ MAX_PROFILES = 64
 MAX_TEXT_LENGTH = 400
 MAX_TIMEOUT_SECONDS = 86_400
 MAX_TRANSFER_BYTES = 1 << 40
+MAX_ENDPOINT_ENTRIES = 4096
+MAX_ENDPOINT_PHASES = 64
 
 IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,95}$")
 RUN_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 PROFILE_IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 REVISION = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SENSITIVE_TEXT_PATTERNS = {
     "Room Code-shaped secret": re.compile(
         r"(?i)(?<![a-z0-9])\d{6}-[a-z0-9]{4,8}-[a-z0-9]{4,8}(?![a-z0-9])"
@@ -194,6 +197,82 @@ PROHIBITED_KEYS = {
     "room_code",
     "token",
 }
+ENDPOINT_RESULT_KEYS = {
+    "schema_version",
+    "run_id",
+    "case_id",
+    "repetition",
+    "role",
+    "platform",
+    "test_layer",
+    "driver",
+    "build_variant",
+    "app_version",
+    "core_version",
+    "protocol_version",
+    "device_model",
+    "os_version",
+    "capabilities",
+    "activity_id",
+    "job_id",
+    "started_at",
+    "finished_at",
+    "terminal_state",
+    "ordered_phases",
+    "attempt_count",
+    "selected_path",
+    "path_reason",
+    "source_summary",
+    "destination_summary",
+    "delivery_proof",
+    "failure",
+    "cleanup",
+    "metrics",
+}
+ENDPOINT_ROLES = {"sender", "receiver"}
+ENDPOINT_DRIVERS = {"direct_jni", "direct_ffi", "product_activity"}
+ENDPOINT_PHASES = {
+    "waiting_for_peer",
+    "pairing",
+    "connecting",
+    "offer",
+    "transferring",
+    "verifying",
+    "saving",
+    "waiting_for_receiver_save",
+    "finalizing_delivery",
+    "completed",
+    "failed",
+}
+PATH_KINDS = {"direct", "relay", "wifi_aware", "other"}
+ENTRY_KINDS = {"file", "directory"}
+ENTRY_DISPOSITIONS = {"completed", "skipped", "renamed", "rejected", "failed"}
+PUBLICATION_MECHANISMS = {"media_store", "test_local_directory", "mixed"}
+RECOVERY_ACTIONS = {
+    "none",
+    "retry",
+    "resume",
+    "re_pair",
+    "open_settings",
+    "choose_folder",
+}
+ENDPOINT_SUMMARY_KEYS = {
+    "root_count",
+    "file_count",
+    "directory_count",
+    "plaintext_bytes",
+    "manifest_digest",
+    "tree_digest",
+    "entries",
+    "publication",
+}
+ENDPOINT_ENTRY_KEYS = {
+    "relative_path",
+    "kind",
+    "plaintext_bytes",
+    "sha256",
+    "disposition",
+}
 
 
 def _is_integer(value: object) -> bool:
@@ -289,6 +368,480 @@ def _check_string_list(
     if len(checked) != len(set(checked)):
         errors.append(f"{context} contains duplicate values")
     return checked
+
+
+def _check_nullable_text(
+    value: object,
+    context: str,
+    errors: list[str],
+) -> str | None:
+    if value is None:
+        return None
+    return _check_text(value, context, errors)
+
+
+def _check_digest(
+    value: object,
+    context: str,
+    errors: list[str],
+    *,
+    nullable: bool = False,
+) -> str | None:
+    if nullable and value is None:
+        return None
+    digest = _check_text(value, context, errors)
+    if digest is not None and not SHA256.fullmatch(digest):
+        errors.append(f"{context} must be a lowercase SHA-256 digest")
+    return digest
+
+
+def _check_relative_path(
+    value: object,
+    context: str,
+    errors: list[str],
+) -> str | None:
+    path = _check_text(value, context, errors)
+    if path is None:
+        return None
+    parts = path.split("/")
+    if (
+        path.startswith("/")
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        errors.append(f"{context} must be a normalized relative path")
+    return path
+
+
+def _validate_endpoint_summary(
+    value: object,
+    context: str,
+    errors: list[str],
+) -> None:
+    if not isinstance(value, dict):
+        errors.append(f"{context} must be an object")
+        return
+    _check_keys(value, ENDPOINT_SUMMARY_KEYS, context, errors)
+    counts: dict[str, int] = {}
+    for field in ("root_count", "file_count", "directory_count", "plaintext_bytes"):
+        raw = value.get(field)
+        maximum = (
+            MAX_TRANSFER_BYTES if field == "plaintext_bytes" else MAX_ENDPOINT_ENTRIES
+        )
+        if not _is_integer(raw) or not 0 <= raw <= maximum:
+            errors.append(f"{context}.{field} must be between 0 and {maximum}")
+        else:
+            counts[field] = raw
+    _check_digest(
+        value.get("manifest_digest"),
+        f"{context}.manifest_digest",
+        errors,
+        nullable=True,
+    )
+    _check_digest(value.get("tree_digest"), f"{context}.tree_digest", errors)
+
+    entries = value.get("entries")
+    checked_paths: list[str] = []
+    checked_file_count = 0
+    checked_directory_count = 0
+    checked_bytes = 0
+    if not isinstance(entries, list):
+        errors.append(f"{context}.entries must be a list")
+    else:
+        if len(entries) > MAX_ENDPOINT_ENTRIES:
+            errors.append(f"{context}.entries exceeds {MAX_ENDPOINT_ENTRIES} entries")
+        for index, entry in enumerate(entries):
+            entry_context = f"{context}.entries[{index}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{entry_context} must be an object")
+                continue
+            _check_keys(entry, ENDPOINT_ENTRY_KEYS, entry_context, errors)
+            relative_path = _check_relative_path(
+                entry.get("relative_path"),
+                f"{entry_context}.relative_path",
+                errors,
+            )
+            if relative_path is not None:
+                checked_paths.append(relative_path)
+            kind = _check_enum(
+                entry.get("kind"),
+                ENTRY_KINDS,
+                f"{entry_context}.kind",
+                errors,
+            )
+            size = entry.get("plaintext_bytes")
+            if not _is_integer(size) or not 0 <= size <= MAX_TRANSFER_BYTES:
+                errors.append(
+                    f"{entry_context}.plaintext_bytes must be between 0 and "
+                    f"{MAX_TRANSFER_BYTES}"
+                )
+            if kind == "file":
+                checked_file_count += 1
+                if _is_integer(size):
+                    checked_bytes += size
+                _check_digest(entry.get("sha256"), f"{entry_context}.sha256", errors)
+            elif kind == "directory":
+                checked_directory_count += 1
+                if size != 0:
+                    errors.append(
+                        f"{entry_context}.plaintext_bytes must be 0 for a directory"
+                    )
+                if entry.get("sha256") is not None:
+                    errors.append(
+                        f"{entry_context}.sha256 must be null for a directory"
+                    )
+            _check_enum(
+                entry.get("disposition"),
+                ENTRY_DISPOSITIONS,
+                f"{entry_context}.disposition",
+                errors,
+            )
+    if len(checked_paths) != len(set(checked_paths)):
+        errors.append(f"{context}.entries contains duplicate relative paths")
+    if checked_paths != sorted(checked_paths):
+        errors.append(f"{context}.entries must be sorted by relative_path")
+    if counts.get("file_count") != checked_file_count:
+        errors.append(f"{context}.file_count does not match entries")
+    if counts.get("directory_count") != checked_directory_count:
+        errors.append(f"{context}.directory_count does not match entries")
+    if counts.get("plaintext_bytes") != checked_bytes:
+        errors.append(f"{context}.plaintext_bytes does not match file entries")
+
+    publication = value.get("publication")
+    if publication is not None:
+        publication_context = f"{context}.publication"
+        if not isinstance(publication, dict):
+            errors.append(f"{publication_context} must be an object or null")
+        else:
+            _check_keys(
+                publication,
+                {"mechanism", "committed"},
+                publication_context,
+                errors,
+            )
+            _check_enum(
+                publication.get("mechanism"),
+                PUBLICATION_MECHANISMS,
+                f"{publication_context}.mechanism",
+                errors,
+            )
+            if type(publication.get("committed")) is not bool:
+                errors.append(f"{publication_context}.committed must be a boolean")
+
+
+def validate_endpoint_result(
+    value: object,
+    *,
+    run_id: str | None = None,
+    case_id: str | None = None,
+    repetition: int | None = None,
+    role: str | None = None,
+    platform: str | None = None,
+) -> list[str]:
+    """Return every contract violation in one sanitized endpoint result."""
+
+    errors: list[str] = []
+    _scan_prohibited_keys(value, "endpoint result", errors)
+    _scan_sensitive_text(value, "endpoint result", errors)
+    if not isinstance(value, dict):
+        return errors + ["endpoint result must be an object"]
+    _check_keys(value, ENDPOINT_RESULT_KEYS, "endpoint result", errors)
+    if value.get("schema_version") != RUN_SCHEMA_VERSION:
+        errors.append(f"endpoint result schema_version must be {RUN_SCHEMA_VERSION}")
+
+    actual_run_id = value.get("run_id")
+    if not isinstance(actual_run_id, str) or not RUN_IDENTIFIER.fullmatch(
+        actual_run_id
+    ):
+        errors.append("endpoint result.run_id must be a stable identifier")
+    if run_id is not None and actual_run_id != run_id:
+        errors.append("endpoint result run_id does not match the runner")
+    actual_case_id = value.get("case_id")
+    if not isinstance(actual_case_id, str) or not IDENTIFIER.fullmatch(actual_case_id):
+        errors.append("endpoint result.case_id must be a stable lowercase identifier")
+    if case_id is not None and actual_case_id != case_id:
+        errors.append("endpoint result case_id does not match the runner")
+    actual_repetition = value.get("repetition")
+    if not _is_integer(actual_repetition) or not 1 <= actual_repetition <= 10:
+        errors.append("endpoint result.repetition must be between 1 and 10")
+    if repetition is not None and actual_repetition != repetition:
+        errors.append("endpoint result repetition does not match the runner")
+    actual_role = _check_enum(
+        value.get("role"),
+        ENDPOINT_ROLES,
+        "endpoint result.role",
+        errors,
+    )
+    if role is not None and actual_role != role:
+        errors.append("endpoint result role does not match the runner")
+    actual_platform = _check_enum(
+        value.get("platform"),
+        ENDPOINTS - {"rust_loopback", "cli"},
+        "endpoint result.platform",
+        errors,
+    )
+    if platform is not None and actual_platform != platform:
+        errors.append("endpoint result platform does not match the runner")
+    actual_layer = _check_enum(
+        value.get("test_layer"),
+        TEST_LAYERS,
+        "endpoint result.test_layer",
+        errors,
+    )
+    actual_driver = _check_enum(
+        value.get("driver"),
+        ENDPOINT_DRIVERS,
+        "endpoint result.driver",
+        errors,
+    )
+    if actual_driver == "direct_jni" and (
+        actual_platform != "android" or actual_layer != "l1_native"
+    ):
+        errors.append("direct_jni endpoint results must be Android L1 evidence")
+    if actual_driver == "direct_ffi" and actual_layer != "l1_native":
+        errors.append("direct_ffi endpoint results must be L1 evidence")
+    if actual_driver == "product_activity" and actual_layer != "l2_physical":
+        errors.append("product_activity endpoint results must be L2 evidence")
+    _check_enum(
+        value.get("build_variant"),
+        BUILD_VARIANTS,
+        "endpoint result.build_variant",
+        errors,
+    )
+    _check_text(value.get("app_version"), "endpoint result.app_version", errors)
+    _check_nullable_text(
+        value.get("core_version"),
+        "endpoint result.core_version",
+        errors,
+    )
+    protocol_version = value.get("protocol_version")
+    if not _is_integer(protocol_version) or protocol_version <= 0:
+        errors.append("endpoint result.protocol_version must be a positive integer")
+    _check_text(value.get("device_model"), "endpoint result.device_model", errors)
+    _check_text(value.get("os_version"), "endpoint result.os_version", errors)
+    capabilities = _check_string_list(
+        value.get("capabilities"),
+        None,
+        "endpoint result.capabilities",
+        errors,
+    )
+    if len(capabilities) > 32:
+        errors.append("endpoint result.capabilities exceeds 32 entries")
+    for index, capability in enumerate(capabilities):
+        if not PROFILE_IDENTIFIER.fullmatch(capability):
+            errors.append(
+                f"endpoint result.capabilities[{index}] must be a stable "
+                "lowercase identifier"
+            )
+    for field in ("activity_id", "job_id"):
+        identifier = _check_nullable_text(
+            value.get(field),
+            f"endpoint result.{field}",
+            errors,
+        )
+        if identifier is not None and not RUN_IDENTIFIER.fullmatch(identifier):
+            errors.append(
+                f"endpoint result.{field} must be a stable identifier or null"
+            )
+
+    started_at = value.get("started_at")
+    finished_at = value.get("finished_at")
+    for field, timestamp in (("started_at", started_at), ("finished_at", finished_at)):
+        if not _is_integer(timestamp) or timestamp < 0:
+            errors.append(f"endpoint result.{field} must be a non-negative integer")
+    if (
+        _is_integer(started_at)
+        and _is_integer(finished_at)
+        and finished_at < started_at
+    ):
+        errors.append("endpoint result.finished_at must not precede started_at")
+
+    terminal_state = _check_enum(
+        value.get("terminal_state"),
+        {"completed", "failed"},
+        "endpoint result.terminal_state",
+        errors,
+    )
+    raw_phases = value.get("ordered_phases")
+    phases: list[str] = []
+    if not isinstance(raw_phases, list):
+        errors.append("endpoint result.ordered_phases must be a list")
+    else:
+        for index, item in enumerate(raw_phases):
+            phase = _check_enum(
+                item,
+                ENDPOINT_PHASES,
+                f"endpoint result.ordered_phases[{index}]",
+                errors,
+            )
+            if phase is not None:
+                phases.append(phase)
+    if not phases:
+        errors.append("endpoint result.ordered_phases must not be empty")
+    if len(phases) > MAX_ENDPOINT_PHASES:
+        errors.append(
+            f"endpoint result.ordered_phases exceeds {MAX_ENDPOINT_PHASES} entries"
+        )
+    if terminal_state is not None and phases and phases[-1] != terminal_state:
+        errors.append("endpoint result.ordered_phases must end at terminal_state")
+    attempt_count = value.get("attempt_count")
+    if not _is_integer(attempt_count) or not 1 <= attempt_count <= 100:
+        errors.append("endpoint result.attempt_count must be between 1 and 100")
+    selected_path = value.get("selected_path")
+    if selected_path is not None:
+        _check_enum(
+            selected_path,
+            PATH_KINDS,
+            "endpoint result.selected_path",
+            errors,
+        )
+    path_reason = _check_nullable_text(
+        value.get("path_reason"),
+        "endpoint result.path_reason",
+        errors,
+    )
+    if path_reason is not None and not PROFILE_IDENTIFIER.fullmatch(path_reason):
+        errors.append(
+            "endpoint result.path_reason must be a stable lowercase identifier"
+        )
+
+    source = value.get("source_summary")
+    destination = value.get("destination_summary")
+    if actual_role == "sender":
+        if source is None and terminal_state == "completed":
+            errors.append("sender requires source_summary")
+        elif source is not None:
+            _validate_endpoint_summary(source, "endpoint result.source_summary", errors)
+        if destination is not None:
+            errors.append("sender destination_summary must be null")
+    elif actual_role == "receiver":
+        if source is not None:
+            errors.append("receiver source_summary must be null")
+        if destination is None and terminal_state == "completed":
+            errors.append("receiver requires destination_summary")
+        elif destination is not None:
+            _validate_endpoint_summary(
+                destination,
+                "endpoint result.destination_summary",
+                errors,
+            )
+
+    delivery_proof = value.get("delivery_proof")
+    if type(delivery_proof) is not bool:
+        errors.append("endpoint result.delivery_proof must be a boolean")
+    failure = value.get("failure")
+    if terminal_state == "completed":
+        if failure is not None:
+            errors.append("completed endpoint failure must be null")
+        if delivery_proof is not True:
+            errors.append("completed endpoint requires delivery_proof")
+    elif terminal_state == "failed":
+        if not isinstance(failure, dict):
+            errors.append("failed endpoint requires failure")
+        else:
+            _check_keys(
+                failure,
+                {"code", "phase", "recovery_action"},
+                "endpoint result.failure",
+                errors,
+            )
+            code = _check_text(
+                failure.get("code"),
+                "endpoint result.failure.code",
+                errors,
+            )
+            if code is not None and not PROFILE_IDENTIFIER.fullmatch(code):
+                errors.append(
+                    "endpoint result.failure.code must be a stable lowercase identifier"
+                )
+            _check_enum(
+                failure.get("phase"),
+                ENDPOINT_PHASES | {"setup", "driver_validation", "cleanup"},
+                "endpoint result.failure.phase",
+                errors,
+            )
+            _check_enum(
+                failure.get("recovery_action"),
+                RECOVERY_ACTIONS,
+                "endpoint result.failure.recovery_action",
+                errors,
+            )
+        if delivery_proof is not False:
+            errors.append("failed endpoint must not claim delivery_proof")
+
+    cleanup = value.get("cleanup")
+    if not isinstance(cleanup, dict):
+        errors.append("endpoint result.cleanup must be an object")
+    else:
+        _check_keys(
+            cleanup,
+            {"test_owned", "completed"},
+            "endpoint result.cleanup",
+            errors,
+        )
+        if cleanup.get("test_owned") is not True:
+            errors.append("endpoint result.cleanup.test_owned must be true")
+        if type(cleanup.get("completed")) is not bool:
+            errors.append("endpoint result.cleanup.completed must be a boolean")
+        if terminal_state == "completed" and cleanup.get("completed") is not True:
+            errors.append("completed endpoint requires completed cleanup")
+
+    metrics = value.get("metrics")
+    if not isinstance(metrics, dict):
+        errors.append("endpoint result.metrics must be an object")
+    else:
+        _check_keys(
+            metrics,
+            {"plaintext_bytes", "elapsed_ms"},
+            "endpoint result.metrics",
+            errors,
+        )
+        metric_bytes = metrics.get("plaintext_bytes")
+        if not _is_integer(metric_bytes) or not 0 <= metric_bytes <= MAX_TRANSFER_BYTES:
+            errors.append(
+                "endpoint result.metrics.plaintext_bytes must be a bounded integer"
+            )
+        elapsed_ms = metrics.get("elapsed_ms")
+        if not _is_integer(elapsed_ms) or elapsed_ms < 0:
+            errors.append(
+                "endpoint result.metrics.elapsed_ms must be a non-negative integer"
+            )
+        if (
+            _is_integer(started_at)
+            and _is_integer(finished_at)
+            and _is_integer(elapsed_ms)
+            and elapsed_ms != finished_at - started_at
+        ):
+            errors.append(
+                "endpoint result.metrics.elapsed_ms does not match endpoint timestamps"
+            )
+        summary = source if actual_role == "sender" else destination
+        if (
+            isinstance(summary, dict)
+            and _is_integer(metric_bytes)
+            and metric_bytes != summary.get("plaintext_bytes")
+        ):
+            errors.append(
+                "endpoint result.metrics.plaintext_bytes does not match endpoint summary"
+            )
+    return errors
+
+
+def read_endpoint_result(
+    path: Path,
+    **expected: object,
+) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"could not read {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"could not parse {path}: {error}") from error
+    errors = validate_endpoint_result(value, **expected)
+    if errors:
+        formatted = "\n".join(f"- {error}" for error in errors)
+        raise ValueError(f"{path} violates the endpoint-result contract:\n{formatted}")
+    return value
 
 
 def _validate_profile(
@@ -849,6 +1402,7 @@ def execution_record(
     status: str,
     failure_code: str | None = None,
     sanitized_logs: Sequence[str] = (),
+    endpoint_results: Sequence[str] = (),
 ) -> dict[str, Any]:
     if not isinstance(run_id, str) or not RUN_IDENTIFIER.fullmatch(run_id):
         raise ValueError("run ID must be a stable identifier")
@@ -867,9 +1421,9 @@ def execution_record(
     if classification is not None:
         if failure_code is None or not PROFILE_IDENTIFIER.fullmatch(failure_code):
             raise ValueError("failure status requires a stable lowercase failure code")
-    for path in sanitized_logs:
+    for path in (*sanitized_logs, *endpoint_results):
         if not path or Path(path).is_absolute() or ".." in Path(path).parts:
-            raise ValueError("sanitized log paths must be artifact-relative")
+            raise ValueError("artifact paths must be artifact-relative")
     return {
         "schema_version": RUN_SCHEMA_VERSION,
         "run_id": run_id,
@@ -879,6 +1433,7 @@ def execution_record(
         "classification": classification,
         "failure_code": failure_code,
         "sanitized_logs": list(sanitized_logs),
+        "endpoint_results": list(endpoint_results),
     }
 
 
@@ -898,6 +1453,7 @@ def validate_execution_record(
         "classification",
         "failure_code",
         "sanitized_logs",
+        "endpoint_results",
     }
     _check_keys(record, expected_keys, "execution record", errors)
     if record.get("schema_version") != RUN_SCHEMA_VERSION:
@@ -937,6 +1493,19 @@ def validate_execution_record(
             ):
                 errors.append(
                     "execution record sanitized_logs must be artifact-relative"
+                )
+    endpoint_results = record.get("endpoint_results")
+    if not isinstance(endpoint_results, list):
+        errors.append("execution record endpoint_results must be a list")
+    else:
+        for path in endpoint_results:
+            if (
+                not isinstance(path, str)
+                or Path(path).is_absolute()
+                or ".." in Path(path).parts
+            ):
+                errors.append(
+                    "execution record endpoint_results must be artifact-relative"
                 )
     allowed_statuses = {
         "execute": {"pass", "product_failure", "infrastructure_failure"},
@@ -1050,8 +1619,8 @@ def render_run_report(aggregate: dict[str, Any]) -> str:
             "",
             "## Executions",
             "",
-            "| Case | Repetition | Direction | Scenario | Support | Execution | Failure |",
-            "|---|---:|---|---|---|---|---|",
+            "| Case | Repetition | Direction | Scenario | Support | Execution | Failure | Evidence |",
+            "|---|---:|---|---|---|---|---|---|",
         ]
     )
     for result in aggregate["results"]:
@@ -1067,6 +1636,7 @@ def render_run_report(aggregate: dict[str, Any]) -> str:
                     result["support_status"],
                     result["execution_status"],
                     result["failure_code"],
+                    ", ".join(result["endpoint_results"]),
                 )
             )
             + " |"
@@ -1179,6 +1749,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     validate = subparsers.add_parser("validate-registry", help="Validate a registry")
     validate.add_argument("registry", type=Path)
 
+    endpoint = subparsers.add_parser(
+        "validate-endpoint-result",
+        help="Validate and retain one sanitized endpoint result",
+    )
+    endpoint.add_argument("input", type=Path)
+    endpoint.add_argument("--run-id", required=True)
+    endpoint.add_argument("--case", required=True, dest="case_id")
+    endpoint.add_argument("--repetition", required=True, type=int)
+    endpoint.add_argument("--role", required=True, choices=sorted(ENDPOINT_ROLES))
+    endpoint.add_argument(
+        "--platform",
+        required=True,
+        choices=sorted(ENDPOINTS - {"rust_loopback", "cli"}),
+    )
+    endpoint.add_argument("--output", required=True, type=Path)
+
     list_cases = subparsers.add_parser("list-cases", help="List validated cases")
     list_cases.add_argument("registry", type=Path)
     _add_filters(list_cases)
@@ -1230,6 +1816,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     record.add_argument("--status", required=True, choices=sorted(EXECUTION_STATUSES))
     record.add_argument("--failure-code")
     record.add_argument("--sanitized-log", action="append", default=[])
+    record.add_argument("--endpoint-result", action="append", default=[])
     record.add_argument("--output", required=True, type=Path)
 
     aggregate = subparsers.add_parser(
@@ -1270,6 +1857,22 @@ def _selected_from_args(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
+    if args.command == "validate-endpoint-result":
+        try:
+            result = read_endpoint_result(
+                args.input,
+                run_id=args.run_id,
+                case_id=args.case_id,
+                repetition=args.repetition,
+                role=args.role,
+                platform=args.platform,
+            )
+            _write_json(args.output, result)
+        except (OSError, ValueError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        return 0
+
     if args.command == "record-result":
         try:
             record = execution_record(
@@ -1279,6 +1882,7 @@ def main(argv: list[str] | None = None) -> int:
                 status=args.status,
                 failure_code=args.failure_code,
                 sanitized_logs=args.sanitized_log,
+                endpoint_results=args.endpoint_result,
             )
             _write_json(args.output, record)
         except (OSError, ValueError) as error:
