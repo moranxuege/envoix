@@ -316,8 +316,11 @@ final class ReservedNearbyDiscoveryProvider: NearbyDiscoveryProvider {
 
 #if DEBUG
 private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
+    private static let observationRefreshInterval: TimeInterval = 5
+
     let source: NearbyDiscoverySource
     private var sink: ((NearbyDiscoveryEvent) -> Void)?
+    private var observationRefreshTimer: Timer?
 
     init(source: NearbyDiscoverySource) {
         self.source = source
@@ -327,14 +330,12 @@ private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
         self.sink = sink
         let detail: NearbyProviderDetail = source == .bluetooth ? .bluetoothReady : .localNetworkReady
         sink(.status(NearbyProviderStatus(source: source, availability: .ready, detail: detail)))
-        sink(.observation(NearbyDiscoveryObservation(
-            peerKey: "0011223344556677",
-            source: source,
-            seenAtMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000),
-            displayName: source == .mdns ? "Nearby test device" : nil,
-            rssi: source == .bluetooth ? -48 : nil,
-            inviteRoute: source == .mdns ? Self.fixtureInviteRoute : nil
-        )))
+        emitObservation()
+        let timer = Timer(timeInterval: Self.observationRefreshInterval, repeats: true) { [weak self] _ in
+            self?.emitObservation()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        observationRefreshTimer = timer
         if source == .bluetooth,
            ProcessInfo.processInfo.arguments.contains("--ui-testing-incoming-nearby-offer"),
            let invite = try? makePairingInvite(role: .send, broker: "", relay: "") {
@@ -350,7 +351,21 @@ private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
     }
 
     func stop() {
+        observationRefreshTimer?.invalidate()
+        observationRefreshTimer = nil
         sink = nil
+    }
+
+    private func emitObservation() {
+        guard let sink else { return }
+        sink(.observation(NearbyDiscoveryObservation(
+            peerKey: "0011223344556677",
+            source: source,
+            seenAtMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000),
+            displayName: source == .mdns ? "Nearby test device" : nil,
+            rssi: source == .bluetooth ? -48 : nil,
+            inviteRoute: source == .mdns ? Self.fixtureInviteRoute : nil
+        )))
     }
 
     func offerInvite(

@@ -158,6 +158,7 @@ struct SendView: View {
                     isFileImporterPresented = false
                 }
             )
+            .accessibilityIdentifier("send_file_picker_sheet")
         }
         .sheet(isPresented: $isFolderPickerPresented) {
             MultiFolderPickerSheet(
@@ -186,6 +187,7 @@ struct SendView: View {
                     isPhotoPickerPresented = false
                 }
             )
+            .accessibilityIdentifier("send_photo_picker_sheet")
         }
         .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onAppear(perform: applyInitialPairingInputIfNeeded)
