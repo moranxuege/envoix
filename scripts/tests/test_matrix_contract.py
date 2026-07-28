@@ -467,7 +467,7 @@ class MatrixContractTests(unittest.TestCase):
     def test_case_selection_uses_explicit_filters(self) -> None:
         selected = matrix_contract.select_cases(
             self.registry,
-            statuses={"planned"},
+            statuses={"experimental"},
             gate="cross-platform-baseline",
             tag="multi-entry",
         )
@@ -569,6 +569,39 @@ class MatrixContractTests(unittest.TestCase):
             {"not_run"},
         )
         self.assertEqual(matrix_contract.validate_run_plan(plan, self.registry), [])
+
+    def test_product_baseline_executes_only_automated_file_profiles(self) -> None:
+        selected, _, selection = matrix_contract.resolve_cases(
+            self.registry,
+            gate="cross-platform-baseline",
+        )
+        plan = matrix_contract.build_run_plan(
+            self.registry,
+            selected,
+            run_id="fixture-run",
+            tested_commit="0123456789abcdef",
+            build_variant="release_equivalent",
+            selection=selection,
+            dry_run=False,
+        )
+        executable = [
+            execution
+            for execution in plan["executions"]
+            if execution["disposition"] == "execute"
+        ]
+        deferred = [
+            execution
+            for execution in plan["executions"]
+            if execution["disposition"] == "not_run"
+        ]
+        self.assertEqual(len(executable), 12)
+        self.assertEqual(len(deferred), 6)
+        self.assertTrue(
+            all(execution["scenario"] != "multi_root" for execution in executable)
+        )
+        self.assertTrue(
+            all(execution["scenario"] == "multi_root" for execution in deferred)
+        )
 
     def test_repetition_override_cannot_weaken_the_registry(self) -> None:
         selected, _, selection = matrix_contract.resolve_cases(

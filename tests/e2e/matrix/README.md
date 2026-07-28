@@ -80,10 +80,11 @@ Support status and execution status are separate. A planned, experimental,
 hardware-blocked, or unsupported row never becomes a pass because it was
 skipped or omitted.
 
-The initial registry records the current direct JNI/FFI physical coverage as
-experimental L1 evidence. Product-path L2 rows remain planned until they emit
-the canonical Activity, native publication, typed path, attempt, cleanup, and
-sanitized evidence required by the issue.
+The registry records the direct JNI/FFI physical coverage as experimental L1
+evidence. The single-file and multi-file L2 baselines use each app's product
+Activity and native file publication path and are experimental until their
+mandatory physical repetitions are recorded. Multi-root L2 rows remain
+planned until the Android driver provisions and verifies a real SAF folder.
 
 `--build-variant release_equivalent` selects the Android `release` application
 and release-targeted instrumentation APK, plus the Apple `Release` app and

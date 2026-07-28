@@ -227,8 +227,8 @@
         "selected_path",
         "sha256"
       ],
-      "support_status": "planned",
-      "support_reason": "The product Activity, typed path, native publication, and structured evidence adapters are not implemented.",
+      "support_status": "experimental",
+      "support_reason": "The product Activity and native file publication are automated; mandatory physical repetitions have not yet been recorded.",
       "hardware_requirements": ["physical_android", "physical_ios"],
       "build_variant": "release_equivalent",
       "required_repetitions": 3,
@@ -261,8 +261,8 @@
         "selected_path",
         "sha256"
       ],
-      "support_status": "planned",
-      "support_reason": "The product Activity, typed path, native publication, and structured evidence adapters are not implemented.",
+      "support_status": "experimental",
+      "support_reason": "The product Activity and native file publication are automated; mandatory physical repetitions have not yet been recorded.",
       "hardware_requirements": ["physical_android", "physical_ios"],
       "build_variant": "release_equivalent",
       "required_repetitions": 3,
@@ -295,8 +295,8 @@
         "selected_path",
         "sha256"
       ],
-      "support_status": "planned",
-      "support_reason": "Multi-file product Activity and native publication evidence are not implemented.",
+      "support_status": "experimental",
+      "support_reason": "The multi-file product Activity and native publication path are automated; mandatory physical repetitions have not yet been recorded.",
       "hardware_requirements": ["physical_android", "physical_ios"],
       "build_variant": "release_equivalent",
       "required_repetitions": 3,
@@ -329,8 +329,8 @@
         "selected_path",
         "sha256"
       ],
-      "support_status": "planned",
-      "support_reason": "Multi-file product Activity and native publication evidence are not implemented.",
+      "support_status": "experimental",
+      "support_reason": "The multi-file product Activity and native publication path are automated; mandatory physical repetitions have not yet been recorded.",
       "hardware_requirements": ["physical_android", "physical_ios"],
       "build_variant": "release_equivalent",
       "required_repetitions": 3,
