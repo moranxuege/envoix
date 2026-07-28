@@ -869,7 +869,7 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
     ) throws -> [String: Any] {
         var entries: [AppleMatrixEntry] = []
         for root in roots {
-            entries.append(contentsOf: try entries(root: root))
+            entries.append(contentsOf: try entriesFromRoot(root))
         }
         entries.sort {
             $0.relativePath.utf8.lexicographicallyPrecedes($1.relativePath.utf8)
@@ -892,7 +892,7 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
         ]
     }
 
-    private static func entries(root: URL) throws -> [AppleMatrixEntry] {
+    private static func entriesFromRoot(_ root: URL) throws -> [AppleMatrixEntry] {
         let values = try root.resourceValues(
             forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
         )
