@@ -3,7 +3,7 @@ use envoix_types::{AttemptGen, RecordId, RequestId};
 
 use crate::{
     Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyResult, GenerationUpdate,
-    Registration,
+    Registration, SourceAcquisitionKey,
 };
 
 fn provenance(card: u64, generation: u32, request: u128) -> DutyProvenance {
@@ -171,4 +171,51 @@ fn durable_duty_round_trips_for_every_capability_domain() {
         let decoded: Duty = serde_json::from_slice(&encoded).expect("duty should deserialize");
         assert_eq!(decoded, duty);
     }
+}
+
+// ---- the identity of one source acquisition ----
+
+fn key_provenance(card: u64, generation: u32, request: u8) -> DutyProvenance {
+    DutyProvenance {
+        card: RecordId::new(card),
+        generation: AttemptGen::new(generation),
+        request: RequestId::from_bytes([request; 16]),
+    }
+}
+
+/// The whole key, or it is a different acquisition.
+///
+/// The Tier 0 review found a picked document held under no identity at all, so
+/// whichever card asked first consumed it. Keying on the card alone would keep
+/// that bug with extra steps: a re-pick advances the generation, and a late
+/// answer to the superseded request must not bind a document to an attempt that
+/// has moved on.
+#[test]
+fn a_source_key_differs_when_any_of_its_three_parts_does() {
+    let key = SourceAcquisitionKey::of(key_provenance(7, 2, 0xab));
+    assert!(key.is(&SourceAcquisitionKey::of(key_provenance(7, 2, 0xab))));
+
+    for other in [
+        key_provenance(8, 2, 0xab), // another card
+        key_provenance(7, 3, 0xab), // the same card, after a re-pick
+        key_provenance(7, 2, 0xac), // the same attempt, a different request
+    ] {
+        let other = SourceAcquisitionKey::of(other);
+        assert!(
+            !key.is(&other),
+            "{other:?} is not the acquisition {key:?} names"
+        );
+    }
+}
+
+/// The key round-trips to the provenance the duty wire carries, so promoting it
+/// to a name costs the lane nothing.
+#[test]
+fn a_source_key_is_the_duty_provenance_it_came_from() {
+    let provenance = key_provenance(0x5150, 9, 0x11);
+    let key = SourceAcquisitionKey::of(provenance);
+    assert_eq!(key.provenance(), provenance);
+    assert_eq!(key.card(), provenance.card);
+    assert_eq!(key.generation(), provenance.generation);
+    assert_eq!(key.request(), provenance.request);
 }
