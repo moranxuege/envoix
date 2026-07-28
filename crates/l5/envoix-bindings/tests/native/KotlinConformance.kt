@@ -14,6 +14,17 @@
 
 package com.envoix.bindings
 
+// One import per contract, because each generated artifact now owns its own
+// package. This harness is the one place that speaks all of them at once, so it
+// is also where a name two schemas both declare would have to be disambiguated
+// with an alias — which is the point: under the previous flat package such a
+// pair could not have coexisted at all.
+// Capability is deliberately absent: this replay compiles Read, Command and
+// Probe only, so the capability artifact's Kotlin encoder is NOT behaviourally
+// covered here. Recorded rather than papered over.
+import com.envoix.bindings.command.*
+import com.envoix.bindings.probe.*
+import com.envoix.bindings.read.*
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject

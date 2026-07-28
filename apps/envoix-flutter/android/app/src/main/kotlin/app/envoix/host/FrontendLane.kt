@@ -2,15 +2,15 @@ package app.envoix.host
 
 import android.os.Handler
 import android.os.Looper
-import com.envoix.bindings.CapabilityBody
-import com.envoix.bindings.CapabilityExchangeView
-import com.envoix.bindings.CapabilityRequestView
-import com.envoix.bindings.CapabilitySecretString
-import com.envoix.bindings.CapabilityStepView
-import com.envoix.bindings.DeclinedReasonView
-import com.envoix.bindings.DeclinedView
-import com.envoix.bindings.EnvoixCapabilityCodec
-import com.envoix.bindings.ScannedTextView
+import com.envoix.bindings.capability.CapabilityBody
+import com.envoix.bindings.capability.CapabilityExchangeView
+import com.envoix.bindings.capability.CapabilityRequestView
+import com.envoix.bindings.capability.CapabilitySecretString
+import com.envoix.bindings.capability.CapabilityStepView
+import com.envoix.bindings.capability.DeclinedReasonView
+import com.envoix.bindings.capability.DeclinedView
+import com.envoix.bindings.capability.EnvoixCapabilityCodec
+import com.envoix.bindings.capability.ScannedTextView
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall

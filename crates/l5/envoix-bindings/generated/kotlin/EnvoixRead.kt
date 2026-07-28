@@ -6,7 +6,7 @@
 // decodes as integer 0 here while the Rust reference codec rejects it (benign:
 // every field with a positive minimum still fails its range check).
 
-package com.envoix.bindings
+package com.envoix.bindings.read
 
 import org.json.JSONArray
 import org.json.JSONException

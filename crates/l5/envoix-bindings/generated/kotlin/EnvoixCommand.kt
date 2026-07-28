@@ -14,7 +14,7 @@
 // encoder can refuse a frame the contract permits. It is never the other way
 // round: the cap is measured on the bytes this artifact actually emits.
 
-package com.envoix.bindings
+package com.envoix.bindings.command
 
 import org.json.JSONArray
 import org.json.JSONException

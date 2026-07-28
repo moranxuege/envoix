@@ -15,7 +15,7 @@ use crate::model::RuleValue;
 
 use super::{
     encodable_decls, encode_helper_use, has_secret, helper_use, is_envelope_field, kotlin_member,
-    scalar_predicate, upper_camel, upper_snake,
+    scalar_predicate, schema_stem, upper_camel, upper_snake,
 };
 
 /// How Kotlin names 2^63-1 in the generated artifact.
@@ -47,7 +47,17 @@ pub fn module(doc: &SchemaDoc) -> String {
         );
     }
     out.push('\n');
-    out.push_str("package com.envoix.bindings\n\n");
+    // One package per schema. Kotlin has no other namespace, so a flat package
+    // would make two contracts unable to declare the same domain type — and the
+    // same type IS declared twice: `OutcomeCodeView` is one L0 vocabulary that
+    // crosses two different seams. Rust has always had `pub mod read/command/
+    // capability`; this is the other emitters catching up, not a new scheme.
+    // Without it, adding a contract costs a name audit against every existing
+    // schema, and that tax is exactly what makes an untyped map look cheap.
+    out.push_str(&format!(
+        "package com.envoix.bindings.{}\n\n",
+        schema_stem(doc)
+    ));
     out.push_str("import org.json.JSONArray\nimport org.json.JSONException\nimport org.json.JSONObject\nimport org.json.JSONTokener\n\n");
     out.push_str(&format!(
         "const val READ_SCHEMA_ID: String = \"{}\"\n",
