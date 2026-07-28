@@ -173,14 +173,21 @@ final class ManifestV2AppUITests: XCTestCase {
         XCTAssertTrue(source.isHittable)
         source.tap()
 
-        // Photos and Documents are external system surfaces. Their controls
-        // and provider contents vary across clean simulator runtimes, so the
-        // application contract ends when its source control is covered by the
-        // presented modal.
-        let presented = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND hittable == false"),
-            object: source
-        )
+        // The iOS 26.5 folder document picker keeps the covered source marked
+        // hittable while its remote view is presented. The app-owned sheet
+        // identifier is the stable presentation contract for that path.
+        let presented: XCTNSPredicateExpectation
+        if identifier == "send_folder_picker" {
+            presented = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == true"),
+                object: element("send_folder_picker_sheet")
+            )
+        } else {
+            presented = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == true AND hittable == false"),
+                object: source
+            )
+        }
         XCTAssertEqual(
             XCTWaiter.wait(for: [presented], timeout: 5),
             .completed,

@@ -172,6 +172,7 @@ struct SendView: View {
                     isFolderPickerPresented = false
                 }
             )
+            .accessibilityIdentifier("send_folder_picker_sheet")
         }
         .sheet(isPresented: $isPhotoPickerPresented) {
             PhotoPickerSheet(
