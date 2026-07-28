@@ -56,8 +56,8 @@ fn generated_artifacts_match_schema() {
         );
     }
 
-    // The generated tree holds exactly the read + command artifacts: a rogue
-    // extra file would ship unreviewed to native consumers.
+    // The generated tree holds exactly the artifacts of the four schemas: a
+    // rogue extra file would ship unreviewed to native consumers.
     fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read generated dir") {
             let path = entry.expect("generated dir entry").path();
@@ -89,6 +89,10 @@ fn generated_artifacts_match_schema() {
         "generated/dart/envoix_capability.dart",
         "generated/kotlin/EnvoixCapability.kt",
         "generated/swift/EnvoixCapability.swift",
+        "generated/rust/duty.rs",
+        "generated/dart/envoix_duty.dart",
+        "generated/kotlin/EnvoixDuty.kt",
+        "generated/swift/EnvoixDuty.swift",
     ];
     let mut expected: Vec<String> = artifacts(&doc)
         .iter()
@@ -98,7 +102,7 @@ fn generated_artifacts_match_schema() {
     expected.sort();
     assert_eq!(
         on_disk, expected,
-        "generated/ must contain exactly the read, command and capability artifacts"
+        "generated/ must contain exactly the read, command, capability and duty artifacts"
     );
 }
 

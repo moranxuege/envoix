@@ -60,6 +60,20 @@ pub mod capability {
     ));
 }
 
+/// Generated duty-contract types and codec; see `generated/rust/duty.rs`.
+///
+/// Its two peers are the Rust authority and a platform duty EXECUTOR (the
+/// Kotlin service on Android, Swift on Apple). Unlike [`capability`], this
+/// exchange is card-scoped and its answer is admitted exactly once by the C6
+/// duty ledger — a decoded report is a well-formed claim, never an admitted
+/// result.
+pub mod duty {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/generated/rust/duty.rs"
+    ));
+}
+
 pub use model::{
     Decl, DeclKind, Direction, EnumDecl, FieldDecl, FieldTy, FrontendBody, RuleValue, SchemaDoc,
     StructDecl, UnionDecl, UnionVariant,
@@ -83,4 +97,9 @@ pub fn command_schema_text() -> &'static str {
 /// The capability-schema source this build was generated from.
 pub fn capability_schema_text() -> &'static str {
     include_str!("../schema/capability.schema")
+}
+
+/// The duty-schema source this build was generated from.
+pub fn duty_schema_text() -> &'static str {
+    include_str!("../schema/duty.schema")
 }

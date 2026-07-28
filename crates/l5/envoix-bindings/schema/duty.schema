@@ -1,0 +1,215 @@
+# envoix generated duty contract — the single source every generated duty
+# binding (Rust/Dart/Kotlin/Swift) derives from. The identifier catalog extracts
+# the schema id from the `id` key; regenerate artifacts with
+# `ENVOIX_BINDINGS_REGEN=1 cargo test -p envoix-bindings generated_artifacts`.
+#
+# WHAT THIS IS, and why it is a fourth contract rather than part of `capability`.
+#
+# A duty is committed, card-scoped platform work: the Rust authority issues it,
+# a platform executor performs it, and the answer is admitted exactly once by
+# the C6 `DutyLedger`. Its provenance names a card, an attempt generation and a
+# request, and the outcome it returns is L0's TRANSFER vocabulary.
+#
+# `capability.schema` is a different exchange between different peers. Its two
+# peers are a frontend and its own platform adapter, it is deliberately
+# card-LESS (a scan happens before any card exists), and the Rust authority is
+# explicitly not a peer. Folding duties into it would be worse than untidy:
+# capability's marked arm makes every declaration under it native-encodable, so
+# a duty ORDER would become constructible by a native caller. Authority orders
+# must not be forgeable by the side that executes them.
+#
+# WHY THIS CONTRACT EXISTS AT ALL. Until now this lane was two hand-written
+# codecs — `serde_json` in `envoix-platform-android::duty` and `org.json`
+# `opt*` calls in `DutyExecutor.kt` — that independently decided the JSON
+# shape. They disagreed: Rust encodes `notice` as a string and Kotlin asked for
+# an object, so every notification silently collapsed to generic text. The gate
+# that was supposed to catch this compared `when` labels in Kotlin SOURCE TEXT
+# and stayed green throughout. A contract removes the decision from both sides.
+#
+# DIRECTION. Rust encodes `order`; the native platform executor encodes
+# `report`. The generator's `originator = "frontend"` spelling means "the
+# non-Rust native encoder"; on this contract that peer is the Kotlin service on
+# Android and would be Swift on Apple, not the UI frontend. The name is the
+# generator's, and it is worth renaming to "native" one day across all schemas
+# at once — but only the reachability it controls matters here, and that is
+# exactly right: `DutyReportView` is reachable from the marked arm and
+# `DutyOrderView`/`WorkView` are not, so no native artifact gets a way to build
+# an order.
+#
+# CONTAINMENT. The scalar vocabulary has no bytes/blob type and no handle, path
+# or URI type. `staged` is bounded opaque text naming an app-private RELATIVE
+# artifact, never an absolute OS path; its relative-path invariants live in the
+# authority's projection and the executor's own containment check, because a
+# path grammar in the schema language would weaken that rule for every other
+# contract. Artifact bytes and source handles cannot be spelled here at all —
+# which is why a duty report can carry an outcome and never a file.
+
+id = "envoix/binding/duty/1"
+root = "DutyFrame"
+direction = "bidirectional"
+
+[limits]
+# `MAX_LANE_FRAME_BYTES` as it stood before this contract. It bounds the
+# ENCODED frame including escaping, so individually in-bound text can still add
+# up to a refusal — an honest `frame_too_large`, and what keeps a trusted
+# control lane from quietly becoming a bulk-data lane.
+max_frame_bytes = 4096
+
+# L0's complete transfer outcome vocabulary, as today's `WorkReport` carries it.
+# Restated at the binding boundary on purpose: the projection's exhaustive match
+# is what pins it to the domain enum, so a variant added there and not here
+# fails to compile rather than silently narrowing what an executor may answer.
+[[decl]]
+kind = "enum"
+name = "OutcomeCodeView"
+variants = [
+  "completed",
+  "cancelled",
+  "paused",
+  "peer_lost",
+  "timeout",
+  "unauthenticated",
+  "version_mismatch",
+  "storage_fault",
+  "publish_failed",
+  "source_unreadable",
+  "network_unreachable",
+  "internal",
+]
+
+# Free-form notice text does not cross this lane. The executor picks
+# platform-local copy from this closed class, so a notification can never
+# become a channel for arbitrary strings.
+[[decl]]
+kind = "enum"
+name = "NoticeView"
+variants = ["transfer_complete", "transfer_failed", "action_needed"]
+
+# Replaces `Lock { hold: bool }`. A boolean is the one shape a permissive JSON
+# reader turns into a silent default — `optBoolean("hold")` answers `false` for
+# a missing OR mistyped value, so a lane glitch reads as "release the lock".
+# Two named directives have no default to fall into.
+[[decl]]
+kind = "enum"
+name = "LockDirectiveView"
+variants = ["hold", "release"]
+
+# Wire projection of `DutyProvenance`. Fixed lowercase hex keeps the identifiers
+# exact without exposing any language's integer width; `generation` is the
+# `AttemptGen` u32 domain. The executor derives its publication recovery key
+# from these three fields, which is why they travel together on every kind.
+[[decl]]
+kind = "struct"
+name = "DutyProvenanceView"
+fields = [
+  { name = "card", type = "hex16" },
+  { name = "generation", type = "u32" },
+  { name = "request", type = "hex32" },
+]
+
+# Payload of the publication duty.
+#
+# `display_name` is NOT sealed, deliberately, and this is a divergence from the
+# design this schema was written from. It is the same value `CardView.offered_name`
+# already publishes in the clear on the read contract, and one value that is
+# secret on one contract and plain on another teaches nobody anything. In this
+# codebase `secret` has meant pairing-password material — the room code, the
+# invite link, the QR modules, scanned invite text — and a file name is not
+# that. `staged` follows it for the same reason: it is an app-private relative
+# name, not a credential.
+[[decl]]
+kind = "struct"
+name = "PublicationWorkView"
+fields = [
+  { name = "staged", type = "str(512)" },
+  # `OfferedName::MAX_BYTES`. The leaf a publication lands under is the
+  # authority's sanitized name, not the wider untrusted provider intake bound.
+  { name = "display_name", type = "str(255)" },
+  # u63 rather than u64: every native target represents this as a non-negative
+  # signed 64-bit value, and the read and command contracts already use that
+  # horizon. The projection refuses a legacy value above it rather than emitting
+  # one the executor cannot represent.
+  { name = "total_bytes", type = "u63" },
+]
+
+[[decl]]
+kind = "struct"
+name = "ForegroundWorkView"
+fields = [{ name = "active_transfers", type = "u32" }]
+
+# A named payload keeps the notice as the exact value at the `notice` key: on
+# the wire this is `"notice":"transfer_complete"`, never an object. That is the
+# precise shape the two hand-written codecs disagreed about.
+[[decl]]
+kind = "struct"
+name = "NotificationWorkView"
+fields = [{ name = "notice", type = "NoticeView" }]
+
+[[decl]]
+kind = "struct"
+name = "LockWorkView"
+fields = [{ name = "directive", type = "LockDirectiveView" }]
+
+# Every shape today's `Work` enum can carry. The union arm IS the duty kind, so
+# there is no second `kind` field that can disagree with its payload — which the
+# hand-written version had to check for by hand.
+#
+# Nine arms, not the six the executor claims nor the two the authority currently
+# emits, because a schema is a versioned VOCABULARY rather than a snapshot of
+# this week's dispatch. `grant`, `staging` and `open_share` are honest unit
+# variants because that is exactly their shape today; giving one a payload later
+# is a version bump, not an unversioned reinterpretation of old bytes.
+[[decl]]
+kind = "union"
+name = "WorkView"
+variants = [
+  { name = "source_handle" },
+  { name = "grant" },
+  { name = "staging" },
+  { name = "publication", payload = "PublicationWorkView" },
+  { name = "courier" },
+  { name = "foreground", payload = "ForegroundWorkView" },
+  { name = "notification", payload = "NotificationWorkView" },
+  { name = "lock", payload = "LockWorkView" },
+  { name = "open_share" },
+]
+
+# One authority-issued order. Provenance sits outside `WorkView` because it
+# correlates every kind uniformly.
+[[decl]]
+kind = "struct"
+name = "DutyOrderView"
+fields = [
+  { name = "provenance", type = "DutyProvenanceView" },
+  { name = "work", type = "WorkView" },
+]
+
+# The executor's entire answer: no handle, no path, no payload. Its provenance
+# is still untrusted — the ledger admits it, or does not.
+[[decl]]
+kind = "struct"
+name = "DutyReportView"
+fields = [
+  { name = "provenance", type = "DutyProvenanceView" },
+  { name = "outcome", type = "OutcomeCodeView" },
+]
+
+[[decl]]
+kind = "union"
+name = "DutyBody"
+variants = [
+  # Unmarked: a host-originated order. Native artifacts decode it and get no
+  # encoder for it or for anything reachable only through `WorkView`.
+  { name = "order", payload = "DutyOrderView" },
+  # The platform executor is the native originator, and this is the only thing
+  # it may build.
+  { name = "report", payload = "DutyReportView", originator = "frontend" },
+]
+
+[[decl]]
+kind = "struct"
+name = "DutyFrame"
+fields = [
+  { name = "schema", type = "ascii(64)" },
+  { name = "body", type = "DutyBody" },
+]
