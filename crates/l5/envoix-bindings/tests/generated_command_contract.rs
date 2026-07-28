@@ -564,7 +564,9 @@ fn native_command_artifacts_carry_schema_and_rules() {
     assert!(kotlin.contains("const val RETRY_HORIZON_COMPLETIONS: Int = 256"));
     let swift = std::fs::read_to_string(root.join("generated/swift/EnvoixCommand.swift"))
         .expect("swift artifact");
-    assert!(swift.contains("public let retryHorizonCompletions = 256"));
+    // `static` because every declaration now lives inside the contract's own
+    // Swift namespace enum; the constant itself is unchanged.
+    assert!(swift.contains("public static let retryHorizonCompletions = 256"));
     // RejectionView/CompletionView carry an `internal` variant: the Swift
     // keyword escape from BN1's adversarial round must hold here too.
     assert!(swift.contains("case `internal` = \"internal\""));

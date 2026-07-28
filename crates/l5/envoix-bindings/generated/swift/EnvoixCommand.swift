@@ -15,13 +15,15 @@
 
 import Foundation
 
-public let commandSchemaId = "envoix/binding/command/4"
-public let commandMaxFrameBytes = 1048576
+public enum EnvoixCommand {
+
+public static let commandSchemaId = "envoix/binding/command/4"
+public static let commandMaxFrameBytes = 1048576
 // Contract rules frozen by schema/command.schema.
-public let newestAttachmentCommands = true
-public let retryHorizonCompletions = 256
-public let supersessionInertPreAcceptanceOnly = true
-private let u63Max: Int64 = 9_223_372_036_854_775_807
+public static let newestAttachmentCommands = true
+public static let retryHorizonCompletions = 256
+public static let supersessionInertPreAcceptanceOnly = true
+private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
 public enum CommandErrorKind {
     case frameTooLarge
@@ -697,4 +699,5 @@ public enum EnvoixCommandCodec {
             body: body
         )
     }
+}
 }

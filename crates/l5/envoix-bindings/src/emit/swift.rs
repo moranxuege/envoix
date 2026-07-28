@@ -47,17 +47,31 @@ pub fn module(doc: &SchemaDoc) -> String {
     }
     out.push('\n');
     out.push_str("import Foundation\n\n");
+    // One namespace per contract, for the reason Kotlin gets one package each:
+    // two contracts must be able to declare the same domain type. Swift has no
+    // sub-module, so a caseless enum is the namespace, and every declaration
+    // below is a member of it.
+    //
+    // Members are deliberately NOT indented. This workspace has no `swiftc`, so
+    // the only checks on this artifact read its text — they anchor on
+    // `\npublic struct ` at column zero. Indenting would change the code and
+    // the gates that stand in for compiling it in the same stroke, leaving
+    // neither proven. Indentation is cosmetic to Swift; the anchor is not.
+    out.push_str("public enum EnvoixRead {\n\n");
     let encodable = encodable_decls(doc);
-    out.push_str(&format!("public let readSchemaId = \"{}\"\n", doc.id));
     out.push_str(&format!(
-        "public let readMaxFrameBytes = {}\n",
+        "public static let readSchemaId = \"{}\"\n",
+        doc.id
+    ));
+    out.push_str(&format!(
+        "public static let readMaxFrameBytes = {}\n",
         doc.max_frame_bytes
     ));
     rules_consts(&mut out, doc);
     // Only when the contract has a u63 to bound; an unread private constant is
     // a warning in the frontends that compile this file.
     if helper_use(doc).u63 {
-        out.push_str("private let u63Max: Int64 = 9_223_372_036_854_775_807\n\n");
+        out.push_str("private static let u63Max: Int64 = 9_223_372_036_854_775_807\n\n");
     }
     error_type(&mut out);
     if has_secret(doc) {
@@ -70,6 +84,7 @@ pub fn module(doc: &SchemaDoc) -> String {
         epoch_gate(&mut out);
     }
     codec(&mut out, doc, &encodable);
+    out.push_str("}\n");
     super::apply_naming(out, doc)
 }
 
@@ -81,11 +96,11 @@ fn rules_consts(out: &mut String, doc: &SchemaDoc) {
     for (key, value) in &doc.rules {
         match value {
             RuleValue::Bool(flag) => out.push_str(&format!(
-                "public let {} = {flag}\n",
+                "public static let {} = {flag}\n",
                 super::lower_camel(key)
             )),
             RuleValue::Int(bound) => out.push_str(&format!(
-                "public let {} = {bound}\n",
+                "public static let {} = {bound}\n",
                 super::lower_camel(key)
             )),
         }

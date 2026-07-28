@@ -15,8 +15,10 @@
 
 import Foundation
 
-public let capabilitySchemaId = "envoix/binding/capability/1"
-public let capabilityMaxFrameBytes = 65536
+public enum EnvoixCapability {
+
+public static let capabilitySchemaId = "envoix/binding/capability/1"
+public static let capabilityMaxFrameBytes = 65536
 public enum CapabilityErrorKind {
     case frameTooLarge
     case malformedJson
@@ -317,4 +319,5 @@ public enum EnvoixCapabilityCodec {
             body: body
         )
     }
+}
 }

@@ -8,9 +8,11 @@
 
 import Foundation
 
-public let readSchemaId = "envoix/binding/read/8"
-public let readMaxFrameBytes = 1048576
-private let u63Max: Int64 = 9_223_372_036_854_775_807
+public enum EnvoixRead {
+
+public static let readSchemaId = "envoix/binding/read/8"
+public static let readMaxFrameBytes = 1048576
+private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
 public enum ReadErrorKind {
     case frameTooLarge
@@ -1186,4 +1188,5 @@ public enum EnvoixReadCodec {
             body: body
         )
     }
+}
 }

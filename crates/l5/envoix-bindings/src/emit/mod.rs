@@ -280,6 +280,9 @@ pub(crate) const SCAFFOLD_TOKENS: &[&str] = &[
     "readMaxFrameBytes",
     "ReadContractError",
     "EnvoixReadCodec",
+    // Swift's namespace enum. Must follow `EnvoixReadCodec` so the longer token
+    // renames first and this never half-renames it.
+    "EnvoixRead",
     "READ_SCHEMA_ID",
     "ReadSecretString",
     "ReadErrorKind",
