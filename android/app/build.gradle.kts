@@ -105,7 +105,8 @@ android {
     namespace = "dev.envoix.app"
     compileSdk = 34
     testBuildType =
-        providers.gradleProperty("envoix.testBuildType")
+        providers
+            .gradleProperty("envoix.testBuildType")
             .orElse("debug")
             .get()
 
