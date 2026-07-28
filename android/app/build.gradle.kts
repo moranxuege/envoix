@@ -104,6 +104,10 @@ val buildEnvoixJniAndroid by tasks.registering {
 android {
     namespace = "dev.envoix.app"
     compileSdk = 34
+    testBuildType =
+        providers.gradleProperty("envoix.testBuildType")
+            .orElse("debug")
+            .get()
 
     defaultConfig {
         applicationId = "dev.envoix.app"

@@ -85,5 +85,11 @@ experimental L1 evidence. Product-path L2 rows remain planned until they emit
 the canonical Activity, native publication, typed path, attempt, cleanup, and
 sanitized evidence required by the issue.
 
+`--build-variant release_equivalent` selects the Android `release` application
+and release-targeted instrumentation APK, plus the Apple `Release` app and
+hosted-test products. Debug and Release products use separate build-cache
+directories. Reusing debug artifacts while labeling a run
+`release_equivalent` is not supported.
+
 Registry and report data must never contain Room Codes, invitation payloads,
 tokens, credentials, stable device identifiers, or absolute private paths.

@@ -35,8 +35,12 @@ selected_cases=()
 legacy_selection=0
 original_args=("$@")
 test_runner="dev.envoix.app.test/androidx.test.runner.AndroidJUnitRunner"
-main_apk="$android_dir/app/build/outputs/apk/debug/app-debug.apk"
-test_apk="$android_dir/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+android_build_type=""
+android_task_suffix=""
+apple_build_configuration=""
+apple_configuration_slug=""
+main_apk=""
+test_apk=""
 
 usage() {
   cat <<'EOF'
@@ -200,6 +204,19 @@ if [[ "$build_variant" != "debug" && "$build_variant" != "release_equivalent" ]]
   echo "error: --build-variant must be debug or release_equivalent" >&2
   exit 2
 fi
+if [[ "$build_variant" == "release_equivalent" ]]; then
+  android_build_type="release"
+  android_task_suffix="Release"
+  apple_build_configuration="Release"
+  apple_configuration_slug="release"
+else
+  android_build_type="debug"
+  android_task_suffix="Debug"
+  apple_build_configuration="Debug"
+  apple_configuration_slug="debug"
+fi
+main_apk="$android_dir/app/build/outputs/apk/$android_build_type/app-$android_build_type.apk"
+test_apk="$android_dir/app/build/outputs/apk/androidTest/$android_build_type/app-$android_build_type-androidTest.apk"
 if [[ ! "$base_run_id" =~ ^[A-Za-z0-9_.-]+$ || "${#base_run_id}" -gt 96 ]]; then
   echo "error: run ID must be at most 96 letters, digits, '.', '-' or '_'" >&2
   exit 2
@@ -318,6 +335,12 @@ print_log_tail() {
 
 prepare_builds() {
   local build_private="$output_dir/private/build"
+  local -a android_build_args=(
+    :app:ktlintCheck
+    ":app:assemble$android_task_suffix"
+    ":app:assemble${android_task_suffix}AndroidTest"
+    --no-daemon
+  )
   mkdir -p "$build_private"
   if [[ ! -x "$adb_bin" ]]; then
     echo "error: adb not found at $adb_bin" >&2
@@ -330,24 +353,31 @@ prepare_builds() {
   require_android_network_route || return 1
 
   if [[ "$skip_build" != "1" ]]; then
-    echo "build: Android application and instrumented tests"
+    echo "build: Android $android_build_type application and instrumented tests"
     if ! (
       cd "$android_dir"
       env ANDROID_HOME="$android_home" ANDROID_SDK_ROOT="$android_home" \
-        ./gradlew :app:ktlintCheck :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon
+        ./gradlew \
+          -Penvoix.testBuildType="$android_build_type" \
+          "${android_build_args[@]}"
     ); then
       return 1
     fi
 
-    echo "build: iPhone hosted tests"
-    if ! env ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" ENVOIX_IOS_SIM_DESTINATION="$ios_destination" \
+    echo "build: iPhone $apple_build_configuration hosted tests"
+    if ! env \
+      ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
+      ENVOIX_APPLE_BUILD_CONFIGURATION="$apple_build_configuration" \
+      ENVOIX_IOS_SIM_DESTINATION="$ios_destination" \
       "$repo_root/scripts/apple-dev.sh" ios-test-build hosted -quiet; then
       return 1
     fi
 
     if matrix_uses_macos; then
-      echo "build: Mac hosted tests"
-      if ! env ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
+      echo "build: Mac $apple_build_configuration hosted tests"
+      if ! env \
+        ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
+        ENVOIX_APPLE_BUILD_CONFIGURATION="$apple_build_configuration" \
         "$repo_root/scripts/apple-dev.sh" macos-test-build -quiet; then
         return 1
       fi
@@ -376,8 +406,8 @@ prepare_builds() {
   adb_command shell pm grant dev.envoix.app android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
 }
 
-ios_products="$apple_cache_root/ios-simulator-debug/Build/Products"
-macos_products="$apple_cache_root/macos-debug/Build/Products"
+ios_products="$apple_cache_root/ios-simulator-$apple_configuration_slug/Build/Products"
+macos_products="$apple_cache_root/macos-$apple_configuration_slug/Build/Products"
 ios_xctestrun=""
 macos_xctestrun=""
 ACTIVE_PATCHED_XCTESTRUN=""
@@ -428,13 +458,13 @@ run_apple_method() {
     target="Envoix-iOSUITests"
     destination="$ios_destination"
     product_directory="$ios_products"
-    derived_data="$apple_cache_root/ios-simulator-debug"
+    derived_data="$apple_cache_root/ios-simulator-$apple_configuration_slug"
   else
     source_xctestrun="$macos_xctestrun"
     target="Envoix-macOSUITests"
     destination="$macos_destination"
     product_directory="$macos_products"
-    derived_data="$apple_cache_root/macos-debug"
+    derived_data="$apple_cache_root/macos-$apple_configuration_slug"
   fi
 
   patched="$product_directory/.envoix-matrix-$run_id-$platform-$method.xctestrun"
