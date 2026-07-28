@@ -49,17 +49,45 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
     func testSendScenarioManifestV2Room() async throws {
         try requirePhysicalRun()
         let fixture = try Self.fixture()
+        let evidence = Self.endpointEvidence(fixture: fixture, role: "sender")
+        try await runWithEndpointEvidence(evidence) {
+            try await runSendScenario(fixture: fixture, evidence: evidence)
+        }
+    }
+
+    func testReceiveScenarioManifestV2Room() async throws {
+        try requirePhysicalRun()
+        let fixture = try Self.fixture()
+        let evidence = Self.endpointEvidence(fixture: fixture, role: "receiver")
+        try await runWithEndpointEvidence(evidence) {
+            try await runReceiveScenario(fixture: fixture, evidence: evidence)
+        }
+    }
+
+    private func runSendScenario(
+        fixture: ManifestV2Fixture,
+        evidence: AppleMatrixEndpointEvidence
+    ) async throws {
         let fileManager = FileManager.default
         let root = try makeTestRoot("send")
+        var cleanupFailed = false
+        defer {
+            do {
+                try fileManager.removeItem(at: root)
+            } catch {
+                cleanupFailed = true
+            }
+            evidence.recordCleanup(completed: !cleanupFailed)
+        }
         let sourceDirectory = root.appendingPathComponent("sources", isDirectory: true)
         let jobStore = root.appendingPathComponent("jobs", isDirectory: true)
         let stateDirectory = root.appendingPathComponent("state", isDirectory: true)
         try fileManager.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: jobStore, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
-        defer { try? fileManager.removeItem(at: root) }
 
         let materialized = try fixture.materialize(in: sourceDirectory)
+        try evidence.recordSource(roots: materialized.rootURLs)
         let selectedPaths: [String]
         #if os(iOS)
         var sharedDraft: (store: ShareDraftStore, id: UUID)?
@@ -82,7 +110,11 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         }
         defer {
             if let sharedDraft {
-                try? sharedDraft.store.discard(id: sharedDraft.id)
+                do {
+                    try sharedDraft.store.discard(id: sharedDraft.id)
+                } catch {
+                    cleanupFailed = true
+                }
             }
         }
         #else
@@ -94,6 +126,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
 
         let job = try await createTransferJobV2(storeDirectory: jobStore.path, compressionPolicy: .never)
         let prepared = try await job.addLocalPaths(paths: selectedPaths)
+        evidence.recordJobID(prepared.jobId)
         XCTAssertEqual(prepared.state, .readyToSend)
         XCTAssertEqual(prepared.inventory.rootCount, UInt32(fixture.roots.count))
         XCTAssertEqual(prepared.inventory.fileCount, UInt32(fixture.fileCount))
@@ -102,7 +135,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         XCTAssertEqual(prepared.inventory.warningCount, 0)
         _ = try await job.sealForSend()
 
-        let observer = ManifestV2PhysicalObserver()
+        let observer = ManifestV2PhysicalObserver(evidence: evidence)
         let completion = try await sendTransferJobV2(
             job: job,
             settings: Self.settings,
@@ -114,24 +147,35 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         XCTAssertEqual(completion.entryCount, UInt32(fixture.entryCount))
         XCTAssertEqual(completion.totalPlaintextBytes, fixture.totalBytes)
         XCTAssertEqual(completion.deliveryProofDigest.count, Self.deliveryProofDigestBytes)
+        evidence.recordDeliveryProof(
+            completion.deliveryProofDigest.count == Self.deliveryProofDigestBytes
+        )
         XCTAssertTrue(completion.savedPaths.isEmpty)
         XCTAssertTrue(observer.phases.contains(.waitingForReceiverSave))
         XCTAssertTrue(observer.phases.contains(.finalizingDelivery))
         XCTAssertTrue(observer.phases.contains(.delivered))
-        XCTAssertNil(observer.failureMessage)
+        XCTAssertNil(observer.failure)
         Self.marker("\(Self.platformName) send completed scenario=\(fixture.scenario.rawValue) bytes=\(fixture.totalBytes)")
     }
 
-    func testReceiveScenarioManifestV2Room() async throws {
-        try requirePhysicalRun()
-        let fixture = try Self.fixture()
+    private func runReceiveScenario(
+        fixture: ManifestV2Fixture,
+        evidence: AppleMatrixEndpointEvidence
+    ) async throws {
         let fileManager = FileManager.default
         let root = try makeTestRoot("receive")
+        defer {
+            do {
+                try fileManager.removeItem(at: root)
+                evidence.recordCleanup(completed: true)
+            } catch {
+                evidence.recordCleanup(completed: false)
+            }
+        }
         let destination = root.appendingPathComponent("received", isDirectory: true)
         let stateDirectory = root.appendingPathComponent("state", isDirectory: true)
         try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
-        defer { try? fileManager.removeItem(at: root) }
 
         var collisionURL: URL?
         if fixture.scenario == .collision {
@@ -147,7 +191,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         )
         defer { withExtendedLifetime(invitation) {} }
         Self.marker("invitation=\(invitation.roomCode)")
-        let observer = ManifestV2PhysicalObserver()
+        let observer = ManifestV2PhysicalObserver(evidence: evidence)
         Self.marker("\(Self.platformName) receiver ready scenario=\(fixture.scenario.rawValue)")
         let pending = try await receiveTransferOfferV2(
             settings: Self.settings,
@@ -159,6 +203,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             cancellation: FfiManifestV2Cancellation(),
             observer: observer
         )
+        evidence.recordOffer()
 
         let summary = pending.summary()
         XCTAssertEqual(summary.rootCount, UInt32(fixture.roots.count))
@@ -193,17 +238,42 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         XCTAssertEqual(completion.totalPlaintextBytes, fixture.totalBytes)
         XCTAssertEqual(completion.deliveryProofDigest.count, Self.deliveryProofDigestBytes)
         XCTAssertEqual(completion.savedPaths.count, fixture.roots.count)
+        evidence.recordDeliveryProof(
+            completion.deliveryProofDigest.count == Self.deliveryProofDigestBytes
+        )
         for (rootSpec, savedPath) in zip(fixture.roots, completion.savedPaths) {
             try rootSpec.verify(at: URL(fileURLWithPath: savedPath))
         }
+        try evidence.recordDestination(
+            roots: completion.savedPaths.map { URL(fileURLWithPath: $0) }
+        )
         if let collisionURL {
             XCTAssertEqual(try Data(contentsOf: collisionURL), Self.collisionSentinel)
             XCTAssertNotEqual(completion.savedPaths.first, collisionURL.path)
         }
         XCTAssertTrue(observer.phases.contains(.saving))
         XCTAssertTrue(observer.phases.contains(.delivered))
-        XCTAssertNil(observer.failureMessage)
+        XCTAssertNil(observer.failure)
         Self.marker("\(Self.platformName) receive saved scenario=\(fixture.scenario.rawValue) bytes=\(fixture.totalBytes)")
+    }
+
+    private func runWithEndpointEvidence(
+        _ evidence: AppleMatrixEndpointEvidence,
+        operation: () async throws -> Void
+    ) async throws {
+        do {
+            try await operation()
+            try evidence.complete()
+        } catch {
+            evidence.fail()
+            do {
+                try evidence.attach(to: self)
+            } catch {
+                XCTFail("could not attach Apple matrix endpoint evidence: \(error)")
+            }
+            throw error
+        }
+        try evidence.attach(to: self)
     }
 
     private func requirePhysicalRun() throws {
@@ -258,6 +328,26 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         return ManifestV2Fixture.make(scenario: scenario, runID: runID, largeBytes: largeBytes)
     }
 
+    private static func endpointEvidence(
+        fixture: ManifestV2Fixture,
+        role: String
+    ) -> AppleMatrixEndpointEvidence {
+        AppleMatrixEndpointEvidence(
+            fixture: fixture,
+            runID: runID,
+            caseID: environmentString("ENVOIX_CROSS_DEVICE_CASE_ID", default: "manual"),
+            repetition: Int(
+                environmentUInt64("ENVOIX_CROSS_DEVICE_REPETITION", default: 1)
+            ),
+            role: role,
+            platform: platformIdentifier,
+            buildVariant: environmentString(
+                "ENVOIX_CROSS_DEVICE_BUILD_VARIANT",
+                default: "debug"
+            )
+        )
+    }
+
     private static func environmentUInt64(_ name: String, default fallback: UInt64) -> UInt64 {
         guard let raw = ProcessInfo.processInfo.environment[name], !raw.isEmpty else { return fallback }
         return UInt64(raw) ?? fallback
@@ -297,6 +387,13 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         "macOS"
         #else
         "iOS"
+        #endif
+    }()
+    private static let platformIdentifier: String = {
+        #if os(macOS)
+        "macos"
+        #else
+        "ios"
         #endif
     }()
 }
@@ -557,13 +654,465 @@ private enum FixturePayload {
     }
 }
 
+private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
+    private let lock = NSLock()
+    private let fixture: ManifestV2Fixture
+    private let runID: String
+    private let caseID: String
+    private let repetition: Int
+    private let role: String
+    private let platform: String
+    private let buildVariant: String
+    private let startedAt: UInt64
+    private var phases: [String] = []
+    private var selectedPath: String?
+    private var nativeFailure: FfiTransferFailure?
+    private var sourceSummary: [String: Any]?
+    private var destinationSummary: [String: Any]?
+    private var jobID: String?
+    private var deliveryProof = false
+    private var cleanupCompleted = false
+    private var terminalState: String?
+
+    init(
+        fixture: ManifestV2Fixture,
+        runID: String,
+        caseID: String,
+        repetition: Int,
+        role: String,
+        platform: String,
+        buildVariant: String
+    ) {
+        self.fixture = fixture
+        self.runID = runID
+        self.caseID = caseID
+        self.repetition = repetition
+        self.role = role
+        self.platform = platform
+        self.buildVariant = buildVariant
+        startedAt = Self.timestamp()
+    }
+
+    func recordPhase(_ phase: FfiManifestV2Phase) {
+        appendPhase(Self.wirePhase(phase))
+    }
+
+    func recordOffer() {
+        appendPhase("offer")
+    }
+
+    func recordFailure(_ failure: FfiTransferFailure) {
+        locked { nativeFailure = failure }
+    }
+
+    func recordPath(_ path: FfiDataPathKind) {
+        locked { selectedPath = Self.wirePath(path) }
+    }
+
+    func recordSource(roots: [URL]) throws {
+        let summary = try Self.endpointSummary(roots: roots, publication: nil)
+        locked { sourceSummary = summary }
+    }
+
+    func recordDestination(roots: [URL]) throws {
+        let summary = try Self.endpointSummary(
+            roots: roots,
+            publication: [
+                "mechanism": "test_local_directory",
+                "committed": true,
+            ]
+        )
+        locked { destinationSummary = summary }
+    }
+
+    func recordJobID(_ value: String) {
+        locked { jobID = value }
+    }
+
+    func recordDeliveryProof(_ value: Bool) {
+        locked { deliveryProof = value }
+    }
+
+    func recordCleanup(completed: Bool) {
+        locked { cleanupCompleted = completed }
+    }
+
+    func complete() throws {
+        try locked {
+            guard deliveryProof else {
+                throw AppleMatrixEvidenceError.missingDeliveryProof
+            }
+            guard cleanupCompleted else {
+                throw AppleMatrixEvidenceError.cleanupIncomplete
+            }
+            if role == "sender", sourceSummary == nil {
+                throw AppleMatrixEvidenceError.missingSummary("source")
+            }
+            if role == "receiver", destinationSummary == nil {
+                throw AppleMatrixEvidenceError.missingSummary("destination")
+            }
+            terminalState = "completed"
+            if phases.last != "completed" {
+                phases.append("completed")
+            }
+        }
+    }
+
+    func fail() {
+        locked {
+            terminalState = "failed"
+            if phases.last != "failed" {
+                phases.append("failed")
+            }
+        }
+    }
+
+    func attach(to testCase: XCTestCase) throws {
+        let data = try resultData()
+        let attachment = XCTAttachment(
+            data: data,
+            uniformTypeIdentifier: "public.json"
+        )
+        attachment.name = "envoix-matrix-\(role).json"
+        attachment.lifetime = .keepAlways
+        testCase.add(attachment)
+    }
+
+    private func appendPhase(_ phase: String) {
+        locked {
+            if phases.last != phase {
+                phases.append(phase)
+            }
+        }
+    }
+
+    private func resultData() throws -> Data {
+        try locked {
+            let finishedAt = Self.timestamp()
+            guard let terminalState else {
+                throw AppleMatrixEvidenceError.missingTerminalState
+            }
+            let coreInfo = envoixCoreInfo()
+            let failure: Any
+            if terminalState == "failed" {
+                let fallbackPhase: String
+                if !cleanupCompleted {
+                    fallbackPhase = "cleanup"
+                } else if phases == ["failed"] {
+                    fallbackPhase = "setup"
+                } else {
+                    fallbackPhase = "driver_validation"
+                }
+                failure = [
+                    "code": nativeFailure.map { Self.wireFailureCode($0.code) }
+                        ?? "endpoint_assertion_failed",
+                    "phase": nativeFailure.map { Self.wireFailurePhase($0.phase) }
+                        ?? fallbackPhase,
+                    "recovery_action": nativeFailure.map {
+                        Self.wireRecoveryAction($0.recoveryAction)
+                    } ?? "none",
+                ]
+            } else {
+                failure = NSNull()
+            }
+            let capability = role == "receiver"
+                ? "test_local_directory_publication"
+                : "source_fixture"
+            let result: [String: Any] = [
+                "schema_version": 1,
+                "run_id": runID,
+                "case_id": caseID,
+                "repetition": repetition,
+                "role": role,
+                "platform": platform,
+                "test_layer": "l1_native",
+                "driver": "direct_ffi",
+                "build_variant": buildVariant,
+                "app_version": Self.appVersion,
+                "core_version": coreInfo.coreVersion,
+                "protocol_version": 2,
+                "device_model": Self.deviceModel,
+                "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
+                "capabilities": ["manifest_v2", capability],
+                "activity_id": NSNull(),
+                "job_id": jobID as Any? ?? NSNull(),
+                "started_at": startedAt,
+                "finished_at": finishedAt,
+                "terminal_state": terminalState,
+                "ordered_phases": phases,
+                "attempt_count": 1,
+                "selected_path": selectedPath as Any? ?? NSNull(),
+                "path_reason": NSNull(),
+                "source_summary": sourceSummary as Any? ?? NSNull(),
+                "destination_summary": destinationSummary as Any? ?? NSNull(),
+                "delivery_proof": deliveryProof && terminalState == "completed",
+                "failure": failure,
+                "cleanup": [
+                    "test_owned": true,
+                    "completed": cleanupCompleted,
+                ],
+                "metrics": [
+                    "plaintext_bytes": fixture.totalBytes,
+                    "elapsed_ms": finishedAt - startedAt,
+                ],
+            ]
+            return try JSONSerialization.data(
+                withJSONObject: result,
+                options: [.sortedKeys]
+            )
+        }
+    }
+
+    private static func endpointSummary(
+        roots: [URL],
+        publication: [String: Any]?
+    ) throws -> [String: Any] {
+        var entries: [AppleMatrixEntry] = []
+        for root in roots {
+            entries.append(contentsOf: try entries(root: root))
+        }
+        entries.sort {
+            $0.relativePath.utf8.lexicographicallyPrecedes($1.relativePath.utf8)
+        }
+        let canonical = entries.map { entry in
+            "\(entry.kind)\u{0}\(entry.relativePath)\u{0}\(entry.plaintextBytes)"
+                + "\u{0}\(entry.sha256 ?? "-")\n"
+        }.joined()
+        return [
+            "root_count": roots.count,
+            "file_count": entries.filter { $0.kind == "file" }.count,
+            "directory_count": entries.filter { $0.kind == "directory" }.count,
+            "plaintext_bytes": entries
+                .filter { $0.kind == "file" }
+                .reduce(UInt64(0)) { $0 + $1.plaintextBytes },
+            "manifest_digest": NSNull(),
+            "tree_digest": Data(SHA256.hash(data: Data(canonical.utf8))).hex,
+            "entries": entries.map(\.json),
+            "publication": publication as Any? ?? NSNull(),
+        ]
+    }
+
+    private static func entries(root: URL) throws -> [AppleMatrixEntry] {
+        let values = try root.resourceValues(
+            forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        )
+        guard values.isSymbolicLink != true else {
+            throw AppleMatrixEvidenceError.unsupportedFile(root.lastPathComponent)
+        }
+        if values.isRegularFile == true {
+            return [try fileEntry(url: root, relativePath: root.lastPathComponent)]
+        }
+        guard values.isDirectory == true else {
+            throw AppleMatrixEvidenceError.unsupportedFile(root.lastPathComponent)
+        }
+
+        var result = [
+            AppleMatrixEntry(
+                relativePath: root.lastPathComponent,
+                kind: "directory",
+                plaintextBytes: 0,
+                sha256: nil
+            ),
+        ]
+        var enumerationError: Error?
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [
+                .isDirectoryKey,
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+            ],
+            options: [],
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
+        ) else {
+            throw AppleMatrixEvidenceError.couldNotEnumerate(root.lastPathComponent)
+        }
+        for case let child as URL in enumerator {
+            let childValues = try child.resourceValues(
+                forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+            )
+            let suffix = child.path.dropFirst(root.path.count)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let relativePath = "\(root.lastPathComponent)/\(suffix)"
+            if childValues.isDirectory == true {
+                result.append(
+                    AppleMatrixEntry(
+                        relativePath: relativePath,
+                        kind: "directory",
+                        plaintextBytes: 0,
+                        sha256: nil
+                    )
+                )
+            } else if childValues.isRegularFile == true, childValues.isSymbolicLink != true {
+                result.append(try fileEntry(url: child, relativePath: relativePath))
+            } else {
+                throw AppleMatrixEvidenceError.unsupportedFile(relativePath)
+            }
+        }
+        if let enumerationError {
+            throw enumerationError
+        }
+        return result
+    }
+
+    private static func fileEntry(
+        url: URL,
+        relativePath: String
+    ) throws -> AppleMatrixEntry {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard let number = attributes[.size] as? NSNumber else {
+            throw AppleMatrixEvidenceError.missingFileSize(relativePath)
+        }
+        var hasher = SHA256()
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        while let chunk = try handle.read(upToCount: 1_024 * 1_024), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return AppleMatrixEntry(
+            relativePath: relativePath,
+            kind: "file",
+            plaintextBytes: number.uint64Value,
+            sha256: Data(hasher.finalize()).hex
+        )
+    }
+
+    private static func wirePhase(_ value: FfiManifestV2Phase) -> String {
+        switch value {
+        case .pairing: return "pairing"
+        case .connecting: return "connecting"
+        case .transferring: return "transferring"
+        case .verifying: return "verifying"
+        case .saving: return "saving"
+        case .waitingForReceiverSave: return "waiting_for_receiver_save"
+        case .finalizingDelivery: return "finalizing_delivery"
+        case .delivered: return "completed"
+        case .waitingForPeer: return "waiting_for_peer"
+        }
+    }
+
+    private static func wirePath(_ value: FfiDataPathKind) -> String {
+        switch value {
+        case .direct: return "direct"
+        case .relay: return "relay"
+        case .wifiAware: return "wifi_aware"
+        case .other: return "other"
+        }
+    }
+
+    private static func wireFailurePhase(_ value: FfiFailurePhase) -> String {
+        switch value {
+        case .setup: return "setup"
+        case .pairing: return "pairing"
+        case .connecting: return "connecting"
+        case .authenticating: return "authenticating"
+        case .negotiating: return "negotiating"
+        case .transferring: return "transferring"
+        case .verifying: return "verifying"
+        case .committing: return "committing"
+        }
+    }
+
+    private static func wireRecoveryAction(_ value: FfiRecoveryAction) -> String {
+        switch value {
+        case .retry: return "retry"
+        case .resume: return "resume"
+        case .chooseFolder: return "choose_folder"
+        case .openSettings: return "open_settings"
+        case .rePair: return "re_pair"
+        case .none: return "none"
+        }
+    }
+
+    private static func wireFailureCode(_ value: FfiFailureCode) -> String {
+        switch value {
+        case .userCanceled: return "user_canceled"
+        case .networkLost: return "network_lost"
+        case .authenticationFailed: return "authentication_failed"
+        case .roomNotFound: return "room_not_found"
+        case .roomExpired: return "room_expired"
+        case .roomFull: return "room_full"
+        case .roomRateLimited: return "room_rate_limited"
+        case .roomUnderAttack: return "room_under_attack"
+        case .endpointRateLimited: return "endpoint_rate_limited"
+        case .ipRateLimited: return "ip_rate_limited"
+        case .serverBusy: return "server_busy"
+        case .malformedJoin: return "malformed_join"
+        case .unsupportedRendezvousVersion: return "unsupported_rendezvous_version"
+        case .unsupportedFeature: return "unsupported_feature"
+        case .internalError: return "internal_error"
+        case .senderSourceUnavailable: return "sender_source_unavailable"
+        case .senderPermissionLost: return "sender_permission_lost"
+        case .senderSourceChanged: return "sender_source_changed"
+        case .senderItemRemoved: return "sender_item_removed"
+        case .senderCanceled: return "sender_canceled"
+        case .protocolOrIntegrityFailure: return "protocol_or_integrity_failure"
+        case .receiverSpaceInsufficient: return "receiver_space_insufficient"
+        case .receiverDestinationDecisionRequired:
+            return "receiver_destination_decision_required"
+        case .receiverDestinationUnavailable: return "receiver_destination_unavailable"
+        case .receiverSaveFailed: return "receiver_save_failed"
+        case .receiverReusedObjectLost: return "receiver_reused_object_lost"
+        case .receiverFinalizationOutcomeUnknown:
+            return "receiver_finalization_outcome_unknown"
+        }
+    }
+
+    private static func timestamp() -> UInt64 {
+        UInt64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+    }
+
+    private static let appVersion =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "unknown"
+    private static let deviceModel: String = {
+        #if os(macOS)
+        "Mac"
+        #else
+        "iPhone"
+        #endif
+    }()
+
+    @discardableResult
+    private func locked<T>(_ operation: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation()
+    }
+}
+
+private struct AppleMatrixEntry {
+    let relativePath: String
+    let kind: String
+    let plaintextBytes: UInt64
+    let sha256: String?
+
+    var json: [String: Any] {
+        [
+            "relative_path": relativePath,
+            "kind": kind,
+            "plaintext_bytes": plaintextBytes,
+            "sha256": sha256 as Any? ?? NSNull(),
+            "disposition": "completed",
+        ]
+    }
+}
+
 private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sendable {
     private let lock = NSLock()
+    private let evidence: AppleMatrixEndpointEvidence
     private var recordedPhases: [FfiManifestV2Phase] = []
-    private var recordedFailure: String?
+    private var recordedFailure: FfiTransferFailure?
 
     var phases: [FfiManifestV2Phase] { locked { recordedPhases } }
-    var failureMessage: String? { locked { recordedFailure } }
+    var failure: FfiTransferFailure? { locked { recordedFailure } }
+
+    init(evidence: AppleMatrixEndpointEvidence) {
+        self.evidence = evidence
+    }
 
     func onInviteReady(invite _: String) {}
     func onStarted(itemCount: UInt32, totalBytes: UInt64) {
@@ -571,6 +1120,7 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
     }
     func onPhase(phase: FfiManifestV2Phase) {
         locked { recordedPhases.append(phase) }
+        evidence.recordPhase(phase)
         marker("phase=\(phase)")
     }
     func onProgress(transferred: UInt64, total: UInt64) {
@@ -578,10 +1128,12 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
     }
     func onCompleted(bytes: UInt64) { marker("completed bytes=\(bytes)") }
     func onTransferFailed(failure: FfiTransferFailure) {
-        locked { recordedFailure = failure.diagnosticMessage }
-        marker("failed code=\(failure.code) detail=\(failure.diagnosticMessage)")
+        locked { recordedFailure = failure }
+        evidence.recordFailure(failure)
+        marker("failed code=\(failure.code)")
     }
     func onConnectionPath(event: FfiConnectionPathEvent) {
+        evidence.recordPath(event.pathKind)
         marker("path=\(event.pathKind) event=\(event.eventKind)")
     }
     func onDiagnostic(message: String) { marker("diagnostic=\(message)") }
@@ -599,7 +1151,23 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
     }
 }
 
+private enum AppleMatrixEvidenceError: Error {
+    case cleanupIncomplete
+    case couldNotEnumerate(String)
+    case missingDeliveryProof
+    case missingFileSize(String)
+    case missingSummary(String)
+    case missingTerminalState
+    case unsupportedFile(String)
+}
+
 private enum PhysicalTestError: Error {
     case invalidScenario(String)
     case missingCapacity(String)
+}
+
+private extension Data {
+    var hex: String {
+        map { String(format: "%02x", $0) }.joined()
+    }
 }
