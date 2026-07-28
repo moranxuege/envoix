@@ -84,7 +84,13 @@ impl AcceptedSourceOffer {
     }
 }
 
-/// What staging established about the artifact — counted, not claimed.
+/// What staging established about the source — counted by us, not claimed by
+/// the provider.
+///
+/// This exists as a separate type from [`AcceptedSourceOffer::reported_size`]
+/// because they are different facts with different trust: a provider states a
+/// size, and staging read the bytes. Streaming rather than copying does not
+/// change that — the read still happens, it just writes nothing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedContent {
     name: OfferedName,
@@ -174,13 +180,28 @@ pub enum SourceLifecycle {
     AwaitingSelection(SelectionGate),
     /// A document was chosen; the platform is being asked to hold it.
     Acquiring(AcceptedSourceOffer),
-    /// The platform holds it, with a stated retention, and bytes are being
-    /// staged into an app-private artifact.
+    /// The platform holds it and the authority is establishing what it
+    /// actually contains.
+    ///
+    /// Usually that means READING the source through once to count it, not
+    /// copying it: the owner's decision is that a send streams from the
+    /// provider, because copying every document would double disk for a
+    /// multi-gigabyte file on a phone. A copy happens only when it must —
+    /// a `Process` grant that a restart would lose, or a source that cannot
+    /// seek, which resume requires.
+    ///
+    /// Copying is therefore how `Process` becomes `Persisted`, which is why no
+    /// separate "did we copy?" field is needed: an app-private copy is
+    /// re-openable by definition, so the retention it leaves is `Persisted`.
     Staging {
         offer: AcceptedSourceOffer,
         retention: SourceRetention,
     },
-    /// A complete app-private artifact exists and its content is counted.
+    /// The content is established and the source can be sent.
+    ///
+    /// `retention` is what a restart consults: `Persisted` can be reopened,
+    /// `Process` cannot and returns the card to awaiting selection however
+    /// complete it looked.
     Ready {
         offer: AcceptedSourceOffer,
         retention: SourceRetention,
