@@ -256,6 +256,14 @@ RECOVERY_ACTIONS = {
     "open_settings",
     "choose_folder",
 }
+FAILURE_PHASES = ENDPOINT_PHASES | {
+    "setup",
+    "authenticating",
+    "negotiating",
+    "committing",
+    "driver_validation",
+    "cleanup",
+}
 ENDPOINT_SUMMARY_KEYS = {
     "root_count",
     "file_count",
@@ -598,8 +606,10 @@ def validate_endpoint_result(
         actual_platform != "android" or actual_layer != "l1_native"
     ):
         errors.append("direct_jni endpoint results must be Android L1 evidence")
-    if actual_driver == "direct_ffi" and actual_layer != "l1_native":
-        errors.append("direct_ffi endpoint results must be L1 evidence")
+    if actual_driver == "direct_ffi" and (
+        actual_platform not in {"ios", "macos"} or actual_layer != "l1_native"
+    ):
+        errors.append("direct_ffi endpoint results must be Apple L1 evidence")
     if actual_driver == "product_activity" and actual_layer != "l2_physical":
         errors.append("product_activity endpoint results must be L2 evidence")
     _check_enum(
@@ -756,7 +766,7 @@ def validate_endpoint_result(
                 )
             _check_enum(
                 failure.get("phase"),
-                ENDPOINT_PHASES | {"setup", "driver_validation", "cleanup"},
+                FAILURE_PHASES,
                 "endpoint result.failure.phase",
                 errors,
             )

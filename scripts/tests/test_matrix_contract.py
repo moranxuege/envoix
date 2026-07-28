@@ -13,6 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import apple_matrix_evidence  # noqa: E402
 import matrix_contract  # noqa: E402
 
 
@@ -99,6 +100,71 @@ class MatrixContractTests(unittest.TestCase):
             matrix_contract.validate_endpoint_result(self.endpoint_result()),
             [],
         )
+
+    def test_apple_l1_endpoint_result_is_valid(self) -> None:
+        value = self.endpoint_result()
+        value["platform"] = "ios"
+        value["driver"] = "direct_ffi"
+        value["device_model"] = "iPhone"
+        value["os_version"] = "iOS 18.5"
+        self.assertEqual(matrix_contract.validate_endpoint_result(value), [])
+
+    def test_direct_ffi_endpoint_result_requires_apple_l1(self) -> None:
+        value = self.endpoint_result()
+        value["driver"] = "direct_ffi"
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "direct_ffi endpoint results must be Apple L1")
+
+    def test_apple_typed_failure_phases_are_valid(self) -> None:
+        value = self.endpoint_result()
+        value["platform"] = "macos"
+        value["driver"] = "direct_ffi"
+        value["terminal_state"] = "failed"
+        value["ordered_phases"][-1] = "failed"
+        value["delivery_proof"] = False
+        value["failure"] = {
+            "code": "authentication_failed",
+            "phase": "authenticating",
+            "recovery_action": "re_pair",
+        }
+        self.assertEqual(matrix_contract.validate_endpoint_result(value), [])
+
+    def test_apple_attachment_extractor_selects_expected_identity(self) -> None:
+        value = self.endpoint_result()
+        value["platform"] = "ios"
+        value["driver"] = "direct_ffi"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "manifest.json").write_text("{}", encoding="utf-8")
+            attachment = root / "0_Test_envoix-matrix-sender.json"
+            attachment.write_text(json.dumps(value), encoding="utf-8")
+            selected = apple_matrix_evidence.find_endpoint_attachment(
+                root,
+                run_id=value["run_id"],
+                case_id=value["case_id"],
+                repetition=value["repetition"],
+                role=value["role"],
+                platform=value["platform"],
+            )
+        self.assertEqual(selected.name, attachment.name)
+
+    def test_apple_attachment_extractor_rejects_duplicate_identity(self) -> None:
+        value = self.endpoint_result()
+        value["platform"] = "ios"
+        value["driver"] = "direct_ffi"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("first", "second"):
+                (root / name).write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaises(apple_matrix_evidence.EvidenceExtractionError):
+                apple_matrix_evidence.find_endpoint_attachment(
+                    root,
+                    run_id=value["run_id"],
+                    case_id=value["case_id"],
+                    repetition=value["repetition"],
+                    role=value["role"],
+                    platform=value["platform"],
+                )
 
     def test_endpoint_result_identity_mismatch_is_rejected(self) -> None:
         errors = matrix_contract.validate_endpoint_result(
