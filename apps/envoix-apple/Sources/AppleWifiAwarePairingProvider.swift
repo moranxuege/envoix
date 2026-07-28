@@ -234,7 +234,7 @@ struct AppleWifiAwarePairingControls: View {
                     .wifiAware(.connecting(to: publishable, from: .userSpecifiedDevices))
                 ) {
                     Label(
-                        AppText.value("Allow nearby device", "允许附近设备", language: language),
+                        AppText.value("Allow this device", "允许此设备", language: language),
                         systemImage: "dot.radiowaves.left.and.right"
                     )
                     .frame(maxWidth: .infinity)
@@ -251,7 +251,7 @@ struct AppleWifiAwarePairingControls: View {
                     // provider observes the resulting snapshot continuously.
                 } label: {
                     Label(
-                        AppText.value("Add nearby device", "添加附近设备", language: language),
+                        AppText.value("Add a device", "添加设备", language: language),
                         systemImage: "plus"
                     )
                     .frame(maxWidth: .infinity)
@@ -263,8 +263,8 @@ struct AppleWifiAwarePairingControls: View {
             }
         } else {
             Text(AppText.value(
-                "Wi-Fi Aware pairing is unavailable in this build.",
-                "此版本无法使用 Wi-Fi Aware 配对。",
+                "Nearby pairing is unavailable in this build.",
+                "此版本无法使用附近设备配对。",
                 language: language
             ))
             .font(.footnote)

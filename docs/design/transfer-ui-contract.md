@@ -65,11 +65,17 @@ Hiding an invalid button is not sufficient.
 Both platforms use one stable transfer card:
 
 1. item or inventory title and Send/Receive direction;
-2. lifecycle stage and optional path;
+2. lifecycle stage and optional privacy-safe path kind;
 3. one progress location;
 4. byte/rate/ETA metrics appropriate to the stage;
 5. actions derived only from the policy above;
-6. expandable diagnostics and authenticated inventory.
+6. a friendly status and authenticated inventory. Raw diagnostics remain
+   available only through explicit developer controls.
 
 Completion wording is `Delivered`, not merely `Transferred`, because sender
 completion is gated by receiver publication and verified delivery proof.
+
+Path presentation is limited to `Direct`, `Relay`, or `Other`, derived from the
+structured connection event emitted by the Rust boundary. Raw IP addresses,
+socket endpoints, relay URLs, pairing codes, and invitation contents belong
+neither in the normal card nor in Activity history.

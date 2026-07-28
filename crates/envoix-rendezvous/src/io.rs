@@ -10,8 +10,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::RendezvousError;
 
-/// Upper bound on a single control frame (the messages are tiny).
-pub(crate) const MAX_FRAME_BODY: usize = 64 * 1024;
+/// Client-side default upper bound on a single control frame. The broker uses
+/// its configured limit through [`read_framed_with_limit`].
+const DEFAULT_MAX_FRAME_BODY: usize = 64 * 1024;
 
 /// Read one length-prefixed JSON frame and decode it into `T`.
 pub async fn read_framed<R, T>(reader: &mut R) -> Result<T, RendezvousError>
@@ -19,10 +20,21 @@ where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
 {
+    read_framed_with_limit(reader, DEFAULT_MAX_FRAME_BODY).await
+}
+
+pub(crate) async fn read_framed_with_limit<R, T>(
+    reader: &mut R,
+    max_frame_body: usize,
+) -> Result<T, RendezvousError>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
     let mut len = [0u8; 4];
     reader.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME_BODY {
+    if len > max_frame_body {
         return Err(RendezvousError::FrameTooLarge);
     }
     let mut body = vec![0u8; len];
@@ -37,7 +49,7 @@ where
     T: Serialize,
 {
     let body = serde_json::to_vec(value).map_err(|e| RendezvousError::BadMessage(e.to_string()))?;
-    if body.len() > MAX_FRAME_BODY {
+    if body.len() > DEFAULT_MAX_FRAME_BODY {
         return Err(RendezvousError::FrameTooLarge);
     }
     writer.write_all(&(body.len() as u32).to_be_bytes()).await?;

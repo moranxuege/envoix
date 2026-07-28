@@ -34,6 +34,29 @@ async fn persistent_identity_is_created_and_reused() {
 }
 
 #[tokio::test]
+async fn concurrent_first_use_reuses_the_atomic_winner() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("identity.json");
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+    let mut tasks = Vec::new();
+
+    for _ in 0..16 {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            load_secret_key(&IdentityConfig::Persistent(path)).await
+        }));
+    }
+
+    let mut public_keys = Vec::new();
+    for task in tasks {
+        public_keys.push(task.await.unwrap().unwrap().public());
+    }
+    assert!(public_keys.windows(2).all(|keys| keys[0] == keys[1]));
+}
+
+#[tokio::test]
 async fn invalid_identity_file_errors() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("identity.json");

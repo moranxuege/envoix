@@ -133,6 +133,40 @@ adb_command() {
   fi
 }
 
+require_android_network_route() {
+  local route
+  # Route lookup is local to Android and sends no traffic. Use a general public
+  # IPv4 target instead of assuming any Wi-Fi interface, gateway, or subnet.
+  if ! route="$(adb_command shell ip -4 route get 1.1.1.1 2>&1)"; then
+    route="${route//$'\r'/}"
+    echo "environment error: the selected Android device has no usable public IPv4 network route" >&2
+    echo "Connect Wi-Fi or mobile data before running the cross-device matrix." >&2
+    [[ -z "$route" ]] || echo "Android route probe: $route" >&2
+    return 1
+  fi
+  route="${route//$'\r'/}"
+  if [[ -z "$route" \
+        || "$route" == *"unreachable"* \
+        || "$route" == *"blackhole"* \
+        || "$route" == *"prohibit"* \
+        || ! "$route" =~ (^|[[:space:]])dev[[:space:]][^[:space:]]+ ]]; then
+    echo "environment error: the selected Android device has no usable public IPv4 network route" >&2
+    echo "Connect Wi-Fi or mobile data before running the cross-device matrix." >&2
+    [[ -z "$route" ]] || echo "Android route probe: $route" >&2
+    return 1
+  fi
+}
+
+matrix_uses_macos() {
+  local direction
+  for direction in "${directions[@]}"; do
+    if [[ "$direction" == macos:* || "$direction" == *:macos ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 print_log_tail() {
   local title="$1"
   local file="$2"
@@ -153,6 +187,7 @@ prepare_builds() {
     echo "error: no usable Android device; set ANDROID_SERIAL if more than one is attached" >&2
     return 1
   fi
+  require_android_network_route || return 1
 
   if [[ "$skip_build" != "1" ]]; then
     echo "build: Android application and instrumented tests"
@@ -170,10 +205,12 @@ prepare_builds() {
       return 1
     fi
 
-    echo "build: Mac hosted tests"
-    if ! env ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
-      "$repo_root/scripts/apple-dev.sh" macos-test-build -quiet; then
-      return 1
+    if matrix_uses_macos; then
+      echo "build: Mac hosted tests"
+      if ! env ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
+        "$repo_root/scripts/apple-dev.sh" macos-test-build -quiet; then
+        return 1
+      fi
     fi
   fi
 
@@ -201,8 +238,12 @@ macos_xctestrun=""
 locate_apple_artifacts() {
   ios_xctestrun="$(find "$ios_products" -maxdepth 1 -name 'Envoix-iOS-Hosted_*.xctestrun' -print -quit 2>/dev/null)"
   macos_xctestrun="$(find "$macos_products" -maxdepth 1 -name 'Envoix-macOS-Hosted_*.xctestrun' -print -quit 2>/dev/null)"
-  if [[ -z "$ios_xctestrun" || -z "$macos_xctestrun" ]]; then
-    echo "error: missing Apple xctestrun artifacts under $apple_cache_root" >&2
+  if [[ -z "$ios_xctestrun" ]]; then
+    echo "error: missing iOS xctestrun artifact under $ios_products" >&2
+    return 1
+  fi
+  if matrix_uses_macos && [[ -z "$macos_xctestrun" ]]; then
+    echo "error: missing macOS xctestrun artifact under $macos_products" >&2
     return 1
   fi
 }
@@ -378,7 +419,7 @@ run_pair() {
   local sender_log="$log_dir/$case_id.sender.log"
   local receiver_log="$log_dir/$case_id.receiver.log"
   local logcat_log="$log_dir/$case_id.android.logcat.log"
-  local ready_log ready_pattern receiver_pid sender_status=0 receiver_status=0
+  local ready_log ready_pattern pairing_code receiver_pid sender_status=0 receiver_status=0
 
   if [[ "$sender" == "android" || "$receiver" == "android" ]]; then
     start_android_logcat "$logcat_log"
@@ -412,11 +453,35 @@ run_pair() {
     stop_android_logcat
     return 1
   fi
+  if ! wait_for_log "$ready_log" '\[cross-device\] invitation=[^[:space:]]+'; then
+    echo "fail: receiver did not publish its InviteV2 Room Code for $case_id" >&2
+    print_log_tail "$receiver receiver" "$receiver_log"
+    [[ -f "$logcat_log" ]] && print_log_tail "Android logcat" "$logcat_log"
+    kill "$receiver_pid" >/dev/null 2>&1 || true
+    wait "$receiver_pid" >/dev/null 2>&1 || true
+    remove_endpoint_patch "$receiver" receive "$run_id"
+    stop_android_tests
+    stop_android_logcat
+    return 1
+  fi
+  pairing_code="$(
+    sed -nE 's/.*\[cross-device\] invitation=([^[:space:]]+).*/\1/p' "$ready_log" |
+      tail -n 1
+  )"
+  if [[ -z "$pairing_code" ]]; then
+    echo "fail: receiver published an unreadable InviteV2 Room Code for $case_id" >&2
+    kill "$receiver_pid" >/dev/null 2>&1 || true
+    wait "$receiver_pid" >/dev/null 2>&1 || true
+    remove_endpoint_patch "$receiver" receive "$run_id"
+    stop_android_tests
+    stop_android_logcat
+    return 1
+  fi
 
   if [[ "$receiver_settle_seconds" -gt 0 ]]; then
     sleep "$receiver_settle_seconds"
   fi
-  run_endpoint_role "$sender" send "$scenario" "$code" "$run_id" "$sender_log" || sender_status=$?
+  run_endpoint_role "$sender" send "$scenario" "$pairing_code" "$run_id" "$sender_log" || sender_status=$?
   if [[ "$sender_status" -ne 0 ]]; then
     kill "$receiver_pid" >/dev/null 2>&1 || true
   fi
@@ -446,7 +511,9 @@ next_case() {
   local repetition="$2"
   case_index=$((case_index + 1))
   CURRENT_RUN_ID="$base_run_id-c$case_index-r$repetition"
-  printf -v CURRENT_CODE '%06d-amber-comet' "$((800000 + case_index % 100000))"
+  # A valid 6-4-4 fallback keeps standalone/local invocations honest. Physical
+  # transfer pairs replace it with the receiver-created InviteV2 Room Code.
+  printf -v CURRENT_CODE '%06d-ambe-come' "$((800000 + case_index % 100000))"
   printf -v CURRENT_CASE_ID '%03d-%s-r%d' "$case_index" "$label" "$repetition"
 }
 

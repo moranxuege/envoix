@@ -28,7 +28,7 @@ class DiscoveryPeerRegistryTest {
                     source = DiscoverySource.Mdns,
                     seenAtMs = 1_200,
                     displayName = "  Test   Phone  ",
-                    endpoint = "192.0.2.1:45454",
+                    nearbyInviteRoute = route(directAddresses = listOf("192.0.2.1:45454")),
                 ),
             ),
         )
@@ -37,7 +37,7 @@ class DiscoveryPeerRegistryTest {
         assertEquals("Test Phone", peer.displayName)
         assertEquals(setOf(DiscoverySource.Bluetooth, DiscoverySource.Mdns), peer.sources)
         assertEquals(-42, peer.rssi)
-        assertEquals("192.0.2.1:45454", peer.endpoint)
+        assertEquals(route(directAddresses = listOf("192.0.2.1:45454")), peer.nearbyInviteRoute)
         assertEquals(1_200, peer.lastSeenAtMs)
     }
 
@@ -69,7 +69,7 @@ class DiscoveryPeerRegistryTest {
                 "0011223344556677",
                 DiscoverySource.Mdns,
                 seenAtMs = 500,
-                endpoint = "192.0.2.2:1234",
+                nearbyInviteRoute = route(directAddresses = listOf("192.0.2.2:1234")),
             ),
         )
 
@@ -153,7 +153,7 @@ class DiscoveryPeerRegistryTest {
     }
 
     @Test
-    fun `pairing selection carries only untrusted display context`() {
+    fun `pairing selection binds delivery to the endpoint shown to the user`() {
         val selection =
             NearbyPairingSelection.from(
                 DiscoveredPeer(
@@ -162,12 +162,63 @@ class DiscoveryPeerRegistryTest {
                     sources = setOf(DiscoverySource.Bluetooth, DiscoverySource.Mdns),
                     lastSeenAtMs = 42,
                     rssi = -36,
-                    endpoint = "192.0.2.10:4242",
+                    nearbyInviteRoute =
+                        route(
+                            relayUrl = "https://relay.example",
+                            directAddresses = listOf("192.0.2.4:443"),
+                        ),
                 ),
             )
 
         assertEquals("0011223344556677", selection.discoveryPeerKey)
         assertEquals("Nearby phone", selection.displayName)
         assertEquals(setOf(DiscoverySource.Bluetooth, DiscoverySource.Mdns), selection.sources)
+        assertEquals(
+            "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst",
+            selection.nearbyInviteRoute?.endpointId,
+        )
+        assertEquals("https://relay.example", selection.nearbyInviteRoute?.relayUrl)
+        assertEquals(listOf("192.0.2.4:443"), selection.nearbyInviteRoute?.directAddresses)
+    }
+
+    @Test
+    fun `registry and pairing selection freeze all nearby route fields`() {
+        val addresses = mutableListOf("192.0.2.8:8443")
+        val discoveredRoute =
+            NearbyInviteRoute.normalized(
+                endpointId = ENDPOINT_ID,
+                relayUrl = "https://relay.example",
+                directAddresses = addresses,
+            )!!
+        val registry = DiscoveryPeerRegistry()
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "0011223344556677",
+                source = DiscoverySource.Mdns,
+                seenAtMs = 1,
+                nearbyInviteRoute = discoveredRoute,
+            ),
+        )
+
+        addresses += "198.51.100.9:8443"
+        val peer = registry.peers(nowMs = 1).single()
+        val selection = NearbyPairingSelection.from(peer)
+
+        assertEquals(listOf("192.0.2.8:8443"), peer.nearbyInviteRoute?.directAddresses)
+        assertEquals(peer.nearbyInviteRoute, selection.nearbyInviteRoute)
+    }
+
+    private fun route(
+        relayUrl: String? = null,
+        directAddresses: List<String> = emptyList(),
+    ): NearbyInviteRoute =
+        NearbyInviteRoute.normalized(
+            endpointId = ENDPOINT_ID,
+            relayUrl = relayUrl,
+            directAddresses = directAddresses,
+        )!!
+
+    private companion object {
+        const val ENDPOINT_ID = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"
     }
 }

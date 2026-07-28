@@ -686,6 +686,11 @@ internal class AndroidWifiAwareDiagnosticController(
                 override fun onPlanRequired(requestJson: String): String = mode.callback.onPlanRequired(requestJson)
 
                 override fun onSaveRequired(requestJson: String): String = mode.callback.onSaveRequired(requestJson)
+
+                override fun onRememberedCredential(
+                    opaqueCredential: ByteArray,
+                    generation: Long,
+                ): Boolean = mode.callback.onRememberedCredential(opaqueCredential, generation)
             }
         mode.nativeStarted.set(true)
         Native.startManifestV2NativeSession(

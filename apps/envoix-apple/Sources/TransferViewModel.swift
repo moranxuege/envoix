@@ -37,9 +37,34 @@ struct TransferActivityRecord: Identifiable {
     var failure: FfiTransferFailure?
     var savedPaths: [String]
     var roomID: String?
+    var connectionPath: FfiDataPathKind?
     var updatedAt: Date
 
     var id: String { activityId }
+}
+
+func roomControlOfferMatchesManifest(
+    _ offer: RoomControlTransferOffer,
+    summary: FfiManifestOfferSummaryV2,
+    entries: [FfiManifestOfferEntryV2]
+) -> Bool {
+    let authenticatedItemCount = UInt64(summary.fileCount) + UInt64(summary.directoryCount)
+    guard UInt64(offer.itemCount) == authenticatedItemCount,
+          offer.directoryCount == summary.directoryCount,
+          offer.totalBytes == summary.totalPlaintextBytes else {
+        return false
+    }
+    let expectedPreviewCount = min(Int(summary.rootCount), 3)
+    guard offer.rootNames.count == expectedPreviewCount else { return false }
+    let authenticatedRootNames =
+        entries
+            .lazy
+            .filter { $0.parentEntryId == nil }
+            .prefix(expectedPreviewCount)
+            .map(\.name)
+    let availableRootNames = Array(authenticatedRootNames)
+    guard expectedPreviewCount == 0 || !availableRootNames.isEmpty else { return false }
+    return Array(offer.rootNames.prefix(availableRootNames.count)) == availableRootNames
 }
 
 enum ActivityProjectionPolicy {
@@ -65,6 +90,21 @@ enum ActivityExecutionPolicy {
         default:
             return true
         }
+    }
+}
+
+enum NativeTerminalDeliveryPolicy {
+    static func shouldForwardPhase(
+        _ phase: FfiManifestV2Phase,
+        defersUntilNativeReturn: Bool
+    ) -> Bool {
+        !defersUntilNativeReturn || phase != .delivered
+    }
+
+    static func shouldForwardObserverCompletion(
+        defersUntilNativeReturn: Bool
+    ) -> Bool {
+        !defersUntilNativeReturn
     }
 }
 
@@ -117,15 +157,16 @@ private struct StoredTransferRequestV2: Codable {
         switch request.mode {
         case .manual: mode = "manual"
         case .invite: mode = "invite"
+        case .remembered: mode = "remembered"
         case .showManual: mode = "show_manual"
         case .showInvite: mode = "show_invite"
         case .mdns: mode = "mdns"
         case .room: mode = "room"
         }
         peerDescriptor = request.peerDescriptor
-        invite = request.invite
-        code = request.code
-        token = request.token
+        invite = ""
+        code = ""
+        token = ""
         broker = request.broker
         relay = request.relay
         configPath = request.configPath
@@ -150,6 +191,7 @@ private struct StoredTransferRequestV2: Codable {
         switch self.mode {
         case "manual": mode = .manual
         case "invite": mode = .invite
+        case "remembered": mode = .remembered
         case "show_manual": mode = .showManual
         case "show_invite": mode = .showInvite
         case "mdns": mode = .mdns
@@ -170,6 +212,10 @@ private struct StoredTransferRequestV2: Codable {
             invite: invite,
             code: code,
             token: token,
+            rememberConsent: false,
+            rememberedCredentialRef: "",
+            rememberedGeneration: 0,
+            rememberedPreviousGeneration: nil,
             broker: broker,
             relay: relay,
             configPath: configPath,
@@ -237,9 +283,6 @@ final class AppModel: ObservableObject {
         }
         send.restoreActiveManifestSession(direction: .send)
         receive.restoreActiveManifestSession(direction: .receive)
-        if !send.isBusy {
-            send.restorePreparedManifestSelection()
-        }
     }
 
     var isActive: Bool {
@@ -264,10 +307,13 @@ final class AppModel: ObservableObject {
 
     func canResumeActivity(_ activityID: String) -> Bool {
         guard let record = activities.first(where: { $0.activityId == activityID }),
-              owner(of: activityID)?.hasResumableOperation == true else {
+              let owner = owner(of: activityID),
+              !owner.ownsNativeSendOperation(activityID: activityID),
+              owner.hasResumableOperation else {
             return false
         }
-        return record.state == .paused || (record.state == .failed && record.failure?.retryable == true)
+        return record.state == .paused ||
+            (record.state == .failed && TransferPresentationPolicy.allowsInPlaceResume(record.failure))
     }
 
     @discardableResult
@@ -288,10 +334,14 @@ final class AppModel: ObservableObject {
     @discardableResult
     func removeActivity(_ activityID: String) -> Bool {
         guard let record = activities.first(where: { $0.activityId == activityID }),
-              !ActivityProjectionPolicy.isPending(record.state) else { return false }
+              !ActivityProjectionPolicy.isPending(record.state),
+              owner(of: activityID)?.ownsNativeSendOperation(activityID: activityID) != true else {
+            return false
+        }
         activities.removeAll { $0.activityId == activityID }
         activityMetrics.removeValue(forKey: activityID)
-        owner(of: activityID)?.forgetActivity(activityID)
+        send.forgetActivity(activityID)
+        receive.forgetActivity(activityID)
         return true
     }
 
@@ -351,6 +401,11 @@ final class AppModel: ObservableObject {
         #if os(iOS)
         let drafts = Set(
             [pendingSendSelection?.id, send.protectedShareDraftID].compactMap { $0 }
+        ).union(
+            Set(
+                (try? RememberedRoomOutboxStore.shared.entries())?
+                    .compactMap(\.shareDraftID) ?? []
+            )
         )
         #else
         let drafts = Set<UUID>()
@@ -475,6 +530,7 @@ final class TransferViewModel: ObservableObject {
         let stateDirectory: String
         let sourceAccess: AnyObject?
         let nearbyWifiAwareDeviceID: String?
+        let rememberPersistence: RememberPersistenceContext?
     }
 
     private struct ReceiveOperation {
@@ -484,6 +540,22 @@ final class TransferViewModel: ObservableObject {
         let targetDirectory: String
         let destinationAccess: AnyObject?
         let nearbyWifiAwareDeviceID: String?
+        let rememberPersistence: RememberPersistenceContext?
+        let expectedControlOffer: RoomControlTransferOffer?
+    }
+
+    @MainActor
+    private final class ReceiveLaunchSignal {
+        private var continuation: CheckedContinuation<String?, Never>?
+
+        init(_ continuation: CheckedContinuation<String?, Never>) {
+            self.continuation = continuation
+        }
+
+        func resolve(_ activityID: String?) {
+            continuation?.resume(returning: activityID)
+            continuation = nil
+        }
     }
 
     /// The one lifecycle state rendered by setup, Activity, and menu-bar
@@ -510,6 +582,8 @@ final class TransferViewModel: ObservableObject {
     @Published private(set) var pendingOfferSummary: FfiManifestOfferSummaryV2?
     @Published private(set) var pendingOfferEntries: [FfiManifestOfferEntryV2] = []
     @Published private(set) var pendingSourceSelections: [FfiSourceSelectionV2] = []
+    @Published private(set) var connectionPath: FfiConnectionPathEvent?
+    @Published private(set) var nativeSendOperationActivityID: String?
 
     weak var appModel: AppModel?
     private var preparedSelection: PreparedSelection?
@@ -522,7 +596,7 @@ final class TransferViewModel: ObservableObject {
     private var task: Task<Void, Never>?
     private var preparationTask: Task<Void, Never>?
     private var resourceAccess: AnyObject?
-    private var stagedNearbyWifiAwareDeviceID: String?
+    private var completedDestinationAccess: [String: AnyObject] = [:]
     private var rate = RateTracker()
     private var observedTransferred: UInt64 = 0
     private var observedTotal: UInt64 = 0
@@ -530,6 +604,9 @@ final class TransferViewModel: ObservableObject {
     fileprivate var operationID = UUID()
     private var pausedByUser = false
     private var displayLanguage = "en"
+    private var nativeSendOperationJobID: String?
+    private var nativeSendReleaseActions:
+        [String: [@MainActor () -> Void]] = [:]
 
     #if os(iOS)
     var protectedShareDraftID: UUID? {
@@ -543,19 +620,6 @@ final class TransferViewModel: ObservableObject {
     }
     #endif
 
-    func stageNearbyWifiAwareDeviceID(_ sourceScopedID: String?) {
-        stagedNearbyWifiAwareDeviceID = sourceScopedID
-    }
-
-    func clearStagedNearbyWifiAwareDeviceID() {
-        stagedNearbyWifiAwareDeviceID = nil
-    }
-
-    private func consumeStagedNearbyWifiAwareDeviceID() -> String? {
-        defer { stagedNearbyWifiAwareDeviceID = nil }
-        return stagedNearbyWifiAwareDeviceID
-    }
-
     var progressFraction: Double { total > 0 ? Double(transferred) / Double(total) : 0 }
     var etaSeconds: Double? {
         estimatedRemainingSeconds(
@@ -566,7 +630,7 @@ final class TransferViewModel: ObservableObject {
         )
     }
     var isBusy: Bool {
-        if isPreparingManifest { return true }
+        if isPreparingManifest || nativeSendOperationActivityID != nil { return true }
         return presentationState.map(ActivityProjectionPolicy.isPending) ?? false
     }
     var isFinalizing: Bool {
@@ -576,10 +640,41 @@ final class TransferViewModel: ObservableObject {
         activeSend != nil || activeReceive != nil
     }
 
+    func ownsNativeSendOperation(activityID: String) -> Bool {
+        nativeSendOperationActivityID == activityID
+    }
+
+    func ownsNativeSendJob(jobID: String) -> Bool {
+        nativeSendOperationJobID == jobID
+    }
+
+    func afterNativeSendOperationRelease(
+        activityID: String,
+        perform action: @escaping @MainActor () -> Void
+    ) {
+        guard nativeSendOperationActivityID == activityID else {
+            action()
+            return
+        }
+        nativeSendReleaseActions[activityID, default: []].append(action)
+    }
+
     func prepareManifestSelection(selectedPaths: [String], sourceAccess: AnyObject? = nil) {
         let paths = normalizedPaths(selectedPaths)
-        guard !paths.isEmpty,
-              preparedSelection?.sourcePaths != paths else { return }
+        guard !paths.isEmpty, nativeSendOperationActivityID == nil else { return }
+        detachTerminalActivityForNewDraftIfNeeded()
+        // SwiftUI may run SendView.onAppear again after returning from another
+        // app or a system picker. Once a prepared job has been handed to an
+        // active transfer, never create a second draft here: doing so changes
+        // operationID, drops the live observer callbacks, and resets the UI to
+        // "Preparing locally" while the native transfer keeps running.
+        guard activeSend == nil, activeReceive == nil else { return }
+        guard preparedSelection?.sourcePaths != paths else {
+            if transferActivity == nil, isManifestSelectionReady {
+                presentationState = nil
+            }
+            return
+        }
         preparationTask?.cancel()
         if let old = preparedSelection?.job { Task { _ = try? await old.cancelJob() } }
         preparedSelection = nil
@@ -606,6 +701,16 @@ final class TransferViewModel: ObservableObject {
                     _ = try? await job.cancelJob()
                     return
                 }
+                let projectedPaths = await projectedSourcePaths(job: job, snapshot: snapshot)
+                guard expected == operationID else {
+                    _ = try? await job.cancelJob()
+                    return
+                }
+                let roots = await job.listRoots()
+                guard expected == operationID else {
+                    _ = try? await job.cancelJob()
+                    return
+                }
                 preparedSelection = PreparedSelection(
                     job: job,
                     jobID: snapshot.jobId,
@@ -615,8 +720,8 @@ final class TransferViewModel: ObservableObject {
                 )
                 applyPreparation(
                     snapshot,
-                    paths: await projectedSourcePaths(job: job, snapshot: snapshot),
-                    roots: await job.listRoots()
+                    paths: projectedPaths,
+                    roots: roots
                 )
             } catch {
                 guard expected == operationID else { return }
@@ -627,42 +732,40 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    func restorePreparedManifestSelection() {
-        guard preparedSelection == nil, !isBusy else { return }
-        preparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let store = try jobStoreDirectory()
-                guard let snapshot = try await listPreparingTransferJobsV2(storeDirectory: store)
-                    .max(by: { $0.updatedUnixMs < $1.updatedUnixMs }) else { return }
-                let job = try await restoreTransferJobV2(
-                    storeDirectory: store,
-                    jobId: snapshot.jobId
-                )
-                var paths: [String] = []
-                for selection in snapshot.selections {
-                    if let path = await job.sourcePathForPreview(itemId: selection.rootItemId) {
-                        paths.append(path)
-                    }
-                }
-                guard !paths.isEmpty else { return }
-                preparedSelection = PreparedSelection(
-                    job: job,
-                    jobID: snapshot.jobId,
-                    sourcePaths: paths,
-                    sessionStateDirectory: try sessionStateDirectory(jobID: snapshot.jobId),
-                    sourceAccess: nil
-                )
-                applyPreparation(
-                    snapshot,
-                    paths: await projectedSourcePaths(job: job, snapshot: snapshot),
-                    roots: await job.listRoots()
-                )
-                statusText = localized("Prepared items restored", "已恢复准备内容")
-            } catch {
-                eventLog.append("restore preparation: \(error.localizedDescription)")
-            }
-        }
+    private func detachTerminalActivityForNewDraftIfNeeded() {
+        guard nativeSendOperationActivityID == nil,
+              let activity = transferActivity,
+              TransferDraftLifecyclePolicy.shouldDetachActivityBeforePreparation(
+                  activity.state
+              ) else { return }
+
+        task?.cancel()
+        task = nil
+        cancellation?.cancel()
+        operationID = UUID()
+        forgetActivity(activity.activityId)
+        pendingReceive = nil
+        pendingOfferSummary = nil
+        pendingOfferEntries = []
+        requiresExceptionalTransferApproval = false
+        failure = nil
+        resourceAccess = nil
+        pausedByUser = false
+        invite = ""
+        fileName = ""
+        transferred = 0
+        total = 0
+        statusText = ""
+        peerAddress = ""
+        eventLog = []
+        bytesPerSec = 0
+        completedFileURL = nil
+        completedItemURLs = []
+        connectionPath = nil
+        rate = RateTracker()
+        observedTransferred = 0
+        observedTotal = 0
+        lastProgressPublishAt = .distantPast
     }
 
     func restoreActiveManifestSession(direction: FfiTransferDirection) {
@@ -672,9 +775,19 @@ final class TransferViewModel: ObservableObject {
         do {
             guard let value = try storedManifestSession(direction: direction) else { return }
             stored = value
+            guard value.request.invite.isEmpty,
+                  value.request.code.isEmpty,
+                  value.request.token.isEmpty else {
+                throw RuntimeSettingsError("Stored transfer contains obsolete authentication data.")
+            }
             request = try value.request.value()
             guard request.direction == direction else {
                 throw RuntimeSettingsError("Stored transfer direction does not match its session slot.")
+            }
+            if usesProcessOnlyAuthentication(request.mode) {
+                clearStoredManifestSession(direction: direction)
+                eventLog.append("discarded process-authenticated session after relaunch")
+                return
             }
         } catch {
             clearStoredManifestSession(direction: direction)
@@ -701,6 +814,7 @@ final class TransferViewModel: ObservableObject {
             failure: nil,
             savedPaths: [],
             roomID: stored.roomID,
+            connectionPath: nil,
             updatedAt: Date()
         )
         presentationState = transferActivity?.state
@@ -729,7 +843,8 @@ final class TransferViewModel: ObservableObject {
                         request: request,
                         stateDirectory: stored.stateDirectory,
                         sourceAccess: sourceAccess,
-                        nearbyWifiAwareDeviceID: nil
+                        nearbyWifiAwareDeviceID: nil,
+                        rememberPersistence: nil
                     ))
                 } else {
                     guard let targetDirectory = stored.targetDirectory else {
@@ -746,7 +861,9 @@ final class TransferViewModel: ObservableObject {
                         stateDirectory: stored.stateDirectory,
                         targetDirectory: restored.path,
                         destinationAccess: restored.access,
-                        nearbyWifiAwareDeviceID: nil
+                        nearbyWifiAwareDeviceID: nil,
+                        rememberPersistence: nil,
+                        expectedControlOffer: nil
                     ))
                 }
             } catch {
@@ -759,7 +876,9 @@ final class TransferViewModel: ObservableObject {
     @discardableResult
     func cancelManifestPreparation() -> Bool {
         guard isPreparingManifest || preparedSelection != nil else { return false }
+        operationID = UUID()
         preparationTask?.cancel()
+        preparationTask = nil
         if let job = preparedSelection?.job { Task { _ = try? await job.cancelJob() } }
         preparedSelection = nil
         preparedManifestSourcePaths = []
@@ -772,7 +891,6 @@ final class TransferViewModel: ObservableObject {
         if transferActivity == nil {
             presentationState = .canceled
         } else {
-            operationID = UUID()
             updateActivity(state: .canceled, diagnostic: statusText)
         }
         return true
@@ -796,7 +914,6 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         sourceAccess: AnyObject? = nil
     ) {
-        clearStagedNearbyWifiAwareDeviceID()
         startSend(
             selectedPaths: selectedPaths,
             settings: settings,
@@ -809,16 +926,26 @@ final class TransferViewModel: ObservableObject {
         selectedPaths: [String],
         code: String,
         settings: EnvoixRuntimeSettings,
-        sourceAccess: AnyObject? = nil
+        sourceAccess: AnyObject? = nil,
+        nearbyWifiAwareDeviceID: String? = nil,
+        rememberLabel: String? = nil
     ) {
-        let nearbyWifiAwareDeviceID = consumeStagedNearbyWifiAwareDeviceID()
+        let persistence = prepareRememberPersistence(label: rememberLabel, settings: settings)
+        if rememberLabel?.trimmed.isEmpty == false, persistence == nil { return }
         startSend(
             selectedPaths: selectedPaths,
             settings: settings,
-            request: request(direction: .send, mode: .room, settings: settings, code: code),
+            request: request(
+                direction: .send,
+                mode: .room,
+                settings: settings,
+                code: code,
+                rememberConsent: persistence != nil
+            ),
             sourceAccess: sourceAccess,
             roomCode: code,
-            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID,
+            rememberPersistence: persistence
         )
     }
 
@@ -827,9 +954,12 @@ final class TransferViewModel: ObservableObject {
         invite: String,
         settings: EnvoixRuntimeSettings,
         pathPolicy: FfiPathPolicy = .auto,
-        sourceAccess: AnyObject? = nil
+        sourceAccess: AnyObject? = nil,
+        nearbyWifiAwareDeviceID: String? = nil,
+        rememberLabel: String? = nil
     ) {
-        clearStagedNearbyWifiAwareDeviceID()
+        let persistence = prepareRememberPersistence(label: rememberLabel, settings: settings)
+        if rememberLabel?.trimmed.isEmpty == false, persistence == nil { return }
         startSend(
             selectedPaths: selectedPaths,
             settings: settings,
@@ -838,10 +968,196 @@ final class TransferViewModel: ObservableObject {
                 mode: .invite,
                 settings: settings,
                 invite: invite,
+                rememberConsent: persistence != nil,
                 pathPolicy: pathPolicy
             ),
-            sourceAccess: sourceAccess
+            sourceAccess: sourceAccess,
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID,
+            rememberPersistence: persistence
         )
+    }
+
+    func startSendingManifestToRememberedPeer(
+        selectedPaths: [String],
+        peer: RememberedPeerSummary,
+        settings: EnvoixRuntimeSettings,
+        sourceAccess: AnyObject? = nil
+    ) {
+        do {
+            let persistence = try RememberPersistenceContext(peer: peer)
+            do {
+                let credential = try RememberedPeerStore.shared.credential(for: peer)
+                let handle = try registerProtectedRememberedCredential(opaqueCredential: credential)
+                startSend(
+                    selectedPaths: selectedPaths,
+                    settings: settings,
+                    request: request(
+                        direction: .send,
+                        mode: .remembered,
+                        settings: settings,
+                        rememberedCredentialRef: handle,
+                        rememberedGeneration: peer.generation,
+                        rememberedPreviousGeneration: peer.previousGeneration
+                    ),
+                    sourceAccess: sourceAccess,
+                    rememberPersistence: persistence
+                )
+            } catch {
+                handleFailed(error.localizedDescription)
+            }
+        } catch {
+            handleFailed(error.localizedDescription)
+        }
+    }
+
+    /**
+     * Seals the current prepared job and hands its durable identity to a
+     * remembered-room outbox. No network operation starts here.
+     */
+    func queuePreparedManifestForRememberedRoom(
+        relationshipID: String,
+        outbox: RememberedRoomOutboxStore = .shared
+    ) async throws -> RememberedRoomOutboxEntry {
+        guard activeSend == nil, activeReceive == nil,
+              isManifestSelectionReady,
+              let preparedSelection else {
+            throw RuntimeSettingsError("Finish preparing the selected files before queueing them.")
+        }
+        let shareDraftID: UUID?
+        #if os(iOS)
+        shareDraftID = (preparedSelection.sourceAccess as? ShareDraftLease)?.id
+        #else
+        shareDraftID = nil
+        #endif
+        let sourceBookmarks: [Data]
+        if shareDraftID == nil {
+            sourceBookmarks = try preparedSelection.sourcePaths.map {
+                try makeSecurityScopedFolderBookmark(for: URL(fileURLWithPath: $0))
+            }
+        } else {
+            sourceBookmarks = []
+        }
+        var snapshot = await preparedSelection.job.snapshot()
+        if snapshot.state != .sealed {
+            _ = try await preparedSelection.job.sealForSend()
+            snapshot = await preparedSelection.job.snapshot()
+        }
+        let summary = snapshot.inventory
+        let roots = await preparedSelection.job.listRoots()
+        let entry = try outbox.enqueue(
+            relationshipID: relationshipID,
+            jobID: preparedSelection.jobID,
+            sourcePaths: preparedSelection.sourcePaths,
+            sourceBookmarks: sourceBookmarks,
+            shareDraftID: shareDraftID,
+            rootNames: roots.prefix(3).map(\.name),
+            itemCount: Int(summary.fileCount) + Int(summary.directoryCount),
+            directoryCount: Int(summary.directoryCount),
+            totalBytes: summary.totalPlaintextBytes
+        )
+
+        // Ownership moved to the outbox. A later picker must not cancel this
+        // sealed job as though it were still a disposable draft.
+        operationID = UUID()
+        self.preparedSelection = nil
+        preparedManifestSourcePaths = []
+        preparedInventorySummary = nil
+        preparedInventoryRoots = []
+        pendingSourceSelections = []
+        isManifestSelectionReady = false
+        isPreparingManifest = false
+        presentationState = nil
+        statusText = localized("Queued for this room", "已加入此房间的发送队列")
+        return entry
+    }
+
+    /**
+     * Restores one outboxed canonical job and starts it with the fresh
+     * single-use invitation negotiated over remembered room control.
+     */
+    func startQueuedRoomManifest(
+        _ entry: RememberedRoomOutboxEntry,
+        roomCode: String,
+        settings: EnvoixRuntimeSettings
+    ) async throws -> String {
+        guard activeSend == nil, activeReceive == nil, !isBusy else {
+            throw RuntimeSettingsError("Another transfer is already using this device.")
+        }
+        let job = try await restoreTransferJobV2(
+            storeDirectory: try jobStoreDirectory(),
+            jobId: entry.jobID
+        )
+        let snapshot = await job.snapshot()
+        guard snapshot.jobId == entry.jobID, snapshot.state == .sealed else {
+            throw RuntimeSettingsError("The queued transfer is no longer ready to send.")
+        }
+        let sourceAccess = try restoreOutboxedSourceAccess(entry)
+        displayLanguage = settings.language
+        beginActivity(direction: .send, mode: .room, roomCode: roomCode)
+        guard let activityID = transferActivity?.activityId else {
+            throw RuntimeSettingsError("Cannot start a queued transfer without an activity.")
+        }
+        launchSend(SendOperation(
+            job: job,
+            jobID: entry.jobID,
+            sourcePaths: entry.sourcePaths,
+            settings: settings,
+            request: request(
+                direction: .send,
+                mode: .room,
+                settings: settings,
+                code: roomCode
+            ),
+            stateDirectory: try sessionStateDirectory(jobID: entry.jobID),
+            sourceAccess: sourceAccess,
+            nearbyWifiAwareDeviceID: nil,
+            rememberPersistence: nil
+        ))
+        return activityID
+    }
+
+    /**
+     * Removes only app-owned artifacts for an outbox entry. Original Files
+     * selections are never deleted; a Share/Photos draft is an app-owned copy
+     * and is discarded with the sealed job.
+     */
+    func discardQueuedRoomManifestArtifacts(
+        _ entry: RememberedRoomOutboxEntry
+    ) async throws {
+        guard nativeSendOperationJobID != entry.jobID else {
+            throw RuntimeSettingsError(
+                "Wait for the current transfer to finish before removing its local cache."
+            )
+        }
+        let root = try manifestRootDirectory()
+        let jobs = root.appendingPathComponent("jobs", isDirectory: true)
+        let jobURL = jobs.appendingPathComponent(
+            "job-\(entry.jobID).json",
+            isDirectory: false
+        )
+        let stagingURL = jobs
+            .appendingPathComponent(".envoix-staging", isDirectory: true)
+            .appendingPathComponent(entry.jobID, isDirectory: true)
+        let sessionURL = root
+            .appendingPathComponent("sessions", isDirectory: true)
+            .appendingPathComponent(entry.jobID, isDirectory: true)
+
+        if let job = try? await restoreTransferJobV2(
+            storeDirectory: jobs.path,
+            jobId: entry.jobID
+        ) {
+            _ = try? await job.cancelJob()
+        }
+        for url in [sessionURL, stagingURL, jobURL]
+            where FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+
+        #if os(iOS)
+        if let shareDraftID = entry.shareDraftID {
+            try ShareDraftStore.live().discard(id: shareDraftID)
+        }
+        #endif
     }
 
     func startReceivingWithToken(
@@ -850,7 +1166,6 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         destinationAccess: AnyObject? = nil
     ) {
-        clearStagedNearbyWifiAwareDeviceID()
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
@@ -863,31 +1178,132 @@ final class TransferViewModel: ObservableObject {
         outputDir: String,
         code: String,
         settings: EnvoixRuntimeSettings,
-        destinationAccess: AnyObject? = nil
+        destinationAccess: AnyObject? = nil,
+        nearbyWifiAwareDeviceID: String? = nil,
+        rememberLabel: String? = nil
     ) {
-        let nearbyWifiAwareDeviceID = consumeStagedNearbyWifiAwareDeviceID()
+        let persistence = prepareRememberPersistence(label: rememberLabel, settings: settings)
+        if rememberLabel?.trimmed.isEmpty == false, persistence == nil { return }
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
-            request: request(direction: .receive, mode: .room, settings: settings, code: code),
+            request: request(
+                direction: .receive,
+                mode: .room,
+                settings: settings,
+                code: code,
+                rememberConsent: persistence != nil
+            ),
             destinationAccess: destinationAccess,
             roomCode: code,
-            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID,
+            rememberPersistence: persistence
         )
     }
 
     func startReceivingWithInvite(
         outputDir: String,
+        invite: String,
         settings: EnvoixRuntimeSettings,
-        destinationAccess: AnyObject? = nil
+        destinationAccess: AnyObject? = nil,
+        nearbyWifiAwareDeviceID: String? = nil,
+        rememberLabel: String? = nil
     ) {
-        clearStagedNearbyWifiAwareDeviceID()
+        let persistence = prepareRememberPersistence(label: rememberLabel, settings: settings)
+        if rememberLabel?.trimmed.isEmpty == false, persistence == nil { return }
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
-            request: request(direction: .receive, mode: .showInvite, settings: settings),
-            destinationAccess: destinationAccess
+            request: request(
+                direction: .receive,
+                mode: .invite,
+                settings: settings,
+                invite: invite,
+                rememberConsent: persistence != nil
+            ),
+            destinationAccess: destinationAccess,
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID,
+            rememberPersistence: persistence
         )
+    }
+
+    /// Starts a receiver for a room-control offer and returns only after the
+    /// persisted operation's native FFI future emits its first phase.
+    func startReceivingRoomControlInvite(
+        outputDir: String,
+        invite: String,
+        offer: RoomControlTransferOffer,
+        settings: EnvoixRuntimeSettings,
+        destinationAccess: AnyObject? = nil,
+        nearbyWifiAwareDeviceID: String? = nil
+    ) async -> String? {
+        displayLanguage = settings.language
+        let request = request(
+            direction: .receive,
+            mode: .invite,
+            settings: settings,
+            invite: invite
+        )
+        beginActivity(direction: .receive, mode: request.mode, roomCode: nil)
+        do {
+            guard let activityID = transferActivity?.activityId else {
+                throw RuntimeSettingsError("Cannot start a receiver without an activity.")
+            }
+            let operation = ReceiveOperation(
+                settings: settings,
+                request: request,
+                stateDirectory: try receiveStateDirectory(activityID: activityID),
+                targetDirectory: outputDir,
+                destinationAccess: destinationAccess,
+                nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID,
+                rememberPersistence: nil,
+                expectedControlOffer: offer
+            )
+            activeReceive = operation
+            activeSend = nil
+            return await withCheckedContinuation { continuation in
+                launchReceive(
+                    operation,
+                    launchSignal: ReceiveLaunchSignal(continuation)
+                )
+            }
+        } catch {
+            handleFailed(error.localizedDescription)
+            return nil
+        }
+    }
+
+    func startReceivingFromRememberedPeer(
+        outputDir: String,
+        peer: RememberedPeerSummary,
+        settings: EnvoixRuntimeSettings,
+        destinationAccess: AnyObject? = nil
+    ) {
+        do {
+            let persistence = try RememberPersistenceContext(peer: peer)
+            do {
+                let credential = try RememberedPeerStore.shared.credential(for: peer)
+                let handle = try registerProtectedRememberedCredential(opaqueCredential: credential)
+                startReceive(
+                    targetDirectory: outputDir,
+                    settings: settings,
+                    request: request(
+                        direction: .receive,
+                        mode: .remembered,
+                        settings: settings,
+                        rememberedCredentialRef: handle,
+                        rememberedGeneration: peer.generation,
+                        rememberedPreviousGeneration: peer.previousGeneration
+                    ),
+                    destinationAccess: destinationAccess,
+                    rememberPersistence: persistence
+                )
+            } catch {
+                handleFailed(error.localizedDescription)
+            }
+        } catch {
+            handleFailed(error.localizedDescription)
+        }
     }
 
     @discardableResult
@@ -922,6 +1338,8 @@ final class TransferViewModel: ObservableObject {
             return false
         }
         pausedByUser = true
+        task?.cancel()
+        task = nil
         cancellation?.cancel()
         cancelPendingNearbyHybridDestination()
         operationID = UUID()
@@ -934,12 +1352,13 @@ final class TransferViewModel: ObservableObject {
 
     @discardableResult
     func resume() -> Bool {
+        guard nativeSendOperationActivityID == nil else { return false }
         let mayResume: Bool
         switch presentationState {
         case .paused?:
             mayResume = true
         case .failed?:
-            mayResume = failure?.retryable == true
+            mayResume = TransferPresentationPolicy.allowsInPlaceResume(failure)
         default:
             mayResume = false
         }
@@ -969,6 +1388,8 @@ final class TransferViewModel: ObservableObject {
             return false
         }
         pausedByUser = false
+        task?.cancel()
+        task = nil
         cancellation?.cancel()
         cancelPendingNearbyHybridDestination()
         operationID = UUID()
@@ -979,12 +1400,18 @@ final class TransferViewModel: ObservableObject {
         updateActivity(state: .canceled, diagnostic: localized("Canceled", "已取消"))
         if let direction = transferActivity?.direction {
             clearStoredManifestSession(direction: direction)
+            if direction == .send {
+                activeSend = nil
+            } else {
+                activeReceive = nil
+            }
         }
         resourceAccess = nil
         return true
     }
 
     func forgetActivity(_ activityID: String) {
+        completedDestinationAccess.removeValue(forKey: activityID)
         guard ownsActivity(activityID) else { return }
         if let direction = transferActivity?.direction {
             clearStoredManifestSession(direction: direction)
@@ -1030,10 +1457,36 @@ final class TransferViewModel: ObservableObject {
         updateActivity(state: .transferring, diagnostic: localized("Transferring", "正在传输"))
     }
 
+    fileprivate func handleConnectionPath(_ event: FfiConnectionPathEvent) {
+        connectionPath = event
+        guard var record = transferActivity else { return }
+        record.connectionPath = event.pathKind
+        record.updatedAt = Date()
+        transferActivity = record
+        appModel?.upsert(record)
+    }
+
     fileprivate func handlePhase(_ next: FfiManifestV2Phase) {
+        if let current = presentationState,
+           TransferPresentationPolicy.isTerminal(current) {
+            return
+        }
+        let direction = transferActivity?.direction ?? .send
+        guard TransferPhasePresentationPolicy.shouldSurface(
+            next,
+            direction: direction,
+            currentState: presentationState,
+            observedBytes: observedTransferred,
+            totalBytes: max(observedTotal, total)
+        ) else {
+            return
+        }
+
         let state: TransferActivityState
         let text: String
         switch next {
+        case .waitingForPeer:
+            state = .waitingForPeer; text = localized("Waiting for peer", "正在等待对端")
         case .pairing:
             state = .pairing; text = localized("Pairing", "正在配对")
         case .connecting:
@@ -1076,15 +1529,27 @@ final class TransferViewModel: ObservableObject {
         observedTransferred = transferred
         observedTotal = total
         bytesPerSec = 0
-        statusText = localized("Delivered", "已送达")
-        updateActivity(state: .delivered, diagnostic: statusText)
-        if let direction = transferActivity?.direction {
+        let direction = transferActivity?.direction
+        if let direction {
             clearStoredManifestSession(direction: direction)
         }
         #if os(iOS)
-        (activeSend?.sourceAccess as? ShareDraftLease)?.acknowledge()
+        if direction == .send {
+            (activeSend?.sourceAccess as? ShareDraftLease)?.acknowledge()
+        }
         #endif
+        if direction == .send {
+            activeSend = nil
+        } else if direction == .receive {
+            if let activityID = transferActivity?.activityId,
+               let resourceAccess {
+                completedDestinationAccess[activityID] = resourceAccess
+            }
+            activeReceive = nil
+        }
         resourceAccess = nil
+        statusText = localized("Delivered", "已送达")
+        updateActivity(state: .delivered, diagnostic: statusText)
     }
 
     fileprivate func handleTransferFailed(_ value: FfiTransferFailure) {
@@ -1095,21 +1560,37 @@ final class TransferViewModel: ObservableObject {
         requiresExceptionalTransferApproval = false
         failure = value
         statusText = friendlyFailure(value, language: displayLanguage)
+        if !value.diagnosticMessage.isEmpty {
+            eventLog.append("failure: \(value.diagnosticMessage)")
+            if eventLog.count > 240 { eventLog.removeFirst(eventLog.count - 240) }
+        }
         transferActivity?.failure = value
         if value.code == .userCanceled || value.code == .senderCanceled {
-            updateActivity(state: .canceled, diagnostic: value.diagnosticMessage)
+            updateActivity(state: .canceled, diagnostic: statusText)
         } else {
-            updateActivity(state: .failed, diagnostic: value.diagnosticMessage)
+            updateActivity(state: .failed, diagnostic: statusText)
+        }
+        if !value.retryable || value.recoveryAction == .rePair {
+            if transferActivity?.direction == .send {
+                activeSend = nil
+            } else {
+                activeReceive = nil
+            }
         }
         resourceAccess = nil
     }
 
     fileprivate func handleDiagnostic(_ message: String) {
-        eventLog.append(message)
+        let projectedMessage: String
+        if message.hasPrefix("connected via ") || message.hasPrefix("path changed:") {
+            projectedMessage = connectionPath.map {
+                "connection path=\($0.pathKind) event=\($0.eventKind)"
+            } ?? "connection path updated"
+        } else {
+            projectedMessage = message
+        }
+        eventLog.append(projectedMessage)
         if eventLog.count > 240 { eventLog.removeFirst(eventLog.count - 240) }
-        transferActivity?.diagnosticMessage = message
-        transferActivity?.updatedAt = Date()
-        if let transferActivity { appModel?.upsert(transferActivity) }
     }
 
     private func startSend(
@@ -1118,8 +1599,16 @@ final class TransferViewModel: ObservableObject {
         request: FfiTransferRequest,
         sourceAccess: AnyObject?,
         roomCode: String? = nil,
-        nearbyWifiAwareDeviceID: String? = nil
+        nearbyWifiAwareDeviceID: String? = nil,
+        rememberPersistence: RememberPersistenceContext? = nil
     ) {
+        guard nativeSendOperationActivityID == nil else {
+            statusText = localized(
+                "Wait for the previous send to finish.",
+                "请等待上一次发送结束。"
+            )
+            return
+        }
         let paths = normalizedPaths(selectedPaths)
         guard !paths.isEmpty else {
             handleFailed(localized("Choose at least one file or folder", "请至少选择一个文件或文件夹"))
@@ -1146,7 +1635,8 @@ final class TransferViewModel: ObservableObject {
                     request: request,
                     stateDirectory: preparedSelection.sessionStateDirectory,
                     sourceAccess: sourceAccess ?? preparedSelection.sourceAccess,
-                    nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
+                    nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID,
+                    rememberPersistence: rememberPersistence
                 ))
             }
             return
@@ -1163,11 +1653,17 @@ final class TransferViewModel: ObservableObject {
             request: request,
             stateDirectory: preparedSelection.sessionStateDirectory,
             sourceAccess: sourceAccess ?? preparedSelection.sourceAccess,
-            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID,
+            rememberPersistence: rememberPersistence
         ))
     }
 
     private func launchSend(_ operation: SendOperation) {
+        guard nativeSendOperationActivityID == nil,
+              let activityID = transferActivity?.activityId else {
+            handleFailed("The previous send is still finishing.")
+            return
+        }
         activeSend = operation
         activeReceive = nil
         resourceAccess = operation.sourceAccess
@@ -1179,9 +1675,20 @@ final class TransferViewModel: ObservableObject {
         } else {
             updateActivity(state: .connecting, diagnostic: localized("Connecting", "正在连接"))
         }
-        let observer = Observer(viewModel: self, operationID: operationID)
+        let expectedOperationID = operationID
+        nativeSendOperationActivityID = activityID
+        nativeSendOperationJobID = operation.jobID
+        let observer = Observer(
+            viewModel: self,
+            operationID: expectedOperationID,
+            rememberPersistence: operation.rememberPersistence,
+            defersDeliveryUntilNativeReturn: true
+        )
         task = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { finishNativeSendOperation(activityID: activityID) }
+            guard
+                  isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
             do {
                 #if os(iOS)
                 if let lease = operation.sourceAccess as? ShareDraftLease,
@@ -1191,15 +1698,27 @@ final class TransferViewModel: ObservableObject {
                 #endif
                 try persistActiveSend(operation)
                 let snapshot = await operation.job.snapshot()
+                guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
                 if snapshot.state != .sealed {
                     _ = try await operation.job.sealForSend()
+                    guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
                     preparedSelection = nil
                     preparedManifestSourcePaths = []
                     pendingSourceSelections = []
                     isManifestSelectionReady = false
                 }
-                try await performSend(operation, cancellation: token, observer: observer)
+                let completion = try await performSend(
+                    operation,
+                    cancellation: token,
+                    observer: observer
+                )
+                guard isCurrentOperation(
+                    expectedOperationID,
+                    activityID: activityID
+                ) else { return }
+                handleCompleted(completion.totalPlaintextBytes)
             } catch {
+                guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
                 if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
@@ -1209,12 +1728,12 @@ final class TransferViewModel: ObservableObject {
         _ operation: SendOperation,
         cancellation: FfiManifestV2Cancellation,
         observer: Observer
-    ) async throws {
+    ) async throws -> FfiManifestV2Completion {
         #if os(iOS) && canImport(WiFiAware)
         if #available(iOS 26.0, *),
            let deviceID = operation.nearbyWifiAwareDeviceID {
-            handleDiagnostic("Nearby hybrid admitted Wi-Fi Aware device \(deviceID)")
-            _ = try await AppleWifiAwareTransportSession.sendNearbyHybrid(
+            handleDiagnostic("Nearby hybrid admitted Wi-Fi Aware route")
+            return try await AppleWifiAwareTransportSession.sendNearbyHybrid(
                 sourceScopedDeviceID: deviceID,
                 job: operation.job,
                 settings: operation.settings,
@@ -1223,10 +1742,9 @@ final class TransferViewModel: ObservableObject {
                 cancellation: cancellation,
                 observer: observer
             )
-            return
         }
         #endif
-        _ = try await sendTransferJobV2(
+        return try await sendTransferJobV2(
             job: operation.job,
             settings: operation.settings,
             request: operation.request,
@@ -1236,13 +1754,22 @@ final class TransferViewModel: ObservableObject {
         )
     }
 
+    private func finishNativeSendOperation(activityID: String) {
+        guard nativeSendOperationActivityID == activityID else { return }
+        nativeSendOperationJobID = nil
+        nativeSendOperationActivityID = nil
+        let actions = nativeSendReleaseActions.removeValue(forKey: activityID) ?? []
+        actions.forEach { $0() }
+    }
+
     private func startReceive(
         targetDirectory: String,
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         destinationAccess: AnyObject?,
         roomCode: String? = nil,
-        nearbyWifiAwareDeviceID: String? = nil
+        nearbyWifiAwareDeviceID: String? = nil,
+        rememberPersistence: RememberPersistenceContext? = nil
     ) {
         displayLanguage = settings.language
         beginActivity(direction: .receive, mode: request.mode, roomCode: roomCode)
@@ -1253,7 +1780,9 @@ final class TransferViewModel: ObservableObject {
                 stateDirectory: try receiveStateDirectory(activityID: transferActivity!.activityId),
                 targetDirectory: targetDirectory,
                 destinationAccess: destinationAccess,
-                nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
+                nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID,
+                rememberPersistence: rememberPersistence,
+                expectedControlOffer: nil
             )
             activeReceive = operation
             activeSend = nil
@@ -1263,15 +1792,40 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    private func launchReceive(_ operation: ReceiveOperation) {
+    private func launchReceive(
+        _ operation: ReceiveOperation,
+        launchSignal: ReceiveLaunchSignal? = nil
+    ) {
         resourceAccess = operation.destinationAccess
         let token = FfiManifestV2Cancellation()
         cancellation = token
         pausedByUser = false
         updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for sender", "等待发送方"))
-        let observer = Observer(viewModel: self, operationID: operationID)
+        let expectedOperationID = operationID
+        let activityID = transferActivity?.activityId
+        let observer = Observer(
+            viewModel: self,
+            operationID: expectedOperationID,
+            rememberPersistence: operation.rememberPersistence,
+            onNativePhase: { phase in
+                guard phase == .waitingForPeer else { return }
+                // Joining is emitted by Rust only after the native receive
+                // future is running. The room-control Accept can now release
+                // the sender without waiting for Matched, which itself needs
+                // that sender to start.
+                launchSignal?.resolve(activityID)
+            },
+            defersDeliveryUntilNativeReturn: true
+        )
         task = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self else {
+                launchSignal?.resolve(nil)
+                return
+            }
+            guard isCurrentOperation(expectedOperationID, activityID: activityID) else {
+                launchSignal?.resolve(nil)
+                return
+            }
             do {
                 try persistActiveReceive(operation)
                 if let completion = try await receiveNearbyHybrid(
@@ -1279,7 +1833,12 @@ final class TransferViewModel: ObservableObject {
                     cancellation: token,
                     observer: observer
                 ) {
+                    guard isCurrentOperation(
+                        expectedOperationID,
+                        activityID: activityID
+                    ) else { return }
                     applyReceiveCompletion(completion)
+                    handleCompleted(completion.totalPlaintextBytes)
                     return
                 }
                 let pending = try await receiveOffer(
@@ -1287,10 +1846,13 @@ final class TransferViewModel: ObservableObject {
                     cancellation: token,
                     observer: observer
                 )
+                guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
                 if try !presentPendingOffer(pending, operation: operation) {
                     continueReceive(pending, operation: operation, exceptionalApproved: false)
                 }
             } catch {
+                guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
+                launchSignal?.resolve(nil)
                 if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
@@ -1318,7 +1880,7 @@ final class TransferViewModel: ObservableObject {
         #if os(iOS) && canImport(WiFiAware)
         if #available(iOS 26.0, *),
            let deviceID = operation.nearbyWifiAwareDeviceID {
-            handleDiagnostic("Nearby hybrid admitted Wi-Fi Aware device \(deviceID)")
+            handleDiagnostic("Nearby hybrid admitted Wi-Fi Aware route")
             return try await AppleWifiAwareTransportSession.receiveNearbyHybrid(
                 sourceScopedDeviceID: deviceID,
                 settings: operation.settings,
@@ -1354,10 +1916,22 @@ final class TransferViewModel: ObservableObject {
         _ pending: FfiPendingManifestV2Receive,
         operation: ReceiveOperation
     ) throws -> Bool {
-        pendingReceive = pending
         let summary = pending.summary()
+        let entries = pending.listEntries(offset: 0, limit: 512).entries
+        if let expectedOffer = operation.expectedControlOffer,
+           !roomControlOfferMatchesManifest(
+               expectedOffer,
+               summary: summary,
+               entries: entries
+           ) {
+            pending.cancel()
+            throw RuntimeSettingsError(
+                "The authenticated file list did not match the offer you accepted."
+            )
+        }
+        pendingReceive = pending
         pendingOfferSummary = summary
-        pendingOfferEntries = pending.listEntries(offset: 0, limit: 512).entries
+        pendingOfferEntries = entries
         total = summary.totalPlaintextBytes
         transferActivity?.itemCount = summary.fileCount + summary.directoryCount
         transferActivity?.totalBytes = total
@@ -1379,9 +1953,16 @@ final class TransferViewModel: ObservableObject {
         operation: ReceiveOperation,
         exceptionalApproved: Bool
     ) {
-        let observer = Observer(viewModel: self, operationID: operationID)
+        let expectedOperationID = operationID
+        let activityID = transferActivity?.activityId
+        let observer = Observer(
+            viewModel: self,
+            operationID: expectedOperationID,
+            defersDeliveryUntilNativeReturn: true
+        )
         task = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self,
+                  isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
             do {
                 let completion = try await pending.receive(
                     destination: try destinationRequest(
@@ -1390,8 +1971,17 @@ final class TransferViewModel: ObservableObject {
                     ),
                     observer: observer
                 )
-                applyReceiveCompletion(completion)
+                guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
+                completedItemURLs = completion.savedPaths.map { URL(fileURLWithPath: $0) }
+                completedFileURL = completedItemURLs.count == 1 ? completedItemURLs[0] : nil
+                transferActivity?.savedPaths = completion.savedPaths
+                pendingReceive = nil
+                pendingOfferSummary = nil
+                pendingOfferEntries = []
+                requiresExceptionalTransferApproval = false
+                handleCompleted(completion.totalPlaintextBytes)
             } catch {
+                guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
                 if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
@@ -1444,16 +2034,21 @@ final class TransferViewModel: ObservableObject {
 
     private func resolveSource(rootItemID: UInt64, decision: FfiSourceDecisionV2, path: String?) {
         guard var selection = preparedSelection else { return }
+        preparationTask?.cancel()
+        let expectedOperationID = UUID()
+        operationID = expectedOperationID
         isPreparingManifest = true
         preparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, expectedOperationID == operationID else { return }
             do {
                 let previousPath = await selection.job.sourcePathForPreview(itemId: rootItemID)
+                guard expectedOperationID == operationID else { return }
                 let snapshot = try await selection.job.resolveSourceIssue(
                     rootItemId: rootItemID,
                     decision: decision,
                     reauthorizedPath: path
                 )
+                guard expectedOperationID == operationID else { return }
                 if decision == .removeSelection {
                     selection.sourcePaths.removeAll { $0 == previousPath }
                 } else if decision == .reauthorize,
@@ -1462,16 +2057,23 @@ final class TransferViewModel: ObservableObject {
                           let index = selection.sourcePaths.firstIndex(of: previousPath) {
                     selection.sourcePaths[index] = path
                 }
+                let projectedPaths = await projectedSourcePaths(job: selection.job, snapshot: snapshot)
+                guard expectedOperationID == operationID else { return }
+                let roots = await selection.job.listRoots()
+                guard expectedOperationID == operationID else { return }
                 preparedSelection = selection
                 applyPreparation(
                     snapshot,
-                    paths: await projectedSourcePaths(job: selection.job, snapshot: snapshot),
-                    roots: await selection.job.listRoots()
+                    paths: projectedPaths,
+                    roots: roots
                 )
             } catch {
+                guard expectedOperationID == operationID else { return }
                 handleFailed(error.localizedDescription)
             }
+            guard expectedOperationID == operationID else { return }
             isPreparingManifest = false
+            preparationTask = nil
         }
     }
 
@@ -1506,6 +2108,13 @@ final class TransferViewModel: ObservableObject {
         return paths
     }
 
+    private func isCurrentOperation(
+        _ expectedOperationID: UUID,
+        activityID: String?
+    ) -> Bool {
+        expectedOperationID == operationID && transferActivity?.activityId == activityID
+    }
+
     private func beginActivity(
         direction: FfiTransferDirection,
         mode: FfiTransferMode,
@@ -1513,6 +2122,7 @@ final class TransferViewModel: ObservableObject {
     ) {
         clearStoredManifestSession(direction: direction)
         task?.cancel()
+        task = nil
         cancellation?.cancel()
         cancelPendingNearbyHybridDestination()
         operationID = UUID()
@@ -1529,6 +2139,7 @@ final class TransferViewModel: ObservableObject {
             failure: nil,
             savedPaths: [],
             roomID: roomCode.flatMap(RemoteLogUpload.roomID),
+            connectionPath: nil,
             updatedAt: Date()
         )
         invite = ""
@@ -1543,6 +2154,7 @@ final class TransferViewModel: ObservableObject {
         completedItemURLs = []
         pendingOfferSummary = nil
         pendingOfferEntries = []
+        connectionPath = nil
         requiresExceptionalTransferApproval = false
         rate = RateTracker()
         eventLog = []
@@ -1581,6 +2193,10 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func persistActiveSend(_ operation: SendOperation) throws {
+        if usesProcessOnlyAuthentication(operation.request.mode) {
+            clearStoredManifestSession(direction: .send)
+            return
+        }
         guard let activity = transferActivity else {
             throw RuntimeSettingsError("Cannot persist a sender session without an activity.")
         }
@@ -1617,6 +2233,10 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func persistActiveReceive(_ operation: ReceiveOperation) throws {
+        if usesProcessOnlyAuthentication(operation.request.mode) {
+            clearStoredManifestSession(direction: .receive)
+            return
+        }
         guard let activity = transferActivity else {
             throw RuntimeSettingsError("Cannot persist a receiver session without an activity.")
         }
@@ -1676,6 +2296,15 @@ final class TransferViewModel: ObservableObject {
         return try manifestRootDirectory().appendingPathComponent(fileName, isDirectory: false)
     }
 
+    private func usesProcessOnlyAuthentication(_ mode: FfiTransferMode) -> Bool {
+        // Transfer authentication material is intentionally never serialized.
+        // Every current route therefore needs a fresh pairing after relaunch.
+        switch mode {
+        case .manual, .invite, .remembered, .showManual, .showInvite, .mdns, .room:
+            return true
+        }
+    }
+
     private func restoreSourceAccess(_ stored: StoredAppleManifestSessionV2) throws -> AnyObject? {
         #if os(iOS)
         if let shareDraftID = stored.shareDraftID {
@@ -1717,6 +2346,64 @@ final class TransferViewModel: ObservableObject {
         return NSArray(array: accesses)
     }
 
+    private func restoreOutboxedSourceAccess(
+        _ entry: RememberedRoomOutboxEntry
+    ) throws -> AnyObject? {
+        #if os(iOS)
+        if let shareDraftID = entry.shareDraftID {
+            let store = try ShareDraftStore.live()
+            let draft = try store.load(id: shareDraftID)
+            let paths = draft.fileURLs.map { $0.standardizedFileURL.path }
+            guard paths == normalizedPaths(entry.sourcePaths) else {
+                throw RuntimeSettingsError(
+                    "The queued Share draft no longer matches its prepared transfer."
+                )
+            }
+            return ShareDraftLease(id: shareDraftID, store: store)
+        }
+        #else
+        guard entry.shareDraftID == nil else {
+            throw RuntimeSettingsError("A queued Share draft cannot be restored on this platform.")
+        }
+        #endif
+
+        guard !entry.sourceBookmarks.isEmpty else {
+            guard entry.sourcePaths.allSatisfy({
+                FileManager.default.isReadableFile(atPath: $0)
+            }) else {
+                throw RuntimeSettingsError(
+                    "A queued source is no longer available. Choose it again."
+                )
+            }
+            return nil
+        }
+        guard entry.sourceBookmarks.count == entry.sourcePaths.count else {
+            throw RuntimeSettingsError("Queued source permissions are incomplete.")
+        }
+        var accesses: [SecurityScopedResourceAccess] = []
+        for (bookmark, expectedPath) in zip(
+            entry.sourceBookmarks,
+            entry.sourcePaths
+        ) {
+            let url = try resolveSecurityScopedFolderBookmark(bookmark)
+            guard url.standardizedFileURL.path
+                    == URL(fileURLWithPath: expectedPath).standardizedFileURL.path else {
+                throw RuntimeSettingsError(
+                    "A queued source moved. Choose it again before retrying."
+                )
+            }
+            let access = SecurityScopedResourceAccess(url: url)
+            guard access.isActive
+                    || FileManager.default.isReadableFile(atPath: url.path) else {
+                throw RuntimeSettingsError(
+                    "A queued source permission expired. Choose it again."
+                )
+            }
+            accesses.append(access)
+        }
+        return NSArray(array: accesses)
+    }
+
     private func restoreDestinationAccess(
         bookmark: Data?,
         fallbackPath: String
@@ -1742,6 +2429,10 @@ final class TransferViewModel: ObservableObject {
         invite: String = "",
         code: String = "",
         token: String = "",
+        rememberConsent: Bool = false,
+        rememberedCredentialRef: String = "",
+        rememberedGeneration: UInt64 = 0,
+        rememberedPreviousGeneration: UInt64? = nil,
         pathPolicy: FfiPathPolicy = .auto
     ) -> FfiTransferRequest {
         let effectiveToken = direction == .receive
@@ -1756,6 +2447,10 @@ final class TransferViewModel: ObservableObject {
             invite: invite,
             code: code,
             token: effectiveToken,
+            rememberConsent: rememberConsent,
+            rememberedCredentialRef: rememberedCredentialRef,
+            rememberedGeneration: rememberedGeneration,
+            rememberedPreviousGeneration: rememberedPreviousGeneration,
             broker: settings.serverUrl,
             relay: settings.relayUrl,
             configPath: settings.configPath,
@@ -1764,16 +2459,33 @@ final class TransferViewModel: ObservableObject {
         )
     }
 
+    private func prepareRememberPersistence(
+        label: String?,
+        settings: EnvoixRuntimeSettings
+    ) -> RememberPersistenceContext? {
+        guard let label, !label.trimmed.isEmpty else { return nil }
+        do {
+            return try RememberPersistenceContext(
+                pending: RememberedPeerStore.shared.prepare(
+                    label: label,
+                    broker: settings.serverUrl,
+                    relay: settings.relayUrl
+                )
+            )
+        } catch {
+            handleFailed(error.localizedDescription)
+            return nil
+        }
+    }
+
     private func rendezvousPlan(for mode: FfiTransferMode) -> FfiRendezvousPlan {
         switch mode {
         case .room:
-            return FfiRendezvousPlan(
-                useRoom: UserDefaults.standard.object(forKey: "envoix.useRoom") as? Bool ?? true,
-                useMdns: UserDefaults.standard.object(forKey: "envoix.useMdns") as? Bool ?? true,
-                internetAvailable: true
-            )
+            return FfiRendezvousPlan(useRoom: true, useMdns: false, internetAvailable: true)
         case .mdns:
             return FfiRendezvousPlan(useRoom: false, useMdns: true, internetAvailable: true)
+        case .remembered:
+            return FfiRendezvousPlan(useRoom: true, useMdns: false, internetAvailable: true)
         default:
             return FfiRendezvousPlan(useRoom: false, useMdns: false, internetAvailable: true)
         }
@@ -1852,23 +2564,57 @@ final class TransferViewModel: ObservableObject {
 final class Observer: TransferObserver, @unchecked Sendable {
     private weak var viewModel: TransferViewModel?
     private let operationID: UUID
+    private let rememberPersistence: RememberPersistenceContext?
+    private let onNativePhase: (@MainActor (FfiManifestV2Phase) -> Void)?
+    private let defersDeliveryUntilNativeReturn: Bool
 
-    init(viewModel: TransferViewModel, operationID: UUID) {
+    init(
+        viewModel: TransferViewModel,
+        operationID: UUID,
+        rememberPersistence: RememberPersistenceContext? = nil,
+        onNativePhase: (@MainActor (FfiManifestV2Phase) -> Void)? = nil,
+        defersDeliveryUntilNativeReturn: Bool = false
+    ) {
         self.viewModel = viewModel
         self.operationID = operationID
+        self.rememberPersistence = rememberPersistence
+        self.onNativePhase = onNativePhase
+        self.defersDeliveryUntilNativeReturn = defersDeliveryUntilNativeReturn
     }
 
     func onInviteReady(invite: String) { hop { $0.handleInvite(invite) } }
     func onStarted(itemCount: UInt32, totalBytes: UInt64) {
         hop { $0.handleStarted(itemCount: itemCount, totalBytes: totalBytes) }
     }
-    func onPhase(phase: FfiManifestV2Phase) { hop { $0.handlePhase(phase) } }
+    func onPhase(phase: FfiManifestV2Phase) {
+        hop { [onNativePhase, defersDeliveryUntilNativeReturn] viewModel in
+            onNativePhase?(phase)
+            guard NativeTerminalDeliveryPolicy.shouldForwardPhase(
+                phase,
+                defersUntilNativeReturn: defersDeliveryUntilNativeReturn
+            ) else {
+                return
+            }
+            viewModel.handlePhase(phase)
+        }
+    }
     func onProgress(transferred: UInt64, total: UInt64) {
         hop { $0.handleProgress(transferred, total) }
     }
-    func onCompleted(bytes: UInt64) { hop { $0.handleCompleted(bytes) } }
+    func onCompleted(bytes: UInt64) {
+        guard NativeTerminalDeliveryPolicy.shouldForwardObserverCompletion(
+            defersUntilNativeReturn: defersDeliveryUntilNativeReturn
+        ) else {
+            return
+        }
+        hop { $0.handleCompleted(bytes) }
+    }
     func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
+    func onConnectionPath(event: FfiConnectionPathEvent) { hop { $0.handleConnectionPath(event) } }
     func onDiagnostic(message: String) { hop { $0.handleDiagnostic(message) } }
+    func onRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
+        rememberPersistence?.persist(opaqueCredential, generation: generation) ?? false
+    }
 
     private func hop(_ body: @escaping @MainActor (TransferViewModel) -> Void) {
         Task { @MainActor [weak viewModel, operationID] in
@@ -1931,6 +2677,20 @@ func friendlyFailure(
         return AppText.value("Connection lost. Resume to continue.", "连接已断开，可恢复继续。", language: language)
     case .authenticationFailed:
         return AppText.value("Pairing authentication failed.", "配对认证失败。", language: language)
+    case .roomNotFound:
+        return AppText.value("The Room is not available yet. Ask the creator to keep it open and retry.", "房间尚不可用。请让创建者保持房间开启后重试。", language: language)
+    case .roomExpired:
+        return AppText.value("This Room expired. Create a new Room Code.", "此房间已过期。请创建新的房间码。", language: language)
+    case .roomFull:
+        return AppText.value("This Room is already in use. Retry shortly.", "此房间正在使用中。请稍后重试。", language: language)
+    case .roomRateLimited, .endpointRateLimited, .ipRateLimited:
+        return AppText.value("Too many Room attempts. Wait before retrying.", "房间尝试次数过多。请稍后再试。", language: language)
+    case .roomUnderAttack:
+        return AppText.value("This Room was closed for security. Create a new Room Code.", "此房间因安全原因已关闭。请创建新的房间码。", language: language)
+    case .serverBusy:
+        return AppText.value("The Room service is busy. Retry shortly.", "房间服务繁忙。请稍后重试。", language: language)
+    case .malformedJoin, .unsupportedRendezvousVersion:
+        return AppText.value("Update Envoix before joining this Room.", "请更新 Envoix 后再加入此房间。", language: language)
     case .senderPermissionLost:
         return AppText.value("Source permission expired. Choose the source again.", "来源权限已失效，请重新选择。", language: language)
     case .senderSourceUnavailable, .senderItemRemoved:
@@ -1958,8 +2718,6 @@ func friendlyFailure(
     case .unsupportedFeature:
         return AppText.value("This transfer request is not supported.", "不支持此传输请求。", language: language)
     case .internalError:
-        return diagnosticMessage.isEmpty
-            ? AppText.value("The transfer failed.", "传输失败。", language: language)
-            : diagnosticMessage
+        return AppText.value("The transfer failed.", "传输失败。", language: language)
     }
 }

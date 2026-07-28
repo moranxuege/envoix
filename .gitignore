@@ -11,9 +11,6 @@ __pycache__/
 
 .DS_Store
 
-# Local implementation plans; keep reviewed architecture documents tracked.
-/docs/design/wifi-aware-vertical-slice.md
-
 # Apple app: generated project + build output + packaged artifacts
 /apps/envoix-apple/*.xcodeproj
 /apps/envoix-apple/build*/

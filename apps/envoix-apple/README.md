@@ -65,6 +65,18 @@ macOS supports mixed multi-file/folder selection and drag/drop through the same
 job preparation API. Security-scoped source and destination access is retained
 for the lifetime of the active job.
 
+## Invitations
+
+Both Send and Receive can create an `envoix://invite/v2/<payload>` QR plus the
+same `dddddd-xxxx-xxxx` Room Code. Deep links route to the invitation's
+authenticated joiner role; scans and clipboard input inside an existing flow
+must match that flow. Legacy invitation formats are rejected.
+
+Pending InviteV2 credentials are process-memory-only. Apple relaunch records do
+not persist full payloads, Room Codes, or tickets, so an invitation that was
+still pairing must be created or entered again after process exit. Persistent
+remembered-peer credentials remain deferred to Issue 58.
+
 ## Generated interface
 
 The Rust declarations in `crates/envoix-ffi/src` are the source of truth.

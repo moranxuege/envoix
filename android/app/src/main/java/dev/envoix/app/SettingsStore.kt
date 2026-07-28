@@ -2,6 +2,8 @@ package dev.envoix.app
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
+import dev.envoix.app.discovery.DiscoveryPeerRegistry
 import dev.envoix.app.ui.AppText
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +33,12 @@ data class Settings(
     val defaultRole: String = "receive",
     /** Canonical Manifest-v2 compression policy: never, always, or smart. */
     val compressionPolicy: String = "smart",
+    /** Public nearby label. This is presentation only, never authenticated identity. */
+    val nearbyDisplayName: String = Build.MODEL,
+    /** hidden, everyone_10m, or foreground. */
+    val nearbyVisibility: String = "hidden",
+    /** Wall-clock deadline used only by everyone_10m. */
+    val nearbyVisibilityExpiresAtEpochMs: Long = 0L,
     // rendezvous routes: receivers listen concurrently; senders prefer Room then mDNS
     val useRoom: Boolean = true,
     val useMdns: Boolean = true,
@@ -72,6 +80,13 @@ object SettingsStore {
                 saveTreeUri = prefs.getString("saveTreeUri", "")!!,
                 defaultRole = prefs.getString("defaultRole", "receive")!!,
                 compressionPolicy = prefs.getString("compressionPolicy", "smart")!!,
+                nearbyDisplayName =
+                    DiscoveryPeerRegistry.sanitizeDisplayName(
+                        prefs.getString("nearbyDisplayName", Build.MODEL),
+                    ) ?: "Android device",
+                nearbyVisibility = prefs.getString("nearbyVisibility", "hidden")!!,
+                nearbyVisibilityExpiresAtEpochMs =
+                    prefs.getLong("nearbyVisibilityExpiresAtEpochMs", 0L),
                 useRoom = prefs.getBoolean("useRoom", true),
                 useMdns = prefs.getBoolean("useMdns", true),
                 devMode = prefs.getBoolean("devMode", false),
@@ -103,6 +118,9 @@ object SettingsStore {
             .putString("saveTreeUri", s.saveTreeUri)
             .putString("defaultRole", s.defaultRole)
             .putString("compressionPolicy", s.compressionPolicy)
+            .putString("nearbyDisplayName", s.nearbyDisplayName)
+            .putString("nearbyVisibility", s.nearbyVisibility)
+            .putLong("nearbyVisibilityExpiresAtEpochMs", s.nearbyVisibilityExpiresAtEpochMs)
             .putBoolean("useRoom", s.useRoom)
             .putBoolean("useMdns", s.useMdns)
             .putBoolean("devMode", s.devMode)
@@ -111,6 +129,26 @@ object SettingsStore {
             .putString("logServer", s.logServer)
             .apply()
         _settings.value = s
+    }
+
+    fun setNearbyDisplayName(value: String): Boolean {
+        val normalized = DiscoveryPeerRegistry.sanitizeDisplayName(value) ?: return false
+        update { it.copy(nearbyDisplayName = normalized) }
+        return true
+    }
+
+    fun setNearbyVisibility(
+        mode: String,
+        nowEpochMs: Long = System.currentTimeMillis(),
+    ) {
+        require(mode == "hidden" || mode == "everyone_10m" || mode == "foreground")
+        update {
+            it.copy(
+                nearbyVisibility = mode,
+                nearbyVisibilityExpiresAtEpochMs =
+                    if (mode == "everyone_10m") nowEpochMs + TEN_MINUTES_MS else 0L,
+            )
+        }
     }
 
     private const val LOG_BASELINE = "envoix=debug,iroh=info,warn"
@@ -199,4 +237,6 @@ object SettingsStore {
                 }
             s.copy(candidatesDeny = deny)
         }
+
+    private const val TEN_MINUTES_MS = 10L * 60L * 1_000L
 }

@@ -122,7 +122,7 @@ internal object AndroidWifiAwareCapabilityProbe {
             )
 
         if (
-            apiLevel < WIFI_AWARE_PAIRING_MIN_API ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
             !featurePresent ||
             permissionState != WifiAwarePermissionState.GRANTED ||
             wifiManager == null ||

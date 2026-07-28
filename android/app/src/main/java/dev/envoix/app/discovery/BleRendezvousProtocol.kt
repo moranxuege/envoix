@@ -48,7 +48,7 @@ internal object BleRendezvousProtocol {
     private const val ENVELOPE_TYPE_INVITE: Byte = 1
     private const val PEER_KEY_BYTES = 16
     private const val ENVELOPE_FIXED_BYTES = 6 + PEER_KEY_BYTES
-    private const val INVITE_PREFIX = "envoix://pair/"
+    private val INVITE_PREFIXES = listOf("envoix://pair/", "envoix://room/")
 
     fun encodeInvite(
         identity: LocalDiscoveryIdentity,
@@ -59,7 +59,7 @@ internal object BleRendezvousProtocol {
     ): List<ByteArray>? {
         val peerKey = DiscoveryPeerRegistry.normalizePeerKey(identity.peerKey) ?: return null
         val inviteBytes = invite.trim().toByteArray(StandardCharsets.UTF_8)
-        if (!invite.trim().startsWith(INVITE_PREFIX, ignoreCase = true) ||
+        if (!supportedInvite(invite) ||
             inviteBytes.isEmpty() ||
             inviteBytes.size > MAX_INVITE_BYTES
         ) {
@@ -178,7 +178,7 @@ internal object BleRendezvousProtocol {
             decodeUtf8(bytes, ENVELOPE_FIXED_BYTES, nameLength)
                 ?.let(DiscoveryPeerRegistry::sanitizeDisplayName)
         val invite = decodeUtf8(bytes, ENVELOPE_FIXED_BYTES + nameLength, inviteLength)?.trim() ?: return null
-        if (!invite.startsWith(INVITE_PREFIX, ignoreCase = true)) return null
+        if (!supportedInvite(invite)) return null
         return BleRendezvousInvite(
             requestId = requestId.toULong().toString(16).padStart(16, '0'),
             senderPeerKey = peerKey,
@@ -198,6 +198,13 @@ internal object BleRendezvousProtocol {
             result.write(encoded)
         }
         return result.toByteArray()
+    }
+
+    private fun supportedInvite(invite: String): Boolean {
+        val normalized = invite.trim()
+        return INVITE_PREFIXES.any { prefix ->
+            normalized.startsWith(prefix, ignoreCase = true)
+        }
     }
 
     private fun decodeUtf8(

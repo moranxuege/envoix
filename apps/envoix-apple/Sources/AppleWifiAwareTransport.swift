@@ -15,6 +15,9 @@ enum AppleWifiAwareTransportError: Error {
     case serviceNotDeclared
     case listenerFinishedWithoutResult
     case receiverConnectionReadyTimedOut
+    case browserReadyTimedOut
+    case peerReadyTimedOut
+    case invalidPeerReadyDatagram
     case invalidReadBound
     case datagramExceedsBound
     case datagramChannelClosed
@@ -43,6 +46,23 @@ struct AppleWifiAwarePerformanceSample: Sendable {
 @available(iOS 26.0, *)
 typealias AppleWifiAwarePerformanceObserver =
     @Sendable (AppleWifiAwarePerformanceSample) -> Void
+
+@available(iOS 26.0, *)
+enum AppleWifiAwareFallbackBoundary {
+    static func crosses(for phase: FfiManifestV2Phase) -> Bool {
+        switch phase {
+        case .waitingForPeer, .pairing, .connecting:
+            false
+        case .transferring, .verifying, .saving, .waitingForReceiverSave,
+             .finalizingDelivery, .delivered:
+            true
+        }
+    }
+
+    static func crosses(for recoveryAction: FfiRecoveryAction) -> Bool {
+        recoveryAction == .rePair
+    }
+}
 
 /// Apple requires matching performance modes on both endpoints. Keep the
 /// system-recommended bulk mode explicit and retain the default best-effort
@@ -98,6 +118,7 @@ enum AppleWifiAwareTransportSession {
         performanceObserver: AppleWifiAwarePerformanceObserver? = nil
     ) async throws -> FfiManifestV2Completion {
         let fallbackObserver = AppleWifiAwareFallbackObserver(downstream: observer)
+        let wifiAwareStartedAt = ContinuousClock().now
         do {
             let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
             return try await withSenderTransport(
@@ -124,6 +145,10 @@ enum AppleWifiAwareTransportSession {
                 fallbackObserver.forwardSuppressedFailure()
                 throw error
             }
+            try await awaitFallbackAlignment(
+                since: wifiAwareStartedAt,
+                cancellation: cancellation
+            )
             observer.onDiagnostic(message: Self.fallbackDiagnostic)
             fallbackObserver.activateFallback()
             return try await sendTransferJobV2(
@@ -150,6 +175,7 @@ enum AppleWifiAwareTransportSession {
         ) async throws -> FfiDestinationRequestV2
     ) async throws -> FfiManifestV2Completion {
         let fallbackObserver = AppleWifiAwareFallbackObserver(downstream: observer)
+        let wifiAwareStartedAt = ContinuousClock().now
         do {
             let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
             return try await withReceiverTransport(
@@ -181,6 +207,10 @@ enum AppleWifiAwareTransportSession {
                 fallbackObserver.forwardSuppressedFailure()
                 throw error
             }
+            try await awaitFallbackAlignment(
+                since: wifiAwareStartedAt,
+                cancellation: cancellation
+            )
             observer.onDiagnostic(message: Self.fallbackDiagnostic)
             fallbackObserver.activateFallback()
             let pending = try await receiveTransferOfferV2(
@@ -218,6 +248,20 @@ enum AppleWifiAwareTransportSession {
             !observer.sawTerminalCancellation &&
             !observer.crossedFallbackBoundary &&
             isRecoverableWifiAwareFailure(error)
+    }
+
+    private static func awaitFallbackAlignment(
+        since startedAt: ContinuousClock.Instant,
+        cancellation: FfiManifestV2Cancellation
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = startedAt.advanced(by: connectionReadyTimeout)
+        while clock.now < deadline {
+            guard !cancellation.isCancelled() else {
+                throw CancellationError()
+            }
+            try await Task<Never, Never>.sleep(for: connectionReadyPollInterval)
+        }
     }
 
     private static let fallbackDiagnostic =
@@ -318,11 +362,17 @@ enum AppleWifiAwareTransportSession {
                             connection: connection
                         )
                     }
-                    let transport = AppleWifiAwareDatagramTransport(connection)
+                    let transport = AppleWifiAwareDatagramTransport(
+                        connection,
+                        role: "receiver",
+                        discardingInitialDatagram: peerHelloDatagram
+                    )
                     do {
                         try await awaitReady(connection, role: "receiver")
                         try await requireWifiAwarePath(connection)
                         let maximumDatagramSize = try requireDatagramCapacity(connection)
+                        try await connection.send(peerReadyDatagram)
+                        logger.info("role=receiver handshake=peer_ready_sent")
                         readyContinuation.yield()
                         readyContinuation.finish()
                         await reportPerformance(
@@ -417,12 +467,7 @@ enum AppleWifiAwareTransportSession {
         .onStateUpdate { _, state in
             Self.logBrowserState(state)
         }
-        let endpoint: WAEndpoint = try await browser.run { endpoints in
-            guard let endpoint = endpoints.first(where: { $0.device.id == device.id }) else {
-                return .continue
-            }
-            return .finish(endpoint)
-        }
+        let endpoint = try await discoverEndpoint(for: device, using: browser)
         let connection: NetworkConnection<UDP> = NetworkConnection(
             to: endpoint,
             using: envoixWifiAwareUDPParameters()
@@ -434,11 +479,15 @@ enum AppleWifiAwareTransportSession {
                 connection: connection
             )
         }
-        let transport = AppleWifiAwareDatagramTransport(connection)
+        let transport = AppleWifiAwareDatagramTransport(connection, role: "sender")
         do {
             try await awaitReady(connection, role: "sender")
             try await requireWifiAwarePath(connection)
             let maximumDatagramSize = try requireDatagramCapacity(connection)
+            try await connection.send(peerHelloDatagram)
+            logger.info("role=sender handshake=peer_hello_sent")
+            try await awaitPeerReady(using: transport)
+            logger.info("role=sender handshake=peer_ready_received")
             await reportPerformance(
                 connection,
                 role: "sender",
@@ -485,6 +534,55 @@ enum AppleWifiAwareTransportSession {
         throw AppleWifiAwareTransportError.connectionReadyTimedOut
     }
 
+    private static func discoverEndpoint(
+        for device: WAPairedDevice,
+        using browser: NetworkBrowser<WASubscriberBrowser>
+    ) async throws -> WAEndpoint {
+        try await withThrowingTaskGroup(of: WAEndpoint.self) { group in
+            group.addTask {
+                try await browser.run { endpoints in
+                    guard let endpoint = endpoints.first(where: { $0.device.id == device.id }) else {
+                        return .continue
+                    }
+                    return .finish(endpoint)
+                }
+            }
+            group.addTask {
+                try await Task<Never, Never>.sleep(for: connectionReadyTimeout)
+                throw AppleWifiAwareTransportError.browserReadyTimedOut
+            }
+            defer { group.cancelAll() }
+            guard let endpoint = try await group.next() else {
+                throw AppleWifiAwareTransportError.browserReadyTimedOut
+            }
+            return endpoint
+        }
+    }
+
+    private static func awaitPeerReady(
+        using transport: FfiNativeDatagramTransport
+    ) async throws {
+        let received = try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                try await transport.receiveDatagram(
+                    maxBytes: UInt32(peerReadyDatagram.count)
+                ).bytes
+            }
+            group.addTask {
+                try await Task<Never, Never>.sleep(for: connectionReadyTimeout)
+                throw AppleWifiAwareTransportError.peerReadyTimedOut
+            }
+            defer { group.cancelAll() }
+            guard let datagram = try await group.next() else {
+                throw AppleWifiAwareTransportError.peerReadyTimedOut
+            }
+            return datagram
+        }
+        guard received == peerReadyDatagram else {
+            throw AppleWifiAwareTransportError.invalidPeerReadyDatagram
+        }
+    }
+
     private static func requireDatagramCapacity(
         _ connection: NetworkConnection<UDP>
     ) throws -> UInt32 {
@@ -499,6 +597,8 @@ enum AppleWifiAwareTransportSession {
     private static let minimumQUICDatagramSize = 1_200
     private static let connectionReadyTimeout: Duration = .seconds(20)
     private static let connectionReadyPollInterval: Duration = .milliseconds(50)
+    private static let peerHelloDatagram = Data("envoix-wifi-aware-hello-v1".utf8)
+    private static let peerReadyDatagram = Data("envoix-wifi-aware-ready-v1".utf8)
 
     private static func reportPerformance(
         _ connection: NetworkConnection<UDP>,
@@ -622,19 +722,50 @@ enum AppleWifiAwareTransportSession {
 /// recovery, and final delivery authority.
 @available(iOS 26.0, *)
 private actor AppleWifiAwareDatagramTransport: FfiNativeDatagramTransport {
+    private static let bootstrapMagic = Data("ENVXWA02".utf8)
+    private static let logger = Logger(
+        subsystem: "com.envoix.app.ios",
+        category: "wifi-aware-transport"
+    )
+
     private let connection: NetworkConnection<UDP>
     private let inbox: AppleWifiAwareDatagramInbox
+    private let role: String
     private var receiveTask: Task<Void, Never>?
+    private var bootstrapSendCount = 0
     private var closed = false
 
-    init(_ connection: NetworkConnection<UDP>) {
+    init(
+        _ connection: NetworkConnection<UDP>,
+        role: String,
+        discardingInitialDatagram: Data? = nil
+    ) {
         self.connection = connection
+        self.role = role
         let inbox = AppleWifiAwareDatagramInbox()
         self.inbox = inbox
         receiveTask = Task {
+            var initialDatagram = discardingInitialDatagram
+            var bootstrapReceiveCount = 0
             do {
-                while !Task.isCancelled {
-                    let message = try await connection.receive()
+                for try await message in connection.messages {
+                    try Task.checkCancellation()
+                    if message.content == initialDatagram {
+                        Self.logger.info(
+                            "role=\(role, privacy: .public) control_datagram=peer_hello_discarded"
+                        )
+                        initialDatagram = nil
+                        continue
+                    }
+                    if message.content.starts(with: Self.bootstrapMagic) {
+                        bootstrapReceiveCount += 1
+                        let attempt = bootstrapReceiveCount
+                        if attempt == 1 || attempt.isMultiple(of: 10) {
+                            Self.logger.info(
+                                "role=\(role, privacy: .public) iroh_bootstrap=received attempt=\(attempt, privacy: .public) bytes=\(message.content.count, privacy: .public)"
+                            )
+                        }
+                    }
                     await inbox.deliver(message.content)
                 }
                 await inbox.finish(reason: nil)
@@ -653,8 +784,28 @@ private actor AppleWifiAwareDatagramTransport: FfiNativeDatagramTransport {
         guard bytes.count <= connection.maximumDatagramSize else {
             throw Self.project(AppleWifiAwareTransportError.datagramExceedsBound)
         }
+        let isBootstrap = bytes.starts(with: Self.bootstrapMagic)
+        let bootstrapAttempt: Int?
+        if isBootstrap {
+            bootstrapSendCount += 1
+            bootstrapAttempt = bootstrapSendCount
+            if bootstrapSendCount == 1 || bootstrapSendCount.isMultiple(of: 10) {
+                Self.logger.info(
+                    "role=\(self.role, privacy: .public) iroh_bootstrap=sending attempt=\(self.bootstrapSendCount, privacy: .public) bytes=\(bytes.count, privacy: .public)"
+                )
+            }
+        } else {
+            bootstrapAttempt = nil
+        }
         do {
             try await connection.send(bytes)
+            if let bootstrapAttempt,
+               bootstrapAttempt == 1 || bootstrapAttempt.isMultiple(of: 10)
+            {
+                Self.logger.info(
+                    "role=\(self.role, privacy: .public) iroh_bootstrap=sent attempt=\(bootstrapAttempt, privacy: .public)"
+                )
+            }
         } catch {
             throw Self.project(error)
         }
@@ -679,9 +830,8 @@ private actor AppleWifiAwareDatagramTransport: FfiNativeDatagramTransport {
         closed = true
         let task = receiveTask
         receiveTask = nil
-        task?.cancel()
-        _ = await task?.result
         await inbox.finish(reason: nil)
+        task?.cancel()
     }
 
     nonisolated private static func project(_ error: Error) -> FfiNativeTransportError {
@@ -753,7 +903,7 @@ private final class AppleWifiAwareFallbackObserver: TransferObserver, @unchecked
     }
 
     func onPhase(phase: FfiManifestV2Phase) {
-        if phase != .pairing && phase != .connecting {
+        if AppleWifiAwareFallbackBoundary.crosses(for: phase) {
             crossFallbackBoundary()
         }
         downstream.onPhase(phase: phase)
@@ -768,6 +918,9 @@ private final class AppleWifiAwareFallbackObserver: TransferObserver, @unchecked
     }
 
     func onTransferFailed(failure: FfiTransferFailure) {
+        if AppleWifiAwareFallbackBoundary.crosses(for: failure.recoveryAction) {
+            crossFallbackBoundary()
+        }
         if failure.code == .userCanceled || failure.code == .senderCanceled {
             lock.lock()
             terminalCancellation = true
@@ -786,17 +939,29 @@ private final class AppleWifiAwareFallbackObserver: TransferObserver, @unchecked
         }
     }
 
+    func onConnectionPath(event: FfiConnectionPathEvent) {
+        downstream.onConnectionPath(event: event)
+    }
+
     func onDiagnostic(message: String) {
         if message.hasPrefix("connected via ") {
             crossFallbackBoundary()
         }
         downstream.onDiagnostic(message: message)
     }
+
+    func onRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
+        downstream.onRememberedCredential(
+            opaqueCredential: opaqueCredential,
+            generation: generation
+        )
+    }
 }
 
 @available(iOS 26.0, *)
 private actor AppleWifiAwareDatagramInbox {
     private struct Waiter {
+        let id: UInt64
         let maxBytes: Int
         let continuation: CheckedContinuation<Data, Error>
     }
@@ -813,6 +978,7 @@ private actor AppleWifiAwareDatagramInbox {
     private var pendingDelivery: PendingDelivery?
     private var finished = false
     private var failureReason: String?
+    private var nextWaiterID: UInt64 = 0
 
     func deliver(_ datagram: Data) async {
         guard !finished else { return }
@@ -868,9 +1034,31 @@ private actor AppleWifiAwareDatagramInbox {
         guard waiter == nil else {
             throw AppleWifiAwareTransportError.concurrentReceive
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiter = Waiter(maxBytes: maxBytes, continuation: continuation)
+        let waiterID = nextWaiterID
+        nextWaiterID &+= 1
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                waiter = Waiter(
+                    id: waiterID,
+                    maxBytes: maxBytes,
+                    continuation: continuation
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID)
+            }
         }
+    }
+
+    private func cancelWaiter(id: UInt64) {
+        guard let waiter, waiter.id == id else { return }
+        self.waiter = nil
+        waiter.continuation.resume(throwing: CancellationError())
     }
 
     private func resumePendingDelivery() {

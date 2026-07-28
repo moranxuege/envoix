@@ -1,7 +1,8 @@
 //! Room rendezvous broker.
 //!
-//! Two peers that share a short code both connect to the broker and present the
-//! same room id. The broker matches them, tells each its SPAKE2 role
+//! Two peers connect to the broker and present the same room locator. The broker
+//! matches an invitation creator to a joiner with complementary transfer roles,
+//! tells each its fixed SPAKE2 role
 //! ([`Role::Initiator`] / [`Role::Responder`]), then **blindly relays raw bytes**
 //! between them. The end-to-end pairing (SPAKE2 + sealed peer descriptors, see
 //! `envoix-pairing`) runs *through* this relay, so the broker never sees
@@ -12,14 +13,19 @@
 //! duplex in tests).
 
 mod broker;
+mod config;
 mod io;
 mod peer;
 mod protocol;
 
-pub use broker::RoomRegistry;
+pub use broker::{BrokerMetricsSnapshot, PeerSource, RoomRegistry};
+pub use config::{BrokerConfig, RateLimitConfig};
+pub use envoix_invite::{BootstrapKind, InvitationSide, TransferRole};
 pub use io::{read_framed, write_framed};
 pub use peer::{CloseWaiter, PeerConn};
-pub use protocol::{Join, JoinIntent, Paired, Reply, Role};
+pub use protocol::{
+    BrokerOutcome, BrokerRejection, Join, Paired, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role,
+};
 
 /// Errors from the rendezvous broker.
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +38,8 @@ pub enum RendezvousError {
     FrameTooLarge,
     #[error("pairing window expired before a partner joined the room")]
     Expired,
-    #[error("join rejected: {0}")]
-    Rejected(&'static str),
+    #[error("join rejected: {outcome}", outcome = .0.code())]
+    Rejected(BrokerOutcome),
+    #[error("rendezvous deadline elapsed")]
+    Timeout,
 }

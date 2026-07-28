@@ -7,6 +7,7 @@ members = [
     "crates/envoix-client",
     "crates/envoix-error",
     "crates/envoix-ffi",
+    "crates/envoix-invite",
     "crates/envoix-pairing",
     "crates/envoix-protocol",
     "crates/envoix-rendezvous",
@@ -28,6 +29,7 @@ envoix-auth = { path = "crates/envoix-auth" }
 envoix-client = { path = "crates/envoix-client" }
 envoix-error = { path = "crates/envoix-error" }
 envoix-ffi = { path = "crates/envoix-ffi" }
+envoix-invite = { path = "crates/envoix-invite" }
 envoix-pairing = { path = "crates/envoix-pairing" }
 envoix-protocol = { path = "crates/envoix-protocol" }
 envoix-rendezvous = { path = "crates/envoix-rendezvous" }
@@ -51,6 +53,7 @@ chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
 hmac = "0.12"
+hkdf = "0.12"
 iroh = { version = "1", features = ["unstable-custom-transports"] }
 iroh-base = "1"
 iroh-mdns-address-lookup = "0.4"

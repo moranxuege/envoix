@@ -178,19 +178,6 @@ fun SettingsScreen(onBack: () -> Unit) {
             checked = SettingsStore.avoidsTailscale(settings),
         ) { SettingsStore.setAvoidTailscale(it) }
 
-        Spacer(Modifier.height(18.dp))
-        ToggleRow(
-            title = appText("Internet pairing", "互联网配对"),
-            subtitle = appText("Pair through the rendezvous broker — works anywhere.", "通过会合服务器配对，可在任意网络使用。"),
-            checked = settings.useRoom,
-        ) { SettingsStore.update { s -> s.copy(useRoom = it) } }
-        Spacer(Modifier.height(18.dp))
-        ToggleRow(
-            title = appText("Local Wi-Fi pairing (mDNS)", "局域网 Wi-Fi 配对（mDNS）"),
-            subtitle = appText("Also try nearby devices on the same Wi-Fi — works with no internet.", "同时发现同一 Wi-Fi 下的附近设备，无需互联网。"),
-            checked = settings.useMdns,
-        ) { SettingsStore.update { s -> s.copy(useMdns = it) } }
-
         Spacer(Modifier.height(26.dp))
         AdvancedHeader(showAdvanced) { showAdvanced = !showAdvanced }
         if (showAdvanced) {

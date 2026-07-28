@@ -9,6 +9,21 @@ interface ManifestV2Callback {
     fun onPlanRequired(requestJson: String): String
 
     fun onSaveRequired(requestJson: String): String
+
+    /** Persist a negotiated or rotated opaque relationship credential before
+     * the core sends any Manifest frame. */
+    fun onRememberedCredential(
+        opaqueCredential: ByteArray,
+        generation: Long,
+    ): Boolean
+}
+
+interface RoomControlCallback {
+    fun onEvent(json: String)
+}
+
+interface NearbyInviteCallback {
+    fun onEvent(json: String)
 }
 
 /** Platform-owned reliable byte stream. Null from [receive] is EOF. Rust owns
@@ -55,17 +70,66 @@ object Native {
     /** Wire the Android VM + app context into the Rust network stack. Call once. */
     external fun initContext(context: android.content.Context)
 
-    /** Generate a room invite for [role] ("send"/"receive"). Returns JSON
-     *  `{"code":..,"payload":..}` (payload = the QR string), or `{"error":..}`. */
+    /** Generate a directional InviteV2 for [role] ("send"/"receive"). */
     external fun generateInvite(
         role: String,
         broker: String,
         relay: String,
     ): String
 
-    /** Parse a typed code or a scanned `envoix://` payload. Returns JSON
-     *  `{"code":..,"broker":..,"relay":..,"role":..}`, or `{"error":..}`. */
+    /** Parse a complete InviteV2 for deep-link routing. */
     external fun parseInvite(input: String): String
+
+    external fun generateRoomControlInvite(
+        broker: String,
+        relay: String,
+    ): String
+
+    external fun parseRoomControlInvite(
+        input: String,
+        fallbackBroker: String,
+        fallbackRelay: String,
+    ): String
+
+    external fun startRoomControlSession(
+        id: Long,
+        paramsJson: String,
+        callback: RoomControlCallback,
+    )
+
+    external fun sendRoomControlCommand(
+        id: Long,
+        commandJson: String,
+    ): String
+
+    external fun cancelRoomControlSession(id: Long)
+
+    external fun startNearbyInviteInbox(
+        id: Long,
+        paramsJson: String,
+        callback: NearbyInviteCallback,
+    )
+
+    external fun sendNearbyInvite(
+        id: Long,
+        requestId: String,
+        routeJson: String,
+        invite: String,
+    ): String
+
+    external fun stopNearbyInviteInbox(id: Long)
+
+    /** Validate a complete invitation or Room Code for an active flow. */
+    external fun parseInviteForRole(
+        input: String,
+        role: String,
+    ): String
+
+    /** Strictly normalize a canonical or separator-free Room Code. */
+    external fun normalizeRoomCode(input: String): String
+
+    /** Validate protected bytes and return a process-only core reference. */
+    external fun registerRememberedCredential(opaqueCredential: ByteArray): String
 
     /** Create the durable canonical job as soon as the first source is chosen. */
     external fun createManifestV2Job(
@@ -82,6 +146,20 @@ object Native {
         storeDirectory: String,
         jobId: String,
         rootsJson: String,
+    ): String
+
+    /** Idempotently seal and persist a prepared job before an outbox assumes
+     * ownership. The returned snapshot is the same canonical job projection
+     * used by preparation. */
+    external fun sealManifestV2Job(
+        storeDirectory: String,
+        jobId: String,
+    ): String
+
+    /** Cancel an unstarted job before its room-scoped staging is discarded. */
+    external fun cancelManifestV2Job(
+        storeDirectory: String,
+        jobId: String,
     ): String
 
     external fun resolveManifestV2Source(

@@ -53,7 +53,13 @@ receiver_result="$evidence_directory/$run_label-receiver.xcresult"
 sender_result="$evidence_directory/$run_label-sender.xcresult"
 receiver_log="$evidence_directory/$run_label-receiver.log"
 sender_log="$evidence_directory/$run_label-sender.log"
-for artifact in "$receiver_result" "$sender_result" "$receiver_log" "$sender_log"; do
+patched_sender_xctestrun="$sender_products/.$run_label-sender.xctestrun"
+for artifact in \
+  "$receiver_result" \
+  "$sender_result" \
+  "$receiver_log" \
+  "$sender_log" \
+  "$patched_sender_xctestrun"; do
   if [[ -e "$artifact" ]]; then
     echo "error: refusing to overwrite existing evidence: $artifact" >&2
     exit 2
@@ -62,6 +68,23 @@ done
 
 receiver_pid=""
 sender_pid=""
+sender_run_xctestrun="$sender_xctestrun"
+patched_sender_created=0
+set_xctestrun_environment() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local scope
+  for scope in EnvironmentVariables TestingEnvironmentVariables; do
+    /usr/libexec/PlistBuddy \
+      -c "Add :Envoix-iOSUITests:$scope:$key string $value" \
+      "$file" >/dev/null 2>&1 \
+      || /usr/libexec/PlistBuddy \
+        -c "Set :Envoix-iOSUITests:$scope:$key $value" \
+        "$file" >/dev/null
+  done
+}
+
 stop_children() {
   if [[ -n "$sender_pid" ]] && kill -0 "$sender_pid" >/dev/null 2>&1; then
     kill "$sender_pid" >/dev/null 2>&1 || true
@@ -71,6 +94,9 @@ stop_children() {
   fi
   [[ -z "$sender_pid" ]] || wait "$sender_pid" >/dev/null 2>&1 || true
   [[ -z "$receiver_pid" ]] || wait "$receiver_pid" >/dev/null 2>&1 || true
+  if [[ "$patched_sender_created" -eq 1 ]]; then
+    rm -f "$patched_sender_xctestrun"
+  fi
 }
 trap stop_children EXIT INT TERM
 
@@ -103,9 +129,48 @@ while ! grep -Eq \
   sleep 0.2
 done
 
+case "$test_identifier" in
+  *testNearbyHybrid*|*testNearbyPreferred*)
+    invitation_deadline=$((SECONDS + 30))
+    while ! grep -Eq 'invitation=[^[:space:]]+' "$receiver_log" 2>/dev/null; do
+      if ! kill -0 "$receiver_pid" >/dev/null 2>&1; then
+        wait "$receiver_pid" || true
+        echo "error: receiver exited before creating its InviteV2 Room Code" >&2
+        tail -n 80 "$receiver_log" >&2
+        exit 1
+      fi
+      if (( SECONDS >= invitation_deadline )); then
+        echo "error: receiver did not create its InviteV2 Room Code within 30 seconds" >&2
+        tail -n 80 "$receiver_log" >&2
+        exit 1
+      fi
+      sleep 0.2
+    done
+    room_code="$(
+      sed -nE 's/.*invitation=([^[:space:]]+).*/\1/p' "$receiver_log" |
+        tail -n 1
+    )"
+    if [[ -z "$room_code" ]]; then
+      echo "error: receiver published an unreadable InviteV2 Room Code" >&2
+      exit 1
+    fi
+    if [[ -e "$patched_sender_xctestrun" ]]; then
+      echo "error: refusing to overwrite temporary xctestrun: $patched_sender_xctestrun" >&2
+      exit 2
+    fi
+    cp "$sender_xctestrun" "$patched_sender_xctestrun"
+    patched_sender_created=1
+    set_xctestrun_environment \
+      "$patched_sender_xctestrun" \
+      ENVOIX_WIFI_AWARE_ROOM_CODE \
+      "$room_code"
+    sender_run_xctestrun="$patched_sender_xctestrun"
+    ;;
+esac
+
 xcodebuild \
   test-without-building \
-  -xctestrun "$sender_xctestrun" \
+  -xctestrun "$sender_run_xctestrun" \
   -destination "$sender_destination" \
   -derivedDataPath "$derived_data" \
   -parallel-testing-enabled NO \
@@ -125,6 +190,9 @@ receiver_status="$?"
 set -e
 sender_pid=""
 receiver_pid=""
+if [[ "$patched_sender_created" -eq 1 ]]; then
+  rm -f "$patched_sender_xctestrun"
+fi
 trap - EXIT INT TERM
 
 if [[ "$receiver_status" -ne 0 || "$sender_status" -ne 0 ]] \

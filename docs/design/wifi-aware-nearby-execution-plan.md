@@ -1,8 +1,8 @@
 # Wi-Fi Aware as a nearby-activated iroh path
 
-Status: **Nearby hybrid and coordinated iroh fallback pass the core Apple physical gate; firmware stability limit remains**
+Status: **Nearby integration and coordinated iroh fallback pass the core Apple physical gate; the 30-run firmware stability gate remains**
 
-Last reviewed: 2026-07-26
+Last reviewed: 2026-07-28
 
 ## 1. Decision
 
@@ -378,8 +378,9 @@ Persistent physical evidence is stored at:
 
 It proves the recovered custom-only Wi-Fi Aware baseline in both Apple
 directions. The 2026-07-26 hybrid, migration, cancellation, fallback, and
-stability findings are summarized below; their temporary test bundles were
-deleted after extracting the results.
+stability findings and the 2026-07-28 final Nearby integration checks are
+summarized below; their temporary test bundles were deleted after extracting
+the results.
 
 ## 12. Execution phases
 
@@ -628,7 +629,7 @@ mapping remains follow-up work.
 
 ### H7 — UI and merge integration
 
-After the separate PR62 UI-drift work is available:
+After merging the current `dev` UI:
 
 - merge or rebase it before editing shared Nearby views;
 - show Wi-Fi Aware as available only for the selected peer;
@@ -639,6 +640,28 @@ After the separate PR62 UI-drift work is available:
 
 Finish with a generic build, focused routing/migration tests, and one short
 two-direction physical regression.
+
+Status: complete on 2026-07-28.
+
+- The standalone Wi-Fi Aware card was removed. Pairing is exposed only as
+  generic Nearby setup when no unique paired route exists, and a unique paired
+  device is admitted automatically.
+- The native UDP adapter now exchanges a reserved hello/ready datagram before
+  handing the channel to iroh. This avoids the Apple listener waiting
+  indefinitely for the first datagram.
+- Both hybrid roles bind the native datagram endpoint before Room
+  authentication. This removes the asymmetric bootstrap deadlock introduced
+  when the receiver joined the Room before listening while the sender listened
+  before joining.
+- Two immediate iPhone-to-iPad transfers and one reverse transfer each moved
+  and hash-verified 8 MiB through the selected Wi-Fi Aware path. Observed sender
+  payload goodput was 116.8–137.9 Mbit/s.
+- A forced sender-only Wi-Fi Aware setup failure made both roles enter the
+  ordinary iroh fallback window together, select the direct path, and
+  hash-verify 8 MiB.
+- The focused hosted Apple suite passed 78 tests on the final build. The 30-run
+  firmware/NDP stability gate above remains separate from this integration
+  result.
 
 ## 13. API compatibility
 

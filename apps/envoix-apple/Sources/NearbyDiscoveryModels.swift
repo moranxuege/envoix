@@ -70,13 +70,95 @@ struct NearbyProviderStatus: Equatable {
     let detail: NearbyProviderDetail
 }
 
+/// Native connection coordinates advertised inside the discovery service.
+///
+/// The endpoint ID alone is not dialable. At least one relay URL or direct
+/// socket address must travel with it, and callers freeze this complete value
+/// before starting pairing so a later Bonjour update cannot redirect a send.
+struct NearbyInviteRoute: Equatable, Hashable {
+    static let maximumDirectAddressCount = 4
+    static let maximumDirectAddressUTF8Bytes = 128
+    // Android's DNS-SD API requires key bytes + value bytes < 255. Keeping the
+    // six-byte `irelay` key in that shared budget leaves 248 value bytes.
+    static let maximumRelayURLUTF8Bytes = 248
+
+    let endpointID: String
+    let relayURL: String?
+    let directAddresses: [String]
+
+    init?(
+        endpointID: String,
+        relayURL: String? = nil,
+        directAddresses: [String] = []
+    ) {
+        guard let endpointID = NearbyDiscoveryPeerRegistry.normalizeInboxEndpointID(
+            endpointID
+        ) else {
+            return nil
+        }
+
+        let normalizedRelayURL: String?
+        if let relayURL {
+            guard let value = Self.normalizeWireValue(
+                relayURL,
+                maximumUTF8Bytes: Self.maximumRelayURLUTF8Bytes
+            ) else {
+                return nil
+            }
+            normalizedRelayURL = value
+        } else {
+            normalizedRelayURL = nil
+        }
+
+        guard directAddresses.count <= Self.maximumDirectAddressCount else {
+            return nil
+        }
+        var seenAddresses = Set<String>()
+        var normalizedDirectAddresses: [String] = []
+        for address in directAddresses {
+            guard let value = Self.normalizeWireValue(
+                address,
+                maximumUTF8Bytes: Self.maximumDirectAddressUTF8Bytes
+            ) else {
+                return nil
+            }
+            if seenAddresses.insert(value).inserted {
+                normalizedDirectAddresses.append(value)
+            }
+        }
+        guard normalizedRelayURL != nil || !normalizedDirectAddresses.isEmpty else {
+            return nil
+        }
+
+        self.endpointID = endpointID
+        self.relayURL = normalizedRelayURL
+        self.directAddresses = normalizedDirectAddresses
+    }
+
+    private static func normalizeWireValue(
+        _ value: String,
+        maximumUTF8Bytes: Int
+    ) -> String? {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized.utf8.count <= maximumUTF8Bytes,
+              normalized.unicodeScalars.allSatisfy({ scalar in
+                  !CharacterSet.whitespacesAndNewlines.contains(scalar)
+                      && !CharacterSet.controlCharacters.contains(scalar)
+              }) else {
+            return nil
+        }
+        return normalized
+    }
+}
+
 struct NearbyDiscoveryObservation: Equatable {
     let peerKey: String
     let source: NearbyDiscoverySource
     let seenAtMilliseconds: Int64
     let displayName: String?
     let rssi: Int?
-    let endpoint: String?
+    let inviteRoute: NearbyInviteRoute?
 
     init(
         peerKey: String,
@@ -84,14 +166,14 @@ struct NearbyDiscoveryObservation: Equatable {
         seenAtMilliseconds: Int64,
         displayName: String? = nil,
         rssi: Int? = nil,
-        endpoint: String? = nil
+        inviteRoute: NearbyInviteRoute? = nil
     ) {
         self.peerKey = peerKey
         self.source = source
         self.seenAtMilliseconds = seenAtMilliseconds
         self.displayName = displayName
         self.rssi = rssi
-        self.endpoint = endpoint
+        self.inviteRoute = inviteRoute
     }
 }
 
@@ -103,7 +185,7 @@ struct NearbyDiscoveredPeer: Equatable, Identifiable {
     let sources: Set<NearbyDiscoverySource>
     let lastSeenAtMilliseconds: Int64
     let rssi: Int?
-    let endpoint: String?
+    let inviteRoute: NearbyInviteRoute?
 }
 
 /// A device paired by an operating-system discovery provider. The identifier
@@ -151,30 +233,42 @@ func uniqueNearbyWifiAwareDeviceID(in devices: [NearbyPairedDevice]) -> String? 
     return wifiAwareDevices.count == 1 ? wifiAwareDevices[0].sourceScopedID : nil
 }
 
-/// UI context carried from public discovery into the authenticated pairing
-/// flow. It intentionally excludes endpoint and credential material: selecting
-/// a discovery card never authorizes a connection by itself.
+/// UI context frozen when a public discovery card is selected. The inbox route
+/// and Wi-Fi Aware device ID are untrusted, one-time routing capabilities, not
+/// remembered credentials. Freezing them prevents later provider updates from
+/// silently changing the selected destination.
 struct NearbyPairingSelection: Equatable, Identifiable {
     var id: String { discoveryPeerKey }
 
     let discoveryPeerKey: String
     let displayName: String?
     let sources: Set<NearbyDiscoverySource>
+    let nearbyInviteRoute: NearbyInviteRoute?
+    let nearbyWifiAwareDeviceID: String?
 
-    init(peer: NearbyDiscoveredPeer) {
+    init(
+        peer: NearbyDiscoveredPeer,
+        nearbyWifiAwareDeviceID: String? = nil
+    ) {
         discoveryPeerKey = peer.peerKey
         displayName = peer.displayName
         sources = peer.sources
+        nearbyInviteRoute = peer.inviteRoute
+        self.nearbyWifiAwareDeviceID = nearbyWifiAwareDeviceID
     }
 
     init(
         discoveryPeerKey: String,
         displayName: String?,
-        sources: Set<NearbyDiscoverySource>
+        sources: Set<NearbyDiscoverySource>,
+        nearbyInviteRoute: NearbyInviteRoute? = nil,
+        nearbyWifiAwareDeviceID: String? = nil
     ) {
         self.discoveryPeerKey = discoveryPeerKey
         self.displayName = displayName
         self.sources = sources
+        self.nearbyInviteRoute = nearbyInviteRoute
+        self.nearbyWifiAwareDeviceID = nearbyWifiAwareDeviceID
     }
 }
 
@@ -184,6 +278,8 @@ struct NearbyRendezvousOffer: Equatable, Identifiable {
     let requestID: String
     let senderPeerKey: String
     let senderDisplayName: String?
+    let source: NearbyDiscoverySource
+    let senderInboxEndpointID: String?
     let invite: String
 }
 
@@ -201,9 +297,15 @@ protocol NearbyDiscoveryProvider: AnyObject {
     func stop()
 }
 
-protocol NearbyRendezvousProvider: AnyObject {
+protocol NearbyAdvertisingConfigurable: AnyObject {
+    func setAdvertisingEnabled(_ enabled: Bool)
+}
+
+protocol NearbyRendezvousProvider: NearbyDiscoveryProvider {
+    func canOfferInvite(to selection: NearbyPairingSelection) -> Bool
+
     func offerInvite(
-        peerKey: String,
+        to selection: NearbyPairingSelection,
         invite: String,
         completion: @escaping (_ error: String?) -> Void
     )
@@ -229,8 +331,8 @@ enum NearbyDiscoveryIdentityFactory {
 final class NearbyDiscoveryPeerRegistry {
     static let defaultObservationTTLMilliseconds: Int64 = 20_000
     static let maximumDisplayNameLength = 48
-    static let maximumEndpointLength = 96
     static let maximumDeviceDetailLength = 96
+    static let maximumInboxEndpointIDLength = 80
     static let peerKeyHexLength = 16
 
     private let observationTTLMilliseconds: Int64
@@ -256,7 +358,7 @@ final class NearbyDiscoveryPeerRegistry {
             seenAtMilliseconds: observation.seenAtMilliseconds,
             displayName: Self.sanitizeDisplayName(observation.displayName),
             rssi: observation.rssi,
-            endpoint: Self.sanitizeText(observation.endpoint, maximumLength: Self.maximumEndpointLength)
+            inviteRoute: observation.inviteRoute
         )
         var bySource = observations[peerKey] ?? [:]
         if let previous = bySource[observation.source],
@@ -295,7 +397,7 @@ final class NearbyDiscoveryPeerRegistry {
                 sources: Set(bySource.keys),
                 lastSeenAtMilliseconds: values.map(\.seenAtMilliseconds).max() ?? 0,
                 rssi: Self.latest(values, value: \NearbyDiscoveryObservation.rssi),
-                endpoint: Self.latest(values, value: \NearbyDiscoveryObservation.endpoint)
+                inviteRoute: Self.latest(values, value: \NearbyDiscoveryObservation.inviteRoute)
             )
         }
         .sorted {
@@ -323,6 +425,21 @@ final class NearbyDiscoveryPeerRegistry {
 
     static func sanitizeDeviceDetail(_ value: String?) -> String? {
         sanitizeText(value, maximumLength: maximumDeviceDetailLength)
+    }
+
+    static func normalizeInboxEndpointID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized.count <= maximumInboxEndpointIDLength,
+              normalized.unicodeScalars.allSatisfy({ scalar in
+                  (48...57).contains(scalar.value)
+                      || (65...90).contains(scalar.value)
+                      || (97...122).contains(scalar.value)
+              }) else {
+            return nil
+        }
+        return normalized
     }
 
     private static func sanitizeText(_ value: String?, maximumLength: Int) -> String? {
@@ -368,9 +485,9 @@ struct NearbyDiscoveryBonjourRecord: Equatable {
     static let serviceType = "_envoix-disc._udp"
     static let wireServiceType = "_envoix-disc._udp."
     private static let protocolVersion = "1"
-
     let peerKey: String
     let displayName: String?
+    let inviteRoute: NearbyInviteRoute?
 
     init?(dictionary: [String: String]) {
         guard dictionary["v"] == Self.protocolVersion,
@@ -380,11 +497,22 @@ struct NearbyDiscoveryBonjourRecord: Equatable {
         }
         self.peerKey = peerKey
         self.displayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(dictionary["name"])
+        if let endpointID = dictionary["ibox"] {
+            self.inviteRoute = NearbyInviteRoute(
+                endpointID: endpointID,
+                relayURL: dictionary["irelay"],
+                directAddresses: (0..<NearbyInviteRoute.maximumDirectAddressCount)
+                    .compactMap { dictionary["iaddr\($0)"] }
+            )
+        } else {
+            self.inviteRoute = nil
+        }
     }
 
-    init(identity: LocalNearbyDiscoveryIdentity) {
+    init(identity: LocalNearbyDiscoveryIdentity, inviteRoute: NearbyInviteRoute? = nil) {
         peerKey = identity.peerKey
         displayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(identity.displayName)
+        self.inviteRoute = inviteRoute
     }
 
     var dictionary: [String: String] {
@@ -392,6 +520,22 @@ struct NearbyDiscoveryBonjourRecord: Equatable {
         if let displayName {
             value["name"] = displayName
         }
+        if let inviteRoute {
+            value["ibox"] = inviteRoute.endpointID
+            if let relayURL = inviteRoute.relayURL {
+                value["irelay"] = relayURL
+            }
+            for (index, address) in inviteRoute.directAddresses.enumerated() {
+                value["iaddr\(index)"] = address
+            }
+        }
         return value
+    }
+
+    static func consistentInviteRoute(
+        in records: [NearbyDiscoveryBonjourRecord]
+    ) -> NearbyInviteRoute? {
+        guard let first = records.first?.inviteRoute else { return nil }
+        return records.allSatisfy { $0.inviteRoute == first } ? first : nil
     }
 }

@@ -2,12 +2,7 @@
 
 use envoix_session::BindAddrs;
 
-use super::transport::TransportPreference;
-
-/// Constraint on which iroh data paths a transfer may use.
-///
-/// Provider selection is configured independently through
-/// [`TransferOptions::transport`].
+/// Constraint on which data paths a transfer may use.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum PathPolicy {
     /// Try direct (hole-punched) first, fall back to the relay when set.
@@ -32,10 +27,6 @@ pub enum PathPolicy {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
 pub struct TransferOptions {
-    /// Which provider should establish the data channel. This is independent
-    /// of [`Self::path`], which applies only after iroh is selected.
-    #[serde(default)]
-    pub transport: TransportPreference,
     /// Relay URL for WAN/NAT reachability, e.g. `https://relay.example.com:8444`.
     pub relay: Option<String>,
     /// Which data paths the transfer may use.
@@ -48,7 +39,6 @@ pub struct TransferOptions {
 impl Default for TransferOptions {
     fn default() -> Self {
         Self {
-            transport: TransportPreference::Automatic,
             relay: None,
             path: PathPolicy::Auto,
             listen_addrs: None,

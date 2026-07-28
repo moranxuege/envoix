@@ -1,3 +1,4 @@
+import EnvoixCore
 import XCTest
 @testable import Envoix_iOS
 
@@ -180,6 +181,25 @@ final class WifiAwareCapabilityTests: XCTestCase {
                 CancellationError()
             )
         )
+    }
+
+    @available(iOS 26.0, *)
+    func testNearbyFallbackBoundaryAllowsOnlyPreAuthenticationPhases() {
+        for phase: FfiManifestV2Phase in [.waitingForPeer, .pairing, .connecting] {
+            XCTAssertFalse(AppleWifiAwareFallbackBoundary.crosses(for: phase))
+        }
+        for phase: FfiManifestV2Phase in [
+            .transferring,
+            .verifying,
+            .saving,
+            .waitingForReceiverSave,
+            .finalizingDelivery,
+            .delivered,
+        ] {
+            XCTAssertTrue(AppleWifiAwareFallbackBoundary.crosses(for: phase))
+        }
+        XCTAssertTrue(AppleWifiAwareFallbackBoundary.crosses(for: .rePair))
+        XCTAssertFalse(AppleWifiAwareFallbackBoundary.crosses(for: .resume))
     }
 
     func testPhysicalDeviceReportsWifiAwarePairingCapability() async throws {

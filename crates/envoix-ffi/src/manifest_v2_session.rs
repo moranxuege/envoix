@@ -5,31 +5,38 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_client::api::{
-    DestinationDecisionV2, DestinationRequestV2, EventSink, PairingConfig, PeerSource,
-    PendingManifestV2Receive, PendingNativeManifestV2Receive, SessionError, TransferCancelToken,
-    TransferEvent, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    AuthenticationHandler, AuthenticationOutcome, DestinationDecisionV2, DestinationRequestV2,
+    EventSink, InvitationConsumption, InvitationLease, PairingConfig, PeerSource,
+    PendingManifestV2Receive, PendingNativeManifestV2Receive, RendezvousCause, SessionError,
+    TransferCancelToken, TransferEvent, acquire_invitation, acquire_remembered_credential,
+    acquire_shared_token, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
     receive_manifest_v2_offer_over_datagram_transport,
-    receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_room,
-    receive_manifest_v2_offer_via_room_hybrid, receive_manifest_v2_offer_with_bound_peer,
-    send_manifest_v2_enable_mdns, send_manifest_v2_manual,
-    send_manifest_v2_over_datagram_transport, send_manifest_v2_over_native_transport,
-    send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room, send_manifest_v2_via_room_hybrid,
+    receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
+    receive_manifest_v2_offer_via_room_hybrid_with_authentication,
+    receive_manifest_v2_offer_via_room_with_authentication,
+    receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
+    send_manifest_v2_manual, send_manifest_v2_over_datagram_transport,
+    send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
+    send_manifest_v2_via_room_hybrid_with_authentication,
+    send_manifest_v2_via_room_with_authentication,
 };
-use envoix_qr::{QrInvitePayload, generate_token};
-use envoix_types::PairingStep;
+use envoix_types::{DataPath, PairingStep};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use super::{
-    EnvoixError, EnvoixRuntimeSettings, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin,
-    FfiFailurePhase, FfiManifestV2Phase, FfiNativeDatagramTransport, FfiNativeDuplexTransport,
-    FfiPathPolicy, FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2,
-    FfiTransferMode, FfiTransferRequest, TransferObserver, build_client_for_request,
-    core_datagram_transport, core_native_transport, on_ffi_runtime, op_err,
-    peer_sources_for_request, spawn_on_ffi_runtime, transfer_options_for_request,
+    EnvoixError, EnvoixRuntimeSettings, FfiConnectionPathEvent, FfiConnectionPathEventKind,
+    FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailurePhase,
+    FfiManifestV2Phase, FfiNativeDatagramTransport, FfiNativeDuplexTransport, FfiPathPolicy,
+    FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferMode,
+    FfiTransferRequest, TransferObserver, build_client_for_request, core_datagram_transport,
+    core_native_transport, on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
+    transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -274,6 +281,119 @@ struct NativeSessionEvents {
     observer: Arc<dyn TransferObserver>,
 }
 
+fn project_connection_path(
+    path: &DataPath,
+    event_kind: FfiConnectionPathEventKind,
+) -> FfiConnectionPathEvent {
+    let path_kind = match path {
+        DataPath::Direct { .. } => FfiDataPathKind::Direct,
+        DataPath::Relay { .. } => FfiDataPathKind::Relay,
+        DataPath::WifiAware => FfiDataPathKind::WifiAware,
+        DataPath::Other { .. } => FfiDataPathKind::Other,
+    };
+    FfiConnectionPathEvent {
+        path_kind,
+        event_kind,
+    }
+}
+
+struct NativeAuthentication {
+    observer: Arc<dyn TransferObserver>,
+    remember_consent: bool,
+    rotation: Option<(Vec<u8>, u64)>,
+    invitation_consumption: Option<InvitationConsumption>,
+    authenticated: AtomicBool,
+    persisted: AtomicBool,
+}
+
+struct SendAttemptContext<'a> {
+    job: &'a envoix_client::api::CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: envoix_client::api::SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &'a TransferCancelToken,
+    relay: Option<&'a str>,
+    observer: Arc<dyn TransferObserver>,
+    remember_consent: bool,
+}
+
+impl NativeAuthentication {
+    fn invitation(
+        observer: Arc<dyn TransferObserver>,
+        remember_consent: bool,
+        invitation_consumption: InvitationConsumption,
+    ) -> Self {
+        Self {
+            observer,
+            remember_consent,
+            rotation: None,
+            invitation_consumption: Some(invitation_consumption),
+            authenticated: AtomicBool::new(false),
+            persisted: AtomicBool::new(false),
+        }
+    }
+
+    fn rotation(
+        observer: Arc<dyn TransferObserver>,
+        opaque_credential: Vec<u8>,
+        next_generation: u64,
+    ) -> Self {
+        Self {
+            observer,
+            remember_consent: false,
+            rotation: Some((opaque_credential, next_generation)),
+            invitation_consumption: None,
+            authenticated: AtomicBool::new(false),
+            persisted: AtomicBool::new(false),
+        }
+    }
+
+    fn authenticated(&self) -> bool {
+        self.authenticated.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn persisted(&self) -> bool {
+        self.persisted.load(Ordering::Acquire)
+    }
+}
+
+impl AuthenticationHandler for NativeAuthentication {
+    fn remember_consent(&self) -> bool {
+        self.remember_consent
+    }
+
+    fn on_authenticated(&self, outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+        self.authenticated.store(true, Ordering::Release);
+        if let Some(consumption) = &self.invitation_consumption {
+            consumption.consume();
+        }
+        let credential = if let Some(secret) = outcome.remember_secret {
+            Some((secret.into_credential().to_opaque(), 0))
+        } else {
+            self.rotation.clone()
+        };
+        let Some((opaque, generation)) = credential else {
+            return Ok(());
+        };
+        if !self.observer.on_remembered_credential(opaque, generation) {
+            return Err(SessionError::Storage(
+                "protected remembered credential could not be persisted".into(),
+            ));
+        }
+        self.persisted.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+fn should_stop_remembered_fallback<T>(
+    result: &Result<T, SessionError>,
+    authentication: &NativeAuthentication,
+    cancel: &TransferCancelToken,
+) -> bool {
+    result.is_ok() || authentication.authenticated() || cancel.is_cancelled()
+}
+
 impl EventSink for NativeSessionEvents {
     fn on_event(&self, event: TransferEvent) {
         match event {
@@ -288,10 +408,16 @@ impl EventSink for NativeSessionEvents {
                 self.observer.on_phase(FfiManifestV2Phase::Connecting);
             }
             TransferEvent::Connected { path } => {
-                self.observer.on_diagnostic(format!("connected via {path}"));
+                let event = project_connection_path(&path, FfiConnectionPathEventKind::Selected);
+                self.observer.on_connection_path(event);
+                self.observer
+                    .on_diagnostic(format!("connected via {:?}", event.path_kind));
             }
             TransferEvent::PathChanged { path } => {
-                self.observer.on_diagnostic(format!("path changed: {path}"));
+                let event = project_connection_path(&path, FfiConnectionPathEventKind::Changed);
+                self.observer.on_connection_path(event);
+                self.observer
+                    .on_diagnostic(format!("path changed: {:?}", event.path_kind));
             }
             TransferEvent::Progress {
                 bytes_transferred,
@@ -319,7 +445,7 @@ impl EventSink for NativeSessionEvents {
 
 fn pairing_phase(step: PairingStep) -> Option<FfiManifestV2Phase> {
     match step {
-        PairingStep::Joining => None,
+        PairingStep::Joining => Some(FfiManifestV2Phase::WaitingForPeer),
         PairingStep::Matched | PairingStep::Exchanged => Some(FfiManifestV2Phase::Pairing),
     }
 }
@@ -361,12 +487,16 @@ pub async fn send_transfer_job_v2(
             });
             let result = send_attempt(
                 &attempt.source,
-                &job,
-                state_directory.clone(),
-                config,
-                events,
-                &cancellation.token,
-                options.relay.as_deref(),
+                SendAttemptContext {
+                    job: &job,
+                    state_directory: state_directory.clone(),
+                    config,
+                    events,
+                    cancel: &cancellation.token,
+                    relay: options.relay.as_deref(),
+                    observer: observer.clone(),
+                    remember_consent: request.remember_consent,
+                },
             )
             .await;
             match result {
@@ -382,7 +512,10 @@ pub async fn send_transfer_job_v2(
                         saved_paths: Vec::new(),
                     });
                 }
-                Err(error) if !cancellation.token.is_cancelled() => {
+                Err(error)
+                    if !cancellation.token.is_cancelled()
+                        && !matches!(error, SessionError::InvitationConsumed(_)) =>
+                {
                     observer.on_diagnostic(format!("route failed; trying next route: {error}"));
                     last_error = Some(error);
                 }
@@ -433,7 +566,7 @@ pub async fn send_transfer_job_v2_nearby_hybrid(
             });
         }
         let state_directory = required_directory(state_directory, "state_directory")?;
-        let (broker, code, config) = nearby_hybrid_room_context(&settings, &request)?;
+        let (broker, lease, config) = nearby_hybrid_room_context(&settings, &request)?;
         let job = job.clone_sealed_job().await?;
         let manifest = job
             .manifest()
@@ -446,19 +579,28 @@ pub async fn send_transfer_job_v2_nearby_hybrid(
         let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
             observer: observer.clone(),
         });
-        let summary = send_manifest_v2_via_room_hybrid(
+        let authentication = NativeAuthentication::invitation(
+            observer.clone(),
+            request.remember_consent,
+            lease.consumption(),
+        );
+        let result = send_manifest_v2_via_room_hybrid_with_authentication(
             core_datagram_transport(transport),
             maximum_datagram_size,
             broker,
-            &code,
+            lease.bootstrap().clone(),
             &job,
             state_directory,
             config,
             events,
             &cancellation.token,
+            &authentication,
         )
-        .await
-        .map_err(|error| {
+        .await;
+        if result.is_ok() || authentication.authenticated() {
+            lease.consume();
+        }
+        let summary = result.map_err(|error| {
             report_v2_failure(
                 observer.as_ref(),
                 &error,
@@ -656,22 +798,31 @@ pub async fn receive_transfer_offer_v2_nearby_hybrid(
             });
         }
         let state_directory = required_directory(state_directory, "state_directory")?;
-        let (broker, code, config) = nearby_hybrid_room_context(&settings, &request)?;
+        let (broker, lease, config) = nearby_hybrid_room_context(&settings, &request)?;
         let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
             observer: observer.clone(),
         });
-        let pending = receive_manifest_v2_offer_via_room_hybrid(
+        let authentication = NativeAuthentication::invitation(
+            observer.clone(),
+            request.remember_consent,
+            lease.consumption(),
+        );
+        let result = receive_manifest_v2_offer_via_room_hybrid_with_authentication(
             core_datagram_transport(transport),
             maximum_datagram_size,
             broker,
-            &code,
+            lease.bootstrap().clone(),
             listen_addrs(&config),
             config,
             events,
             &cancellation.token,
+            &authentication,
         )
-        .await
-        .map_err(|error| {
+        .await;
+        if result.is_ok() || authentication.authenticated() {
+            lease.consume();
+        }
+        let pending = result.map_err(|error| {
             report_v2_failure(
                 observer.as_ref(),
                 &error,
@@ -870,6 +1021,17 @@ async fn receive_offer_from_attempts(
                         FfiSelectedDataPath::Unknown,
                     )));
                 }
+                Some(Ok((_, Err(error @ SessionError::InvitationConsumed(_))))) => {
+                    route_cancellations.iter().for_each(TransferCancelToken::cancel);
+                    while routes.join_next().await.is_some() {}
+                    report_v2_failure(
+                        observer.as_ref(),
+                        &error,
+                        FfiTransferDirection::Receive,
+                        FfiFailurePhase::Authenticating,
+                    );
+                    return Err(op_err(error));
+                }
                 Some(Ok((_, Err(error)))) => {
                     observer.on_diagnostic(format!("receive route failed; keeping other routes active: {error}"));
                     last_error = Some(error);
@@ -933,6 +1095,7 @@ async fn receive_one_offer_attempt(
         observer,
         cancel,
         options.relay.as_deref(),
+        request.remember_consent,
     )
     .await
 }
@@ -943,14 +1106,17 @@ fn nearby_hybrid_room_context(
 ) -> Result<
     (
         envoix_client::api::EndpointAddr,
-        String,
+        InvitationLease,
         envoix_client::api::SessionConfig,
     ),
     EnvoixError,
 > {
-    if request.mode != FfiTransferMode::Room {
+    if !matches!(
+        request.mode,
+        FfiTransferMode::Room | FfiTransferMode::Invite
+    ) {
         return Err(EnvoixError::Operation {
-            reason: "Nearby hybrid transport requires Room pairing".into(),
+            reason: "Nearby hybrid transport requires a one-time invitation".into(),
         });
     }
     if request.path_policy == FfiPathPolicy::RelayOnly {
@@ -963,34 +1129,43 @@ fn nearby_hybrid_room_context(
             reason: "Nearby hybrid transport requires an available Room rendezvous route".into(),
         });
     }
-    let source = peer_sources_for_request(settings, request)?
+    let (secret_ref, broker) = peer_sources_for_request(settings, request)?
         .into_iter()
         .find_map(|attempt| match attempt.source {
-            PeerSource::Room { code, broker } => Some((code, broker)),
+            PeerSource::Invitation {
+                secret_ref, broker, ..
+            } => Some((secret_ref, broker)),
             _ => None,
         })
         .ok_or_else(|| EnvoixError::Operation {
-            reason: "Nearby hybrid transport has no Room rendezvous route".into(),
+            reason: "Nearby hybrid transport has no invitation rendezvous route".into(),
         })?;
+    let lease = acquire_invitation(&secret_ref).map_err(op_err)?;
     let options = transfer_options_for_request(settings, request, None)?;
     let client = build_client_for_request(settings, request)?;
     let config = client.session_config(&options);
-    let broker = parse_broker_addr(&source.1, options.relay.as_deref()).map_err(op_err)?;
-    Ok((broker, source.0, config))
+    let broker = parse_broker_addr(&broker, options.relay.as_deref()).map_err(op_err)?;
+    Ok((broker, lease, config))
 }
 
 async fn send_attempt(
     source: &PeerSource,
-    job: &envoix_client::api::CanonicalTransferJob,
-    state_directory: PathBuf,
-    config: envoix_client::api::SessionConfig,
-    events: Arc<dyn EventSink>,
-    cancel: &TransferCancelToken,
-    relay: Option<&str>,
+    context: SendAttemptContext<'_>,
 ) -> Result<envoix_client::api::SenderManifestV2SessionSummary, SessionError> {
+    let SendAttemptContext {
+        job,
+        state_directory,
+        config,
+        events,
+        cancel,
+        relay,
+        observer,
+        remember_consent,
+    } = context;
     match source {
-        PeerSource::Manual { peer, token } => {
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+        PeerSource::Manual { peer, token_ref } => {
+            let token = acquire_shared_token(token_ref).map_err(op_err_core)?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             send_manifest_v2_manual(
                 peer.clone(),
                 job,
@@ -1002,24 +1177,81 @@ async fn send_attempt(
             )
             .await
         }
-        PeerSource::Invite { invite } => {
-            let payload = QrInvitePayload::decode(invite).map_err(op_err_core)?;
-            payload.validate(now_unix_seconds()).map_err(op_err_core)?;
-            let pairing = PairingConfig::spake2_shared_token(payload.token.clone())?;
-            let endpoint = payload.endpoint_addr().map_err(op_err_core)?;
-            send_manifest_v2_to_endpoint_addr(
-                endpoint,
+        PeerSource::Invitation {
+            secret_ref, broker, ..
+        } => {
+            let lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
+            let broker = parse_broker_addr(broker, relay)?;
+            let authentication =
+                NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
+            let result = send_manifest_v2_via_room_with_authentication(
+                broker,
+                lease.bootstrap().clone(),
                 job,
                 state_directory,
                 config,
-                &pairing,
                 events,
                 cancel,
+                &authentication,
             )
-            .await
+            .await;
+            if result.is_ok() || authentication.authenticated() {
+                lease.consume();
+            }
+            result
         }
-        PeerSource::Mdns { token: Some(token) } => {
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+        PeerSource::Remembered {
+            credential_ref,
+            generation,
+            previous_generation,
+            broker,
+        } => {
+            let credential = acquire_remembered_credential(credential_ref).map_err(op_err_core)?;
+            let broker_addr = parse_broker_addr(broker, relay)?;
+            // Keep joining the receiver's fallback window before trying our
+            // own previous generation.
+            let mut generations = vec![*generation, *generation];
+            if let Some(previous) = previous_generation {
+                generations.push(*previous);
+            }
+            let mut last_error = None;
+            for generation in generations {
+                let next_generation = generation.checked_add(1).ok_or_else(|| {
+                    SessionError::InvalidInput(
+                        "remembered credential generation is exhausted".into(),
+                    )
+                })?;
+                let authentication = NativeAuthentication::rotation(
+                    observer.clone(),
+                    credential.to_opaque(),
+                    next_generation,
+                );
+                let result = send_manifest_v2_via_remembered(
+                    broker_addr.clone(),
+                    broker.clone(),
+                    credential.derive_session(generation),
+                    job,
+                    state_directory.clone(),
+                    config.clone(),
+                    events.clone(),
+                    cancel,
+                    &authentication,
+                )
+                .await;
+                if should_stop_remembered_fallback(&result, &authentication, cancel) {
+                    return result;
+                }
+                last_error = result.err();
+            }
+            Err(last_error.unwrap_or_else(|| {
+                SessionError::InvalidInput("remembered credential has no usable generation".into())
+            }))
+        }
+        PeerSource::Mdns {
+            token_ref: Some(token_ref),
+        } => {
+            let token = acquire_shared_token(token_ref).map_err(op_err_core)?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             send_manifest_v2_enable_mdns(
                 job.clone(),
                 state_directory,
@@ -1029,11 +1261,6 @@ async fn send_attempt(
                 cancel.clone(),
             )
             .await
-        }
-        PeerSource::Room { code, broker } => {
-            let broker = parse_broker_addr(broker, relay)?;
-            send_manifest_v2_via_room(broker, code, job, state_directory, config, events, cancel)
-                .await
         }
         _ => Err(SessionError::InvalidInput(
             "selected route cannot dial a canonical receiver".into(),
@@ -1048,16 +1275,18 @@ async fn receive_offer_attempt(
     observer: Arc<dyn TransferObserver>,
     cancel: &TransferCancelToken,
     relay: Option<&str>,
+    remember_consent: bool,
 ) -> Result<PendingManifestV2Receive, SessionError> {
     let listen = config.clone();
     match source {
-        PeerSource::ShowManual { token } => {
-            let token = token.clone().ok_or_else(|| {
+        PeerSource::ShowManual { token_ref } => {
+            let token_ref = token_ref.as_ref().ok_or_else(|| {
                 SessionError::InvalidInput(
                     "manual receiver display requires a caller-owned pairing token".into(),
                 )
             })?;
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+            let token = acquire_shared_token(token_ref).map_err(op_err_core)?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             receive_manifest_v2_offer_with_bound_peer(
                 listen_addrs(&listen),
                 config,
@@ -1070,79 +1299,102 @@ async fn receive_offer_attempt(
             )
             .await
         }
-        PeerSource::ShowInvite { token, ttl_secs } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(op_err_core)?;
+        PeerSource::Mdns { token_ref } => {
+            let token = token_ref
+                .as_ref()
+                .map(|token_ref| acquire_shared_token(token_ref).map_err(op_err_core))
+                .unwrap_or_else(generate_token)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
-            let expires_at = now_unix_seconds().saturating_add(*ttl_secs);
-            receive_manifest_v2_offer_with_bound_peer(
-                listen_addrs(&listen),
-                config,
-                &pairing,
-                events,
-                move |peer, relay_urls| {
-                    observer.on_invite_ready(
-                        QrInvitePayload {
-                            version: envoix_qr::PAYLOAD_VERSION,
-                            protocol_version: envoix_types::PROTOCOL_VERSION,
-                            token,
-                            peer,
-                            relay_urls,
-                            expires_at,
-                            flags: 0,
-                        }
-                        .encode(),
-                    );
-                },
-                cancel,
-            )
-            .await
-        }
-        PeerSource::Mdns { token } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(op_err_core)?;
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
-            let expires_at = now_unix_seconds().saturating_add(300);
             receive_manifest_v2_offer_enable_mdns(
                 listen_addrs(&listen),
                 config,
                 &pairing,
                 events,
-                move |peer, relay_urls| {
-                    observer.on_invite_ready(
-                        QrInvitePayload {
-                            version: envoix_qr::PAYLOAD_VERSION,
-                            protocol_version: envoix_types::PROTOCOL_VERSION,
-                            token,
-                            peer,
-                            relay_urls,
-                            expires_at,
-                            flags: 0,
-                        }
-                        .encode(),
-                    );
+                move |peer, _relay_urls| {
+                    observer.on_invite_ready(peer.to_string());
                 },
                 cancel,
             )
             .await
         }
-        PeerSource::Room { code, broker } => {
+        PeerSource::Invitation {
+            secret_ref, broker, ..
+        } => {
+            let lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
-            receive_manifest_v2_offer_via_room(
+            let authentication =
+                NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
+            let result = receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
-                code,
+                lease.bootstrap().clone(),
                 listen_addrs(&listen),
                 config,
                 events,
                 cancel,
+                &authentication,
             )
-            .await
+            .await;
+            if result.is_ok() || authentication.authenticated() {
+                lease.consume();
+            }
+            result
+        }
+        PeerSource::Remembered {
+            credential_ref,
+            generation,
+            previous_generation,
+            broker,
+        } => {
+            let credential = acquire_remembered_credential(credential_ref).map_err(op_err_core)?;
+            let broker_addr = parse_broker_addr(broker, relay)?;
+            // Offset the sender's current/current/previous schedule so either
+            // side of a one-generation crash can rendezvous.
+            let mut generations = vec![*generation];
+            if let Some(previous) = previous_generation {
+                generations.push(*previous);
+                generations.push(*generation);
+            }
+            let last_index = generations.len() - 1;
+            let mut last_error = None;
+            for (index, generation) in generations.into_iter().enumerate() {
+                let next_generation = generation.checked_add(1).ok_or_else(|| {
+                    SessionError::InvalidInput(
+                        "remembered credential generation is exhausted".into(),
+                    )
+                })?;
+                let authentication = NativeAuthentication::rotation(
+                    observer.clone(),
+                    credential.to_opaque(),
+                    next_generation,
+                );
+                let receive = receive_manifest_v2_offer_via_remembered(
+                    broker_addr.clone(),
+                    broker.clone(),
+                    credential.derive_session(generation),
+                    listen_addrs(&listen),
+                    config.clone(),
+                    events.clone(),
+                    cancel,
+                    &authentication,
+                );
+                let result = if index < last_index {
+                    match tokio::time::timeout(std::time::Duration::from_secs(35), receive).await {
+                        Ok(result) => result,
+                        Err(_) => Err(SessionError::Transport(
+                            "current remembered generation did not find the peer".into(),
+                        )),
+                    }
+                } else {
+                    receive.await
+                };
+                if should_stop_remembered_fallback(&result, &authentication, cancel) {
+                    return result;
+                }
+                last_error = result.err();
+            }
+            Err(last_error.unwrap_or_else(|| {
+                SessionError::InvalidInput("remembered credential has no usable generation".into())
+            }))
         }
         _ => Err(SessionError::InvalidInput(
             "selected route cannot listen for a canonical sender".into(),
@@ -1244,11 +1496,11 @@ fn encode_job_id(job_id: envoix_client::api::JobIdV2) -> String {
     job_id.0.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn now_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn generate_token() -> Result<String, SessionError> {
+    let mut bytes = [0_u8; 18];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| SessionError::Crypto(format!("token entropy unavailable: {error}")))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn report_v2_failure(
@@ -1257,80 +1509,92 @@ fn report_v2_failure(
     direction: FfiTransferDirection,
     fallback_phase: FfiFailurePhase,
 ) {
-    let (code, category, phase, origin, retryable, recovery_action, message_key) = match error {
-        SessionError::Cause { cause, .. } => manifest_v2_cause_projection(cause.code()),
-        SessionError::Cancelled => (
-            FfiFailureCode::UserCanceled,
-            FfiFailureCategory::User,
-            fallback_phase,
-            FfiFailureOrigin::Local,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.user_canceled",
-        ),
-        SessionError::Transport(_) | SessionError::Discovery(_) => (
-            FfiFailureCode::NetworkLost,
-            FfiFailureCategory::Network,
-            fallback_phase,
-            FfiFailureOrigin::Unknown,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.network_lost",
-        ),
-        SessionError::Crypto(_) => (
-            FfiFailureCode::AuthenticationFailed,
-            FfiFailureCategory::Authentication,
-            FfiFailurePhase::Authenticating,
-            FfiFailureOrigin::Unknown,
-            true,
-            FfiRecoveryAction::RePair,
-            "transfer.authentication_failed",
-        ),
-        SessionError::Protocol(_) => (
-            FfiFailureCode::ProtocolOrIntegrityFailure,
-            FfiFailureCategory::Integrity,
-            FfiFailurePhase::Verifying,
-            FfiFailureOrigin::Unknown,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.protocol_or_integrity_failure",
-        ),
-        SessionError::Io(_) | SessionError::Storage(_) => (
-            if direction == FfiTransferDirection::Receive {
-                FfiFailureCode::ReceiverSaveFailed
-            } else {
-                FfiFailureCode::SenderSourceUnavailable
-            },
-            FfiFailureCategory::Storage,
-            fallback_phase,
-            FfiFailureOrigin::Local,
-            true,
-            io_failure_recovery(direction),
-            if direction == FfiTransferDirection::Receive {
-                "transfer.receiver_save_failed"
-            } else {
-                "transfer.sender_source_unavailable"
-            },
-        ),
-        SessionError::InvalidInput(_) => (
-            FfiFailureCode::UnsupportedFeature,
-            FfiFailureCategory::Unsupported,
-            fallback_phase,
-            FfiFailureOrigin::Local,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.unsupported_feature",
-        ),
-        SessionError::Transfer(_) => (
-            FfiFailureCode::InternalError,
-            FfiFailureCategory::Internal,
-            fallback_phase,
-            FfiFailureOrigin::Unknown,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.internal_error",
-        ),
+    let (projected_error, invitation_consumed) = match error {
+        SessionError::InvitationConsumed(source) => (source.as_ref(), true),
+        error => (error, false),
     };
+    let (code, category, phase, origin, retryable, mut recovery_action, message_key) =
+        match projected_error {
+            SessionError::Cause { cause, .. } => manifest_v2_cause_projection(cause.code()),
+            SessionError::Rendezvous { cause, .. } => rendezvous_cause_projection(*cause),
+            SessionError::Cancelled => (
+                FfiFailureCode::UserCanceled,
+                FfiFailureCategory::User,
+                fallback_phase,
+                FfiFailureOrigin::Local,
+                false,
+                FfiRecoveryAction::None,
+                "transfer.user_canceled",
+            ),
+            SessionError::Transport(_) | SessionError::Discovery(_) => (
+                FfiFailureCode::NetworkLost,
+                FfiFailureCategory::Network,
+                fallback_phase,
+                FfiFailureOrigin::Unknown,
+                true,
+                FfiRecoveryAction::Resume,
+                "transfer.network_lost",
+            ),
+            SessionError::Crypto(_) => (
+                FfiFailureCode::AuthenticationFailed,
+                FfiFailureCategory::Authentication,
+                FfiFailurePhase::Authenticating,
+                FfiFailureOrigin::Unknown,
+                true,
+                FfiRecoveryAction::RePair,
+                "transfer.authentication_failed",
+            ),
+            SessionError::Protocol(_) => (
+                FfiFailureCode::ProtocolOrIntegrityFailure,
+                FfiFailureCategory::Integrity,
+                FfiFailurePhase::Verifying,
+                FfiFailureOrigin::Unknown,
+                false,
+                FfiRecoveryAction::None,
+                "transfer.protocol_or_integrity_failure",
+            ),
+            SessionError::Io(_) | SessionError::Storage(_) => (
+                if direction == FfiTransferDirection::Receive {
+                    FfiFailureCode::ReceiverSaveFailed
+                } else {
+                    FfiFailureCode::SenderSourceUnavailable
+                },
+                FfiFailureCategory::Storage,
+                fallback_phase,
+                FfiFailureOrigin::Local,
+                true,
+                io_failure_recovery(direction),
+                if direction == FfiTransferDirection::Receive {
+                    "transfer.receiver_save_failed"
+                } else {
+                    "transfer.sender_source_unavailable"
+                },
+            ),
+            SessionError::InvalidInput(_) => (
+                FfiFailureCode::UnsupportedFeature,
+                FfiFailureCategory::Unsupported,
+                fallback_phase,
+                FfiFailureOrigin::Local,
+                false,
+                FfiRecoveryAction::None,
+                "transfer.unsupported_feature",
+            ),
+            SessionError::Transfer(_) => (
+                FfiFailureCode::InternalError,
+                FfiFailureCategory::Internal,
+                fallback_phase,
+                FfiFailureOrigin::Unknown,
+                true,
+                FfiRecoveryAction::Retry,
+                "transfer.internal_error",
+            ),
+            SessionError::InvitationConsumed(_) => {
+                unreachable!("consumed invitation was unwrapped")
+            }
+        };
+    if invitation_consumed && retryable {
+        recovery_action = FfiRecoveryAction::RePair;
+    }
     observer.on_transfer_failed(FfiTransferFailure {
         code,
         category,
@@ -1342,6 +1606,98 @@ fn report_v2_failure(
         user_message_key: message_key.into(),
         diagnostic_message: error.to_string(),
     });
+}
+
+#[allow(clippy::type_complexity)]
+fn rendezvous_cause_projection(
+    cause: RendezvousCause,
+) -> (
+    FfiFailureCode,
+    FfiFailureCategory,
+    FfiFailurePhase,
+    FfiFailureOrigin,
+    bool,
+    FfiRecoveryAction,
+    &'static str,
+) {
+    let (code, retryable, recovery, key) = match cause {
+        RendezvousCause::RoomNotFound => (
+            FfiFailureCode::RoomNotFound,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.room_not_found",
+        ),
+        RendezvousCause::RoomExpired => (
+            FfiFailureCode::RoomExpired,
+            true,
+            FfiRecoveryAction::RePair,
+            "transfer.room_expired",
+        ),
+        RendezvousCause::RoomFull => (
+            FfiFailureCode::RoomFull,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.room_full",
+        ),
+        RendezvousCause::RoomRateLimited => (
+            FfiFailureCode::RoomRateLimited,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.room_rate_limited",
+        ),
+        RendezvousCause::RoomUnderAttack => (
+            FfiFailureCode::RoomUnderAttack,
+            true,
+            FfiRecoveryAction::RePair,
+            "transfer.room_under_attack",
+        ),
+        RendezvousCause::EndpointRateLimited => (
+            FfiFailureCode::EndpointRateLimited,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.endpoint_rate_limited",
+        ),
+        RendezvousCause::IpRateLimited => (
+            FfiFailureCode::IpRateLimited,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.ip_rate_limited",
+        ),
+        RendezvousCause::ServerBusy => (
+            FfiFailureCode::ServerBusy,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.server_busy",
+        ),
+        RendezvousCause::MalformedJoin => (
+            FfiFailureCode::MalformedJoin,
+            false,
+            FfiRecoveryAction::None,
+            "transfer.malformed_join",
+        ),
+        RendezvousCause::UnsupportedVersion => (
+            FfiFailureCode::UnsupportedRendezvousVersion,
+            false,
+            FfiRecoveryAction::None,
+            "transfer.unsupported_rendezvous_version",
+        ),
+    };
+    (
+        code,
+        if matches!(
+            cause,
+            RendezvousCause::MalformedJoin | RendezvousCause::UnsupportedVersion
+        ) {
+            FfiFailureCategory::Unsupported
+        } else {
+            FfiFailureCategory::Network
+        },
+        FfiFailurePhase::Pairing,
+        FfiFailureOrigin::Unknown,
+        retryable,
+        recovery,
+        key,
+    )
 }
 
 fn io_failure_recovery(direction: FfiTransferDirection) -> FfiRecoveryAction {
@@ -1483,6 +1839,11 @@ fn op_err_core(error: impl std::fmt::Display) -> SessionError {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Mutex as StdMutex;
+
+    use envoix_error::TransferCause;
+
     use super::*;
 
     fn nearby_request() -> FfiTransferRequest {
@@ -1491,8 +1852,12 @@ mod tests {
             mode: FfiTransferMode::Room,
             peer_descriptor: String::new(),
             invite: String::new(),
-            code: "test-room-code".into(),
+            code: String::new(),
             token: String::new(),
+            remember_consent: false,
+            remembered_credential_ref: String::new(),
+            remembered_generation: 0,
+            remembered_previous_generation: None,
             broker: String::new(),
             relay: String::new(),
             config_path: String::new(),
@@ -1505,9 +1870,47 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingObserver {
+        failure: StdMutex<Option<FfiTransferFailure>>,
+        path_events: StdMutex<Vec<FfiConnectionPathEvent>>,
+        diagnostics: StdMutex<Vec<String>>,
+    }
+
+    impl TransferObserver for RecordingObserver {
+        fn on_invite_ready(&self, _invite: String) {}
+
+        fn on_started(&self, _item_count: u32, _total_bytes: u64) {}
+
+        fn on_phase(&self, _phase: FfiManifestV2Phase) {}
+
+        fn on_progress(&self, _transferred: u64, _total: u64) {}
+
+        fn on_completed(&self, _bytes: u64) {}
+
+        fn on_transfer_failed(&self, failure: FfiTransferFailure) {
+            *self.failure.lock().expect("failure mutex") = Some(failure);
+        }
+
+        fn on_connection_path(&self, event: FfiConnectionPathEvent) {
+            self.path_events.lock().unwrap().push(event);
+        }
+
+        fn on_diagnostic(&self, message: String) {
+            self.diagnostics.lock().unwrap().push(message);
+        }
+
+        fn on_remembered_credential(&self, _opaque_credential: Vec<u8>, _generation: u64) -> bool {
+            false
+        }
+    }
+
     #[test]
-    fn room_joining_keeps_the_platform_waiting_state() {
-        assert_eq!(pairing_phase(PairingStep::Joining), None);
+    fn room_joining_reports_native_receiver_readiness() {
+        assert_eq!(
+            pairing_phase(PairingStep::Joining),
+            Some(FfiManifestV2Phase::WaitingForPeer)
+        );
         assert_eq!(
             pairing_phase(PairingStep::Matched),
             Some(FfiManifestV2Phase::Pairing)
@@ -1544,5 +1947,183 @@ mod tests {
         request = nearby_request();
         request.rendezvous.internet_available = false;
         assert!(nearby_hybrid_room_context(&settings, &request).is_err());
+    }
+
+    #[test]
+    fn rendezvous_causes_project_without_parsing_diagnostics() {
+        let rate_limited = rendezvous_cause_projection(RendezvousCause::RoomRateLimited);
+        assert_eq!(rate_limited.0, FfiFailureCode::RoomRateLimited);
+        assert!(rate_limited.4);
+        assert_eq!(rate_limited.5, FfiRecoveryAction::Retry);
+
+        let exhausted = rendezvous_cause_projection(RendezvousCause::RoomUnderAttack);
+        assert_eq!(exhausted.0, FfiFailureCode::RoomUnderAttack);
+        assert_eq!(exhausted.5, FfiRecoveryAction::RePair);
+    }
+
+    #[test]
+    fn consumed_invitation_failure_requires_repair() {
+        let observer = RecordingObserver::default();
+        report_v2_failure(
+            &observer,
+            &SessionError::InvitationConsumed(Box::new(SessionError::Transport(
+                "connection lost".into(),
+            ))),
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
+        );
+        let failure = observer
+            .failure
+            .lock()
+            .expect("failure mutex")
+            .clone()
+            .expect("reported failure");
+
+        assert_eq!(failure.code, FfiFailureCode::NetworkLost);
+        assert_eq!(failure.recovery_action, FfiRecoveryAction::RePair);
+        assert!(
+            failure
+                .diagnostic_message
+                .contains("one-time invitation was consumed after authentication")
+        );
+    }
+
+    #[test]
+    fn consumed_invitation_preserves_receiver_save_failure() {
+        let observer = RecordingObserver::default();
+        report_v2_failure(
+            &observer,
+            &SessionError::InvitationConsumed(Box::new(SessionError::Cause {
+                cause: TransferCause::ReceiverSaveFailed,
+                detail: "destination contended".into(),
+            })),
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
+        );
+        let failure = observer
+            .failure
+            .lock()
+            .expect("failure mutex")
+            .clone()
+            .expect("reported failure");
+
+        assert_eq!(failure.code, FfiFailureCode::ReceiverSaveFailed);
+        assert_eq!(failure.category, FfiFailureCategory::Storage);
+        assert_eq!(failure.phase, FfiFailurePhase::Committing);
+        assert_eq!(failure.recovery_action, FfiRecoveryAction::RePair);
+    }
+
+    #[test]
+    fn consumed_invitation_does_not_make_integrity_failure_retryable() {
+        let observer = RecordingObserver::default();
+        report_v2_failure(
+            &observer,
+            &SessionError::InvitationConsumed(Box::new(SessionError::Protocol(
+                "bad digest".into(),
+            ))),
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Verifying,
+        );
+        let failure = observer
+            .failure
+            .lock()
+            .expect("failure mutex")
+            .clone()
+            .expect("reported failure");
+
+        assert_eq!(failure.code, FfiFailureCode::ProtocolOrIntegrityFailure);
+        assert!(!failure.retryable);
+        assert_eq!(failure.recovery_action, FfiRecoveryAction::None);
+    }
+
+    #[test]
+    fn authentication_milestone_precedes_credential_persistence() {
+        let authentication =
+            NativeAuthentication::rotation(Arc::new(RecordingObserver::default()), vec![1], 1);
+
+        let result = authentication.on_authenticated(AuthenticationOutcome {
+            remember_secret: None,
+        });
+
+        assert!(matches!(&result, Err(SessionError::Storage(_))));
+        assert!(authentication.authenticated());
+        assert!(!authentication.persisted());
+        assert!(should_stop_remembered_fallback(
+            &result,
+            &authentication,
+            &TransferCancelToken::new(),
+        ));
+    }
+
+    #[test]
+    fn connection_path_projection_classifies_without_endpoint_details() {
+        let direct = DataPath::Direct {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 4242),
+        };
+        let relay = DataPath::Relay {
+            url: "https://sensitive-relay.example".into(),
+        };
+        let wifi_aware = DataPath::WifiAware;
+        let other = DataPath::Other {
+            description: "sensitive transport details".into(),
+        };
+
+        let projections = [
+            project_connection_path(&direct, FfiConnectionPathEventKind::Selected),
+            project_connection_path(&relay, FfiConnectionPathEventKind::Changed),
+            project_connection_path(&wifi_aware, FfiConnectionPathEventKind::Changed),
+            project_connection_path(&other, FfiConnectionPathEventKind::Changed),
+        ];
+
+        assert_eq!(projections[0].path_kind, FfiDataPathKind::Direct);
+        assert_eq!(
+            projections[0].event_kind,
+            FfiConnectionPathEventKind::Selected
+        );
+        assert_eq!(projections[1].path_kind, FfiDataPathKind::Relay);
+        assert_eq!(projections[2].path_kind, FfiDataPathKind::WifiAware);
+        assert_eq!(projections[3].path_kind, FfiDataPathKind::Other);
+        let rendered = format!("{projections:?}");
+        assert!(!rendered.contains("198.51.100.42"));
+        assert!(!rendered.contains("sensitive-relay.example"));
+        assert!(!rendered.contains("sensitive transport details"));
+    }
+
+    #[test]
+    fn native_events_forward_selected_and_changed_paths() {
+        let observer = Arc::new(RecordingObserver::default());
+        let sink = NativeSessionEvents {
+            observer: observer.clone(),
+        };
+
+        sink.on_event(TransferEvent::Connected {
+            path: DataPath::Relay {
+                url: "https://relay.example".into(),
+            },
+        });
+        sink.on_event(TransferEvent::PathChanged {
+            path: DataPath::Direct {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+            },
+        });
+
+        assert_eq!(
+            *observer.path_events.lock().unwrap(),
+            vec![
+                FfiConnectionPathEvent {
+                    path_kind: FfiDataPathKind::Relay,
+                    event_kind: FfiConnectionPathEventKind::Selected,
+                },
+                FfiConnectionPathEvent {
+                    path_kind: FfiDataPathKind::Direct,
+                    event_kind: FfiConnectionPathEventKind::Changed,
+                },
+            ]
+        );
+        let diagnostics = observer.diagnostics.lock().unwrap().join("\n");
+        assert!(diagnostics.contains("Relay"));
+        assert!(diagnostics.contains("Direct"));
+        assert!(!diagnostics.contains("relay.example"));
+        assert!(!diagnostics.contains("127.0.0.1"));
     }
 }

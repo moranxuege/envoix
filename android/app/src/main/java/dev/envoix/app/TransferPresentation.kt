@@ -17,6 +17,42 @@ enum class TransferProgressPresentation {
 }
 
 /**
+ * Reduces receiver per-entry native phase reports into one aggregate transfer
+ * status. Verification is only presented after all payload bytes arrived, and
+ * that final verification cannot flicker back to transferring.
+ */
+data class TransferStatusPresentationDecision(
+    val status: Status,
+    val shouldPublish: Boolean,
+)
+
+object TransferStatusPresentationReducer {
+    fun decide(
+        direction: Direction,
+        current: Status,
+        reported: Status,
+        bytes: Long,
+        total: Long,
+    ): TransferStatusPresentationDecision {
+        val status =
+            when {
+                direction != Direction.Receive -> reported
+                reported == Status.Verifying && bytes < total -> current
+                current == Status.Verifying && reported == Status.Transferring -> current
+                else -> reported
+            }
+        val redundantEntryPhase =
+            direction == Direction.Receive &&
+                status == current &&
+                (reported == Status.Verifying || reported == Status.Transferring)
+        return TransferStatusPresentationDecision(
+            status = status,
+            shouldPublish = !redundantEntryPhase,
+        )
+    }
+}
+
+/**
  * Pure lifecycle-to-presentation policy shared by every Android transfer
  * surface. Compose renders this result and does not infer actions or progress
  * behavior independently.
@@ -24,24 +60,22 @@ enum class TransferProgressPresentation {
 object TransferPresentationPolicy {
     fun actions(transfer: Transfer): TransferActionAvailability {
         val state = transfer.status
-        val canPause =
-            when (state) {
-                Status.WaitingForPeer,
-                Status.Pairing,
-                Status.Connecting,
-                Status.Transferring,
-                Status.Verifying,
-                -> true
-                else -> false
-            }
         val canCancel =
-            canPause ||
-                state == Status.Preparing ||
+            state == Status.Preparing ||
+                state == Status.WaitingForPeer ||
+                state == Status.Pairing ||
+                state == Status.Connecting ||
                 state == Status.AwaitingDecision ||
+                state == Status.Transferring ||
+                state == Status.Verifying ||
                 state == Status.Paused
         return TransferActionAvailability(
-            canPause = canPause,
-            canResume = state == Status.Paused || (state == Status.Failed && transfer.retryable),
+            // Current invitation sessions consume their authentication secret
+            // after pairing and Android does not restore their process-only
+            // spec. A Pause/Resume control would promise a continuation that
+            // cannot be honored; use Cancel and create a fresh room offer.
+            canPause = false,
+            canResume = false,
             canCancel = canCancel,
             canApprove = state == Status.AwaitingDecision,
             canRemove = isTerminal(state),
@@ -62,8 +96,8 @@ object TransferPresentationPolicy {
             Status.Saving,
             Status.WaitingForReceiverSave,
             Status.FinalizingDelivery,
-            Status.Delivered,
             -> TransferProgressPresentation.Complete
+            Status.Delivered -> TransferProgressPresentation.Hidden
             Status.Paused,
             Status.Failed,
             Status.Canceled,

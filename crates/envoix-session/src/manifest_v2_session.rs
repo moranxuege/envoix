@@ -33,9 +33,10 @@ use crate::native_transport::{
     NativeFrameConnection, NativeTransportRole, PlatformDuplexTransport,
 };
 use crate::{
-    BoundEndpoint, DEFAULT_DATA_STREAM_WINDOW, EventSink, PairingConfig, PeerDescriptor,
-    SessionConfig, SessionError, TransferCancelToken, TransferProtocol, auth_bounded,
-    authenticate_receiver, authenticate_sender, dial_peer_addr_for_protocol, interrupted_error,
+    AuthenticationHandler, BoundEndpoint, DEFAULT_DATA_STREAM_WINDOW, EventSink,
+    NoopAuthenticationHandler, PairingConfig, PeerDescriptor, SessionConfig, SessionError,
+    TransferCancelToken, TransferProtocol, auth_bounded, authenticate_receiver_with_remember,
+    authenticate_sender_with_remember, dial_peer_addr_for_protocol, interrupted_error,
     peer_addr_from_descriptor,
 };
 
@@ -280,7 +281,30 @@ pub async fn send_manifest_v2_to_endpoint_addr(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
-    sealed_manifest(job)?;
+    send_manifest_v2_to_endpoint_addr_with_authentication(
+        peer_addr,
+        job,
+        state_directory,
+        config,
+        pairing,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
+    peer_addr: iroh::EndpointAddr,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
     let local_endpoint = super::build_dial_endpoint(
         &config.identity,
         &config.data_relay(),
@@ -289,7 +313,7 @@ pub async fn send_manifest_v2_to_endpoint_addr(
         config.data_stream_window,
     )
     .await?;
-    send_manifest_v2_from_endpoint(
+    send_manifest_v2_from_endpoint_with_authentication(
         local_endpoint,
         peer_addr,
         job,
@@ -297,11 +321,13 @@ pub async fn send_manifest_v2_to_endpoint_addr(
         pairing,
         events,
         cancel,
+        authentication,
     )
     .await
 }
 
-pub(crate) async fn send_manifest_v2_from_endpoint(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_manifest_v2_from_endpoint_with_authentication(
     local_endpoint: Endpoint,
     peer_addr: iroh::EndpointAddr,
     job: &CanonicalTransferJob,
@@ -309,6 +335,7 @@ pub(crate) async fn send_manifest_v2_from_endpoint(
     pairing: &PairingConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
     sealed_manifest(job)?;
     events.on_event(envoix_transfer::TransferEvent::Connecting);
@@ -326,13 +353,14 @@ pub(crate) async fn send_manifest_v2_from_endpoint(
         }
     };
     connection.watch_path(events.clone());
-    let result = send_manifest_v2_over_connection(
+    let result = send_manifest_v2_over_connection_with_authentication(
         job,
         state_directory,
         pairing,
         events,
         cancel,
         &mut connection,
+        authentication,
     )
     .await;
     let _ = ManifestV2FrameConnection::close(&mut connection).await;
@@ -431,6 +459,31 @@ async fn send_manifest_v2_over_connection<Connection>(
 where
     Connection: FrameConnection + ManifestV2FrameConnection,
 {
+    send_manifest_v2_over_connection_with_authentication(
+        job,
+        state_directory,
+        pairing,
+        events,
+        cancel,
+        connection,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_manifest_v2_over_connection_with_authentication<Connection>(
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    connection: &mut Connection,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<SenderManifestV2SessionSummary, SessionError>
+where
+    Connection: FrameConnection + ManifestV2FrameConnection,
+{
     let manifest = sealed_manifest(job)?;
     let offer = build_manifest_offer_v2(manifest.clone())
         .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
@@ -447,7 +500,12 @@ where
         .validate_offer(&offer)
         .map_err(session_delivery_error)?;
     store.save(&record).await.map_err(session_delivery_error)?;
-    auth_bounded(authenticate_sender(connection, pairing), cancel).await?;
+    let outcome = auth_bounded(
+        authenticate_sender_with_remember(connection, pairing, authentication.remember_consent()),
+        cancel,
+    )
+    .await?;
+    authentication.on_authenticated(outcome)?;
     let progress =
         SessionManifestV2Progress::new(events.clone(), identity, TransferDirection::Send);
     tokio::select! {
@@ -516,6 +574,23 @@ pub async fn receive_manifest_v2_offer(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, SessionError> {
+    receive_manifest_v2_offer_with_authentication(
+        bound_endpoint,
+        pairing,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+pub async fn receive_manifest_v2_offer_with_authentication(
+    bound_endpoint: BoundEndpoint,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<PendingManifestV2Receive, SessionError> {
     let mut connection_failures = 0_u32;
     let mut authentication_failures = 0_u32;
     let mut connection = loop {
@@ -546,8 +621,23 @@ pub async fn receive_manifest_v2_offer(
             ));
         }
         connection.watch_path(events.clone());
-        match auth_bounded(authenticate_receiver(&mut connection, pairing), cancel).await {
-            Ok(()) => break connection,
+        match auth_bounded(
+            authenticate_receiver_with_remember(
+                &mut connection,
+                pairing,
+                authentication.remember_consent(),
+            ),
+            cancel,
+        )
+        .await
+        {
+            Ok(outcome) => match authentication.on_authenticated(outcome) {
+                Ok(()) => break connection,
+                Err(error) => {
+                    let _ = ManifestV2FrameConnection::close(&mut connection).await;
+                    return Err(error);
+                }
+            },
             Err(error) if cancel.is_cancelled() => {
                 let _ = ManifestV2FrameConnection::close(&mut connection).await;
                 return Err(error);
@@ -622,8 +712,19 @@ pub async fn receive_manifest_v2_offer_over_native_transport(
     events.on_event(envoix_transfer::TransferEvent::Connected {
         path: DataPath::WifiAware,
     });
-    if let Err(error) = auth_bounded(authenticate_receiver(&mut connection, pairing), cancel).await
+    let outcome = match auth_bounded(
+        authenticate_receiver_with_remember(&mut connection, pairing, false),
+        cancel,
+    )
+    .await
     {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = ManifestV2FrameConnection::close(&mut connection).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = NoopAuthenticationHandler.on_authenticated(outcome) {
         let _ = ManifestV2FrameConnection::close(&mut connection).await;
         return Err(error);
     }

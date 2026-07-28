@@ -671,10 +671,11 @@ pub(crate) async fn build_manifest_v2_accept_endpoint(
     candidates: &CandidateFilter,
     window: u32,
 ) -> Result<Endpoint, SessionError> {
+    let accepted_alpns = [TransferProtocol::ManifestV2.alpn().to_vec()];
     build_endpoint(
         Some(listen_addrs),
         identity,
-        &[TransferProtocol::ManifestV2],
+        &accepted_alpns,
         false,
         relay,
         relay_only,
@@ -692,10 +693,11 @@ pub(crate) async fn build_manifest_v2_advertising_accept_endpoint(
     candidates: &CandidateFilter,
     window: u32,
 ) -> Result<Endpoint, SessionError> {
+    let accepted_alpns = [TransferProtocol::ManifestV2.alpn().to_vec()];
     build_endpoint(
         Some(listen_addrs),
         identity,
-        &[TransferProtocol::ManifestV2],
+        &accepted_alpns,
         true,
         relay,
         relay_only,
@@ -835,10 +837,10 @@ fn data_transport_config_builder(window: u32) -> QuicTransportConfigBuilder {
 // Endpoint knobs are independent flags/handles; the v2 accept/dial wrappers
 // above pin the supported combinations without exposing legacy ALPN choices.
 #[allow(clippy::too_many_arguments)]
-async fn build_endpoint(
+pub(crate) async fn build_endpoint(
     local_listen_addrs: Option<BindAddrs>,
     identity: &IdentityConfig,
-    accepted_protocols: &[TransferProtocol],
+    accepted_alpns: &[Vec<u8>],
     advertise_self: bool,
     relay: &Option<String>,
     relay_only: bool,
@@ -849,7 +851,7 @@ async fn build_endpoint(
     build_endpoint_with_secret(
         local_listen_addrs,
         secret_key,
-        accepted_protocols,
+        accepted_alpns,
         advertise_self,
         relay,
         relay_only,
@@ -868,10 +870,11 @@ pub(crate) async fn build_manifest_v2_hybrid_endpoint(
     window: u32,
     custom_transport: Arc<dyn CustomTransport>,
 ) -> Result<Endpoint, SessionError> {
+    let accepted_alpns = [TransferProtocol::ManifestV2.alpn().to_vec()];
     build_endpoint_with_secret(
         local_listen_addrs,
         secret_key,
-        &[TransferProtocol::ManifestV2],
+        &accepted_alpns,
         false,
         relay,
         false,
@@ -886,7 +889,7 @@ pub(crate) async fn build_manifest_v2_hybrid_endpoint(
 async fn build_endpoint_with_secret(
     local_listen_addrs: Option<BindAddrs>,
     secret_key: SecretKey,
-    accepted_protocols: &[TransferProtocol],
+    accepted_alpns: &[Vec<u8>],
     advertise_self: bool,
     relay: &Option<String>,
     relay_only: bool,
@@ -913,13 +916,8 @@ async fn build_endpoint_with_secret(
     {
         builder = builder.dns_resolver(platform_system_dns_resolver());
     }
-    if !accepted_protocols.is_empty() {
-        builder = builder.alpns(
-            accepted_protocols
-                .iter()
-                .map(|protocol| protocol.alpn().to_vec())
-                .collect(),
-        );
+    if !accepted_alpns.is_empty() {
+        builder = builder.alpns(accepted_alpns.to_vec());
     }
     if advertise_self {
         builder = builder.address_lookup(MdnsAddressLookup::builder().advertise(true));
