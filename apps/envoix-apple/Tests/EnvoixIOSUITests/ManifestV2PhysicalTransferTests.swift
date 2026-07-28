@@ -1,3 +1,4 @@
+import Combine
 import CryptoKit
 import EnvoixCore
 import Foundation
@@ -61,6 +62,152 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         let evidence = Self.endpointEvidence(fixture: fixture, role: "receiver")
         try await runWithEndpointEvidence(evidence) {
             try await runReceiveScenario(fixture: fixture, evidence: evidence)
+        }
+    }
+
+    @MainActor
+    func testSendScenarioProductActivityRoom() async throws {
+        try requirePhysicalRun()
+        try requireProductActivityRun()
+        let fixture = try Self.fixture()
+        let evidence = Self.endpointEvidence(
+            fixture: fixture,
+            role: "sender",
+            productActivity: true
+        )
+        try await runWithEndpointEvidence(evidence) {
+            let fileManager = FileManager.default
+            let root = try makeTestRoot("product-send")
+            var cleanupCompleted = false
+            var modelCleanupCompleted = false
+            defer {
+                do {
+                    try fileManager.removeItem(at: root)
+                    cleanupCompleted = true
+                } catch {
+                    cleanupCompleted = false
+                }
+                evidence.recordCleanup(
+                    completed: cleanupCompleted && modelCleanupCompleted
+                )
+            }
+
+            let sourceDirectory = root.appendingPathComponent("sources", isDirectory: true)
+            try fileManager.createDirectory(
+                at: sourceDirectory,
+                withIntermediateDirectories: true
+            )
+            let materialized = try fixture.materialize(in: sourceDirectory)
+            try evidence.recordSource(roots: materialized.rootURLs)
+            let model = TransferViewModel()
+            let subscription = observeProductActivity(model, evidence: evidence)
+            defer { subscription.cancel() }
+
+            do {
+                model.prepareManifestSelection(
+                    selectedPaths: materialized.selectedURLs.map(\.path)
+                )
+                try await waitForProductPreparation(model)
+                evidence.recordJobID(try XCTUnwrap(model.preparedManifestJobID))
+                model.startSendingManifestWithRoom(
+                    selectedPaths: materialized.selectedURLs.map(\.path),
+                    code: Self.scenarioCode,
+                    settings: Self.settings
+                )
+                let completed = try await waitForProductTerminal(model, evidence: evidence)
+                XCTAssertEqual(completed.state, .delivered)
+                XCTAssertEqual(completed.totalBytes, fixture.totalBytes)
+                XCTAssertEqual(completed.bytesTransferred, fixture.totalBytes)
+                evidence.recordDeliveryProof(true)
+                Self.marker(
+                    "\(Self.platformName) product sender delivered "
+                        + "scenario=\(fixture.scenario.rawValue) bytes=\(fixture.totalBytes)"
+                )
+            } catch {
+                modelCleanupCompleted = await cleanupProductModel(model)
+                throw error
+            }
+            modelCleanupCompleted = await cleanupProductModel(model)
+        }
+    }
+
+    @MainActor
+    func testReceiveScenarioProductActivityRoom() async throws {
+        try requirePhysicalRun()
+        try requireProductActivityRun()
+        let fixture = try Self.fixture()
+        let evidence = Self.endpointEvidence(
+            fixture: fixture,
+            role: "receiver",
+            productActivity: true
+        )
+        try await runWithEndpointEvidence(evidence) {
+            let fileManager = FileManager.default
+            let root = try makeTestRoot("product-receive")
+            var cleanupCompleted = false
+            var modelCleanupCompleted = false
+            defer {
+                do {
+                    try fileManager.removeItem(at: root)
+                    cleanupCompleted = true
+                } catch {
+                    cleanupCompleted = false
+                }
+                evidence.recordCleanup(
+                    completed: cleanupCompleted && modelCleanupCompleted
+                )
+            }
+            let destination = root.appendingPathComponent(
+                "Files-destination",
+                isDirectory: true
+            )
+            try fileManager.createDirectory(
+                at: destination,
+                withIntermediateDirectories: true
+            )
+            let invitation = try makePairingInvite(
+                role: .receive,
+                broker: Self.settings.serverUrl,
+                relay: Self.settings.relayUrl
+            )
+            defer { withExtendedLifetime(invitation) {} }
+            Self.marker("invitation=\(invitation.roomCode)")
+
+            let model = TransferViewModel()
+            let subscription = observeProductActivity(model, evidence: evidence)
+            defer { subscription.cancel() }
+            do {
+                let readyActivityID = await model.startReceivingWithRoomWhenReady(
+                    outputDir: destination.path,
+                    code: invitation.roomCode,
+                    settings: Self.settings
+                )
+                XCTAssertEqual(readyActivityID, model.transferActivity?.activityId)
+                Self.marker(
+                    "\(Self.platformName) receiver ready scenario=\(fixture.scenario.rawValue)"
+                )
+                let completed = try await waitForProductTerminal(model, evidence: evidence)
+                XCTAssertEqual(completed.state, .delivered)
+                XCTAssertEqual(completed.totalBytes, fixture.totalBytes)
+                XCTAssertEqual(completed.savedPaths.count, fixture.roots.count)
+                let published = completed.savedPaths.map { URL(fileURLWithPath: $0) }
+                for (rootSpec, savedURL) in zip(fixture.roots, published) {
+                    try rootSpec.verify(at: savedURL)
+                }
+                try evidence.recordDestination(
+                    roots: published,
+                    publicationMechanism: "files_directory"
+                )
+                evidence.recordDeliveryProof(true)
+                Self.marker(
+                    "\(Self.platformName) product receiver published "
+                        + "scenario=\(fixture.scenario.rawValue) bytes=\(fixture.totalBytes)"
+                )
+            } catch {
+                modelCleanupCompleted = await cleanupProductModel(model)
+                throw error
+            }
+            modelCleanupCompleted = await cleanupProductModel(model)
         }
     }
 
@@ -282,6 +429,82 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         }
     }
 
+    private func requireProductActivityRun() throws {
+        guard Self.buildVariant == "release_equivalent" else {
+            throw PhysicalTestError.invalidBuildVariant(Self.buildVariant)
+        }
+    }
+
+    @MainActor
+    private func observeProductActivity(
+        _ model: TransferViewModel,
+        evidence: AppleMatrixEndpointEvidence
+    ) -> AnyCancellable {
+        model.$transferActivity
+            .compactMap { $0 }
+            .sink { evidence.recordActivity($0) }
+    }
+
+    @MainActor
+    private func waitForProductPreparation(
+        _ model: TransferViewModel
+    ) async throws {
+        let deadline = Date().addingTimeInterval(Self.productPreparationTimeout)
+        while model.isPreparingManifest, Date() < deadline {
+            try await Task.sleep(nanoseconds: Self.productPollNanoseconds)
+        }
+        guard !model.isPreparingManifest else {
+            throw PhysicalTestError.productTimedOut("source preparation")
+        }
+        guard model.isManifestSelectionReady else {
+            throw PhysicalTestError.productFailed("source preparation")
+        }
+    }
+
+    @MainActor
+    private func waitForProductTerminal(
+        _ model: TransferViewModel,
+        evidence: AppleMatrixEndpointEvidence
+    ) async throws -> TransferActivityRecord {
+        let deadline = Date().addingTimeInterval(Self.productTransferTimeout)
+        while Date() < deadline {
+            if let activity = model.transferActivity {
+                evidence.recordActivity(activity)
+                switch activity.state {
+                case .delivered:
+                    return activity
+                case .failed, .canceled:
+                    throw PhysicalTestError.productFailed("terminal Activity")
+                default:
+                    break
+                }
+            }
+            try await Task.sleep(nanoseconds: Self.productPollNanoseconds)
+        }
+        throw PhysicalTestError.productTimedOut("terminal Activity")
+    }
+
+    @MainActor
+    private func cleanupProductModel(
+        _ model: TransferViewModel
+    ) async -> Bool {
+        if model.transferActivity == nil, model.isPreparingManifest {
+            _ = model.cancelManifestPreparation()
+        } else if let state = model.presentationState,
+                  ActivityProjectionPolicy.isPending(state) {
+            _ = model.cancel()
+        }
+        let deadline = Date().addingTimeInterval(Self.productCleanupTimeout)
+        while model.isBusy, Date() < deadline {
+            try? await Task.sleep(nanoseconds: Self.productPollNanoseconds)
+        }
+        guard !model.isBusy else { return false }
+        if let activityID = model.transferActivity?.activityId {
+            model.forgetActivity(activityID)
+        }
+        return model.transferActivity == nil
+    }
+
     private func makeTestRoot(_ suffix: String) throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("envoix-manifest-v2-\(Self.runID)-\(suffix)", isDirectory: true)
@@ -330,7 +553,8 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
 
     private static func endpointEvidence(
         fixture: ManifestV2Fixture,
-        role: String
+        role: String,
+        productActivity: Bool = false
     ) -> AppleMatrixEndpointEvidence {
         AppleMatrixEndpointEvidence(
             fixture: fixture,
@@ -341,10 +565,9 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             ),
             role: role,
             platform: platformIdentifier,
-            buildVariant: environmentString(
-                "ENVOIX_CROSS_DEVICE_BUILD_VARIANT",
-                default: "debug"
-            )
+            buildVariant: buildVariant,
+            testLayer: productActivity ? "l2_physical" : "l1_native",
+            driver: productActivity ? "product_activity" : "direct_ffi"
         )
     }
 
@@ -372,6 +595,10 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         speedLimitMbps: 0
     )
     private static let enabledEnvironment = "ENVOIX_CROSS_DEVICE"
+    private static let buildVariant = environmentString(
+        "ENVOIX_CROSS_DEVICE_BUILD_VARIANT",
+        default: "debug"
+    )
     private static let runID = environmentString("ENVOIX_CROSS_DEVICE_RUN_ID", default: "manual")
     private static let scenarioName = environmentString("ENVOIX_CROSS_DEVICE_SCENARIO", default: "single_file")
     private static let scenarioCode = environmentString(
@@ -382,6 +609,10 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
     private static let collisionSentinel = Data("pre-existing destination must remain unchanged\n".utf8)
     private static let shareRecoveryBytes = Data("valid source after an unreadable Share item\n".utf8)
     private static let deliveryProofDigestBytes = 32
+    private static let productPreparationTimeout: TimeInterval = 120
+    private static let productTransferTimeout: TimeInterval = 600
+    private static let productCleanupTimeout: TimeInterval = 15
+    private static let productPollNanoseconds: UInt64 = 50_000_000
     private static let platformName: String = {
         #if os(macOS)
         "macOS"
@@ -663,6 +894,8 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
     private let role: String
     private let platform: String
     private let buildVariant: String
+    private let testLayer: String
+    private let driver: String
     private let startedAt: UInt64
     private var phases: [String] = []
     private var selectedPath: String?
@@ -673,6 +906,8 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
     private var deliveryProof = false
     private var cleanupCompleted = false
     private var terminalState: String?
+    private var activityID: String?
+    private var attemptCount: UInt32 = 1
 
     init(
         fixture: ManifestV2Fixture,
@@ -681,7 +916,9 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
         repetition: Int,
         role: String,
         platform: String,
-        buildVariant: String
+        buildVariant: String,
+        testLayer: String,
+        driver: String
     ) {
         self.fixture = fixture
         self.runID = runID
@@ -690,6 +927,8 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
         self.role = role
         self.platform = platform
         self.buildVariant = buildVariant
+        self.testLayer = testLayer
+        self.driver = driver
         startedAt = Self.timestamp()
     }
 
@@ -709,16 +948,38 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
         locked { selectedPath = Self.wirePath(path) }
     }
 
+    func recordActivity(_ activity: TransferActivityRecord) {
+        locked {
+            activityID = activity.activityId
+            attemptCount = max(attemptCount, activity.attemptCount)
+            if let path = activity.connectionPath {
+                selectedPath = Self.wirePath(path)
+            }
+            if let failure = activity.failure {
+                nativeFailure = failure
+            }
+            guard let phase = Self.wireActivityState(activity.state) else {
+                return
+            }
+            if phases.last != phase {
+                phases.append(phase)
+            }
+        }
+    }
+
     func recordSource(roots: [URL]) throws {
         let summary = try Self.endpointSummary(roots: roots, publication: nil)
         locked { sourceSummary = summary }
     }
 
-    func recordDestination(roots: [URL]) throws {
+    func recordDestination(
+        roots: [URL],
+        publicationMechanism: String = "test_local_directory"
+    ) throws {
         let summary = try Self.endpointSummary(
             roots: roots,
             publication: [
-                "mechanism": "test_local_directory",
+                "mechanism": publicationMechanism,
                 "committed": true,
             ]
         )
@@ -750,6 +1011,17 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
             }
             if role == "receiver", destinationSummary == nil {
                 throw AppleMatrixEvidenceError.missingSummary("destination")
+            }
+            if driver == "product_activity" {
+                guard buildVariant == "release_equivalent" else {
+                    throw AppleMatrixEvidenceError.invalidProductEvidence("build variant")
+                }
+                guard activityID != nil else {
+                    throw AppleMatrixEvidenceError.invalidProductEvidence("Activity ID")
+                }
+                guard selectedPath != nil else {
+                    throw AppleMatrixEvidenceError.invalidProductEvidence("selected path")
+                }
             }
             terminalState = "completed"
             if phases.last != "completed" {
@@ -815,9 +1087,16 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
             } else {
                 failure = NSNull()
             }
-            let capability = role == "receiver"
-                ? "test_local_directory_publication"
-                : "source_fixture"
+            let publication = destinationSummary?["publication"] as? [String: Any]
+            let capability: String
+            switch publication?["mechanism"] as? String {
+            case "files_directory":
+                capability = "files_directory_publication"
+            case "test_local_directory":
+                capability = "test_local_directory_publication"
+            default:
+                capability = "source_fixture"
+            }
             let result: [String: Any] = [
                 "schema_version": 1,
                 "run_id": runID,
@@ -825,8 +1104,8 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
                 "repetition": repetition,
                 "role": role,
                 "platform": platform,
-                "test_layer": "l1_native",
-                "driver": "direct_ffi",
+                "test_layer": testLayer,
+                "driver": driver,
                 "build_variant": buildVariant,
                 "app_version": Self.appVersion,
                 "core_version": coreInfo.coreVersion,
@@ -834,13 +1113,13 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
                 "device_model": Self.deviceModel,
                 "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
                 "capabilities": ["manifest_v2", capability],
-                "activity_id": NSNull(),
+                "activity_id": activityID as Any? ?? NSNull(),
                 "job_id": jobID as Any? ?? NSNull(),
                 "started_at": startedAt,
                 "finished_at": finishedAt,
                 "terminal_state": terminalState,
                 "ordered_phases": phases,
-                "attempt_count": 1,
+                "attempt_count": attemptCount,
                 "selected_path": selectedPath as Any? ?? NSNull(),
                 "path_reason": NSNull(),
                 "source_summary": sourceSummary as Any? ?? NSNull(),
@@ -991,6 +1270,37 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
         case .finalizingDelivery: return "finalizing_delivery"
         case .delivered: return "completed"
         case .waitingForPeer: return "waiting_for_peer"
+        }
+    }
+
+    private static func wireActivityState(
+        _ value: TransferActivityState
+    ) -> String? {
+        switch value {
+        case .preparing, .paused:
+            return nil
+        case .waitingForPeer:
+            return "waiting_for_peer"
+        case .pairing:
+            return "pairing"
+        case .connecting:
+            return "connecting"
+        case .awaitingDecision:
+            return "offer"
+        case .transferring:
+            return "transferring"
+        case .verifying:
+            return "verifying"
+        case .saving:
+            return "saving"
+        case .waitingForReceiverSave:
+            return "waiting_for_receiver_save"
+        case .finalizingDelivery:
+            return "finalizing_delivery"
+        case .delivered:
+            return "completed"
+        case .failed, .canceled:
+            return "failed"
         }
     }
 
@@ -1154,6 +1464,7 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
 private enum AppleMatrixEvidenceError: Error {
     case cleanupIncomplete
     case couldNotEnumerate(String)
+    case invalidProductEvidence(String)
     case missingDeliveryProof
     case missingFileSize(String)
     case missingSummary(String)
@@ -1162,8 +1473,11 @@ private enum AppleMatrixEvidenceError: Error {
 }
 
 private enum PhysicalTestError: Error {
+    case invalidBuildVariant(String)
     case invalidScenario(String)
     case missingCapacity(String)
+    case productFailed(String)
+    case productTimedOut(String)
 }
 
 private extension Data {
