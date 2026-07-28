@@ -141,14 +141,17 @@ macro_rules! wire_hex {
 wire_hex!(WireHex16, u64, 16);
 wire_hex!(WireHex32, u128, 32);
 
-/// The duty kinds the Kotlin `DutyExecutor` actually executes.
+/// The duty kinds this crate CLAIMS the platform executor performs.
 ///
-/// This is the ONE source of truth for the platform lane: [`platform_work`]
-/// may only build work for these kinds, and the Kotlin `when` branches are
-/// pinned against it by `kotlin_executor_handles_exactly_the_executed_kinds`.
-/// Dispatching any other kind would strand the duty — the service drops what
-/// it cannot execute, so no result is ever reported and the ledger never
-/// admits one.
+/// It is a declaration, not a derivation, and nothing in production reads it —
+/// routing lives in the Kotlin `DutyRouter`. So it can only be trusted as far
+/// as something executable checks it, and the thing that does is
+/// `the_shipped_router_replays_authority_encoded_orders`, which runs the real
+/// router. Treat this constant as the intent; treat the replay as the evidence.
+///
+/// It must remain a superset of what [`platform_work`] can build: dispatching a
+/// kind the executor drops would strand the duty, since no result is reported
+/// and the ledger never admits one.
 pub const EXECUTED_KINDS: [DutyKind; 6] = [
     DutyKind::SourceHandle,
     DutyKind::Publication,

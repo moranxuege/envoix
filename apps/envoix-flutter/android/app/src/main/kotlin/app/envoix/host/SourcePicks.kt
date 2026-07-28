@@ -82,7 +82,15 @@ object SourcePicks {
             // is gone, so this card holds nothing — returning the URI anyway
             // would hand back a source we just released, and whether reading it
             // still works would depend on an ephemeral grant nobody recorded.
-            // Answering "no source" sends the card down its own re-pick path.
+            //
+            // Answering "no source" is honest and is NOT yet a recovery. There
+            // is no implemented path back: the pick was consumed by the
+            // `getAndSet` above, the report reaches only the process-local duty
+            // ledger, and the `RePickSource` command the card later offers
+            // submits a core command WITHOUT opening the picker. The card is
+            // therefore stuck until source acquisition gains a durable, typed
+            // result path. Do not persist the duty ledger before that lands —
+            // it would convert this process-local dead end into a durable one.
             releaseGrant(context, source)
             bound.remove(card)
             return null

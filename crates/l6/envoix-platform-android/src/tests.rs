@@ -860,7 +860,10 @@ fn one_activity_means_one_frontend() {
 ///
 /// The three facts are:
 ///   - the schema VOCABULARY: every arm `WorkView` can carry (9);
-///   - what the executor SUPPORTS: `EXECUTED_KINDS` (6);
+///   - what the executor CLAIMS to support: `EXECUTED_KINDS` (6) — a
+///     declaration this test cannot verify, because nothing in production reads
+///     it and Kotlin routing is not derivable from Rust. The executable proof
+///     for the arms that exist is the replay harness, not this;
 ///   - what the authority EMITS today: what `platform_work` can build (2).
 ///
 /// Only the containments are invariants. Equality between any two of them is

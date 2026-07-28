@@ -20,8 +20,8 @@ use std::process::Command;
 
 use envoix_bindings::duty::{
     DutyBody, DutyFrame, DutyOrderView, DutyProvenanceView, ForegroundWorkView, LockDirectiveView,
-    LockWorkView, NoticeView, NotificationWorkView, PublicationWorkView, WorkView,
-    encode_duty_frame,
+    LockWorkView, NoticeView, NotificationWorkView, OutcomeCodeView, PublicationWorkView, WorkView,
+    decode_duty_frame, encode_duty_frame,
 };
 
 /// Skips the replay. Named in the failure message on purpose: a gate that
@@ -127,37 +127,49 @@ fn order(work: WorkView) -> String {
 }
 
 /// Every arm, and what the router must have delivered for it.
-fn vectors() -> Vec<(String, &'static str)> {
+fn vectors() -> Vec<(String, &'static str, Option<OutcomeCodeView>)> {
     vec![
         (
             order(WorkView::Notification(NotificationWorkView {
                 notice: NoticeView::TransferComplete,
             })),
-            "effects=[notice=TRANSFER_COMPLETE card=00112233445566aa] report=COMPLETED",
+            "effects=[notice=TRANSFER_COMPLETE card=00112233445566aa]",
+            Some(OutcomeCodeView::Completed),
         ),
         (
             order(WorkView::Notification(NotificationWorkView {
                 notice: NoticeView::ActionNeeded,
             })),
-            "effects=[notice=ACTION_NEEDED card=00112233445566aa] report=COMPLETED",
+            "effects=[notice=ACTION_NEEDED card=00112233445566aa]",
+            Some(OutcomeCodeView::Completed),
+        ),
+        (
+            order(WorkView::Notification(NotificationWorkView {
+                notice: NoticeView::TransferFailed,
+            })),
+            "effects=[notice=TRANSFER_FAILED card=00112233445566aa]",
+            Some(OutcomeCodeView::Completed),
         ),
         (
             order(WorkView::Lock(LockWorkView {
                 directive: LockDirectiveView::Hold,
             })),
-            "effects=[lock=HOLD] report=COMPLETED",
+            "effects=[lock=HOLD]",
+            Some(OutcomeCodeView::Completed),
         ),
         (
             order(WorkView::Lock(LockWorkView {
                 directive: LockDirectiveView::Release,
             })),
-            "effects=[lock=RELEASE] report=COMPLETED",
+            "effects=[lock=RELEASE]",
+            Some(OutcomeCodeView::Completed),
         ),
         (
             order(WorkView::Foreground(ForegroundWorkView {
                 active_transfers: 4_294_967_295,
             })),
-            "effects=[foreground=4294967295] report=COMPLETED",
+            "effects=[foreground=4294967295]",
+            Some(OutcomeCodeView::Completed),
         ),
         (
             order(WorkView::Publication(PublicationWorkView {
@@ -166,22 +178,25 @@ fn vectors() -> Vec<(String, &'static str)> {
                 total_bytes: 9_223_372_036_854_775_807,
             })),
             "effects=[publish staged=artifacts/one name=report.pdf \
-             total=9223372036854775807] report=COMPLETED",
+             total=9223372036854775807]",
+            Some(OutcomeCodeView::Completed),
         ),
         (
             order(WorkView::Courier),
-            "effects=[courier] report=INTERNAL",
+            "effects=[courier]",
+            Some(OutcomeCodeView::Internal),
         ),
         (
             order(WorkView::SourceHandle),
-            "effects=[source card=00112233445566aa gen=9] report=COMPLETED",
+            "effects=[source card=00112233445566aa gen=9]",
+            Some(OutcomeCodeView::Completed),
         ),
         // The three the vocabulary carries and this platform does not execute.
         // Outstanding means the duty is re-delivered, so a router that reported
         // anything at all here would discharge work nobody did.
-        (order(WorkView::Grant), "effects=[] report=OUTSTANDING"),
-        (order(WorkView::Staging), "effects=[] report=OUTSTANDING"),
-        (order(WorkView::OpenShare), "effects=[] report=OUTSTANDING"),
+        (order(WorkView::Grant), "effects=[]", None),
+        (order(WorkView::Staging), "effects=[]", None),
+        (order(WorkView::OpenShare), "effects=[]", None),
     ]
 }
 
@@ -209,7 +224,7 @@ fn the_shipped_router_replays_authority_encoded_orders() {
         work.join("orders.txt"),
         cases
             .iter()
-            .map(|(frame, _)| frame.as_str())
+            .map(|(frame, _, _)| frame.as_str())
             .collect::<Vec<_>>()
             .join("\n"),
     )
@@ -263,11 +278,38 @@ fn the_shipped_router_replays_authority_encoded_orders() {
 
     let lines: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
     assert_eq!(lines.len(), cases.len(), "one line per vector:\n{stdout}");
-    for (index, (_, expected)) in cases.iter().enumerate() {
+    for (index, (_, effects, outcome)) in cases.iter().enumerate() {
+        let line = lines[index];
+        let (head, report) = line
+            .split_once(" report=")
+            .unwrap_or_else(|| panic!("vector {index} printed no report: {line}"));
         assert_eq!(
-            lines[index],
-            format!("{index} {expected}"),
+            head,
+            format!("{index} {effects}"),
             "vector {index} routed differently than the authority meant"
         );
+        let Some(expected) = outcome else {
+            assert_eq!(
+                report, "OUTSTANDING",
+                "vector {index} reported work this platform does not perform"
+            );
+            continue;
+        };
+        // RUST decodes what Kotlin emitted. Decoding it on the Kotlin side would
+        // only have proven Kotlin agrees with itself; the real ledger admits
+        // from this direction, and it matches provenance EXACTLY — so a report
+        // whose provenance drifted is admitted by nobody and the duty stays in
+        // flight until the process dies.
+        let frame = decode_duty_frame(report.as_bytes())
+            .unwrap_or_else(|error| panic!("vector {index} report is not a duty frame: {error:?}"));
+        let DutyBody::Report(returned) = frame.body else {
+            panic!("vector {index} returned something that is not a report");
+        };
+        assert_eq!(
+            returned.provenance,
+            provenance(),
+            "vector {index} reported a provenance the ledger would refuse"
+        );
+        assert_eq!(returned.outcome, *expected, "vector {index} outcome");
     }
 }

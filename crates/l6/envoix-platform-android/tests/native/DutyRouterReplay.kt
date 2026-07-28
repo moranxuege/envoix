@@ -60,15 +60,10 @@ fun main(args: Array<String>) {
     File(args[0]).readLines().filter { it.isNotBlank() }.forEachIndexed { index, frame ->
         val effects = RecordingEffects()
         val report = DutyRouter.route(frame.toByteArray(Charsets.UTF_8), effects)
-        val outcome =
-            report?.let {
-                // Decoding our own report proves the encoder produced something
-                // the contract accepts, not merely something non-null.
-                val decoded =
-                    com.envoix.bindings.duty.EnvoixDutyCodec
-                        .decode(String(it, Charsets.UTF_8))
-                (decoded.body as com.envoix.bindings.duty.DutyBody.Report).value.outcome.name
-            } ?: "OUTSTANDING"
-        println("$index effects=[${effects.seen.joinToString(";")}] report=$outcome")
+        // The report goes back as BYTES. Decoding it here with the same Kotlin
+        // codec would only prove Kotlin agrees with itself; Rust must be the one
+        // that accepts it, because Rust is what the real ledger admits from.
+        val encoded = report?.let { String(it, Charsets.UTF_8) } ?: "OUTSTANDING"
+        println("$index effects=[${effects.seen.joinToString(";")}] report=$encoded")
     }
 }

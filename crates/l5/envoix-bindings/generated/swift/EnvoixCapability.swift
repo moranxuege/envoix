@@ -40,7 +40,11 @@ public struct CapabilityContractError: Error, Equatable {
 public struct CapabilitySecretString: Equatable, CustomStringConvertible {
     private let value: String
 
-    init(_ value: String) { self.value = value }
+    /// `public` because a separate-module consumer must be able to
+    /// SEAL a value: an originable body carries secret text, so an
+    /// internal initializer makes the public encoder uncallable from
+    /// the app that imports these bindings.
+    public init(_ value: String) { self.value = value }
 
     public func expose() -> String { value }
 

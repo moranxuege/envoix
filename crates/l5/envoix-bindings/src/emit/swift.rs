@@ -132,7 +132,11 @@ fn secret_type(out: &mut String) {
         "/// Bounded contract text that redacts ordinary string interpolation.\n\
          public struct ReadSecretString: Equatable, CustomStringConvertible {\n\
          \x20   private let value: String\n\n\
-         \x20   init(_ value: String) { self.value = value }\n\n\
+         \x20   /// `public` because a separate-module consumer must be able to\n\
+         \x20   /// SEAL a value: an originable body carries secret text, so an\n\
+         \x20   /// internal initializer makes the public encoder uncallable from\n\
+         \x20   /// the app that imports these bindings.\n\
+         \x20   public init(_ value: String) { self.value = value }\n\n\
          \x20   public func expose() -> String { value }\n\n\
          \x20   public var description: String { \"ReadSecretString([redacted])\" }\n\
          }\n\n",
