@@ -1,13 +1,18 @@
 package dev.envoix.app
 
+import android.app.Application
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
@@ -319,6 +324,162 @@ class ManifestV2CrossDeviceInstrumentedTest {
         }
     }
 
+    @Test
+    fun sendScenarioProductActivityRoom() {
+        requireEnabled()
+        requireProductActivityRun()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val fixture = fixture()
+        require(fixture.directoryCount == 0) {
+            "Android product-Activity directory publication requires a provisioned SAF tree"
+        }
+        val evidence = endpointEvidence(context, fixture, "sender", productActivity = true)
+        runWithEndpointEvidence(evidence) {
+            val testRoot = testRoot(context, "product-send")
+            val sourceDirectory = File(testRoot, "sources").apply { check(mkdirs()) }
+            val transientUris = mutableListOf<Uri>()
+            var model: TransferViewModel? = null
+            var transferId: Long? = null
+            var jobId: String? = null
+            try {
+                val materialized = fixture.materialize(sourceDirectory)
+                evidence.recordSource(materialized.rootFiles)
+                val jobStore = TransferService.jobStoreDirectory(context)
+                val created = checkedResponse(Native.createManifestV2Job(jobStore.path, "never"))
+                val createdJobId = created.getString("job_id")
+                jobId = createdJobId
+                evidence.jobId = createdJobId
+                var prepared = created
+                fixture.roots.zip(materialized.rootFiles).forEach { (root, file) ->
+                    check(!root.directory)
+                    val uri = publishShareSource(context, file, root.name)
+                    transientUris += uri
+                    val source = ManifestV2Source(uri, directory = false, displayName = root.name)
+                    val staged = runBlocking { ManifestV2SourceStager.stage(context, createdJobId, source) }
+                    prepared =
+                        checkedResponse(
+                            Native.prepareManifestV2Job(
+                                jobStore.path,
+                                createdJobId,
+                                ManifestV2SourceStager.rootsJson(source, staged),
+                            ),
+                        )
+                }
+                assertEquals("ready_to_send", prepared.getString("state"))
+                assertEquals(fixture.roots.size, prepared.getInt("root_count"))
+                assertEquals(fixture.fileCount, prepared.getInt("file_count"))
+                assertEquals(fixture.totalBytes, prepared.getLong("total"))
+
+                val invitation = checkedResponse(Native.parseInviteForRole(scenarioCode(), "send"))
+                val productModel =
+                    TransferViewModel(context.applicationContext as Application).also { model = it }
+                val id =
+                    productModel
+                        .startSend(
+                            invitation.getString("reference"),
+                            createdJobId,
+                            Endpoints.BROKER,
+                            Endpoints.RELAY,
+                            qrPayload = null,
+                        ).also { transferId = it }
+                val completed = awaitProductTransfer(id, evidence, timeoutMs(fixture.totalBytes))
+                assertEquals(Status.Delivered, completed.status)
+                assertEquals(createdJobId, completed.jobId)
+                assertEquals(fixture.totalBytes, completed.total)
+                evidence.deliveryProof = true
+                marker(
+                    "Android product sender delivered " +
+                        "scenario=${fixture.scenario.wireName} bytes=${fixture.totalBytes}",
+                )
+            } finally {
+                if (model != null && transferId != null) {
+                    cleanupProductTransfer(requireNotNull(model), requireNotNull(transferId))
+                }
+                transientUris.forEach { check(MediaStoreSaver.delete(context, it)) }
+                jobId?.let { deleteManifestJobArtifacts(context.filesDir, it) }
+                check(testRoot.deleteRecursively())
+                evidence.cleanupCompleted = true
+            }
+        }
+    }
+
+    @Test
+    fun receiveScenarioProductActivityRoom() {
+        requireEnabled()
+        requireProductActivityRun()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val fixture = fixture()
+        require(fixture.directoryCount == 0) {
+            "Android product-Activity directory publication requires a provisioned SAF tree"
+        }
+        val evidence = endpointEvidence(context, fixture, "receiver", productActivity = true)
+        runWithEndpointEvidence(evidence) {
+            val originalSettings = SettingsStore.settings.value
+            val publicFolder = "EnvoixMatrix-${crossDeviceRunId()}"
+            val publishedUris = mutableListOf<Uri>()
+            var model: TransferViewModel? = null
+            var transferId: Long? = null
+            try {
+                SettingsStore.update { it.copy(saveTreeUri = "", saveFolder = publicFolder) }
+                val invitation =
+                    checkedResponse(
+                        Native.generateInvite(
+                            "receive",
+                            Endpoints.BROKER,
+                            Endpoints.RELAY,
+                        ),
+                    )
+                marker("invitation=${invitation.getString("code")}")
+                val productModel =
+                    TransferViewModel(context.applicationContext as Application).also { model = it }
+                val id =
+                    productModel
+                        .startReceive(
+                            invitation.getString("reference"),
+                            Endpoints.BROKER,
+                            Endpoints.RELAY,
+                            qrPayload = invitation.getString("code"),
+                            destinationCopyApproved = true,
+                        ).also { transferId = it }
+                var readyPublished = false
+                val completed =
+                    awaitProductTransfer(
+                        id,
+                        evidence,
+                        timeoutMs(fixture.totalBytes),
+                    ) { transfer ->
+                        if (!readyPublished && transfer.status == Status.WaitingForPeer) {
+                            readyPublished = true
+                            marker("Android receiver ready scenario=${fixture.scenario.wireName}")
+                        }
+                    }
+                assertTrue("product receiver never reached its native readiness phase", readyPublished)
+                assertEquals(Status.Delivered, completed.status)
+                assertEquals(fixture.roots.size, completed.savedUris.size)
+                fixture.roots.zip(completed.savedUris).forEach { (root, encodedUri) ->
+                    val uri = Uri.parse(encodedUri)
+                    assertEquals(root.name, displayName(context, uri))
+                    assertArrayEquals(root.files.single().payload.digest(), streamDigest(context, uri))
+                    publishedUris += uri
+                }
+                evidence.recordProductDestination(completed.savedUris.map(Uri::parse))
+                evidence.jobId = completed.jobId
+                evidence.deliveryProof = true
+                marker(
+                    "Android product receiver published " +
+                        "scenario=${fixture.scenario.wireName} bytes=${fixture.totalBytes}",
+                )
+            } finally {
+                if (model != null && transferId != null) {
+                    cleanupProductTransfer(requireNotNull(model), requireNotNull(transferId))
+                }
+                publishedUris.forEach { check(MediaStoreSaver.delete(context, it)) }
+                SettingsStore.update { originalSettings }
+                evidence.cleanupCompleted = true
+            }
+        }
+    }
+
     private class RecordingCallback(
         private val evidence: AndroidMatrixEndpointEvidence,
         private val plan: ((String) -> String)? = null,
@@ -437,11 +598,76 @@ class ManifestV2CrossDeviceInstrumentedTest {
         return digest.digest()
     }
 
+    private fun displayName(
+        context: Context,
+        uri: Uri,
+    ): String =
+        requireNotNull(
+            context.contentResolver
+                .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else null
+                },
+        ) { "published URI has no display name" }
+
+    private fun awaitProductTransfer(
+        id: Long,
+        evidence: AndroidMatrixEndpointEvidence,
+        timeoutMs: Long,
+        onUpdate: (Transfer) -> Unit = {},
+    ): Transfer =
+        runBlocking {
+            withTimeout(timeoutMs) {
+                TransferRepository.transfers
+                    .mapNotNull { transfers ->
+                        transfers
+                            .firstOrNull { it.id == id }
+                            ?.also {
+                                evidence.recordActivity(it)
+                                onUpdate(it)
+                            }
+                    }.first { it.status.isTerminal }
+            }
+        }
+
+    private fun cleanupProductTransfer(
+        model: TransferViewModel,
+        id: Long,
+    ) {
+        val current = TransferRepository.transfers.value.firstOrNull { it.id == id }
+        if (current != null && !current.status.isTerminal) {
+            model.cancel(id)
+            runBlocking {
+                withTimeout(PRODUCT_CLEANUP_TIMEOUT_MS) {
+                    TransferRepository.transfers
+                        .mapNotNull { transfers -> transfers.firstOrNull { it.id == id } }
+                        .first { it.status.isTerminal }
+                }
+            }
+        }
+        if (TransferRepository.transfers.value.any { it.id == id }) {
+            model.remove(id)
+            runBlocking {
+                withTimeout(PRODUCT_CLEANUP_TIMEOUT_MS) {
+                    TransferRepository.transfers.first { transfers ->
+                        transfers.none { it.id == id }
+                    }
+                }
+            }
+        }
+    }
+
     private fun requireEnabled() {
         assumeTrue(
             "set -e $ARG_ENABLED 1 to run physical cross-device tests",
             argument(ARG_ENABLED) == "1",
         )
+    }
+
+    private fun requireProductActivityRun() {
+        require(argument(ARG_BUILD_VARIANT) == "release_equivalent") {
+            "product-Activity matrix tests require a release-equivalent build"
+        }
     }
 
     private fun fixture(): Fixture =
@@ -494,6 +720,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
         context: Context,
         fixture: Fixture,
         role: String,
+        productActivity: Boolean = false,
     ): AndroidMatrixEndpointEvidence =
         AndroidMatrixEndpointEvidence(
             context = context,
@@ -503,6 +730,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
             repetition = crossDeviceRepetition(),
             role = role,
             buildVariant = argument(ARG_BUILD_VARIANT) ?: "debug",
+            testLayer = if (productActivity) "l2_physical" else "l1_native",
+            driver = if (productActivity) "product_activity" else "direct_jni",
         )
 
     private fun runWithEndpointEvidence(
@@ -558,6 +787,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
         const val ARG_LARGE_BYTES = "envoixCrossDeviceLargeBytes"
         const val DEFAULT_CODE = "741203-ambe-come"
         const val DEFAULT_TIMEOUT_MS = 180_000L
+        const val PRODUCT_CLEANUP_TIMEOUT_MS = 15_000L
         const val TIMEOUT_BYTES_PER_MS = 2_048L
         const val DEFAULT_LARGE_BYTES = 128L * 1_024 * 1_024
         const val MAX_RUN_ID_LENGTH = 96
@@ -584,6 +814,8 @@ private class AndroidMatrixEndpointEvidence(
     private val repetition: Int,
     private val role: String,
     private val buildVariant: String,
+    private val testLayer: String,
+    private val driver: String,
 ) {
     private val startedAt = System.currentTimeMillis()
     private val phases = mutableListOf<String>()
@@ -594,6 +826,8 @@ private class AndroidMatrixEndpointEvidence(
     private var sourceSummary: JSONObject? = null
     private var destinationSummary: JSONObject? = null
     private var terminalState: String? = null
+    private var activityId: String? = null
+    private var attemptCount = 1
 
     var jobId: String? = null
     var deliveryProof: Boolean = false
@@ -602,6 +836,10 @@ private class AndroidMatrixEndpointEvidence(
     init {
         require(role == "sender" || role == "receiver")
         require(buildVariant == "debug" || buildVariant == "release_equivalent")
+        require(
+            (testLayer == "l1_native" && driver == "direct_jni") ||
+                (testLayer == "l2_physical" && driver == "product_activity"),
+        )
     }
 
     @Synchronized
@@ -628,6 +866,43 @@ private class AndroidMatrixEndpointEvidence(
                     ?: "none"
         }
         if (phases.lastOrNull() != state) phases += state
+    }
+
+    @Synchronized
+    fun recordActivity(transfer: Transfer) {
+        activityId = transfer.id.toString()
+        attemptCount = maxOf(attemptCount, transfer.attempt)
+        transfer.jobId?.takeIf(String::isNotBlank)?.let { jobId = it }
+        transfer.pathAddr?.takeIf { it in PATH_KINDS }?.let { selectedPath = it }
+        val phase =
+            when (transfer.status) {
+                Status.Preparing -> null
+                Status.WaitingForPeer -> "waiting_for_peer"
+                Status.Pairing -> "pairing"
+                Status.Connecting -> "connecting"
+                Status.AwaitingDecision -> "offer"
+                Status.Transferring -> "transferring"
+                Status.Verifying -> "verifying"
+                Status.Saving -> "saving"
+                Status.WaitingForReceiverSave -> "waiting_for_receiver_save"
+                Status.FinalizingDelivery -> "finalizing_delivery"
+                Status.Delivered -> "completed"
+                Status.Failed, Status.Canceled -> "failed"
+                Status.Paused -> null
+            }
+        if (phase == "failed") {
+            nativeFailurePhase = phases.lastOrNull()
+            nativeFailureCode =
+                transfer.failureCause
+                    ?.takeIf(::stableFailureCode)
+                    ?: if (transfer.status == Status.Canceled) {
+                        "user_canceled"
+                    } else {
+                        "product_activity_failed"
+                    }
+            nativeRecoveryAction = transfer.recoveryAction.wire
+        }
+        if (phase != null && phases.lastOrNull() != phase) phases += phase
     }
 
     fun recordSource(roots: List<File>) {
@@ -670,12 +945,41 @@ private class AndroidMatrixEndpointEvidence(
             )
     }
 
+    fun recordProductDestination(uris: List<Uri>) {
+        check(role == "receiver")
+        check(uris.size == fixture.roots.size)
+        val entries =
+            uris.map { uri ->
+                val inspected = MediaStoreSaver.inspect(context, uri).getOrThrow()
+                AndroidMatrixEntry(
+                    relativePath = publishedDisplayName(uri),
+                    kind = "file",
+                    plaintextBytes = inspected.size,
+                    sha256 = inspected.sha256,
+                )
+            }
+        destinationSummary =
+            endpointSummary(
+                rootCount = uris.size,
+                entries = entries,
+                publication =
+                    JSONObject()
+                        .put("mechanism", "media_store")
+                        .put("committed", true),
+            )
+    }
+
     @Synchronized
     fun complete() {
         check(deliveryProof) { "endpoint did not record delivery proof" }
         check(cleanupCompleted) { "endpoint did not complete test-owned cleanup" }
         if (role == "sender") check(sourceSummary != null)
         if (role == "receiver") check(destinationSummary != null)
+        if (driver == "product_activity") {
+            check(buildVariant == "release_equivalent")
+            check(activityId != null) { "product endpoint did not record its Activity ID" }
+            check(selectedPath != null) { "product endpoint did not record its selected path" }
+        }
         terminalState = "completed"
         if (phases.lastOrNull() != "completed") phases += "completed"
     }
@@ -714,6 +1018,7 @@ private class AndroidMatrixEndpointEvidence(
                 .put(
                     when (destinationSummary?.optJSONObject("publication")?.optString("mechanism")) {
                         "media_store" -> "media_store_publication"
+                        "storage_access_framework" -> "storage_access_framework_publication"
                         "test_local_directory" -> "test_local_directory_publication"
                         "mixed" -> "mixed_test_publication"
                         else -> "source_fixture"
@@ -727,8 +1032,8 @@ private class AndroidMatrixEndpointEvidence(
                 .put("repetition", repetition)
                 .put("role", role)
                 .put("platform", "android")
-                .put("test_layer", "l1_native")
-                .put("driver", "direct_jni")
+                .put("test_layer", testLayer)
+                .put("driver", driver)
                 .put("build_variant", buildVariant)
                 .put("app_version", BuildConfig.VERSION_NAME)
                 .put("core_version", JSONObject.NULL)
@@ -736,13 +1041,13 @@ private class AndroidMatrixEndpointEvidence(
                 .put("device_model", Build.MODEL)
                 .put("os_version", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
                 .put("capabilities", capabilities)
-                .put("activity_id", JSONObject.NULL)
+                .put("activity_id", activityId ?: JSONObject.NULL)
                 .put("job_id", jobId ?: JSONObject.NULL)
                 .put("started_at", startedAt)
                 .put("finished_at", finishedAt)
                 .put("terminal_state", terminal)
                 .put("ordered_phases", JSONArray(phases))
-                .put("attempt_count", 1)
+                .put("attempt_count", attemptCount)
                 .put("selected_path", selectedPath ?: JSONObject.NULL)
                 .put("path_reason", JSONObject.NULL)
                 .put("source_summary", sourceSummary ?: JSONObject.NULL)
@@ -768,6 +1073,15 @@ private class AndroidMatrixEndpointEvidence(
         if (output.exists()) check(output.delete())
         check(temporary.renameTo(output)) { "could not publish Android endpoint evidence" }
     }
+
+    private fun publishedDisplayName(uri: Uri): String =
+        requireNotNull(
+            context.contentResolver
+                .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else null
+                },
+        ) { "published URI has no display name" }
 
     private fun summaryFromFiles(
         roots: List<File>,

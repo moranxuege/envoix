@@ -607,6 +607,38 @@ class MatrixContractTests(unittest.TestCase):
             "disposition does not match support and run state",
         )
 
+    def test_execution_rows_include_registry_test_layer(self) -> None:
+        selected, _, selection = matrix_contract.resolve_cases(
+            self.registry,
+            case_ids=["l2.baseline.room.android-ios.single-file"],
+        )
+        plan = matrix_contract.build_run_plan(
+            self.registry,
+            selected,
+            run_id="fixture-run",
+            tested_commit="0123456789abcdef",
+            build_variant="release_equivalent",
+            selection=selection,
+            dry_run=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts/matrix_contract.py"),
+                    "list-executions",
+                    str(REGISTRY_PATH),
+                    str(plan_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        fields = completed.stdout.splitlines()[0].split("\t")
+        self.assertEqual(fields[-2:], ["l2_physical", "not_run"])
+
     def test_fixture_aggregate_is_deterministic_and_keeps_failure_classes(self) -> None:
         fixture = json.loads(RUNNER_FIXTURE_PATH.read_text(encoding="utf-8"))
         selected, _, selection = matrix_contract.resolve_cases(

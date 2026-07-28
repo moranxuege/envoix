@@ -722,7 +722,11 @@ def validate_endpoint_result(
             "endpoint result.selected_path",
             errors,
         )
-    if actual_driver == "product_activity" and selected_path is None:
+    if (
+        actual_driver == "product_activity"
+        and terminal_state == "completed"
+        and selected_path is None
+    ):
         errors.append("product_activity endpoint results require selected_path")
     path_reason = _check_nullable_text(
         value.get("path_reason"),
@@ -2015,19 +2019,25 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
+        cases_by_id = {case["case_id"]: case for case in registry["cases"]}
         for execution in plan["executions"]:
             print(
                 "\t".join(
-                    str(execution[field])
-                    for field in (
-                        "case_id",
-                        "repetition",
-                        "sender",
-                        "receiver",
-                        "scenario",
-                        "timeout_seconds",
-                        "disposition",
-                    )
+                    [
+                        *(
+                            str(execution[field])
+                            for field in (
+                                "case_id",
+                                "repetition",
+                                "sender",
+                                "receiver",
+                                "scenario",
+                                "timeout_seconds",
+                            )
+                        ),
+                        cases_by_id[execution["case_id"]]["test_layer"],
+                        execution["disposition"],
+                    ]
                 )
             )
         return 0

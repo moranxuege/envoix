@@ -543,20 +543,29 @@ run_endpoint_role() {
   local platform="$1"
   local role="$2"
   local scenario="$3"
-  local code="$4"
-  local run_id="$5"
-  local case_id="$6"
-  local repetition="$7"
-  local log_file="$8"
+  local test_layer="$4"
+  local code="$5"
+  local run_id="$6"
+  local case_id="$7"
+  local repetition="$8"
+  local log_file="$9"
   local method private_case_dir
   private_case_dir="$(dirname "$log_file")"
 
   if [[ "$role" == "send" ]]; then
     method="sendScenarioManifestV2Room"
     [[ "$platform" != "android" ]] && method="testSendScenarioManifestV2Room"
+    if [[ "$test_layer" == "l2_physical" ]]; then
+      method="sendScenarioProductActivityRoom"
+      [[ "$platform" != "android" ]] && method="testSendScenarioProductActivityRoom"
+    fi
   else
     method="receiveScenarioManifestV2Room"
     [[ "$platform" != "android" ]] && method="testReceiveScenarioManifestV2Room"
+    if [[ "$test_layer" == "l2_physical" ]]; then
+      method="receiveScenarioProductActivityRoom"
+      [[ "$platform" != "android" ]] && method="testReceiveScenarioProductActivityRoom"
+    fi
   fi
 
   if [[ "$platform" == "android" ]]; then
@@ -702,12 +711,15 @@ remove_endpoint_patch() {
   local platform="$1"
   local role="$2"
   local run_id="$3"
+  local test_layer="$4"
   local method product_directory
   [[ "$platform" == "android" ]] && return
   if [[ "$role" == "send" ]]; then
     method="testSendScenarioManifestV2Room"
+    [[ "$test_layer" == "l2_physical" ]] && method="testSendScenarioProductActivityRoom"
   else
     method="testReceiveScenarioManifestV2Room"
+    [[ "$test_layer" == "l2_physical" ]] && method="testReceiveScenarioProductActivityRoom"
   fi
   if [[ "$platform" == "ios" ]]; then
     product_directory="$ios_products"
@@ -721,6 +733,7 @@ ANDROID_LOGCAT_PID=""
 ACTIVE_RECEIVER_PID=""
 ACTIVE_RECEIVER_PLATFORM=""
 ACTIVE_RECEIVER_RUN_ID=""
+ACTIVE_RECEIVER_TEST_LAYER=""
 ACTIVE_CASE_ID=""
 
 start_android_logcat() {
@@ -752,7 +765,8 @@ cleanup_runner() {
     kill "$ACTIVE_RECEIVER_PID" >/dev/null 2>&1 || true
     wait "$ACTIVE_RECEIVER_PID" >/dev/null 2>&1 || true
     remove_endpoint_patch \
-      "$ACTIVE_RECEIVER_PLATFORM" receive "$ACTIVE_RECEIVER_RUN_ID"
+      "$ACTIVE_RECEIVER_PLATFORM" receive "$ACTIVE_RECEIVER_RUN_ID" \
+      "$ACTIVE_RECEIVER_TEST_LAYER"
   fi
   if [[ -n "$ACTIVE_RECEIVER_RUN_ID" && -n "$ACTIVE_CASE_ID" ]]; then
     remove_android_evidence_files "$ACTIVE_RECEIVER_RUN_ID" "$ACTIVE_CASE_ID"
@@ -779,11 +793,12 @@ run_pair() {
   local sender="$1"
   local receiver="$2"
   local scenario="$3"
-  local code="$4"
-  local run_id="$5"
-  local case_id="$6"
-  local repetition="$7"
-  local private_case_dir="$8"
+  local test_layer="$4"
+  local code="$5"
+  local run_id="$6"
+  local case_id="$7"
+  local repetition="$8"
+  local private_case_dir="$9"
   local sender_log="$private_case_dir/sender.log"
   local receiver_log="$private_case_dir/receiver.log"
   local logcat_log="$private_case_dir/android-logcat.log"
@@ -800,11 +815,13 @@ run_pair() {
   fi
 
   run_endpoint_role \
-    "$receiver" receive "$scenario" "$code" "$run_id" "$case_id" "$repetition" "$receiver_log" &
+    "$receiver" receive "$scenario" "$test_layer" "$code" "$run_id" \
+    "$case_id" "$repetition" "$receiver_log" &
   receiver_pid=$!
   ACTIVE_RECEIVER_PID="$receiver_pid"
   ACTIVE_RECEIVER_PLATFORM="$receiver"
   ACTIVE_RECEIVER_RUN_ID="$run_id"
+  ACTIVE_RECEIVER_TEST_LAYER="$test_layer"
   ACTIVE_CASE_ID="$case_id"
   case "$receiver" in
     android)
@@ -828,7 +845,7 @@ run_pair() {
     kill "$receiver_pid" >/dev/null 2>&1 || true
     wait "$receiver_pid" >/dev/null 2>&1 || true
     ACTIVE_RECEIVER_PID=""
-    remove_endpoint_patch "$receiver" receive "$run_id"
+    remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
     remove_android_evidence_files "$run_id" "$case_id"
@@ -847,7 +864,7 @@ run_pair() {
     kill "$receiver_pid" >/dev/null 2>&1 || true
     wait "$receiver_pid" >/dev/null 2>&1 || true
     ACTIVE_RECEIVER_PID=""
-    remove_endpoint_patch "$receiver" receive "$run_id"
+    remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
     remove_android_evidence_files "$run_id" "$case_id"
@@ -868,7 +885,7 @@ run_pair() {
     kill "$receiver_pid" >/dev/null 2>&1 || true
     wait "$receiver_pid" >/dev/null 2>&1 || true
     ACTIVE_RECEIVER_PID=""
-    remove_endpoint_patch "$receiver" receive "$run_id"
+    remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
     remove_android_evidence_files "$run_id" "$case_id"
@@ -885,7 +902,8 @@ run_pair() {
     sleep "$receiver_settle_seconds"
   fi
   run_endpoint_role \
-    "$sender" send "$scenario" "$pairing_code" "$run_id" "$case_id" "$repetition" "$sender_log" ||
+    "$sender" send "$scenario" "$test_layer" "$pairing_code" "$run_id" \
+    "$case_id" "$repetition" "$sender_log" ||
     sender_status=$?
   pairing_code=""
   if [[ "$sender_status" -ne 0 ]]; then
@@ -893,8 +911,8 @@ run_pair() {
   fi
   wait "$receiver_pid" || receiver_status=$?
   ACTIVE_RECEIVER_PID=""
-  remove_endpoint_patch "$sender" send "$run_id"
-  remove_endpoint_patch "$receiver" receive "$run_id"
+  remove_endpoint_patch "$sender" send "$run_id" "$test_layer"
+  remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
   if [[ "$sender" == "android" ]]; then
     collect_android_evidence \
       send "$run_id" "$case_id" "$repetition" "$private_case_dir" || evidence_status=1
@@ -1014,7 +1032,7 @@ mapfile -t execution_rows < <(
 MATRIX_USES_MACOS=0
 requires_execution=0
 for row in "${execution_rows[@]}"; do
-  IFS=$'\t' read -r _ _ sender receiver _ _ disposition <<< "$row"
+  IFS=$'\t' read -r _ _ sender receiver _ _ _ disposition <<< "$row"
   if [[ "$disposition" == "execute" ]]; then
     requires_execution=1
     if [[ "$sender" == "macos" || "$receiver" == "macos" ]]; then
@@ -1025,7 +1043,7 @@ done
 
 if [[ "$dry_run" == "1" || "$requires_execution" == "0" ]]; then
   for row in "${execution_rows[@]}"; do
-    IFS=$'\t' read -r case_id repetition _ _ _ _ disposition <<< "$row"
+    IFS=$'\t' read -r case_id repetition _ _ _ _ _ disposition <<< "$row"
     record_execution "$case_id" "$repetition" "$disposition"
   done
   if aggregate_and_check; then
@@ -1054,7 +1072,7 @@ fi
 
 if [[ -n "$preparation_failure" ]]; then
   for row in "${execution_rows[@]}"; do
-    IFS=$'\t' read -r case_id repetition _ _ _ _ disposition <<< "$row"
+    IFS=$'\t' read -r case_id repetition _ _ _ _ _ disposition <<< "$row"
     if [[ "$disposition" == "execute" ]]; then
       record_execution \
         "$case_id" "$repetition" infrastructure_failure "$preparation_failure"
@@ -1068,7 +1086,7 @@ fi
 
 for row in "${execution_rows[@]}"; do
   IFS=$'\t' read -r \
-    case_id repetition sender receiver scenario timeout_seconds disposition <<< "$row"
+    case_id repetition sender receiver scenario timeout_seconds test_layer disposition <<< "$row"
   if [[ "$disposition" != "execute" ]]; then
     record_execution "$case_id" "$repetition" "$disposition"
     continue
@@ -1087,7 +1105,7 @@ for row in "${execution_rows[@]}"; do
   fi
   private_case_dir="$output_dir/private/cases/$case_id/r$repetition"
   echo "case $case_id r$repetition: $sender -> $receiver, scenario=$scenario"
-  if run_pair "$sender" "$receiver" "$scenario" \
+  if run_pair "$sender" "$receiver" "$scenario" "$test_layer" \
     "$CURRENT_CODE" "$CURRENT_RUN_ID" "$case_id" "$repetition" "$private_case_dir"; then
     record_execution "$case_id" "$repetition" pass
     echo "pass: $case_id r$repetition"
