@@ -154,7 +154,10 @@ jobs:
         id: hosted_tests
         env:
           ENVOIX_XCRESULT_PATH: ${{ runner.temp }}/envoix-ios-hosted.xcresult
-        run: scripts/apple-dev.sh ios-test-rerun hosted
+        run: >-
+          scripts/apple-dev.sh ios-test-rerun hosted
+          -skip-testing:Envoix-iOSUITests/WifiAwareCapabilityTests/testPhysicalDeviceReportsWifiAwarePairingCapability
+          -skip-testing:Envoix-iOSUITests/WifiAwarePhysicalTransferTests
 
       - name: Audit hosted test execution
         if: always() && steps.hosted_tests.outcome != 'skipped'
