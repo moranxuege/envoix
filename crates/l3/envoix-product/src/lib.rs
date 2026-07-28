@@ -36,8 +36,8 @@ pub use record::{
 };
 pub use source::resolve_source;
 pub use source_lifecycle::{
-    AcceptedSourceOffer, SelectionGate, SourceLifecycle, SourcePromptReason, SourceRetention,
-    StagedContent,
+    AcceptedSourceOffer, SelectionGate, SourceLifecycle, SourceOfferAnswer, SourcePromptReason,
+    SourceRetention, StagedContent,
 };
 
 #[cfg(test)]

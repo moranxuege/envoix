@@ -251,6 +251,68 @@ impl SourceLifecycle {
     }
 }
 
+/// What the authority says about an offered document.
+///
+/// A source offer is SYNCHRONOUS: the frontend is waiting for this, and it
+/// holds a platform resource under the offered key that it must release. So
+/// every refusal here is typed and terminal. That is deliberately unlike an
+/// asynchronous duty or staging result, where a stale arrival is normal after a
+/// generation advance and the right answer is silent inertia — turning that
+/// into a failure would let the loser of a race overwrite the winner.
+///
+/// Silence is the one answer this must never give: it would leak the frontend's
+/// held resource and invite a blind retry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceOfferAnswer {
+    /// Bound to this acquisition. The card advances to `Acquiring`.
+    Accepted,
+    /// This exact offer was already accepted. Idempotent re-delivery, not an
+    /// error — the frontend may have retried across a process death.
+    AlreadyAccepted,
+    /// The key named a real card, but not its current acquisition: a re-pick
+    /// advanced the generation, or the request is not the one outstanding. The
+    /// frontend should release what it holds and wait to be asked again.
+    Stale,
+    /// No such card. Distinct from `Stale` because there is nothing to wait
+    /// for, and a frontend that keeps a pending key would keep it forever.
+    UnknownCard,
+    /// The card receives, so it can never take a source. A forged or confused
+    /// offer cannot make a receiver into a sender.
+    NotExpected,
+}
+
+impl SourceLifecycle {
+    /// Whether `offered` may be accepted, given where this card's source is.
+    ///
+    /// The whole key is compared, never the card alone. That is the fix for the
+    /// ownership defect this design exists for: a document offered for one
+    /// acquisition must not satisfy another, however similar.
+    pub fn answer_offer(&self, offered: &SourceAcquisitionKey) -> SourceOfferAnswer {
+        match self {
+            // A receiver has no acquisition to name, so nothing can match.
+            Self::NotRequired => SourceOfferAnswer::NotExpected,
+            Self::AwaitingSelection(gate) => {
+                if gate.accepts_an_offer() {
+                    SourceOfferAnswer::Accepted
+                } else {
+                    // This generation already had a source and lost it. Only a
+                    // re-pick reopens it, and a re-pick mints a new key.
+                    SourceOfferAnswer::Stale
+                }
+            }
+            // Already bound. The same key is the frontend retrying; a different
+            // one is an offer for an acquisition that is no longer current.
+            Self::Acquiring(offer) | Self::Staging { offer, .. } | Self::Ready { offer, .. } => {
+                if offer.key().is(offered) {
+                    SourceOfferAnswer::AlreadyAccepted
+                } else {
+                    SourceOfferAnswer::Stale
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use envoix_capabilities::DutyProvenance;
@@ -417,5 +479,95 @@ mod tests {
                 .reported_size()
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod offer_tests {
+    use envoix_capabilities::DutyProvenance;
+    use envoix_types::{AttemptGen, RecordId, RequestId};
+
+    use super::*;
+
+    fn key_of(card: u64, generation: u32, request: u8) -> SourceAcquisitionKey {
+        SourceAcquisitionKey::of(DutyProvenance {
+            card: RecordId::new(card),
+            generation: AttemptGen::new(generation),
+            request: RequestId::from_bytes([request; 16]),
+        })
+    }
+
+    fn offer_of(key: SourceAcquisitionKey) -> AcceptedSourceOffer {
+        AcceptedSourceOffer::new(key, None)
+    }
+
+    /// The ownership fix, stated as behaviour. A document offered for one
+    /// acquisition must not satisfy another however similar — same card and
+    /// request but a later generation is a DIFFERENT acquisition, and that is
+    /// exactly the case a global slot could not tell apart.
+    #[test]
+    fn an_offer_for_another_acquisition_is_never_accepted() {
+        let current = key_of(0x51, 2, 0xaa);
+        let bound = SourceLifecycle::Acquiring(offer_of(current));
+
+        assert_eq!(
+            bound.answer_offer(&current),
+            SourceOfferAnswer::AlreadyAccepted
+        );
+        for other in [
+            key_of(0x52, 2, 0xaa), // another card
+            key_of(0x51, 3, 0xaa), // the same card after a re-pick
+            key_of(0x51, 2, 0xab), // the same attempt, another request
+        ] {
+            assert_eq!(bound.answer_offer(&other), SourceOfferAnswer::Stale);
+        }
+    }
+
+    /// A receiver cannot be turned into a sender by an offer, forged or
+    /// confused. The read projection publishes no source action for one, and
+    /// this is the authority answering even if something reaches it anyway.
+    #[test]
+    fn a_receiver_refuses_every_offer() {
+        let receiving = SourceLifecycle::initial(Direction::Receive);
+        assert_eq!(
+            receiving.answer_offer(&key_of(0x51, 1, 0xaa)),
+            SourceOfferAnswer::NotExpected
+        );
+    }
+
+    /// A generation that lost its source is not selectable again, so a late
+    /// offer under the discharged key is refused rather than resurrecting it.
+    #[test]
+    fn a_lost_generation_refuses_a_late_offer() {
+        let key = key_of(0x51, 1, 0xaa);
+        let lost = SourceLifecycle::AwaitingSelection(
+            SelectionGate::lost(SourcePromptReason::PermissionLost, offer_of(key))
+                .expect("a failure reason"),
+        );
+        assert_eq!(lost.answer_offer(&key), SourceOfferAnswer::Stale);
+
+        let asking = SourceLifecycle::initial(Direction::Send);
+        assert_eq!(asking.answer_offer(&key), SourceOfferAnswer::Accepted);
+    }
+
+    /// Every answer is terminal and distinct. A frontend holds a platform
+    /// resource under the offered key while it waits, so silence would leak it
+    /// and invite a blind retry — and collapsing two answers would leave the
+    /// frontend unable to tell "wait to be asked again" from "there is nothing
+    /// to wait for".
+    #[test]
+    fn the_offer_answers_are_distinct() {
+        let answers = [
+            SourceOfferAnswer::Accepted,
+            SourceOfferAnswer::AlreadyAccepted,
+            SourceOfferAnswer::Stale,
+            SourceOfferAnswer::UnknownCard,
+            SourceOfferAnswer::NotExpected,
+        ];
+        for (index, answer) in answers.iter().enumerate() {
+            for other in &answers[index + 1..] {
+                assert_ne!(answer, other);
+            }
+        }
     }
 }
