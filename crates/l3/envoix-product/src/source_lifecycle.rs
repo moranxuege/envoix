@@ -273,8 +273,12 @@ pub enum SourceOfferAnswer {
     /// advanced the generation, or the request is not the one outstanding. The
     /// frontend should release what it holds and wait to be asked again.
     Stale,
-    /// No such card. Distinct from `Stale` because there is nothing to wait
-    /// for, and a frontend that keeps a pending key would keep it forever.
+    /// No such card. Answered by the RECORD LOOKUP that precedes
+    /// [`SourceLifecycle::answer_offer`], never by the lifecycle itself: a
+    /// method called on a state that was found cannot discover that nothing
+    /// was. Kept in this vocabulary because it is one of the answers a
+    /// frontend receives, and it must be able to tell "there is nothing to
+    /// wait for" from `Stale`'s "wait to be asked again".
     UnknownCard,
     /// The card receives, so it can never take a source. A forged or confused
     /// offer cannot make a receiver into a sender.
@@ -282,17 +286,30 @@ pub enum SourceOfferAnswer {
 }
 
 impl SourceLifecycle {
-    /// Whether `offered` may be accepted, given where this card's source is.
+    /// Whether `offered` may be accepted, given the acquisition the authority
+    /// is currently asking for and where this card's source is.
     ///
-    /// The whole key is compared, never the card alone. That is the fix for the
-    /// ownership defect this design exists for: a document offered for one
-    /// acquisition must not satisfy another, however similar.
-    pub fn answer_offer(&self, offered: &SourceAcquisitionKey) -> SourceOfferAnswer {
+    /// `expected` is REQUIRED and is the whole point. An awaiting card holds no
+    /// offer, so it has no key of its own to compare against — and a version of
+    /// this that took only `offered` accepted any key at all, including another
+    /// card's, which reopened the exact ownership defect
+    /// [`SourceAcquisitionKey`] exists to close. The expected key is derived by
+    /// the authority (`reducer.rs`'s source duty provenance) rather than stored
+    /// twice.
+    pub fn answer_offer(
+        &self,
+        expected: &SourceAcquisitionKey,
+        offered: &SourceAcquisitionKey,
+    ) -> SourceOfferAnswer {
         match self {
             // A receiver has no acquisition to name, so nothing can match.
             Self::NotRequired => SourceOfferAnswer::NotExpected,
             Self::AwaitingSelection(gate) => {
-                if gate.accepts_an_offer() {
+                if !expected.is(offered) {
+                    // Another card, a superseded generation, or a request that
+                    // is not the outstanding one.
+                    SourceOfferAnswer::Stale
+                } else if gate.accepts_an_offer() {
                     SourceOfferAnswer::Accepted
                 } else {
                     // This generation already had a source and lost it. Only a
@@ -511,7 +528,7 @@ mod offer_tests {
         let bound = SourceLifecycle::Acquiring(offer_of(current));
 
         assert_eq!(
-            bound.answer_offer(&current),
+            bound.answer_offer(&current, &current),
             SourceOfferAnswer::AlreadyAccepted
         );
         for other in [
@@ -519,7 +536,39 @@ mod offer_tests {
             key_of(0x51, 3, 0xaa), // the same card after a re-pick
             key_of(0x51, 2, 0xab), // the same attempt, another request
         ] {
-            assert_eq!(bound.answer_offer(&other), SourceOfferAnswer::Stale);
+            assert_eq!(
+                bound.answer_offer(&current, &other),
+                SourceOfferAnswer::Stale
+            );
+        }
+    }
+
+    /// The regression this method was rewritten for.
+    ///
+    /// An AWAITING card holds no offer, so it has no key of its own. The first
+    /// version of `answer_offer` therefore compared nothing and answered
+    /// `Accepted` to any key at all — another card's included — which reopened
+    /// the very ownership defect `SourceAcquisitionKey` was introduced to
+    /// close. Worse, the test below used to assert that as correct.
+    #[test]
+    fn an_awaiting_card_accepts_only_the_acquisition_it_was_asked_for() {
+        let expected = key_of(0x51, 2, 0xaa);
+        let asking = SourceLifecycle::initial(Direction::Send);
+
+        assert_eq!(
+            asking.answer_offer(&expected, &expected),
+            SourceOfferAnswer::Accepted
+        );
+        for other in [
+            key_of(0x52, 2, 0xaa),  // another card entirely
+            key_of(0x51, 99, 0xaa), // a generation this card has never reached
+            key_of(0x51, 2, 0xbb),  // a request that is not the outstanding one
+        ] {
+            assert_eq!(
+                asking.answer_offer(&expected, &other),
+                SourceOfferAnswer::Stale,
+                "{other:?} is not the acquisition this card was asked for"
+            );
         }
     }
 
@@ -529,8 +578,9 @@ mod offer_tests {
     #[test]
     fn a_receiver_refuses_every_offer() {
         let receiving = SourceLifecycle::initial(Direction::Receive);
+        let key = key_of(0x51, 1, 0xaa);
         assert_eq!(
-            receiving.answer_offer(&key_of(0x51, 1, 0xaa)),
+            receiving.answer_offer(&key, &key),
             SourceOfferAnswer::NotExpected
         );
     }
@@ -544,10 +594,7 @@ mod offer_tests {
             SelectionGate::lost(SourcePromptReason::PermissionLost, offer_of(key))
                 .expect("a failure reason"),
         );
-        assert_eq!(lost.answer_offer(&key), SourceOfferAnswer::Stale);
-
-        let asking = SourceLifecycle::initial(Direction::Send);
-        assert_eq!(asking.answer_offer(&key), SourceOfferAnswer::Accepted);
+        assert_eq!(lost.answer_offer(&key, &key), SourceOfferAnswer::Stale);
     }
 
     /// Every answer is terminal and distinct. A frontend holds a platform
