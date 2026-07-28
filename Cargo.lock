@@ -1085,6 +1085,7 @@ dependencies = [
 name = "envoix-platform-android"
 version = "0.2.0"
 dependencies = [
+ "envoix-bindings",
  "envoix-capabilities",
  "envoix-outcomes",
  "envoix-types",
