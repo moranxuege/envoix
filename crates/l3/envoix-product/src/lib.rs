@@ -8,6 +8,7 @@ mod model;
 mod pairing;
 mod reducer;
 mod source;
+mod source_lifecycle;
 
 pub mod record;
 
@@ -34,6 +35,10 @@ pub use record::{
     decode_record, encode_record,
 };
 pub use source::resolve_source;
+pub use source_lifecycle::{
+    AcceptedSourceOffer, SelectionGate, SourceLifecycle, SourcePromptReason, SourceRetention,
+    StagedContent,
+};
 
 #[cfg(test)]
 mod commit_tests;
