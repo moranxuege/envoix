@@ -25,6 +25,49 @@ python3 scripts/matrix_contract.py render-report \
   tests/e2e/matrix/cases.v1.json
 ```
 
+Use the registry-backed runner:
+
+```bash
+scripts/cross-device-transfer-matrix.sh --list
+scripts/cross-device-transfer-matrix.sh --validate
+scripts/cross-device-transfer-matrix.sh --dry-run --case \
+  l1.physical.room.ios-android.single-file
+scripts/cross-device-transfer-matrix.sh --gate current-physical-harness \
+  --commit "$(git rev-parse HEAD)" \
+  --run-id physical-20260728 \
+  --output-directory /path/to/test-owned-output \
+  --android-device SERIAL \
+  --ios-destination "platform=iOS,id=DEVICE_ID"
+```
+
+`--case` may be repeated. `--case`, `--gate`, and `--tag` are mutually
+exclusive selection modes, and every selected row comes directly from the
+registry. With no selector, the runner selects `current-physical-harness`.
+Legacy scenario and direction environment variables are mapped to registered
+rows for one migration period; combinations without a row are warned and
+never synthesized.
+
+Each run writes:
+
+```text
+matrix-plan.json
+matrix-result.json
+matrix-report.md
+cases/<case-id>/r<repetition>/result.json
+sanitized/cases/<case-id>/r<repetition>/*.log
+private/
+```
+
+`private/` is mode `0700`, is never an uploadable artifact, and can retain raw
+logs only for local failure triage. Successful case logs are removed after
+sanitized copies are created. The runner scans every retained public file for
+Room Codes, Invite V2 URIs, device-serial canaries, private absolute paths, and
+network addresses before the run can succeed.
+
+Dry-runs build and execute nothing. They produce the same plan and report
+shape as a physical run, but executable rows are recorded as `not_run`; a
+dry-run can never produce `pass`.
+
 Support status and execution status are separate. A planned, experimental,
 hardware-blocked, or unsupported row never becomes a pass because it was
 skipped or omitted.
