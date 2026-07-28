@@ -158,6 +158,8 @@ jobs:
           scripts/apple-dev.sh ios-test-rerun hosted
           -skip-testing:Envoix-iOSUITests/WifiAwareCapabilityTests/testPhysicalDeviceReportsWifiAwarePairingCapability
           -skip-testing:Envoix-iOSUITests/WifiAwarePhysicalTransferTests
+          -skip-testing:Envoix-iOSUITests/ManifestV2PhysicalTransferTests/testSendScenarioProductActivityRoom
+          -skip-testing:Envoix-iOSUITests/ManifestV2PhysicalTransferTests/testReceiveScenarioProductActivityRoom
 
       - name: Audit hosted test execution
         if: always() && steps.hosted_tests.outcome != 'skipped'
