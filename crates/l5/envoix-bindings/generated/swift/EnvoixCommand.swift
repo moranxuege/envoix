@@ -17,7 +17,7 @@ import Foundation
 
 public enum EnvoixCommand {
 
-public static let commandSchemaId = "envoix/binding/command/4"
+public static let commandSchemaId = "envoix/binding/command/5"
 public static let commandMaxFrameBytes = 1048576
 // Contract rules frozen by schema/command.schema.
 public static let newestAttachmentCommands = true
@@ -103,13 +103,16 @@ public struct SubmitView: Equatable {
     }
 }
 
-public struct SendSourceView: Equatable {
-    public let displayName: String
-    public let total: Int64
+public enum LocalDirectionView: String, Equatable {
+    case send = "send"
+    case receive = "receive"
+}
 
-    public init(displayName: String, total: Int64) {
-        self.displayName = displayName
-        self.total = total
+public struct MintRoomView: Equatable {
+    public let localDirection: LocalDirectionView
+
+    public init(localDirection: LocalDirectionView) {
+        self.localDirection = localDirection
     }
 }
 
@@ -122,8 +125,32 @@ public struct JoinInviteView: Equatable {
 }
 
 public enum CreateIntentView: Equatable {
-    case send(SendSourceView)
-    case join(JoinInviteView)
+    case mintRoom(MintRoomView)
+    case joinRoom(JoinInviteView)
+}
+
+public struct SourceAcquisitionKeyView: Equatable {
+    public let card: String
+    public let generation: Int64
+    public let request: String
+
+    public init(card: String, generation: Int64, request: String) {
+        self.card = card
+        self.generation = generation
+        self.request = request
+    }
+}
+
+public struct SourceOfferView: Equatable {
+    public let key: SourceAcquisitionKeyView
+    public let displayName: String
+    public let reportedSize: Int64?
+
+    public init(key: SourceAcquisitionKeyView, displayName: String, reportedSize: Int64?) {
+        self.key = key
+        self.displayName = displayName
+        self.reportedSize = reportedSize
+    }
 }
 
 public struct CreateView: Equatable {
@@ -139,6 +166,7 @@ public struct CreateView: Equatable {
 public enum FrontendIntentView: Equatable {
     case command(SubmitView)
     case create(CreateView)
+    case sourceOffer(SourceOfferView)
 }
 
 public enum RejectionView: String, Equatable {
@@ -449,21 +477,32 @@ public enum EnvoixCommandCodec {
         return map
     }
 
-    private static func decodeSendSourceView(_ value: Any?, _ context: String) throws -> SendSourceView {
+    private static func decodeLocalDirectionView(_ value: Any?, _ context: String) throws -> LocalDirectionView {
+        guard let text = value as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        guard let decoded = LocalDirectionView(rawValue: text) else {
+            throw CommandContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func encodeLocalDirectionView(_ value: LocalDirectionView) -> String {
+        return value.rawValue
+    }
+
+    private static func decodeMintRoomView(_ value: Any?, _ context: String) throws -> MintRoomView {
         let map = try object(value, context)
-        try knownKeys(map, ["display_name", "total"], context)
-        let displayName = try utf8Bounded(try field(map, "display_name", "SendSourceView.display_name"), 1020, "SendSourceView.display_name")
-        let total = try integer(try field(map, "total", "SendSourceView.total"), u63Max, "SendSourceView.total")
-        return SendSourceView(
-            displayName: displayName,
-            total: total
+        try knownKeys(map, ["local_direction"], context)
+        let localDirection = try decodeLocalDirectionView(try field(map, "local_direction", "MintRoomView.local_direction"), "MintRoomView.local_direction")
+        return MintRoomView(
+            localDirection: localDirection
         )
     }
 
-    private static func encodeSendSourceView(_ value: SendSourceView) throws -> [String: Any] {
+    private static func encodeMintRoomView(_ value: MintRoomView) throws -> [String: Any] {
         var map: [String: Any] = [:]
-        map["display_name"] = try encodeUtf8Bounded(value.displayName, 1020, "SendSourceView.display_name")
-        map["total"] = try encodeInteger(value.total, u63Max, "SendSourceView.total")
+        map["local_direction"] = encodeLocalDirectionView(value.localDirection)
         return map
     }
 
@@ -489,10 +528,10 @@ public enum EnvoixCommandCodec {
             throw CommandContractError(kind: .shape, context: context)
         }
         switch kind {
-        case "send":
-            return .send(try decodeSendSourceView(payload(map, "CreateIntentView.send"), "CreateIntentView.send"))
-        case "join":
-            return .join(try decodeJoinInviteView(payload(map, "CreateIntentView.join"), "CreateIntentView.join"))
+        case "mint_room":
+            return .mintRoom(try decodeMintRoomView(payload(map, "CreateIntentView.mint_room"), "CreateIntentView.mint_room"))
+        case "join_room":
+            return .joinRoom(try decodeJoinInviteView(payload(map, "CreateIntentView.join_room"), "CreateIntentView.join_room"))
         default:
             throw CommandContractError(kind: .unknownVariant, context: context)
         }
@@ -500,13 +539,64 @@ public enum EnvoixCommandCodec {
 
     private static func encodeCreateIntentView(_ value: CreateIntentView) throws -> [String: Any] {
         switch value {
-        case .send(let payload):
-            let encoded = try encodeSendSourceView(payload)
-            return ["kind": "send", "value": encoded]
-        case .join(let payload):
+        case .mintRoom(let payload):
+            let encoded = try encodeMintRoomView(payload)
+            return ["kind": "mint_room", "value": encoded]
+        case .joinRoom(let payload):
             let encoded = try encodeJoinInviteView(payload)
-            return ["kind": "join", "value": encoded]
+            return ["kind": "join_room", "value": encoded]
         }
+    }
+
+    private static func decodeSourceAcquisitionKeyView(_ value: Any?, _ context: String) throws -> SourceAcquisitionKeyView {
+        let map = try object(value, context)
+        try knownKeys(map, ["card", "generation", "request"], context)
+        let card = try hexFixed(try field(map, "card", "SourceAcquisitionKeyView.card"), 16, "SourceAcquisitionKeyView.card")
+        let generation = try integer(try field(map, "generation", "SourceAcquisitionKeyView.generation"), 4294967295, "SourceAcquisitionKeyView.generation")
+        let request = try hexFixed(try field(map, "request", "SourceAcquisitionKeyView.request"), 32, "SourceAcquisitionKeyView.request")
+        return SourceAcquisitionKeyView(
+            card: card,
+            generation: generation,
+            request: request
+        )
+    }
+
+    private static func encodeSourceAcquisitionKeyView(_ value: SourceAcquisitionKeyView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["card"] = try encodeHexFixed(value.card, 16, "SourceAcquisitionKeyView.card")
+        map["generation"] = try encodeInteger(value.generation, 4294967295, "SourceAcquisitionKeyView.generation")
+        map["request"] = try encodeHexFixed(value.request, 32, "SourceAcquisitionKeyView.request")
+        return map
+    }
+
+    private static func decodeSourceOfferView(_ value: Any?, _ context: String) throws -> SourceOfferView {
+        let map = try object(value, context)
+        try knownKeys(map, ["key", "display_name", "reported_size"], context)
+        let key = try decodeSourceAcquisitionKeyView(try field(map, "key", "SourceOfferView.key"), "SourceOfferView.key")
+        let displayName = try utf8Bounded(try field(map, "display_name", "SourceOfferView.display_name"), 1020, "SourceOfferView.display_name")
+        let reportedSize: Int64?
+        if let present = try field(map, "reported_size", "SourceOfferView.reported_size") {
+            reportedSize = try integer(present, u63Max, "SourceOfferView.reported_size")
+        } else {
+            reportedSize = nil
+        }
+        return SourceOfferView(
+            key: key,
+            displayName: displayName,
+            reportedSize: reportedSize
+        )
+    }
+
+    private static func encodeSourceOfferView(_ value: SourceOfferView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["key"] = try encodeSourceAcquisitionKeyView(value.key)
+        map["display_name"] = try encodeUtf8Bounded(value.displayName, 1020, "SourceOfferView.display_name")
+        if let present = value.reportedSize {
+            map["reported_size"] = try encodeInteger(present, u63Max, "SourceOfferView.reported_size")
+        } else {
+            map["reported_size"] = NSNull()
+        }
+        return map
     }
 
     private static func decodeCreateView(_ value: Any?, _ context: String) throws -> CreateView {
@@ -538,6 +628,8 @@ public enum EnvoixCommandCodec {
             return .command(try decodeSubmitView(payload(map, "FrontendIntentView.command"), "FrontendIntentView.command"))
         case "create":
             return .create(try decodeCreateView(payload(map, "FrontendIntentView.create"), "FrontendIntentView.create"))
+        case "source_offer":
+            return .sourceOffer(try decodeSourceOfferView(payload(map, "FrontendIntentView.source_offer"), "FrontendIntentView.source_offer"))
         default:
             throw CommandContractError(kind: .unknownVariant, context: context)
         }
@@ -551,6 +643,9 @@ public enum EnvoixCommandCodec {
         case .create(let payload):
             let encoded = try encodeCreateView(payload)
             return ["kind": "create", "value": encoded]
+        case .sourceOffer(let payload):
+            let encoded = try encodeSourceOfferView(payload)
+            return ["kind": "source_offer", "value": encoded]
         }
     }
 

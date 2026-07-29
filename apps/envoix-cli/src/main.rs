@@ -10,14 +10,15 @@ use envoix_bindings::capability::{
     CapabilityBody, CapabilityExchangeView, CapabilityFrame, CapabilityRequestView,
     CapabilityStepView, encode_capability_frame,
 };
+use envoix_bindings::command::LocalDirectionView;
 use envoix_bindings::read::CommandKindView;
-use envoix_cli::{Frontend, create_join_frame, create_send_frame, render};
+use envoix_cli::{Frontend, create_join_frame, create_mint_frame, render};
 use envoix_platform_local::answer_capability;
 
 const USAGE: &str = "\
 Usage:
   envoix observe
-  envoix send REQUEST_ID DISPLAY_NAME TOTAL_BYTES
+  envoix mint REQUEST_ID send|receive
   envoix join REQUEST_ID
   envoix command CARD COMMAND_ID pause|cancel|resume|remove|re-pick-source
   envoix capability scan-invite
@@ -40,16 +41,19 @@ fn run() -> Result<(), String> {
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
         Some("observe") if arguments.next().is_none() => observe(),
-        Some("send") => {
+        // Minting carries no document. Which side this endpoint is on is the
+        // only thing a room's creator states; a source is acquired afterwards,
+        // under an identity the authority mints.
+        Some("mint") => {
             let request_id = required(&mut arguments, "REQUEST_ID")?;
-            let display_name = required(&mut arguments, "DISPLAY_NAME")?;
-            let total = required(&mut arguments, "TOTAL_BYTES")?
-                .parse::<u64>()
-                .map_err(|_| "TOTAL_BYTES must be an unsigned integer".to_owned())?;
+            let direction = match required(&mut arguments, "send|receive")?.as_str() {
+                "send" => LocalDirectionView::Send,
+                "receive" => LocalDirectionView::Receive,
+                other => return Err(format!("unknown direction {other}")),
+            };
             no_more(arguments)?;
             write_frame(
-                &create_send_frame(request_id, display_name, total)
-                    .map_err(|error| error.to_string())?,
+                &create_mint_frame(request_id, direction).map_err(|error| error.to_string())?,
             )
         }
         Some("join") => {

@@ -126,10 +126,19 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
       return Future<void>.value();
     }
     final String id = _sendRequestId ??= mintCommandId();
-    return _ask(() => widget.creator.send(
+    // The create frame carries NO document. The picked source is delivered
+    // afterwards, on the source-offer intent, under the acquisition identity
+    // the authority mints — which is why a document chosen here can no longer
+    // be consumed by a different card.
+    //
+    // That offer is not wired yet, so today the pick gates this button and is
+    // then not delivered. It was never delivered to the product before either
+    // (no reducer edge consumed it), so this changes what is TRUE about the
+    // card, not what happens: it is now honestly nameless instead of carrying
+    // a name nothing had staged.
+    return _ask(() => widget.creator.mint(
           id: id,
-          displayName: source.displayName,
-          sizeBytes: source.sizeBytes,
+          direction: LocalDirectionView.send,
         ));
   }
 

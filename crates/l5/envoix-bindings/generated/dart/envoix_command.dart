@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String commandSchemaId = 'envoix/binding/command/4';
+const String commandSchemaId = 'envoix/binding/command/5';
 const int commandMaxFrameBytes = 1048576;
 // Contract rules frozen by schema/command.schema.
 const bool newestAttachmentCommands = true;
@@ -141,14 +141,17 @@ final class SubmitView {
   final CommandView command;
 }
 
-final class SendSourceView {
-  const SendSourceView({
-    required this.displayName,
-    required this.total,
+enum LocalDirectionView {
+  send,
+  receive,
+}
+
+final class MintRoomView {
+  const MintRoomView({
+    required this.localDirection,
   });
 
-  final String displayName;
-  final int total;
+  final LocalDirectionView localDirection;
 }
 
 final class JoinInviteView {
@@ -163,16 +166,40 @@ sealed class CreateIntentView {
   const CreateIntentView();
 }
 
-final class CreateIntentViewSend extends CreateIntentView {
-  const CreateIntentViewSend(this.value);
+final class CreateIntentViewMintRoom extends CreateIntentView {
+  const CreateIntentViewMintRoom(this.value);
 
-  final SendSourceView value;
+  final MintRoomView value;
 }
 
-final class CreateIntentViewJoin extends CreateIntentView {
-  const CreateIntentViewJoin(this.value);
+final class CreateIntentViewJoinRoom extends CreateIntentView {
+  const CreateIntentViewJoinRoom(this.value);
 
   final JoinInviteView value;
+}
+
+final class SourceAcquisitionKeyView {
+  const SourceAcquisitionKeyView({
+    required this.card,
+    required this.generation,
+    required this.request,
+  });
+
+  final String card;
+  final int generation;
+  final String request;
+}
+
+final class SourceOfferView {
+  const SourceOfferView({
+    required this.key,
+    required this.displayName,
+    required this.reportedSize,
+  });
+
+  final SourceAcquisitionKeyView key;
+  final String displayName;
+  final int? reportedSize;
 }
 
 final class CreateView {
@@ -199,6 +226,12 @@ final class FrontendIntentViewCreate extends FrontendIntentView {
   const FrontendIntentViewCreate(this.value);
 
   final CreateView value;
+}
+
+final class FrontendIntentViewSourceOffer extends FrontendIntentView {
+  const FrontendIntentViewSourceOffer(this.value);
+
+  final SourceOfferView value;
 }
 
 enum RejectionView {
@@ -619,19 +652,34 @@ Map<String, Object?> _encodeSubmitView(SubmitView value) {
   };
 }
 
-SendSourceView _decodeSendSourceView(Object? value, String context) {
+LocalDirectionView _decodeLocalDirectionView(Object? value, String context) {
+  return switch (value) {
+    'send' => LocalDirectionView.send,
+    'receive' => LocalDirectionView.receive,
+    String() =>
+      throw CommandContractException(CommandErrorKind.unknownVariant, context),
+    _ => throw CommandContractException(CommandErrorKind.shape, context),
+  };
+}
+
+String _encodeLocalDirectionView(LocalDirectionView value) {
+  return switch (value) {
+    LocalDirectionView.send => 'send',
+    LocalDirectionView.receive => 'receive',
+  };
+}
+
+MintRoomView _decodeMintRoomView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'display_name', 'total'}, context);
-  return SendSourceView(
-    displayName: _utf8Bounded(_field(map, 'display_name', 'SendSourceView.display_name'), 1020, 'SendSourceView.display_name'),
-    total: _integer(_field(map, 'total', 'SendSourceView.total'), _u63Max, 'SendSourceView.total'),
+  _knownKeys(map, const {'local_direction'}, context);
+  return MintRoomView(
+    localDirection: _decodeLocalDirectionView(_field(map, 'local_direction', 'MintRoomView.local_direction'), 'MintRoomView.local_direction'),
   );
 }
 
-Map<String, Object?> _encodeSendSourceView(SendSourceView value) {
+Map<String, Object?> _encodeMintRoomView(MintRoomView value) {
   return <String, Object?>{
-    'display_name': _encodeUtf8Bounded(value.displayName, 1020, 'SendSourceView.display_name'),
-    'total': _encodeInteger(value.total, _u63Max, 'SendSourceView.total'),
+    'local_direction': _encodeLocalDirectionView(value.localDirection),
   };
 }
 
@@ -657,13 +705,13 @@ CreateIntentView _decodeCreateIntentView(Object? value, String context) {
     throw CommandContractException(CommandErrorKind.shape, context);
   }
   switch (kind) {
-    case 'send':
-      return CreateIntentViewSend(
-        _decodeSendSourceView(_payload(map, 'CreateIntentView.send'), 'CreateIntentView.send'),
+    case 'mint_room':
+      return CreateIntentViewMintRoom(
+        _decodeMintRoomView(_payload(map, 'CreateIntentView.mint_room'), 'CreateIntentView.mint_room'),
       );
-    case 'join':
-      return CreateIntentViewJoin(
-        _decodeJoinInviteView(_payload(map, 'CreateIntentView.join'), 'CreateIntentView.join'),
+    case 'join_room':
+      return CreateIntentViewJoinRoom(
+        _decodeJoinInviteView(_payload(map, 'CreateIntentView.join_room'), 'CreateIntentView.join_room'),
       );
     default:
       throw CommandContractException(CommandErrorKind.unknownVariant, context);
@@ -672,14 +720,53 @@ CreateIntentView _decodeCreateIntentView(Object? value, String context) {
 
 Map<String, Object?> _encodeCreateIntentView(CreateIntentView value) {
   return switch (value) {
-    CreateIntentViewSend(value: final payload) => <String, Object?>{
-        'kind': 'send',
-        'value': _encodeSendSourceView(payload),
+    CreateIntentViewMintRoom(value: final payload) => <String, Object?>{
+        'kind': 'mint_room',
+        'value': _encodeMintRoomView(payload),
       },
-    CreateIntentViewJoin(value: final payload) => <String, Object?>{
-        'kind': 'join',
+    CreateIntentViewJoinRoom(value: final payload) => <String, Object?>{
+        'kind': 'join_room',
         'value': _encodeJoinInviteView(payload),
       },
+  };
+}
+
+SourceAcquisitionKeyView _decodeSourceAcquisitionKeyView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'card', 'generation', 'request'}, context);
+  return SourceAcquisitionKeyView(
+    card: _hexFixed(_field(map, 'card', 'SourceAcquisitionKeyView.card'), 16, 'SourceAcquisitionKeyView.card'),
+    generation: _integer(_field(map, 'generation', 'SourceAcquisitionKeyView.generation'), 4294967295, 'SourceAcquisitionKeyView.generation'),
+    request: _hexFixed(_field(map, 'request', 'SourceAcquisitionKeyView.request'), 32, 'SourceAcquisitionKeyView.request'),
+  );
+}
+
+Map<String, Object?> _encodeSourceAcquisitionKeyView(SourceAcquisitionKeyView value) {
+  return <String, Object?>{
+    'card': _encodeHexFixed(value.card, 16, 'SourceAcquisitionKeyView.card'),
+    'generation': _encodeInteger(value.generation, 4294967295, 'SourceAcquisitionKeyView.generation'),
+    'request': _encodeHexFixed(value.request, 32, 'SourceAcquisitionKeyView.request'),
+  };
+}
+
+SourceOfferView _decodeSourceOfferView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'key', 'display_name', 'reported_size'}, context);
+  return SourceOfferView(
+    key: _decodeSourceAcquisitionKeyView(_field(map, 'key', 'SourceOfferView.key'), 'SourceOfferView.key'),
+    displayName: _utf8Bounded(_field(map, 'display_name', 'SourceOfferView.display_name'), 1020, 'SourceOfferView.display_name'),
+    reportedSize: switch (_field(map, 'reported_size', 'SourceOfferView.reported_size')) {
+      null => null,
+      final present => _integer(present, _u63Max, 'SourceOfferView.reported_size'),
+    },
+  );
+}
+
+Map<String, Object?> _encodeSourceOfferView(SourceOfferView value) {
+  return <String, Object?>{
+    'display_name': _encodeUtf8Bounded(value.displayName, 1020, 'SourceOfferView.display_name'),
+    'key': _encodeSourceAcquisitionKeyView(value.key),
+    'reported_size': value.reportedSize == null ? null : _encodeInteger(value.reportedSize!, _u63Max, 'SourceOfferView.reported_size'),
   };
 }
 
@@ -715,6 +802,10 @@ FrontendIntentView _decodeFrontendIntentView(Object? value, String context) {
       return FrontendIntentViewCreate(
         _decodeCreateView(_payload(map, 'FrontendIntentView.create'), 'FrontendIntentView.create'),
       );
+    case 'source_offer':
+      return FrontendIntentViewSourceOffer(
+        _decodeSourceOfferView(_payload(map, 'FrontendIntentView.source_offer'), 'FrontendIntentView.source_offer'),
+      );
     default:
       throw CommandContractException(CommandErrorKind.unknownVariant, context);
   }
@@ -729,6 +820,10 @@ Map<String, Object?> _encodeFrontendIntentView(FrontendIntentView value) {
     FrontendIntentViewCreate(value: final payload) => <String, Object?>{
         'kind': 'create',
         'value': _encodeCreateView(payload),
+      },
+    FrontendIntentViewSourceOffer(value: final payload) => <String, Object?>{
+        'kind': 'source_offer',
+        'value': _encodeSourceOfferView(payload),
       },
   };
 }

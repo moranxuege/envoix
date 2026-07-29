@@ -73,8 +73,8 @@ void main(List<String> arguments) {
       'send.frame',
       createFrame(
         id: id,
-        intent: const CreateIntentViewSend(
-          SendSourceView(displayName: 'quarterly report.pdf', total: 4096),
+        intent: const CreateIntentViewMintRoom(
+          MintRoomView(localDirection: LocalDirectionView.send),
         ),
       ),
     );
@@ -92,7 +92,7 @@ void main(List<String> arguments) {
       'join.frame',
       createFrame(
         id: id,
-        intent: CreateIntentViewJoin(JoinInviteView(invite: CommandSecretString(text('invite.txt')))),
+        intent: CreateIntentViewJoinRoom(JoinInviteView(invite: CommandSecretString(text('invite.txt')))),
       ),
     );
     writeText('join.id', id);
@@ -104,7 +104,7 @@ void main(List<String> arguments) {
         id: bare,
         // Six digits and two words: exactly the shape the old app called
         // "ready" with `contains("-")`. This app has no opinion about it.
-        intent: const CreateIntentViewJoin(
+        intent: const CreateIntentViewJoinRoom(
           JoinInviteView(invite: CommandSecretString('000123-amber-brass')),
         ),
       ),
@@ -116,7 +116,7 @@ void main(List<String> arguments) {
 
   // The answers the running host gave, rendered by the app's own words.
   final CreateIntent send =
-      answered(text('send.id'), CreateKind.send, frame('send.result'));
+      answered(text('send.id'), CreateKind.mint, frame('send.result'));
   check('the send was created', send.card != null);
   equal(
     'and the app says so in the authority\'s terms',
@@ -154,8 +154,10 @@ void main(List<String> arguments) {
   final CardView sending = sender.view!;
   equal('the send is a send', directionLabel(sending.direction), 'Sending');
   equal('preparing its source', stateLabel(sending.state), 'Preparing');
-  equal('with the name the platform reported', sending.offeredName,
-      'quarterly report.pdf');
+  // Nameless on purpose: a minted send carries no document, and the name
+  // arrives with the source rather than from a frontend repeating what a
+  // provider claimed.
+  equal('with no document yet', sending.offeredName, 'unnamed');
   final InviteView? published = sending.invite;
   check('the send publishes an invite to share', published != null);
   check(

@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/4"
+const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/5"
 const val COMMAND_MAX_FRAME_BYTES: Int = 1048576
 
 // Contract rules frozen by schema/command.schema.
@@ -90,9 +90,13 @@ data class SubmitView(
     val command: CommandView,
 )
 
-data class SendSourceView(
-    val displayName: String,
-    val total: Long,
+enum class LocalDirectionView {
+    SEND,
+    RECEIVE,
+}
+
+data class MintRoomView(
+    val localDirection: LocalDirectionView,
 )
 
 data class JoinInviteView(
@@ -100,9 +104,21 @@ data class JoinInviteView(
 )
 
 sealed interface CreateIntentView {
-    data class Send(val value: SendSourceView) : CreateIntentView
-    data class Join(val value: JoinInviteView) : CreateIntentView
+    data class MintRoom(val value: MintRoomView) : CreateIntentView
+    data class JoinRoom(val value: JoinInviteView) : CreateIntentView
 }
+
+data class SourceAcquisitionKeyView(
+    val card: String,
+    val generation: Long,
+    val request: String,
+)
+
+data class SourceOfferView(
+    val key: SourceAcquisitionKeyView,
+    val displayName: String,
+    val reportedSize: Long?,
+)
 
 data class CreateView(
     val intent: CreateIntentView,
@@ -112,6 +128,7 @@ data class CreateView(
 sealed interface FrontendIntentView {
     data class Command(val value: SubmitView) : FrontendIntentView
     data class Create(val value: CreateView) : FrontendIntentView
+    data class SourceOffer(val value: SourceOfferView) : FrontendIntentView
 }
 
 enum class RejectionView {
@@ -435,19 +452,29 @@ object EnvoixCommandCodec {
         return map
     }
 
-    private fun decodeSendSourceView(value: Any?, context: String): SendSourceView {
+    private fun decodeLocalDirectionView(value: Any?, context: String): LocalDirectionView = when (value) {
+        "send" -> LocalDirectionView.SEND
+        "receive" -> LocalDirectionView.RECEIVE
+        is String -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw CommandContractException(CommandErrorKind.SHAPE, context)
+    }
+
+    private fun encodeLocalDirectionView(value: LocalDirectionView): String = when (value) {
+        LocalDirectionView.SEND -> "send"
+        LocalDirectionView.RECEIVE -> "receive"
+    }
+
+    private fun decodeMintRoomView(value: Any?, context: String): MintRoomView {
         val map = obj(value, context)
-        knownKeys(map, setOf("display_name", "total"), context)
-        return SendSourceView(
-            displayName = utf8Bounded(field(map, "display_name", "SendSourceView.display_name"), 1020, "SendSourceView.display_name"),
-            total = integer(field(map, "total", "SendSourceView.total"), Long.MAX_VALUE, "SendSourceView.total"),
+        knownKeys(map, setOf("local_direction"), context)
+        return MintRoomView(
+            localDirection = decodeLocalDirectionView(field(map, "local_direction", "MintRoomView.local_direction"), "MintRoomView.local_direction"),
         )
     }
 
-    private fun encodeSendSourceView(value: SendSourceView): JSONObject {
+    private fun encodeMintRoomView(value: MintRoomView): JSONObject {
         val map = JSONObject()
-        map.put("display_name", encodeUtf8Bounded(value.displayName, 1020, "SendSourceView.display_name"))
-        map.put("total", encodeInteger(value.total, Long.MAX_VALUE, "SendSourceView.total"))
+        map.put("local_direction", encodeLocalDirectionView(value.localDirection))
         return map
     }
 
@@ -471,21 +498,57 @@ object EnvoixCommandCodec {
         val kind = field(map, "kind", context) as? String
             ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
         return when (kind) {
-            "send" -> CreateIntentView.Send(
-                decodeSendSourceView(payload(map, "CreateIntentView.send"), "CreateIntentView.send"),
+            "mint_room" -> CreateIntentView.MintRoom(
+                decodeMintRoomView(payload(map, "CreateIntentView.mint_room"), "CreateIntentView.mint_room"),
             )
-            "join" -> CreateIntentView.Join(
-                decodeJoinInviteView(payload(map, "CreateIntentView.join"), "CreateIntentView.join"),
+            "join_room" -> CreateIntentView.JoinRoom(
+                decodeJoinInviteView(payload(map, "CreateIntentView.join_room"), "CreateIntentView.join_room"),
             )
             else -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
         }
     }
 
     private fun encodeCreateIntentView(value: CreateIntentView): JSONObject = when (value) {
-        is CreateIntentView.Send ->
-            JSONObject().put("kind", "send").put("value", encodeSendSourceView(value.value))
-        is CreateIntentView.Join ->
-            JSONObject().put("kind", "join").put("value", encodeJoinInviteView(value.value))
+        is CreateIntentView.MintRoom ->
+            JSONObject().put("kind", "mint_room").put("value", encodeMintRoomView(value.value))
+        is CreateIntentView.JoinRoom ->
+            JSONObject().put("kind", "join_room").put("value", encodeJoinInviteView(value.value))
+    }
+
+    private fun decodeSourceAcquisitionKeyView(value: Any?, context: String): SourceAcquisitionKeyView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("card", "generation", "request"), context)
+        return SourceAcquisitionKeyView(
+            card = hexFixed(field(map, "card", "SourceAcquisitionKeyView.card"), 16, "SourceAcquisitionKeyView.card"),
+            generation = integer(field(map, "generation", "SourceAcquisitionKeyView.generation"), 4294967295, "SourceAcquisitionKeyView.generation"),
+            request = hexFixed(field(map, "request", "SourceAcquisitionKeyView.request"), 32, "SourceAcquisitionKeyView.request"),
+        )
+    }
+
+    private fun encodeSourceAcquisitionKeyView(value: SourceAcquisitionKeyView): JSONObject {
+        val map = JSONObject()
+        map.put("card", encodeHexFixed(value.card, 16, "SourceAcquisitionKeyView.card"))
+        map.put("generation", encodeInteger(value.generation, 4294967295, "SourceAcquisitionKeyView.generation"))
+        map.put("request", encodeHexFixed(value.request, 32, "SourceAcquisitionKeyView.request"))
+        return map
+    }
+
+    private fun decodeSourceOfferView(value: Any?, context: String): SourceOfferView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("key", "display_name", "reported_size"), context)
+        return SourceOfferView(
+            key = decodeSourceAcquisitionKeyView(field(map, "key", "SourceOfferView.key"), "SourceOfferView.key"),
+            displayName = utf8Bounded(field(map, "display_name", "SourceOfferView.display_name"), 1020, "SourceOfferView.display_name"),
+            reportedSize = field(map, "reported_size", "SourceOfferView.reported_size")?.let { integer(it, Long.MAX_VALUE, "SourceOfferView.reported_size") },
+        )
+    }
+
+    private fun encodeSourceOfferView(value: SourceOfferView): JSONObject {
+        val map = JSONObject()
+        map.put("key", encodeSourceAcquisitionKeyView(value.key))
+        map.put("display_name", encodeUtf8Bounded(value.displayName, 1020, "SourceOfferView.display_name"))
+        map.put("reported_size", value.reportedSize?.let { encodeInteger(it, Long.MAX_VALUE, "SourceOfferView.reported_size") } ?: JSONObject.NULL)
+        return map
     }
 
     private fun decodeCreateView(value: Any?, context: String): CreateView {
@@ -516,6 +579,9 @@ object EnvoixCommandCodec {
             "create" -> FrontendIntentView.Create(
                 decodeCreateView(payload(map, "FrontendIntentView.create"), "FrontendIntentView.create"),
             )
+            "source_offer" -> FrontendIntentView.SourceOffer(
+                decodeSourceOfferView(payload(map, "FrontendIntentView.source_offer"), "FrontendIntentView.source_offer"),
+            )
             else -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
         }
     }
@@ -525,6 +591,8 @@ object EnvoixCommandCodec {
             JSONObject().put("kind", "command").put("value", encodeSubmitView(value.value))
         is FrontendIntentView.Create ->
             JSONObject().put("kind", "create").put("value", encodeCreateView(value.value))
+        is FrontendIntentView.SourceOffer ->
+            JSONObject().put("kind", "source_offer").put("value", encodeSourceOfferView(value.value))
     }
 
     private fun decodeRejectionView(value: Any?, context: String): RejectionView = when (value) {

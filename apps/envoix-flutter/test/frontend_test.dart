@@ -240,15 +240,21 @@ String _intent(FrontendIntentView intent) => switch (intent) {
         '{"kind":"create","value":'
             '{"intent":${_createIntent(value.intent)},'
             '"request_id":"${value.requestId}"}}',
+      FrontendIntentViewSourceOffer(:final SourceOfferView value) =>
+        '{"kind":"source_offer","value":'
+            '{"display_name":${jsonEncode(value.displayName)},'
+            '"key":{"card":"${value.key.card}",'
+            '"generation":${value.key.generation},'
+            '"request":"${value.key.request}"},'
+            '"reported_size":${value.reportedSize}}}',
     };
 
 String _createIntent(CreateIntentView intent) => switch (intent) {
-      CreateIntentViewSend(:final SendSourceView value) =>
-        '{"kind":"send","value":'
-            '{"display_name":${jsonEncode(value.displayName)},'
-            '"total":${value.total}}}',
-      CreateIntentViewJoin(:final JoinInviteView value) =>
-        '{"kind":"join","value":{"invite":${jsonEncode(value.invite.expose())}}}',
+      CreateIntentViewMintRoom(:final MintRoomView value) =>
+        '{"kind":"mint_room","value":'
+            '{"local_direction":"${value.localDirection.name}"}}',
+      CreateIntentViewJoinRoom(:final JoinInviteView value) =>
+        '{"kind":"join_room","value":{"invite":${jsonEncode(value.invite.expose())}}}',
     };
 
 String _createOutcome(CreateOutcomeView outcome) => switch (outcome) {
@@ -1402,8 +1408,8 @@ void main() {
           body: CommandBodyIntent(
             FrontendIntentViewCreate(
               CreateView(
-                intent: const CreateIntentViewSend(
-                  SendSourceView(displayName: 'a"quoted\\name.bin', total: 0),
+                intent: const CreateIntentViewMintRoom(
+                  MintRoomView(localDirection: LocalDirectionView.send),
                 ),
                 requestId: id,
               ),
@@ -1414,7 +1420,7 @@ void main() {
           body: CommandBodyIntent(
             FrontendIntentViewCreate(
               CreateView(
-                intent: const CreateIntentViewJoin(
+                intent: const CreateIntentViewJoinRoom(
                   JoinInviteView(invite: CommandSecretString('envoix://invite/v3/AAAA')),
                 ),
                 requestId: id,
@@ -2162,28 +2168,31 @@ void main() {
       expect(sink.requested.length, texts.length);
       for (int index = 0; index < texts.length; index += 1) {
         final CreateIntentView intent = sink.requested[index].intent;
-        expect(intent, isA<CreateIntentViewJoin>());
+        expect(intent, isA<CreateIntentViewJoinRoom>());
         expect(
-          (intent as CreateIntentViewJoin).value.invite.expose(),
+          (intent as CreateIntentViewJoinRoom).value.invite.expose(),
           texts[index],
           reason: 'the app must not interpret, trim or judge invite text',
         );
       }
     });
 
-    test('a send carries the metadata the platform reported', () async {
-      final RecordingCreateSink sink =
-          RecordingCreateSink((CreateView create) => null);
-      await Creator(sink: sink.call).send(
-        id: mintCommandId(),
-        displayName: 'quarterly report.pdf',
-        sizeBytes: 4096,
-      );
-      final CreateIntentView intent = sink.requested.single.intent;
-      expect(intent, isA<CreateIntentViewSend>());
-      final SendSourceView source = (intent as CreateIntentViewSend).value;
-      expect(source.displayName, 'quarterly report.pdf');
-      expect(source.total, 4096);
+    test('a mint carries only which side of the room this endpoint is on',
+        () async {
+      // Both directions, because a receiver minting its own room is the half of
+      // the 2x2 that used to be unreachable — and neither carries a document.
+      for (final LocalDirectionView direction in LocalDirectionView.values) {
+        final RecordingCreateSink sink =
+            RecordingCreateSink((CreateView create) => null);
+        await Creator(sink: sink.call)
+            .mint(id: mintCommandId(), direction: direction);
+        final CreateIntentView intent = sink.requested.single.intent;
+        expect(intent, isA<CreateIntentViewMintRoom>());
+        expect(
+          (intent as CreateIntentViewMintRoom).value.localDirection,
+          direction,
+        );
+      }
     });
 
     test('the identity bound to each user intent is preserved', () async {
@@ -2194,7 +2203,7 @@ void main() {
           List<String>.generate(3, (_) => mintCommandId());
       await creator.join(id: ids[0], invite: invite);
       await creator.join(id: ids[1], invite: invite);
-      await creator.send(id: ids[2], displayName: 'a.bin', sizeBytes: 1);
+      await creator.mint(id: ids[2], direction: LocalDirectionView.send);
       expect(
         sink.requested.map((CreateView create) => create.requestId),
         ids,
@@ -2287,10 +2296,9 @@ void main() {
         (CreateView create) =>
             refusedOf(create.requestId, CreateRefusalView.nameTooLong),
       );
-      final CreateIntent request = await Creator(sink: sink.call).send(
+      final CreateIntent request = await Creator(sink: sink.call).mint(
         id: mintCommandId(),
-        displayName: '界' * 86,
-        sizeBytes: 1,
+        direction: LocalDirectionView.send,
       );
       expect(sink.requested, hasLength(1));
       expect(request.outcome, isA<CreateOutcomeViewRefused>());
@@ -2331,7 +2339,12 @@ void main() {
       await tester.tap(start);
       await tester.pumpAndSettle();
       final CreateIntentView intent = sink.requested.single.intent;
-      expect((intent as CreateIntentViewSend).value.displayName, 'holiday.mp4');
+      // The picked file gated the button; the frame carries only the room's
+      // direction, because a document is offered after the card exists.
+      expect(
+        (intent as CreateIntentViewMintRoom).value.localDirection,
+        LocalDirectionView.send,
+      );
       expect(find.textContaining('Created'), findsOneWidget);
       expect(find.textContaining(other), findsOneWidget);
 
@@ -2363,7 +2376,7 @@ void main() {
       await tester.tap(join);
       await tester.pumpAndSettle();
       expect(
-        (sink.requested.single.intent as CreateIntentViewJoin).value.invite.expose(),
+        (sink.requested.single.intent as CreateIntentViewJoinRoom).value.invite.expose(),
         '  000123-amber-brass  ',
       );
       expect(
@@ -2499,9 +2512,9 @@ void main() {
       expect(sink.requested, hasLength(1));
       final CreateView create = sink.requested.single;
       final CreateIntentView intent = create.intent;
-      expect(intent, isA<CreateIntentViewJoin>());
+      expect(intent, isA<CreateIntentViewJoinRoom>());
       expect(
-        (intent as CreateIntentViewJoin).value.invite.expose(),
+        (intent as CreateIntentViewJoinRoom).value.invite.expose(),
         invite,
       );
     });

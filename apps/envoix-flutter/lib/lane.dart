@@ -161,28 +161,26 @@ class Creator {
 
   final CommandSink _sink;
 
-  /// Asks for a send of the document the platform granted.
-  Future<CreateIntent> send({
+  /// Asks for a room this endpoint will be on `direction` of.
+  ///
+  /// It carries no document. A sender acquires one AFTER the card exists,
+  /// under an identity the authority mints — so this is the same request
+  /// whichever side the user will be on, and a receiver minting its own room
+  /// is finally expressible.
+  Future<CreateIntent> mint({
     required String id,
-    required String displayName,
-    required int sizeBytes,
+    required LocalDirectionView direction,
   }) =>
       _ask(
-        CreateIntent(
-          id: id,
-          kind: CreateKind.send,
-          displayName: displayName,
-        ),
-        CreateIntentViewSend(
-          SendSourceView(displayName: displayName, total: sizeBytes),
-        ),
+        CreateIntent(id: id, kind: CreateKind.mint),
+        CreateIntentViewMintRoom(MintRoomView(localDirection: direction)),
       );
 
   /// Asks to join whatever `invite` turns out to be. The text is passed
   /// through untouched — not trimmed, not sniffed, not measured.
   Future<CreateIntent> join({required String id, required String invite}) => _ask(
         CreateIntent(id: id, kind: CreateKind.join),
-        CreateIntentViewJoin(JoinInviteView(invite: CommandSecretString(invite))),
+        CreateIntentViewJoinRoom(JoinInviteView(invite: CommandSecretString(invite))),
       );
 
   Future<CreateIntent> _ask(

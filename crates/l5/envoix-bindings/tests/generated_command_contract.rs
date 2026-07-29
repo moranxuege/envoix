@@ -10,8 +10,8 @@ use envoix_bindings::command::{
     AcceptanceView, COMMAND_MAX_FRAME_BYTES, COMMAND_SCHEMA_ID, CardCreatedView,
     CommandAcceptanceView, CommandBody, CommandError, CommandFrame, CommandView, CreateIntentView,
     CreateOutcomeView, CreateRefusalView, CreateView, FrontendIntentView, JoinInviteView,
-    NEWEST_ATTACHMENT_COMMANDS, RETRY_HORIZON_COMPLETIONS, RejectionView,
-    SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY, SendSourceView, SubmitView, decode_command_frame,
+    LocalDirectionView, MintRoomView, NEWEST_ATTACHMENT_COMMANDS, RETRY_HORIZON_COMPLETIONS,
+    RejectionView, SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY, SubmitView, decode_command_frame,
     encode_command_frame,
 };
 use envoix_bindings::{Decl, FieldTy, emit};
@@ -125,7 +125,7 @@ fn generated_command_schema_exhaustiveness() {
         assert!(SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY);
         assert!(RETRY_HORIZON_COMPLETIONS as usize == CommandLedger::RETENTION);
     }
-    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/4");
+    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/5");
 
     // The invite field carries text the grammar has not seen yet, so its bound
     // is the one place `MAX_INVITE_INPUT_LENGTH` — the parser's permissive
@@ -220,9 +220,8 @@ fn generated_command_schema_exhaustiveness() {
     // Both create intents round-trip into the typed bridge value the host
     // plans from, and every refusal the authority can answer crosses back.
     // Invite text is carried, never inspected: what goes in comes out.
-    let bytes = encode_command_frame(&create_frame(CreateIntentView::Send(SendSourceView {
-        display_name: "report.pdf".to_owned(),
-        total: 4096,
+    let bytes = encode_command_frame(&create_frame(CreateIntentView::MintRoom(MintRoomView {
+        local_direction: LocalDirectionView::Send,
     })))
     .expect("send intent encodes");
     let FrontendIntent::Create(spec) = decode_intent(&bytes).expect("send intent decodes") else {
@@ -234,13 +233,12 @@ fn generated_command_schema_exhaustiveness() {
     );
     assert_eq!(
         spec.intent,
-        CreateIntent::Send {
-            display_name: "report.pdf".to_owned(),
-            total: 4096,
+        CreateIntent::MintRoom {
+            local_direction: envoix_types::Direction::Send
         }
     );
     let hostile = "envoix://invite/v3/\u{202e}not-really'; DROP--";
-    let bytes = encode_command_frame(&create_frame(CreateIntentView::Join(JoinInviteView {
+    let bytes = encode_command_frame(&create_frame(CreateIntentView::JoinRoom(JoinInviteView {
         invite: Secret::new(hostile.to_owned()),
     })))
     .expect("join intent encodes");
@@ -249,7 +247,7 @@ fn generated_command_schema_exhaustiveness() {
     };
     assert_eq!(
         spec.intent,
-        CreateIntent::Join {
+        CreateIntent::JoinRoom {
             invite: hostile.to_owned(),
         },
         "invite text crosses verbatim; nothing on this path interprets it"
@@ -290,7 +288,8 @@ fn generated_command_schema_exhaustiveness() {
         _ => panic!("union {name} expected"),
     };
     assert_eq!(union_len("CommandBody"), 4);
-    assert_eq!(union_len("FrontendIntentView"), 2);
+    // command, create, source_offer — the third arrived with acquisition.
+    assert_eq!(union_len("FrontendIntentView"), 3);
     assert_eq!(union_len("CreateIntentView"), 2);
     assert_eq!(union_len("CreateOutcomeView"), 2);
     assert_eq!(CreateRefusalView::ALL.len(), 9);
@@ -308,14 +307,18 @@ fn generated_command_schema_exhaustiveness() {
 #[test]
 fn the_picked_name_bound_reaches_the_authority_for_every_android_leaf() {
     let doc = doc();
-    let Some(Decl::Struct(decl)) = doc.find("SendSourceView") else {
-        panic!("SendSourceView expected");
+    // The bound moved with the field: a document's name now crosses on the
+    // SOURCE OFFER rather than at create, because a card exists before a
+    // document is chosen. The invariant is unchanged — the authority, not the
+    // frontend's encoder, must be the thing that says a name is too long.
+    let Some(Decl::Struct(decl)) = doc.find("SourceOfferView") else {
+        panic!("SourceOfferView expected");
     };
     let field = decl
         .fields
         .iter()
         .find(|field| field.name == "display_name")
-        .expect("SendSourceView declares a display_name");
+        .expect("SourceOfferView declares a display_name");
     assert!(
         matches!(field.ty, FieldTy::Str { max_bytes }
             if max_bytes as usize == OfferedName::MAX_BYTES * 4),
@@ -349,7 +352,7 @@ fn command_frames_reject_hostile_input() {
     );
 
     let future_version = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/command/5");
+        value["schema"] = serde_json::json!("envoix/binding/command/6");
     });
     assert_eq!(
         decode_command_frame(&future_version),

@@ -15,7 +15,7 @@
 # bytes/blob type and no handle/path/URI type, so a command can never carry
 # file bytes or an OS handle.
 
-id = "envoix/binding/command/4"
+id = "envoix/binding/command/5"
 root = "CommandFrame"
 # Frontends originate frames on this contract, so every native artifact carries
 # an encoder that enforces the same bounds its decoder checks. Which frames is
@@ -85,23 +85,20 @@ fields = [
 # the record). So creation is a second intent on the same contract rather than a
 # sixth `CommandView` — which would be a command with no card — or a second
 # contract, which would be a second intake model.
+# WHICH SIDE THIS ENDPOINT IS ON, when it is the one minting the room.
+#
+# A joiner does not send this: its direction is the inverse of what the invite
+# declares, and only the Rust grammar may read an invite (`XI02`). A frontend
+# that stated a direction for a join would be deciding a transfer fact.
+[[decl]]
+kind = "enum"
+name = "LocalDirectionView"
+variants = ["send", "receive"]
+
 [[decl]]
 kind = "struct"
-name = "SendSourceView"
-fields = [
-  # The picked document's provider name and size, as the platform reported them
-  # to the frontend. Sanitized metadata, never an artifact key (`SF09`): the
-  # authority re-sanitizes the name, and staging's own completion is what
-  # authors the real byte count. No URI or handle can be spelled here — the
-  # scalar vocabulary has no type for one.
-  # Wider than OfferedName::MAX_BYTES so ordinary provider names whose UTF-8
-  # representation exceeds a filesystem leaf reach the authority and receive
-  # its typed refusal instead of dying as a local codec exception. Android
-  # providers conventionally cap names at 255 UTF-16 units; 1020 bytes covers
-  # the all-supplementary-plane case.
-  { name = "display_name", type = "str(1020)" },
-  { name = "total", type = "u63" },
-]
+name = "MintRoomView"
+fields = [{ name = "local_direction", type = "LocalDirectionView" }]
 
 [[decl]]
 kind = "struct"
@@ -117,12 +114,66 @@ fields = [
   { name = "invite", type = "str(16384)", secret = true },
 ]
 
+# The two ways a card comes into being, and they are the two ROOM
+# participations rather than the two directions.
+#
+# `send`/`join` conflated two independent axes — which side sends, and who
+# minted the room — so only two of the four combinations were reachable: a
+# receiver could not mint a room and a sender could not join one. Both are
+# ordinary things to want, and the stack below has always been symmetric about
+# them (`envoix-invite` round-trips either role, the rendezvous assigns
+# initiator by arrival order, the data plane keys on direction).
+#
+# NEITHER carries a source. A document is acquired AFTER the card exists, under
+# an identity the authority mints, because a picked document must belong to
+# exactly one acquisition and before create there is no card to belong to. An
+# optional source here would preserve exactly the ordering that made a
+# process-global pick slot possible.
 [[decl]]
 kind = "union"
 name = "CreateIntentView"
 variants = [
-  { name = "send", payload = "SendSourceView" },
-  { name = "join", payload = "JoinInviteView" },
+  { name = "mint_room", payload = "MintRoomView" },
+  { name = "join_room", payload = "JoinInviteView" },
+]
+
+# The key of ONE source acquisition, as the authority minted it.
+#
+# All three parts, because equality over the whole key is what makes a document
+# belong to exactly one acquisition: a card match alone is how a picked file
+# could satisfy a request it was never chosen for. A re-pick advances the
+# generation, so a late offer under the discharged key names a key that is no
+# longer current and is refused on sight.
+[[decl]]
+kind = "struct"
+name = "SourceAcquisitionKeyView"
+fields = [
+  { name = "card", type = "hex16" },
+  { name = "generation", type = "u32" },
+  { name = "request", type = "hex32" },
+]
+
+# A document the user chose, offered to the acquisition that asked for it.
+#
+# Still no handle: the platform keeps the URI under this key and what crosses is
+# metadata the authority sanitizes (`SF09`). Every field here is part of the
+# accepted offer, and the authority classifies a repeat by comparing ALL of
+# them — an equal offer is an idempotent retry, the same key with different
+# metadata is a conflict that was never committed.
+[[decl]]
+kind = "struct"
+name = "SourceOfferView"
+fields = [
+  { name = "key", type = "SourceAcquisitionKeyView" },
+  # Wider than OfferedName::MAX_BYTES so ordinary provider names whose UTF-8
+  # representation exceeds a filesystem leaf reach the authority and receive its
+  # typed refusal instead of dying as a local codec exception. Android providers
+  # conventionally cap names at 255 UTF-16 units; 1020 bytes covers the
+  # all-supplementary-plane case.
+  { name = "display_name", type = "str(1020)" },
+  # What the provider CLAIMED. Never the transfer's total: staging counts the
+  # bytes, and a provider is untrusted about length.
+  { name = "reported_size", type = "option(u63)" },
 ]
 
 [[decl]]
@@ -139,6 +190,10 @@ name = "FrontendIntentView"
 variants = [
   { name = "command", payload = "SubmitView" },
   { name = "create", payload = "CreateView" },
+  # Offering a document is neither: there is a card, so it is not a create, and
+  # it carries a payload the card-command vocabulary has no room for. It is the
+  # answer to a source duty the authority already raised.
+  { name = "source_offer", payload = "SourceOfferView" },
 ]
 
 [[decl]]

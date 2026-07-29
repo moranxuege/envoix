@@ -315,7 +315,7 @@ List<int> _intentFrame(FrontendIntentView intent) =>
 /// Which kind of card is being asked for. It is the frontend's INTENT, not a
 /// decision about the transfer: a send says the platform has granted a source,
 /// a join carries text the app has not looked at.
-enum CreateKind { send, join }
+enum CreateKind { mint, join }
 
 /// One request that a card be created, and the authority's answer to it.
 ///

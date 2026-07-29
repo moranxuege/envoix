@@ -159,10 +159,10 @@ fun handBuiltSubmits(): Map<String, FrontendIntentView> {
     bodies["submit_ids_min"] = submit("0".repeat(16), 1, "0".repeat(32), CommandView.CANCEL)
     bodies["submit_ids_max"] = submit("f".repeat(16), 1, "f".repeat(32), CommandView.CANCEL)
 
-    bodies["create_send_narrowest"] =
-        create(id, CreateIntentView.Send(SendSourceView("", 0)))
-    bodies["create_send_widest"] =
-        create("f".repeat(32), CreateIntentView.Send(SendSourceView("世".repeat(84) + "x", Long.MAX_VALUE)))
+    bodies["create_mint_send"] =
+        create(id, CreateIntentView.MintRoom(MintRoomView(LocalDirectionView.SEND)))
+    bodies["create_mint_receive"] =
+        create("f".repeat(32), CreateIntentView.MintRoom(MintRoomView(LocalDirectionView.RECEIVE)))
     val invites = linkedMapOf(
         "empty" to "",
         "canonical" to "envoix://invite/v3/eyJ2ZXJzaW9uIjozfQ",
@@ -170,7 +170,7 @@ fun handBuiltSubmits(): Map<String, FrontendIntentView> {
         "at_bound" to "e".repeat(16384),
     )
     invites.forEach { (name, invite) ->
-        bodies["create_join_$name"] = create(id, CreateIntentView.Join(JoinInviteView(CommandSecretString(invite))))
+        bodies["create_join_$name"] = create(id, CreateIntentView.JoinRoom(JoinInviteView(CommandSecretString(invite))))
     }
     return bodies
 }

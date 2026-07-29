@@ -12,8 +12,6 @@ import '../../../envoix-flutter/lib/bindings/envoix_command.dart';
 import '../../../envoix-flutter/lib/bindings/envoix_read.dart';
 import '../../../envoix-flutter/lib/commands.dart';
 
-const String name = 'quarterly report.pdf';
-const int total = 4096;
 
 void main(List<String> arguments) {
   final String mode = arguments[0];
@@ -41,8 +39,10 @@ void main(List<String> arguments) {
       'create.frame',
       createFrame(
         id: request,
-        intent: const CreateIntentViewSend(
-          SendSourceView(displayName: name, total: total),
+        // The Dart frontend states which side of the room it will be on, and
+        // nothing about a document — the same frame the CLI emits.
+        intent: const CreateIntentViewMintRoom(
+          MintRoomView(localDirection: LocalDirectionView.send),
         ),
       ),
     );

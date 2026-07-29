@@ -25,8 +25,6 @@ use envoix_bindings::read::{
 use envoix_cli::{Frontend, Ingested};
 use envoix_host_android::{AttachmentToken, FramePoll, Host};
 
-const NAME: &str = "quarterly report.pdf";
-const TOTAL: u64 = 4096;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[test]
@@ -68,7 +66,10 @@ fn anchor(witness: &str) {
 
     assert_eq!(fact("created"), "true", "the send was created");
     assert_eq!(fact("direction"), "send");
-    assert_eq!(fact("total"), TOTAL.to_string());
+    // Zero, and that is the point: a minted send is born with no document. The
+    // total arrives from staging, which counts the bytes, rather than from a
+    // frontend repeating what a provider claimed.
+    assert_eq!(fact("total"), "0");
     // A fresh send is not yet running, so pause and resume are not on offer and
     // the authority says so itself — this is the legality table F2a made the
     // reducer DERIVE, and the value nobody may re-derive in a frontend.
@@ -125,22 +126,15 @@ fn drive_cli(work: &Path) -> String {
 
     // A real CLI process emits the generated create frame. It owns the request
     // identity, not the authority-minted card identity in the answer.
-    let create = run_cli_frame(
-        &[
-            "send",
-            "10000000000000000000000000000001",
-            NAME,
-            &TOTAL.to_string(),
-        ],
-        &[],
-    );
+    let create = run_cli_frame(&["mint", "10000000000000000000000000000001", "send"], &[]);
     let created = host
         .intent(&create)
         .expect("the authority answers the CLI create");
     let opening = drain_until(&host, token, |frames| {
-        frames.iter().filter_map(card_view).any(|view| {
-            view.offered_name == NAME && view.allowed_actions.contains(&CommandKindView::Cancel)
-        })
+        frames
+            .iter()
+            .filter_map(card_view)
+            .any(|view| view.allowed_actions.contains(&CommandKindView::Cancel))
     });
     let card = created_card_through_cli(&created);
 
@@ -201,9 +195,10 @@ fn drive_flutter(work: &Path) -> String {
         .expect("the authority answers the Flutter create");
     fs::write(work.join("create.result"), &created).expect("write the create answer");
     let opening = drain_until(&host, token, |frames| {
-        frames.iter().filter_map(card_view).any(|view| {
-            view.offered_name == NAME && view.allowed_actions.contains(&CommandKindView::Cancel)
-        })
+        frames
+            .iter()
+            .filter_map(card_view)
+            .any(|view| view.allowed_actions.contains(&CommandKindView::Cancel))
     });
     fs::write(work.join("opening.frames"), frame_lines(&opening))
         .expect("write Flutter opening frames");

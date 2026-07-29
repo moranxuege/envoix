@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/4";
+pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/5";
 pub const COMMAND_MAX_FRAME_BYTES: usize = 1048576;
 
 // Contract rules frozen by schema/command.schema.
@@ -91,10 +91,22 @@ pub struct SubmitView {
     pub command: CommandView,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalDirectionView {
+    Send,
+    Receive,
+}
+
+impl LocalDirectionView {
+    pub const ALL: [Self; 2] = [
+        Self::Send,
+        Self::Receive,
+    ];
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SendSourceView {
-    pub display_name: String,
-    pub total: u64,
+pub struct MintRoomView {
+    pub local_direction: LocalDirectionView,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,8 +116,22 @@ pub struct JoinInviteView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CreateIntentView {
-    Send(SendSourceView),
-    Join(JoinInviteView),
+    MintRoom(MintRoomView),
+    JoinRoom(JoinInviteView),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceAcquisitionKeyView {
+    pub card: String,
+    pub generation: u32,
+    pub request: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceOfferView {
+    pub key: SourceAcquisitionKeyView,
+    pub display_name: String,
+    pub reported_size: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +144,7 @@ pub struct CreateView {
 pub enum FrontendIntentView {
     Command(SubmitView),
     Create(CreateView),
+    SourceOffer(SourceOfferView),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -353,6 +380,11 @@ fn encode_u63(number: u64, context: &'static str) -> Result<Value, CommandError>
     Ok(Value::from(number))
 }
 
+fn integer_u32(value: &Value, context: &'static str) -> Result<u32, CommandError> {
+    let number = integer(value, 4_294_967_295, context)?;
+    u32::try_from(number).map_err(|_| CommandError::Range { context })
+}
+
 fn hex_chars(text: &str) -> bool {
     text.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -569,21 +601,34 @@ fn encode_submit_view_value(value: &SubmitView) -> Result<Value, CommandError> {
     Ok(Value::Object(map))
 }
 
-fn decode_send_source_view_value(value: &Value, context: &'static str) -> Result<SendSourceView, CommandError> {
-    let map = frame_object(value, context)?;
-    known_keys(map, &["display_name", "total"], context)?;
-    let display_name = utf8_bounded(field(map, "display_name", "SendSourceView.display_name")?, 1020, "SendSourceView.display_name")?;
-    let total = integer(field(map, "total", "SendSourceView.total")?, U63_MAX, "SendSourceView.total")?;
-    Ok(SendSourceView {
-        display_name,
-        total,
+fn decode_local_direction_view_value(value: &Value, context: &'static str) -> Result<LocalDirectionView, CommandError> {
+    let text = value.as_str().ok_or(CommandError::Shape { context })?;
+    match text {
+        "send" => Ok(LocalDirectionView::Send),
+        "receive" => Ok(LocalDirectionView::Receive),
+        _ => Err(CommandError::UnknownVariant { context }),
+    }
+}
+
+fn encode_local_direction_view_value(value: &LocalDirectionView) -> Value {
+    Value::from(match value {
+        LocalDirectionView::Send => "send",
+        LocalDirectionView::Receive => "receive",
     })
 }
 
-fn encode_send_source_view_value(value: &SendSourceView) -> Result<Value, CommandError> {
+fn decode_mint_room_view_value(value: &Value, context: &'static str) -> Result<MintRoomView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["local_direction"], context)?;
+    let local_direction = decode_local_direction_view_value(field(map, "local_direction", "MintRoomView.local_direction")?, "MintRoomView.local_direction")?;
+    Ok(MintRoomView {
+        local_direction,
+    })
+}
+
+fn encode_mint_room_view_value(value: &MintRoomView) -> Result<Value, CommandError> {
     let mut map = Map::new();
-    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 1020, "SendSourceView.display_name")?);
-    map.insert("total".to_owned(), encode_u63(value.total, "SendSourceView.total")?);
+    map.insert("local_direction".to_owned(), encode_local_direction_view_value(&value.local_direction));
     Ok(Value::Object(map))
 }
 
@@ -609,8 +654,8 @@ fn decode_create_intent_view_value(value: &Value, context: &'static str) -> Resu
         .as_str()
         .ok_or(CommandError::Shape { context })?;
     match kind {
-        "send" => Ok(CreateIntentView::Send(decode_send_source_view_value(payload(map, "CreateIntentView.send")?, "CreateIntentView.send")?)),
-        "join" => Ok(CreateIntentView::Join(decode_join_invite_view_value(payload(map, "CreateIntentView.join")?, "CreateIntentView.join")?)),
+        "mint_room" => Ok(CreateIntentView::MintRoom(decode_mint_room_view_value(payload(map, "CreateIntentView.mint_room")?, "CreateIntentView.mint_room")?)),
+        "join_room" => Ok(CreateIntentView::JoinRoom(decode_join_invite_view_value(payload(map, "CreateIntentView.join_room")?, "CreateIntentView.join_room")?)),
         _ => Err(CommandError::UnknownVariant { context }),
     }
 }
@@ -618,15 +663,66 @@ fn decode_create_intent_view_value(value: &Value, context: &'static str) -> Resu
 fn encode_create_intent_view_value(value: &CreateIntentView) -> Result<Value, CommandError> {
     let mut map = Map::new();
     match value {
-        CreateIntentView::Send(payload) => {
-            map.insert("kind".to_owned(), Value::from("send"));
-            map.insert("value".to_owned(), encode_send_source_view_value(payload)?);
+        CreateIntentView::MintRoom(payload) => {
+            map.insert("kind".to_owned(), Value::from("mint_room"));
+            map.insert("value".to_owned(), encode_mint_room_view_value(payload)?);
         }
-        CreateIntentView::Join(payload) => {
-            map.insert("kind".to_owned(), Value::from("join"));
+        CreateIntentView::JoinRoom(payload) => {
+            map.insert("kind".to_owned(), Value::from("join_room"));
             map.insert("value".to_owned(), encode_join_invite_view_value(payload)?);
         }
     }
+    Ok(Value::Object(map))
+}
+
+fn decode_source_acquisition_key_view_value(value: &Value, context: &'static str) -> Result<SourceAcquisitionKeyView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["card", "generation", "request"], context)?;
+    let card = hex_fixed(field(map, "card", "SourceAcquisitionKeyView.card")?, 16, "SourceAcquisitionKeyView.card")?;
+    let generation = integer_u32(field(map, "generation", "SourceAcquisitionKeyView.generation")?, "SourceAcquisitionKeyView.generation")?;
+    let request = hex_fixed(field(map, "request", "SourceAcquisitionKeyView.request")?, 32, "SourceAcquisitionKeyView.request")?;
+    Ok(SourceAcquisitionKeyView {
+        card,
+        generation,
+        request,
+    })
+}
+
+fn encode_source_acquisition_key_view_value(value: &SourceAcquisitionKeyView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("card".to_owned(), encode_hex_fixed(&value.card, 16, "SourceAcquisitionKeyView.card")?);
+    map.insert("generation".to_owned(), Value::from(value.generation));
+    map.insert("request".to_owned(), encode_hex_fixed(&value.request, 32, "SourceAcquisitionKeyView.request")?);
+    Ok(Value::Object(map))
+}
+
+fn decode_source_offer_view_value(value: &Value, context: &'static str) -> Result<SourceOfferView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["key", "display_name", "reported_size"], context)?;
+    let key = decode_source_acquisition_key_view_value(field(map, "key", "SourceOfferView.key")?, "SourceOfferView.key")?;
+    let display_name = utf8_bounded(field(map, "display_name", "SourceOfferView.display_name")?, 1020, "SourceOfferView.display_name")?;
+    let reported_size = match field(map, "reported_size", "SourceOfferView.reported_size")? {
+        Value::Null => None,
+        present => Some(integer(present, U63_MAX, "SourceOfferView.reported_size")?),
+    };
+    Ok(SourceOfferView {
+        key,
+        display_name,
+        reported_size,
+    })
+}
+
+fn encode_source_offer_view_value(value: &SourceOfferView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("key".to_owned(), encode_source_acquisition_key_view_value(&value.key)?);
+    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 1020, "SourceOfferView.display_name")?);
+    map.insert(
+        "reported_size".to_owned(),
+        match &value.reported_size {
+            None => Value::Null,
+            Some(inner) => encode_u63(*inner, "SourceOfferView.reported_size")?,
+        },
+    );
     Ok(Value::Object(map))
 }
 
@@ -657,6 +753,7 @@ fn decode_frontend_intent_view_value(value: &Value, context: &'static str) -> Re
     match kind {
         "command" => Ok(FrontendIntentView::Command(decode_submit_view_value(payload(map, "FrontendIntentView.command")?, "FrontendIntentView.command")?)),
         "create" => Ok(FrontendIntentView::Create(decode_create_view_value(payload(map, "FrontendIntentView.create")?, "FrontendIntentView.create")?)),
+        "source_offer" => Ok(FrontendIntentView::SourceOffer(decode_source_offer_view_value(payload(map, "FrontendIntentView.source_offer")?, "FrontendIntentView.source_offer")?)),
         _ => Err(CommandError::UnknownVariant { context }),
     }
 }
@@ -671,6 +768,10 @@ fn encode_frontend_intent_view_value(value: &FrontendIntentView) -> Result<Value
         FrontendIntentView::Create(payload) => {
             map.insert("kind".to_owned(), Value::from("create"));
             map.insert("value".to_owned(), encode_create_view_value(payload)?);
+        }
+        FrontendIntentView::SourceOffer(payload) => {
+            map.insert("kind".to_owned(), Value::from("source_offer"));
+            map.insert("value".to_owned(), encode_source_offer_view_value(payload)?);
         }
     }
     Ok(Value::Object(map))

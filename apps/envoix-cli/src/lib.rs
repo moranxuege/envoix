@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use envoix_bindings::command::{
     CommandBody, CommandError, CommandFrame, CommandView, CreateIntentView, CreateView,
-    FrontendIntentView, JoinInviteView, SendSourceView, SubmitView, decode_command_frame,
-    encode_command_frame,
+    FrontendIntentView, JoinInviteView, LocalDirectionView, MintRoomView, SubmitView,
+    decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::read::{
     CardUpdateKindView, CardView, CommandKindView, EpochGate, GateDecision, LosslessKindView,
@@ -212,18 +212,17 @@ impl Frontend {
     }
 }
 
-/// Encodes a request to send metadata the local source picker published.
-pub fn create_send_frame(
+/// Encodes a request to mint a room and be on `local_direction` of it.
+///
+/// It carries no document: a source is acquired after the card exists, so this
+/// is the same frame whichever side the caller will be on.
+pub fn create_mint_frame(
     request_id: String,
-    display_name: String,
-    total: u64,
+    local_direction: LocalDirectionView,
 ) -> Result<Vec<u8>, IntentError> {
     create_frame(
         request_id,
-        CreateIntentView::Send(SendSourceView {
-            display_name,
-            total,
-        }),
+        CreateIntentView::MintRoom(MintRoomView { local_direction }),
     )
 }
 
@@ -231,7 +230,7 @@ pub fn create_send_frame(
 pub fn create_join_frame(request_id: String, invite: String) -> Result<Vec<u8>, IntentError> {
     create_frame(
         request_id,
-        CreateIntentView::Join(JoinInviteView {
+        CreateIntentView::JoinRoom(JoinInviteView {
             invite: Secret::new(invite),
         }),
     )
@@ -358,8 +357,8 @@ mod tests {
     };
 
     use super::{
-        Frontend, FrontendError, Ingested, IntentError, create_join_frame, create_send_frame,
-        render,
+        Frontend, FrontendError, Ingested, IntentError, LocalDirectionView, create_join_frame,
+        create_mint_frame, render,
     };
 
     fn view(allowed_actions: Vec<CommandKindView>) -> CardView {
@@ -464,10 +463,9 @@ mod tests {
             frontend.ingest(&update(1, CardUpdateKindView::Progress(view(Vec::new())))),
             Err(FrontendError::ContractBreach)
         );
-        let inbound = create_send_frame(
+        let inbound = create_mint_frame(
             "0123456789abcdeffedcba9876543210".to_owned(),
-            "contract.bin".to_owned(),
-            4096,
+            LocalDirectionView::Send,
         )
         .expect("the create encodes");
         assert_eq!(
@@ -478,10 +476,9 @@ mod tests {
 
     #[test]
     fn create_inputs_cross_unchanged_through_the_generated_contract() {
-        let send = create_send_frame(
+        let send = create_mint_frame(
             "0123456789abcdeffedcba9876543210".to_owned(),
-            "界".repeat(20),
-            4096,
+            LocalDirectionView::Send,
         )
         .expect("the bounded name encodes");
         assert!(matches!(
@@ -500,7 +497,7 @@ mod tests {
         else {
             panic!("the generated body is a create");
         };
-        let envoix_bindings::command::CreateIntentView::Join(join) = create.intent else {
+        let envoix_bindings::command::CreateIntentView::JoinRoom(join) = create.intent else {
             panic!("the generated intent is a join");
         };
         assert_eq!(join.invite.expose(), invite);

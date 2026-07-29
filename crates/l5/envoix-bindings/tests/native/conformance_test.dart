@@ -115,14 +115,15 @@ Map<String, FrontendIntentView> handBuiltSubmits() {
   bodies['submit_ids_max'] =
       submit('ffffffffffffffff', 1, 'f' * 32, CommandView.cancel);
 
-  // The create half of the same originable body. A frontend hands the picked
-  // document's sanitized metadata, or opaque invite text it has not looked at.
-  bodies['create_send_narrowest'] = create(
-      id, CreateIntentViewSend(SendSourceView(displayName: '', total: 0)));
-  bodies['create_send_widest'] = create(
+  // The create half of the same originable body. A frontend states which side
+  // of a room it will be on, or hands over opaque invite text it has not looked
+  // at. Neither carries a document.
+  bodies['create_mint_send'] = create(
+      id, CreateIntentViewMintRoom(MintRoomView(localDirection: LocalDirectionView.send)));
+  bodies['create_mint_receive'] = create(
       'f' * 32,
-      CreateIntentViewSend(SendSourceView(
-          displayName: '${'世' * 84}x', total: 9223372036854775807)));
+      CreateIntentViewMintRoom(
+          MintRoomView(localDirection: LocalDirectionView.receive)));
   const invites = <String, String>{
     'empty': '',
     'canonical': 'envoix://invite/v3/eyJ2ZXJzaW9uIjozfQ',
@@ -130,10 +131,10 @@ Map<String, FrontendIntentView> handBuiltSubmits() {
   };
   invites.forEach((name, invite) {
     bodies['create_join_$name'] =
-        create(id, CreateIntentViewJoin(JoinInviteView(invite: CommandSecretString(invite))));
+        create(id, CreateIntentViewJoinRoom(JoinInviteView(invite: CommandSecretString(invite))));
   });
   bodies['create_join_at_bound'] =
-      create(id, CreateIntentViewJoin(JoinInviteView(invite: CommandSecretString('e' * 16384))));
+      create(id, CreateIntentViewJoinRoom(JoinInviteView(invite: CommandSecretString('e' * 16384))));
   return bodies;
 }
 

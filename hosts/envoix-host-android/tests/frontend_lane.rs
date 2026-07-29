@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use envoix_bindings::command::{
     COMMAND_SCHEMA_ID, CommandBody, CommandFrame, CreateIntentView, CreateOutcomeView, CreateView,
-    FrontendIntentView, JoinInviteView, SendSourceView, decode_command_frame, encode_command_frame,
+    FrontendIntentView, JoinInviteView, LocalDirectionView, MintRoomView, decode_command_frame,
+    encode_command_frame,
 };
 use envoix_bindings::lag_frame;
 use envoix_bindings::read::{
@@ -590,9 +591,8 @@ fn repeated_create_identity_survives_restart_without_creating_another_card() {
     let request_id = "0123456789abcdeffedcba9876543210";
     let request = encode_command_frame(&CommandFrame {
         body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
-            intent: CreateIntentView::Send(SendSourceView {
-                display_name: "one-card.bin".to_owned(),
-                total: 4096,
+            intent: CreateIntentView::MintRoom(MintRoomView {
+                local_direction: LocalDirectionView::Send,
             }),
             request_id: request_id.to_owned(),
         })),
@@ -1030,7 +1030,7 @@ fn a_fresh_id_for_a_room_already_joined_does_not_make_a_second_card() {
     let link = {
         let host = Host::boot(sender.path()).expect("the sending host boots");
         let token = host.open_lane();
-        host.intent(&create_send_frame("shared.bin", 4096))
+        host.intent(&create_mint_send_frame())
             .expect("the send is created");
         let published = drain_until(&host, token, |frames| {
             frames
@@ -1079,12 +1079,13 @@ fn a_fresh_id_for_a_room_already_joined_does_not_make_a_second_card() {
     );
 }
 
-fn create_send_frame(name: &str, total: u64) -> Vec<u8> {
+/// A mint of a SENDING room. It carries no document — the name and size a
+/// caller used to pass belong to the source offer now.
+fn create_mint_send_frame() -> Vec<u8> {
     encode_command_frame(&CommandFrame {
         body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
-            intent: CreateIntentView::Send(SendSourceView {
-                display_name: name.to_owned(),
-                total,
+            intent: CreateIntentView::MintRoom(MintRoomView {
+                local_direction: LocalDirectionView::Send,
             }),
             request_id: "00000000000000000000000000000001".to_owned(),
         })),
@@ -1095,7 +1096,7 @@ fn create_send_frame(name: &str, total: u64) -> Vec<u8> {
 fn create_join_frame(link: &str, request_id: &str) -> Vec<u8> {
     encode_command_frame(&CommandFrame {
         body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
-            intent: CreateIntentView::Join(JoinInviteView {
+            intent: CreateIntentView::JoinRoom(JoinInviteView {
                 invite: Secret::new(link.to_owned()),
             }),
             request_id: request_id.to_owned(),

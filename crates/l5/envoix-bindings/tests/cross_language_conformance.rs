@@ -14,8 +14,8 @@ use envoix_bindings::command::{
     AcceptanceView, CardCreatedView, CommandAcceptanceView, CommandBody, CommandCompletionView,
     CommandError, CommandFrame, CommandView, CompletionView, CreateIntentView, CreateOutcomeView,
     CreateRefusalView, CreateResultView, CreateView, DispositionView, FrontendIntentView,
-    JoinInviteView, PauseCauseView, PausedStateView, RejectionView, SendSourceView, SubmitView,
-    decode_command_frame, encode_command_frame,
+    JoinInviteView, LocalDirectionView, MintRoomView, PauseCauseView, PausedStateView,
+    RejectionView, SubmitView, decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::read::{
     AbiSchemaManifestView, BuildManifestView, CardUpdateKindView, CardUpdateView, CardView,
@@ -107,14 +107,17 @@ fields = [
 /// statement of intent have to agree.
 fn originable_decls(id: &str) -> &'static [&'static str] {
     match id {
-        "envoix/binding/command/4" => &[
+        "envoix/binding/command/5" => &[
             "CommandView",
             "SubmitView",
             "CreateIntentView",
             "CreateView",
             "FrontendIntentView",
             "JoinInviteView",
-            "SendSourceView",
+            "LocalDirectionView",
+            "MintRoomView",
+            "SourceAcquisitionKeyView",
+            "SourceOfferView",
         ],
         "envoix/binding/probe/1" => &["ProbeTone", "ProbeLeaf", "ProbeChoice", "ProbeScalars"],
         _ => &[],
@@ -570,23 +573,22 @@ fn command_vectors() -> Vec<(String, CommandFrame)> {
     // invite text that is deliberately not an invite — carried verbatim,
     // because nothing on this path may interpret it.
     vectors.push((
-        "create_send_narrowest".to_owned(),
+        "create_mint_send".to_owned(),
         create(
             id,
-            CreateIntentView::Send(SendSourceView {
-                display_name: String::new(),
-                total: 0,
+            CreateIntentView::MintRoom(MintRoomView {
+                local_direction: LocalDirectionView::Send,
             }),
         ),
     ));
+    // The half of the 2x2 that used to be unreachable: a receiver minting its
+    // own room.
     vectors.push((
-        "create_send_widest".to_owned(),
+        "create_mint_receive".to_owned(),
         create(
             &"f".repeat(32),
-            CreateIntentView::Send(SendSourceView {
-                // 255 bytes exactly, in three-byte characters plus one ASCII.
-                display_name: format!("{}x", "世".repeat(84)),
-                total: u64::MAX >> 1,
+            CreateIntentView::MintRoom(MintRoomView {
+                local_direction: LocalDirectionView::Receive,
             }),
         ),
     ));
@@ -603,7 +605,7 @@ fn command_vectors() -> Vec<(String, CommandFrame)> {
             format!("create_join_{name}"),
             create(
                 id,
-                CreateIntentView::Join(JoinInviteView {
+                CreateIntentView::JoinRoom(JoinInviteView {
                     invite: Secret::new(invite),
                 }),
             ),

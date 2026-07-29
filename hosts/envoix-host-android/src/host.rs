@@ -492,6 +492,18 @@ impl Host {
         match decode_intent(bytes) {
             Ok(FrontendIntent::Command(spec)) => Ok(self.submit_command(spec)),
             Ok(FrontendIntent::Create(spec)) => Ok(self.create(&spec)),
+            // The acquisition protocol's intake, decodable but not yet
+            // answerable: the reducer edge that accepts an offer lands with the
+            // source-acquisition step, and there is no typed "not yet" on this
+            // verb to answer with.
+            //
+            // So today this is refused, and the refusal is honest rather than
+            // right: a frontend that sent a well-formed offer would be told its
+            // frame was a contract breach. Nothing sends one — the frontend
+            // still has no source flow — and the alternative, inventing an
+            // answer the product cannot stand behind, is worse. Stated here so
+            // the next step replaces it rather than discovering it.
+            Ok(FrontendIntent::SourceOffer(_)) => Err(IntentRejection::Contract),
             // Hostile or non-intent bytes carry no usable request id. This is
             // nevertheless a typed authority refusal, not zero bytes that a
             // frontend can only misreport as a lost answer.

@@ -13,13 +13,13 @@
 use envoix_runtime::{
     CommandCompletion, CommandRejected, CommandVerdict, PauseOrigin, ProductCommand, ProductState,
 };
-use envoix_types::{CommandId, RecordId};
+use envoix_types::{CommandId, Direction, RecordId};
 
 use crate::command::{
     AcceptanceView, CommandAcceptanceView, CommandBody, CommandCompletionView, CommandError,
     CommandFrame, CommandView, CompletionView, CreateIntentView, CreateOutcomeView,
-    CreateResultView, CreateView, DispositionView, FrontendIntentView, PausedStateView,
-    RejectionView, SubmitView, decode_command_frame,
+    CreateResultView, CreateView, DispositionView, FrontendIntentView, LocalDirectionView,
+    PausedStateView, RejectionView, SourceOfferView, SubmitView, decode_command_frame,
 };
 
 /// A decoded, validated submit request. The host resolves `card` to the live
@@ -49,11 +49,13 @@ pub struct CreateSpec {
 /// What kind of card a frontend asked for.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CreateIntent {
-    /// Send the document the platform granted, described by the sanitized
-    /// metadata the picker reported.
-    Send { display_name: String, total: u64 },
-    /// Join whatever this opaque text turns out to be.
-    Join { invite: String },
+    /// Mint a room and be on `local_direction` of it. Carries no document:
+    /// a source is acquired after the card exists, under an identity the
+    /// authority mints.
+    MintRoom { local_direction: Direction },
+    /// Join whatever this opaque text turns out to be. The invite decides the
+    /// local direction, so none is stated here.
+    JoinRoom { invite: String },
 }
 
 /// One decoded frontend-originated intent.
@@ -61,6 +63,21 @@ pub enum CreateIntent {
 pub enum FrontendIntent {
     Command(SubmitSpec),
     Create(CreateSpec),
+    /// A document offered to the acquisition that asked for it.
+    SourceOffer(SourceOfferSpec),
+}
+
+/// One decoded source offer. The key is carried whole: a card match alone is
+/// how a picked document could satisfy a request it was never chosen for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceOfferSpec {
+    pub card: RecordId,
+    pub generation: u32,
+    pub request: CommandId,
+    /// Untrusted provider metadata; the authority sanitizes it.
+    pub display_name: String,
+    /// What the provider claimed, never the transfer's total.
+    pub reported_size: Option<u64>,
 }
 
 /// Why frontend bytes did not yield a [`FrontendIntent`].
@@ -84,7 +101,25 @@ pub fn decode_intent(bytes: &[u8]) -> Result<FrontendIntent, SubmitDecodeError> 
     match intent {
         FrontendIntentView::Command(submit) => submit_spec(submit).map(FrontendIntent::Command),
         FrontendIntentView::Create(create) => create_spec(create).map(FrontendIntent::Create),
+        FrontendIntentView::SourceOffer(offer) => {
+            source_offer_spec(offer).map(FrontendIntent::SourceOffer)
+        }
     }
+}
+
+fn source_offer_spec(offer: SourceOfferView) -> Result<SourceOfferSpec, SubmitDecodeError> {
+    let card = u64::from_str_radix(&offer.key.card, 16).map_err(|_| {
+        SubmitDecodeError::Frame(CommandError::Shape {
+            context: "SourceAcquisitionKeyView.card",
+        })
+    })?;
+    Ok(SourceOfferSpec {
+        card: RecordId::new(card),
+        generation: offer.key.generation,
+        request: command_id(&offer.key.request, "SourceAcquisitionKeyView.request")?,
+        display_name: offer.display_name,
+        reported_size: offer.reported_size,
+    })
 }
 
 fn submit_spec(submit: SubmitView) -> Result<SubmitSpec, SubmitDecodeError> {
@@ -105,14 +140,16 @@ fn create_spec(create: CreateView) -> Result<CreateSpec, SubmitDecodeError> {
     Ok(CreateSpec {
         request_id: command_id(&create.request_id, "CreateView.request_id")?,
         intent: match create.intent {
-            CreateIntentView::Send(source) => CreateIntent::Send {
-                display_name: source.display_name,
-                total: source.total,
+            CreateIntentView::MintRoom(mint) => CreateIntent::MintRoom {
+                local_direction: match mint.local_direction {
+                    LocalDirectionView::Send => Direction::Send,
+                    LocalDirectionView::Receive => Direction::Receive,
+                },
             },
             // Exposed at the one boundary that must read it: the invite
             // grammar in Rust is what judges this text. It is sealed on the
             // wire and sealed again in anything the frontend can render.
-            CreateIntentView::Join(join) => CreateIntent::Join {
+            CreateIntentView::JoinRoom(join) => CreateIntent::JoinRoom {
                 invite: join.invite.expose().clone(),
             },
         },
