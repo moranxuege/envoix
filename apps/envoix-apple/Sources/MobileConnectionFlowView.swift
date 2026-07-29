@@ -1,4 +1,4 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import Combine
 import EnvoixCore
 import SwiftUI
@@ -135,7 +135,7 @@ struct MobileConnectionFlowView: View {
     @State private var isRoomReplacementPresented = false
     @State private var acceptingRoomOfferID: String?
     @State private var roomDestinationRepair: RoomDestinationRepairRequest?
-    #if DEBUG
+    #if DEBUG && os(iOS)
     @State private var didStageBackgroundShareFixture = false
     @State private var openInUITestFixtureURL: URL?
     #endif
@@ -145,7 +145,9 @@ struct MobileConnectionFlowView: View {
             pageContent
                 .background(Theme.bg)
                 .navigationTitle(pageTitle)
+                #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
+                #endif
                 .toolbar { toolbarContent }
         }
         .sheet(item: $transferRoute, onDismiss: finishTransferSheetPresentation) { route in
@@ -154,7 +156,9 @@ struct MobileConnectionFlowView: View {
                     .padding(.horizontal, 16)
                     .background(Theme.bg)
                     .navigationTitle(transferTitle(route))
+                    #if os(iOS)
                     .navigationBarTitleDisplayMode(.inline)
+                    #endif
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button {
@@ -171,8 +175,10 @@ struct MobileConnectionFlowView: View {
                         }
                     }
             }
+            #if os(iOS)
             .presentationDragIndicator(.visible)
             .presentationDetents([.large])
+            #endif
             .interactiveDismissDisabled(transferSheetDismissalBlocked)
         }
         .sheet(item: $roomDestinationRepair) { request in
@@ -187,11 +193,11 @@ struct MobileConnectionFlowView: View {
                 }
             )
         }
-        .fullScreenCover(isPresented: $scannerIsPresented) {
-            QRCodeScannerSheet(language: language) { value in
-                openPairingRoom(input: value)
-            }
-        }
+        .modifier(QRScannerPresentationModifier(
+            isPresented: $scannerIsPresented,
+            language: language,
+            onScan: openPairingRoom
+        ))
         .sheet(isPresented: $manualEntryIsPresented) {
             ManualPairingCodeSheet(
                 language: language,
@@ -295,7 +301,7 @@ struct MobileConnectionFlowView: View {
             let effects = MobileSceneLifecyclePolicy.effects(
                 for: MobileSceneLifecycleEvent(scenePhase: phase)
             )
-            #if DEBUG
+            #if DEBUG && os(iOS)
             if phase == .background {
                 stageBackgroundShareFixtureIfRequested()
             }
@@ -538,7 +544,7 @@ struct MobileConnectionFlowView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if page == .connect {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: leadingToolbarPlacement) {
                 Button {
                     showPage(.activity)
                 } label: {
@@ -550,7 +556,7 @@ struct MobileConnectionFlowView: View {
                 .accessibilityIdentifier("open_activity")
             }
         } else {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: leadingToolbarPlacement) {
                 Button(action: navigateBack) {
                     Image(systemName: "chevron.left")
                         .font(.body.weight(.semibold))
@@ -562,7 +568,7 @@ struct MobileConnectionFlowView: View {
         }
 
         if page != .connect {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: trailingToolbarPlacement) {
                 if page != .activity {
                 Button {
                     showPage(.activity)
@@ -576,7 +582,7 @@ struct MobileConnectionFlowView: View {
             }
         }
 
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: trailingToolbarPlacement) {
             if page != .settings {
                 Button {
                     showPage(.settings)
@@ -590,21 +596,31 @@ struct MobileConnectionFlowView: View {
         }
     }
 
+    private var leadingToolbarPlacement: ToolbarItemPlacement {
+        #if os(iOS)
+        return .topBarLeading
+        #else
+        return .navigation
+        #endif
+    }
+
+    private var trailingToolbarPlacement: ToolbarItemPlacement {
+        #if os(iOS)
+        return .topBarTrailing
+        #else
+        return .primaryAction
+        #endif
+    }
+
     @ViewBuilder
     private func transferContent(_ route: MobileTransferRoute) -> some View {
         switch route {
         case .send:
             SendView(
                 viewModel: model.send,
-                initialFiles: preservedSendSelection.items.isEmpty
-                    ? model.pendingSendSelection?.fileURLs ?? []
-                    : preservedSendSelection.items,
-                initialFileAccess: preservedSendSelection.items.isEmpty
-                    ? model.pendingSendSelection?.sourceAccess
-                    : preservedSendSelection.sourceAccess,
-                initialPendingSelectionID: preservedSendSelection.items.isEmpty
-                    ? model.pendingSendSelection?.id
-                    : preservedSendSelection.pendingSelectionID,
+                initialFiles: initialSendFiles,
+                initialFileAccess: initialSendFileAccess,
+                initialPendingSelectionID: initialPendingSendSelectionID,
                 initialPairingInput: pendingSendPairingInput,
                 nearbySelection: workflow.room?.nearbySelection,
                 nearbyInviteOffer: nearbyInviteOffer,
@@ -640,6 +656,39 @@ struct MobileConnectionFlowView: View {
                 onSwitchToSend: switchToSend
             )
         }
+    }
+
+    private var initialSendFiles: [URL] {
+        guard preservedSendSelection.items.isEmpty else {
+            return preservedSendSelection.items
+        }
+        #if os(iOS)
+        return model.pendingSendSelection?.fileURLs ?? []
+        #else
+        return []
+        #endif
+    }
+
+    private var initialSendFileAccess: AnyObject? {
+        guard preservedSendSelection.items.isEmpty else {
+            return preservedSendSelection.sourceAccess
+        }
+        #if os(iOS)
+        return model.pendingSendSelection?.sourceAccess
+        #else
+        return nil
+        #endif
+    }
+
+    private var initialPendingSendSelectionID: UUID? {
+        guard preservedSendSelection.items.isEmpty else {
+            return preservedSendSelection.pendingSelectionID
+        }
+        #if os(iOS)
+        return model.pendingSendSelection?.id
+        #else
+        return nil
+        #endif
     }
 
     private var pageTitle: String {
@@ -1137,14 +1186,19 @@ struct MobileConnectionFlowView: View {
             peer.peerKey == pending.offer.senderPeerKey
                 && peer.inviteRoute?.endpointID == pending.offer.senderInboxEndpointID
         }?.inviteRoute
+        #if os(iOS)
+        let nearbyWifiAwareDeviceID = uniqueNearbyWifiAwareDeviceID(
+            in: nearbyCoordinator.state.pairedDevices
+        )
+        #else
+        let nearbyWifiAwareDeviceID: String? = nil
+        #endif
         let selection = NearbyPairingSelection(
             discoveryPeerKey: pending.offer.senderPeerKey,
             displayName: pending.offer.senderDisplayName,
             sources: [pending.offer.source],
             nearbyInviteRoute: capturedRoute,
-            nearbyWifiAwareDeviceID: uniqueNearbyWifiAwareDeviceID(
-                in: nearbyCoordinator.state.pairedDevices
-            )
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
         )
         let action = ConnectionWorkflowPolicy.localAction(
             forLocalRole: parsed.joinerRole
@@ -1167,10 +1221,12 @@ struct MobileConnectionFlowView: View {
     }
 
     private func handleIncomingURL(_ url: URL) {
+        #if os(iOS)
         if let id = ShareDraftLink.draftID(from: url) {
             presentSharedDraft(preferredID: id)
             return
         }
+        #endif
         let input = url.absoluteString
         if input.lowercased().hasPrefix("envoix://invite/v2/") {
             guardRoomReplacement {
@@ -1188,6 +1244,7 @@ struct MobileConnectionFlowView: View {
             }
             return
         }
+        #if os(iOS)
         guard url.isFileURL else { return }
 
         do {
@@ -1206,16 +1263,20 @@ struct MobileConnectionFlowView: View {
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }
+        #endif
     }
 
     private func presentPendingSendSelection() {
+        #if os(iOS)
         if !model.send.isBusy, model.pendingSendSelection != nil {
             openExternalShareRoom()
             return
         }
         presentSharedDraft(preferredID: nil)
+        #endif
     }
 
+    #if os(iOS)
     private func presentSharedDraft(preferredID: UUID?) {
         do {
             switch try model.importSharedSendDraft(preferredID: preferredID) {
@@ -1257,6 +1318,7 @@ struct MobileConnectionFlowView: View {
         transferUsesRoomControl = workflow.room?.origin == .roomControl
         transferRoute = .send
     }
+    #endif
 
     private var isRoomOccupied: Bool {
         workflow.room != nil || workflow.hasPinnedRememberedRoom || isControlRoomOpen
@@ -1529,6 +1591,13 @@ struct MobileConnectionFlowView: View {
             return (url, access)
         }
 
+        #if os(macOS)
+        throw RuntimeSettingsError(AppText.value(
+            "Choose a save folder before accepting files on Mac.",
+            "在 Mac 上接收文件前，请先选择保存文件夹。",
+            language: language
+        ))
+        #else
         let documents = FileManager.default.urls(
             for: .documentDirectory,
             in: .userDomainMask
@@ -1539,8 +1608,10 @@ struct MobileConnectionFlowView: View {
         let destination = documents.appendingPathComponent("Downloads", isDirectory: true)
         try validateWritableDirectoryAccess(destination)
         return (destination, nil)
+        #endif
     }
 
+    #if os(iOS)
     private func openedSendFileErrorMessage(_ error: OpenedSendFileError) -> String {
         switch error {
         case .unsupportedURL:
@@ -1563,8 +1634,9 @@ struct MobileConnectionFlowView: View {
             )
         }
     }
+    #endif
 
-    #if DEBUG
+    #if DEBUG && os(iOS)
     private var debugOpenInFixtureURL: URL? { openInUITestFixtureURL }
 
     private func prepareUITestFixtures() {
@@ -1641,8 +1713,10 @@ private struct ManualPairingCodeSheet: View {
                     text: $input,
                     axis: .vertical
                 )
+                #if os(iOS)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                #endif
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("manual_pairing_code_input")
 
@@ -1669,7 +1743,9 @@ private struct ManualPairingCodeSheet: View {
             .padding(20)
             .background(Theme.bg)
             .navigationTitle(AppText.value("Enter code", "输入配对码", language: language))
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(AppText.value("Close", "关闭", language: language)) {
@@ -1678,7 +1754,28 @@ private struct ManualPairingCodeSheet: View {
                 }
             }
         }
+        #if os(iOS)
         .presentationDetents([.medium, .large])
+        #endif
+    }
+}
+
+private struct QRScannerPresentationModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    let language: String
+    let onScan: (String) -> String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        content.fullScreenCover(isPresented: $isPresented) {
+            QRCodeScannerSheet(language: language) { value in
+                onScan(value)
+            }
+        }
+        #else
+        content
+        #endif
     }
 }
 #endif

@@ -1,7 +1,9 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import Combine
 import Foundation
+#if os(iOS)
 import UIKit
+#endif
 
 enum NearbyVisibilityMode: String, CaseIterable, Equatable {
     case hidden
@@ -28,9 +30,16 @@ final class NearbyPresencePreferences: ObservableObject {
     init(defaults: UserDefaults = .standard, now: Date = Date()) {
         self.defaults = defaults
         let storedName = defaults.string(forKey: Key.displayName)
+#if os(iOS)
+        let platformDisplayName: String? = UIDevice.current.model
+        let fallbackDisplayName = "Apple device"
+#else
+        let platformDisplayName = Host.current().localizedName
+        let fallbackDisplayName = "Mac"
+#endif
         displayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(storedName)
-            ?? NearbyDiscoveryPeerRegistry.sanitizeDisplayName(UIDevice.current.model)
-            ?? "Apple device"
+            ?? NearbyDiscoveryPeerRegistry.sanitizeDisplayName(platformDisplayName)
+            ?? fallbackDisplayName
 
         let storedVisibility = defaults.string(forKey: Key.visibility)
             .flatMap(NearbyVisibilityMode.init(rawValue:))

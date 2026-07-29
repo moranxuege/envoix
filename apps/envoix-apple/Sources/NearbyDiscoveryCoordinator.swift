@@ -1,9 +1,11 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import Combine
 import EnvoixCore
 import Foundation
 import OSLog
+#if os(iOS)
 import UIKit
+#endif
 
 struct NearbyDiscoveryState {
     var localName: String
@@ -44,7 +46,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     ) {
         let resolvedIdentity = identity
             ?? identityFactory?()
-            ?? NearbyDiscoveryIdentityFactory.create(displayName: UIDevice.current.model)
+            ?? NearbyDiscoveryIdentityFactory.create(displayName: Self.defaultDisplayName)
         self.identity = resolvedIdentity
         self.registry = registry
         self.clock = clock
@@ -253,18 +255,40 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         Int64(ProcessInfo.processInfo.systemUptime * 1_000)
     }
 
+    private static var defaultDisplayName: String {
+        #if os(iOS)
+        UIDevice.current.model
+        #else
+        NearbyDiscoveryPeerRegistry.sanitizeDisplayName(Host.current().localizedName)
+            ?? "Mac"
+        #endif
+    }
+
     private static func defaultProviderFactory(
         identity: LocalNearbyDiscoveryIdentity
     ) -> [NearbyDiscoveryProvider] {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--ui-testing-discovery-fixtures") {
+            #if os(iOS)
             return [
                 FixtureNearbyDiscoveryProvider(source: .bluetooth),
                 FixtureNearbyDiscoveryProvider(source: .mdns),
                 ReservedNearbyDiscoveryProvider(),
             ]
+            #else
+            return [
+                FixtureNearbyDiscoveryProvider(source: .mdns),
+                UnsupportedWifiAwareDiscoveryProvider(),
+            ]
+            #endif
         }
         #endif
+        #if os(macOS)
+        return [
+            AppleBonjourDiscoveryProvider(identity: identity),
+            UnsupportedWifiAwareDiscoveryProvider(),
+        ]
+        #else
         var providers: [NearbyDiscoveryProvider] = [
             AppleBluetoothDiscoveryProvider(identity: identity),
             AppleBonjourDiscoveryProvider(identity: identity),
@@ -279,6 +303,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         providers.append(UnsupportedWifiAwareDiscoveryProvider())
         #endif
         return providers
+        #endif
     }
 }
 

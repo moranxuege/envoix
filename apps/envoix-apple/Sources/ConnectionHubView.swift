@@ -1,6 +1,10 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import SwiftUI
+#if os(iOS)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 struct ConnectionHubView: View {
     @Environment(\.appLanguage) private var language
@@ -58,9 +62,7 @@ struct ConnectionHubView: View {
                         Button {
                             onSelectPeer(NearbyPairingSelection(
                                 peer: peer,
-                                nearbyWifiAwareDeviceID: uniqueNearbyWifiAwareDeviceID(
-                                    in: coordinator.state.pairedDevices
-                                )
+                                nearbyWifiAwareDeviceID: selectedNearbyWifiAwareDeviceID
                             ))
                         } label: {
                             peerCard(peer)
@@ -129,7 +131,9 @@ struct ConnectionHubView: View {
                         AppText.value("Visible name", "显示名称", language: language),
                         text: $editedDisplayName
                     )
+                    #if os(iOS)
                     .textInputAutocapitalization(.words)
+                    #endif
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("nearby_display_name_input")
 
@@ -146,7 +150,9 @@ struct ConnectionHubView: View {
                 .padding(20)
                 .background(Theme.bg)
                 .navigationTitle(AppText.value("Device name", "设备名称", language: language))
+                #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
+                #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button(AppText.value("Cancel", "取消", language: language)) {
@@ -166,7 +172,9 @@ struct ConnectionHubView: View {
                     }
                 }
             }
+            #if os(iOS)
             .presentationDetents([.medium])
+            #endif
         }
     }
 
@@ -312,6 +320,15 @@ struct ConnectionHubView: View {
                     .frame(width: 196, height: 196)
 
                 if let image = roomInvitation.flatMap({ QRCode.image(from: $0.payload) }) {
+                    #if os(macOS)
+                    Image(nsImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(14)
+                        .frame(width: 196, height: 196)
+                        .blur(radius: roomInvitationIsRevealed ? 0 : 13)
+                    #else
                     Image(uiImage: image)
                         .interpolation(.none)
                         .resizable()
@@ -319,6 +336,7 @@ struct ConnectionHubView: View {
                         .padding(14)
                         .frame(width: 196, height: 196)
                         .blur(radius: roomInvitationIsRevealed ? 0 : 13)
+                    #endif
                 } else {
                     Image(systemName: "qrcode")
                         .font(.system(size: 112, weight: .regular))
@@ -409,12 +427,14 @@ struct ConnectionHubView: View {
 
     private var connectionMethods: some View {
         HStack(spacing: 10) {
+            #if os(iOS)
             methodButton(
                 AppText.value("Scan QR", "扫描二维码", language: language),
                 systemImage: "qrcode.viewfinder",
                 identifier: "connect_scan_qr",
                 action: onScanQRCode
             )
+            #endif
             methodButton(
                 AppText.value("Enter code", "输入配对码", language: language),
                 systemImage: "keyboard",
@@ -527,29 +547,43 @@ struct ConnectionHubView: View {
     }
 
     private var nearbyHeader: some View {
-        HStack {
-            Text(AppText.value("Nearby", "附近设备", language: language))
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Theme.text)
-            Spacer()
-            nearbySetupButton
-            Button(action: coordinator.restart) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.body.weight(.semibold))
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(AppText.value("Nearby", "附近设备", language: language))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                Spacer()
+                nearbySetupButton
+                Button(action: coordinator.restart) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accentStrong)
+                .accessibilityLabel(AppText.value("Restart discovery", "重新开始发现", language: language))
+                .accessibilityIdentifier("nearby_restart")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.accentStrong)
-            .accessibilityLabel(AppText.value("Restart discovery", "重新开始发现", language: language))
-            .accessibilityIdentifier("nearby_restart")
+
+            #if os(macOS)
+            Text(AppText.value(
+                "Uses the local network or relay; Wi‑Fi Aware is not available on macOS.",
+                "使用局域网或中继；macOS 暂不支持 Wi‑Fi Aware。",
+                language: language
+            ))
+                .font(.caption)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("nearby_transport_note")
+            #endif
         }
         .padding(.top, 4)
     }
 
     @ViewBuilder
     private var nearbySetupButton: some View {
-        #if canImport(DeviceDiscoveryUI) && canImport(WiFiAware)
+        #if os(iOS) && canImport(DeviceDiscoveryUI) && canImport(WiFiAware)
         if #available(iOS 26.0, *),
            coordinator.state.statuses[.wifiAware]?.availability != .unsupported,
            uniqueNearbyWifiAwareDeviceID(in: coordinator.state.pairedDevices) == nil {
@@ -626,6 +660,14 @@ struct ConnectionHubView: View {
         }
     }
 
+    private var selectedNearbyWifiAwareDeviceID: String? {
+        #if os(iOS)
+        return uniqueNearbyWifiAwareDeviceID(in: coordinator.state.pairedDevices)
+        #else
+        return nil
+        #endif
+    }
+
     private func peerCard(_ peer: NearbyDiscoveredPeer) -> some View {
         HStack(spacing: 13) {
             Image(systemName: "iphone.gen2.radiowaves.left.and.right")
@@ -664,8 +706,15 @@ struct ConnectionHubView: View {
     }
 
     private func openSettings() {
+        #if os(iOS)
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+        #elseif os(macOS)
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+        #endif
     }
 }
 #endif

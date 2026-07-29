@@ -706,6 +706,51 @@ struct ReceivedItemsSheet: View {
 }
 #endif
 
+#if os(macOS)
+struct ReceivedItemsPresentation: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+}
+
+struct ReceivedItemsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appLanguage) private var language
+    let urls: [URL]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text(AppText.value("Received Items", "已接收项目", language: language))
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button(AppText.value("Done", "完成", language: language)) {
+                    dismiss()
+                }
+            }
+
+            List(urls, id: \.self) { url in
+                Button {
+                    revealInFinder(url)
+                } label: {
+                    Label(
+                        url.lastPathComponent,
+                        systemImage: availableCompletedDirectoryURL(path: url.path) == nil
+                            ? "doc"
+                            : "folder"
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("received_item_reveal_\(url.lastPathComponent)")
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 440, minHeight: 320)
+    }
+}
+#endif
+
 /// Formats a byte count as a short human-readable string (auto KB/MB/GB).
 func byteString(_ bytes: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)

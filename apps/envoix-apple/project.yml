@@ -27,14 +27,12 @@ targets:
         MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "2"
         SWIFT_VERSION: "5.0"
-        GENERATE_INFOPLIST_FILE: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Resources/Info-macOS.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: NO
-        INFOPLIST_KEY_CFBundleDisplayName: Envoix
-        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Envoix connects to nearby devices on your local network to transfer files."
         # The Rust static library (iroh / objc2) references these system
         # frameworks. CoreWLAN is looked up dynamically at runtime, so it must
         # be linked or the app panics during network setup.
@@ -183,6 +181,7 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - Tests/EnvoixIOSUITests/ManifestV2PhysicalTransferTests.swift
+      - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
     dependencies:
       - target: Envoix
       - package: EnvoixCore
