@@ -236,6 +236,7 @@ fn commit_completed_receiver(root: &std::path::Path) -> RecordId {
     let stores = CardStores::new(root.to_path_buf());
     let transfer = NewTransfer {
         direction: Direction::Receive,
+        participation: envoix_product::RoomParticipation::Minted,
         offered_name: OfferedName::from_untrusted("receipt.bin").unwrap(),
         total: ByteCount::new(64),
         source: SourceDecision::Ready,
@@ -330,6 +331,7 @@ fn durable_removal_replays_its_source_grant_release_after_restart() {
     let stores = CardStores::new(root.path().to_path_buf());
     let transfer = NewTransfer {
         direction: Direction::Send,
+        participation: envoix_product::RoomParticipation::Minted,
         offered_name: OfferedName::from_untrusted("owned.bin").unwrap(),
         total: ByteCount::new(1),
         // Quiescent immediately, so Remove can commit its tombstone without a

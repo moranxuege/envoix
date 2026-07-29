@@ -555,7 +555,9 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
     );
 
     // And the cards are on disk, not in this process: a fresh host over the
-    // same root brings both back, invites included.
+    // same root brings both back — with the MINTER still publishing its invite
+    // and the joiner still publishing none. Participation is durable precisely
+    // so a restart cannot turn an adopted channel into a shareable one.
     host.shutdown();
     let rebooted = Host::boot(root.path()).expect("the host boots again");
     let reboot_token = rebooted.open_lane();
@@ -563,7 +565,6 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
         frames
             .iter()
             .filter_map(|frame| card_view(frame))
-            .filter(|view| view.invite.is_some())
             .map(|view| view.identity.card)
             .collect::<BTreeSet<String>>()
             .len()
@@ -577,7 +578,7 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
     assert_eq!(
         codes,
         BTreeSet::from([invite.code.expose().clone()]),
-        "both restored cards carry the one room code the send minted"
+        "exactly one restored card publishes an invite, and it is the minter's"
     );
 }
 

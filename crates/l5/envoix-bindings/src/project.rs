@@ -208,9 +208,19 @@ fn card_view(record: &TransferRecord) -> CardView {
             .map(command_kind_view)
             .collect(),
         // The card's frozen channel, rendered by the invite grammar that owns
-        // it. A card with no channel, or one whose stored fields no longer
-        // spell a valid invite, publishes nothing rather than a partial one.
-        invite: record.pairing.as_deref().and_then(invite_view),
+        // it — and ONLY for a card that minted its room.
+        //
+        // A joined card holds the channel it adopted, so publishing on channel
+        // presence alone made a joiner republish the secret it was given. An
+        // invite names a ONE-peer rendezvous: a third party acting on the
+        // republished one races the two already pairing. A card with no
+        // channel, or one whose stored fields no longer spell a valid invite,
+        // still publishes nothing rather than a partial one.
+        invite: record
+            .participation
+            .publishes_the_invite()
+            .then(|| record.pairing.as_deref().and_then(invite_view))
+            .flatten(),
     }
 }
 

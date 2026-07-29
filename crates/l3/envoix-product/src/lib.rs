@@ -6,6 +6,7 @@ mod commit;
 mod identity;
 mod model;
 mod pairing;
+mod participation;
 mod reducer;
 mod source;
 mod source_lifecycle;
@@ -30,6 +31,7 @@ pub use model::{
     StorageAction, TransferRecord, WorkerKind,
 };
 pub use pairing::PairingChannel;
+pub use participation::RoomParticipation;
 pub use record::{
     OLDEST_READABLE_RECORD_VERSION, PRODUCT_RECORD_VERSION, RecordCodecError, RecordDecode,
     decode_record, encode_record,

@@ -222,6 +222,7 @@ fn record(
         // A receiver needs no source, and record v5 makes that explicit rather
         // than leaving it to be inferred from the direction.
         "source": { "not_required": { "peer_content": null } },
+        "participation": "minted",
         "offered_name": "quarterly-report.pdf",
         "total": 4096,
         "state": state,

@@ -684,6 +684,7 @@ impl Host {
     pub fn create_for_e2e(&self, name: &str, total: u64) -> Result<RecordId, IdentityError> {
         let transfer = NewTransfer {
             direction: Direction::Send,
+            participation: envoix_product::RoomParticipation::Minted,
             offered_name: OfferedName::from_untrusted(name)
                 .expect("e2e instrumentation supplies a bounded name"),
             total: ByteCount::new(total),

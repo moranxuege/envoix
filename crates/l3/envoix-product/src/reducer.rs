@@ -97,6 +97,7 @@ impl TransferRecord {
             // sender is born asking for one. The two states that would
             // contradict the card's own direction are unreachable from here.
             source: SourceLifecycle::initial(transfer.direction),
+            participation: transfer.participation,
             offered_name: transfer.offered_name,
             total: transfer.total,
             state,

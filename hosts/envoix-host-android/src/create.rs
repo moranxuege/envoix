@@ -13,7 +13,7 @@ use envoix_invite::{
     EntropyError, EntropySource, Invite, InviteError, RecognizedInvalid, Role, generate_room_code,
     route_invite,
 };
-use envoix_product::{NewTransfer, PairingChannel, SourceDecision};
+use envoix_product::{NewTransfer, PairingChannel, RoomParticipation, SourceDecision};
 use envoix_types::{ByteCount, Direction, OfferedName};
 
 /// Longer than the invite grammar's own input bound, so the refusal for an
@@ -74,6 +74,7 @@ fn plan_mint(direction: Direction) -> Result<NewTransfer, CreateRefusalView> {
     .map_err(refusal)?;
     Ok(NewTransfer {
         direction,
+        participation: RoomParticipation::Minted,
         // Unknown until a source is acquired and staged (sender) or the peer
         // states it (receiver). The authority's own fallback rather than an
         // invented name — which is what a joined card has always carried.
@@ -102,6 +103,9 @@ fn plan_join(text: &str) -> Result<NewTransfer, CreateRefusalView> {
     };
     Ok(NewTransfer {
         direction,
+        // Adopted, not minted — so this card must never republish the invite
+        // it was given.
+        participation: RoomParticipation::Joined,
         // The offered name is the sender's to state; until the peer does, the
         // record carries the authority's own fallback rather than an invented
         // name.

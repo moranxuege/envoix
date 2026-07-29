@@ -172,11 +172,11 @@ void main(List<String> arguments) {
   // The invite declared its creator's role, and the AUTHORITY took the other
   // one. Nothing in this app chose a direction.
   equal('the joiner receives', directionLabel(joining.direction), 'Receiving');
-  equal(
-    'on the same room code the sender published',
-    joining.invite?.code.expose(),
-    published.code.expose(),
-  );
+  // The joiner publishes NOTHING. It holds the channel it adopted, and an
+  // invite names a one-peer rendezvous — republishing the secret it was given
+  // would let a third party race the two already pairing. This test used to
+  // assert both endpoints published the SAME code, which asserted the defect.
+  check('and republishes no invite of its own', joining.invite == null);
   report();
 }
 

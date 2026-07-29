@@ -6,7 +6,7 @@ use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RequestId};
 use serde::{Deserialize, Serialize};
 
-use crate::{PairingChannel, ProductIdentity, SourceLifecycle};
+use crate::{PairingChannel, ProductIdentity, RoomParticipation, SourceLifecycle};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,7 +105,11 @@ pub struct NewTransfer {
     pub offered_name: OfferedName,
     pub total: ByteCount,
     pub source: SourceDecision,
-    /// The rendezvous channel this card is frozen to, minted for a send or
+    /// Whether this endpoint minted the room or joined one. Carried from the
+    /// create intent because only the intent knows: a mint states its own
+    /// direction, a join derives the opposite from an invite only Rust reads.
+    pub participation: RoomParticipation,
+    /// The rendezvous channel this card is frozen to, minted for a mint or
     /// adopted from the invite a join was created with. `None` is a card with
     /// no channel yet — the shape every pre-F2b creation path had.
     pub pairing: Option<Box<PairingChannel>>,
@@ -321,6 +325,9 @@ pub struct TransferRecord {
     /// be a card lying about what it is — which is exactly the class of default
     /// this record type refuses elsewhere.
     pub source: SourceLifecycle,
+    /// Whether this endpoint minted its room or joined one. Durable because a
+    /// JOINED card must not republish the invite it adopted.
+    pub participation: RoomParticipation,
     /// The channel this card was frozen to at creation. Defaulted so pre-F2b
     /// records still decode.
     ///

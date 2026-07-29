@@ -45,6 +45,7 @@ fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<
     TransferRecord::create(
         NewTransfer {
             direction,
+            participation: crate::RoomParticipation::Minted,
             offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
             total: ByteCount::new(100),
             source,
@@ -211,6 +212,7 @@ fn product_mints_all_identity_before_the_first_attempt() {
     let error = TransferRecord::create(
         NewTransfer {
             direction: Direction::Send,
+            participation: crate::RoomParticipation::Minted,
             offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
             total: ByteCount::new(1),
             source: SourceDecision::Ready,
@@ -229,6 +231,7 @@ fn receiver_adopts_authenticated_transfer_identity_and_mints_local_identity() {
     let (record, effects) = TransferRecord::create_with_identity(
         NewTransfer {
             direction: Direction::Receive,
+            participation: crate::RoomParticipation::Minted,
             offered_name: OfferedName::from_untrusted("authenticated.zip").unwrap(),
             total: ByteCount::new(321),
             source: SourceDecision::Ready,
@@ -2120,6 +2123,7 @@ fn a_card_that_needs_a_source_asks_the_platform_for_one() {
     let (session, outcome) = crate::CommittedSession::create_without_store(
         NewTransfer {
             direction: Direction::Send,
+            participation: crate::RoomParticipation::Minted,
             offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
             total: ByteCount::new(100),
             source: SourceDecision::Stage { recoverable: false },
@@ -2211,6 +2215,7 @@ fn a_cards_channel_survives_the_record_and_re_encodes_to_its_invite() {
     let (record, _) = TransferRecord::create(
         NewTransfer {
             direction: Direction::Send,
+            participation: crate::RoomParticipation::Minted,
             offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
             total: ByteCount::new(100),
             source: SourceDecision::Stage { recoverable: false },
@@ -2244,6 +2249,7 @@ fn fixture_record() -> TransferRecord {
         },
         direction: Direction::Send,
         source: crate::SourceLifecycle::initial(Direction::Send),
+        participation: crate::RoomParticipation::Minted,
         offered_name: OfferedName::from_untrusted("a.txt").unwrap(),
         total: ByteCount::new(10),
         state: ProductState::Paused(PauseOrigin::Local),
@@ -2280,7 +2286,7 @@ fn product_record_roundtrips() {
 
 #[test]
 fn product_record_v5_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"source":{"awaiting_selection":{"gate":{"selectable":{"reason":"initial"}}}},"pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"source":{"awaiting_selection":{"gate":{"selectable":{"reason":"initial"}}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");

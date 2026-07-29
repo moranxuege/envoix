@@ -281,6 +281,7 @@ fn create_session(
 ) -> (Session, envoix_product::ApplyOutcome) {
     let transfer = NewTransfer {
         direction,
+        participation: envoix_product::RoomParticipation::Minted,
         offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
         total: ByteCount::new(1024),
         source: SourceDecision::Ready,
@@ -298,6 +299,7 @@ fn create_session(
 fn create_staged_session(root: &Path, seed: u8) -> (Session, envoix_product::ApplyOutcome) {
     let transfer = NewTransfer {
         direction: Direction::Send,
+        participation: envoix_product::RoomParticipation::Minted,
         offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
         total: ByteCount::new(1024),
         source: SourceDecision::Stage { recoverable: false },

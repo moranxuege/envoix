@@ -354,6 +354,7 @@ fn server_config(root: &Path) -> ServerConfig {
 fn new_transfer(direction: Direction, offered_name: OfferedName, total: ByteCount) -> NewTransfer {
     NewTransfer {
         direction,
+        participation: envoix_product::RoomParticipation::Minted,
         offered_name,
         total,
         source: SourceDecision::Ready,

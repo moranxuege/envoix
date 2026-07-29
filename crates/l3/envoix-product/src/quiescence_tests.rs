@@ -31,6 +31,7 @@ fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<
     TransferRecord::create(
         NewTransfer {
             direction,
+            participation: crate::RoomParticipation::Minted,
             offered_name: OfferedName::from_untrusted("quiescence.bin").unwrap(),
             total: ByteCount::new(100),
             source,

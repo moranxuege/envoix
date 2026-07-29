@@ -227,6 +227,7 @@ fn create_card(
     CommittedSession::create(
         NewTransfer {
             direction: Direction::Send,
+            participation: envoix_product::RoomParticipation::Minted,
             offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
             total: ByteCount::new(1024),
             source: SourceDecision::Ready,
