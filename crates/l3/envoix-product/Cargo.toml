@@ -13,6 +13,7 @@ envoix-attempt-api = { path = "../../l1/envoix-attempt-api" }
 envoix-capabilities = { path = "../../l1/envoix-capabilities" }
 envoix-invite = { path = "../../l1/envoix-invite" }
 envoix-outcomes = { path = "../../l0/envoix-outcomes" }
+envoix-protocol = { path = "../../l1/envoix-protocol" }
 envoix-types = { path = "../../l0/envoix-types" }
 getrandom.workspace = true
 serde.workspace = true

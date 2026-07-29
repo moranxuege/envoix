@@ -1112,6 +1112,7 @@ dependencies = [
  "envoix-capabilities",
  "envoix-invite",
  "envoix-outcomes",
+ "envoix-protocol",
  "envoix-types",
  "getrandom 0.3.4",
  "serde",

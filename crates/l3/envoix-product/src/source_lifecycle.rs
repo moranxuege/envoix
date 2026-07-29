@@ -11,11 +11,18 @@
 //! process-lifetime readability, and a picked document that belonged to no card
 //! at all.
 //!
-//! A hostile storage editor can always write invalid bytes. "Not representable"
-//! means such bytes cannot become a live value: these constructors will not
-//! build one.
+//! "Not representable" is enforced, not asserted. The payload-bearing variants
+//! are `#[non_exhaustive]`, so another crate can MATCH them but cannot BUILD
+//! one — construction goes through the checked constructors here. An earlier
+//! version made this claim in prose while every variant was publicly
+//! constructible, which is a comment that lies.
+//!
+//! A hostile storage editor can still write invalid bytes. What stops those
+//! becoming live values is the record decoder converting through a DTO rather
+//! than deserializing these types directly; that lands with record v5.
 
 use envoix_capabilities::SourceAcquisitionKey;
+use envoix_protocol::ContentHash;
 use envoix_types::{ByteCount, Direction, OfferedName};
 
 /// Why the authority is asking for a source. Carried so a frontend can say
@@ -48,11 +55,19 @@ impl SourcePromptReason {
     }
 }
 
-/// How long the platform's hold on the document actually lasts.
+/// How long the PLATFORM's hold on the document lasts, exactly as the source
+/// duty reported it.
 ///
 /// The reason `duty/2` exists. A source duty used to answer `completed`, which
 /// said nothing about surviving a restart — so a card could believe it owned a
-/// document it would lose. Two different promises, now two different values.
+/// document it would lose.
+///
+/// **Never rewritten.** An earlier version of this model promoted `Process` to
+/// `Persisted` once bytes were copied, which quietly changed the meaning of an
+/// admitted duty result: an exact replay of the original
+/// `source_acquired(Process)` would then look like a conflict with state that
+/// had moved underneath it. What owns the bytes now is [`SourceBacking`], a
+/// different question with a different answer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceRetention {
     /// Readable in THIS platform process only. Honest and usable: the transfer
@@ -116,6 +131,35 @@ impl AcceptedSourceOffer {
     }
 }
 
+/// How the bytes will be read, chosen when staging begins.
+///
+/// A copy is a different AUTHORITY over the bytes, not a stronger platform
+/// grant, so it is recorded rather than inferred. Restore needs to know which
+/// plan was in flight: a stream reopens the platform registry entry, a copy
+/// reconciles a partial app-private artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StagingPlan {
+    /// Read straight from the provider. Implies the grant is persisted and the
+    /// source is seekable — the two things resume requires — which is why the
+    /// owner's streaming decision is expressible as a type rather than a
+    /// comment.
+    ProviderStream,
+    /// Copy into an app-private artifact, because the grant would not survive a
+    /// restart or the source cannot seek.
+    CopyToOwnedArtifact,
+}
+
+/// What owns the bytes once staging has finished.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceBacking {
+    /// The provider, reopened through its persisted grant. That grant must be
+    /// retained and revalidated.
+    PersistedProvider,
+    /// An app-private artifact this build owns outright. The provider grant can
+    /// be released.
+    OwnedArtifact,
+}
+
 /// What staging established about the source — counted by us, not claimed by
 /// the provider.
 ///
@@ -127,11 +171,27 @@ impl AcceptedSourceOffer {
 pub struct StagedContent {
     name: OfferedName,
     total: ByteCount,
+    /// Which bytes staging actually read.
+    ///
+    /// Without it "staged" means only "once observed a length": a provider can
+    /// replace the document with a different one of the same name and size, and
+    /// after a restart the identical record would reopen it and send it as what
+    /// staging established. A provider-backed attempt verifies against this
+    /// before sending.
+    content_hash: ContentHash,
 }
 
 impl StagedContent {
-    pub const fn new(name: OfferedName, total: ByteCount) -> Self {
-        Self { name, total }
+    pub const fn new(name: OfferedName, total: ByteCount, content_hash: ContentHash) -> Self {
+        Self {
+            name,
+            total,
+            content_hash,
+        }
+    }
+
+    pub const fn content_hash(&self) -> ContentHash {
+        self.content_hash
     }
 
     pub const fn name(&self) -> &OfferedName {
@@ -153,11 +213,20 @@ impl StagedContent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SelectionGate {
     /// No offer has been accepted under this generation yet.
+    ///
+    /// `non_exhaustive` so this can be MATCHED anywhere but CONSTRUCTED only in
+    /// this crate, through the checked constructors below. Without it,
+    /// `RePickRequired { reason: Initial, .. }` compiled in any importing
+    /// crate — which made this module's "unconstructible" claim aspirational
+    /// rather than true. Rust has no per-field visibility on enum variants, so
+    /// this is the mechanism that makes the claim real.
+    #[non_exhaustive]
     Selectable { reason: SourcePromptReason },
     /// This generation accepted an offer and then lost it. Only a re-pick —
     /// which advances the generation and mints a new key — makes the card
     /// selectable again, so a late offer under the discharged key cannot
     /// resurrect it.
+    #[non_exhaustive]
     RePickRequired {
         reason: SourcePromptReason,
         previous_offer: AcceptedSourceOffer,
@@ -207,7 +276,17 @@ impl SelectionGate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SourceLifecycle {
     /// This card receives. It has no source and can never acquire one.
-    NotRequired,
+    ///
+    /// It still has CONTENT — what the peer says it is sending — and that needs
+    /// a durable home once record v5 drops the top-level name and total. Here
+    /// keeps "what is this card transferring?" in one place per direction.
+    ///
+    /// `None` until the peer's header is admitted, which is honest: a card
+    /// joined from an invite knows nothing about the file until the sender
+    /// says so, and inventing a placeholder is what made the old empty
+    /// `offered_name` ambiguous.
+    #[non_exhaustive]
+    NotRequired { peer_content: Option<StagedContent> },
     /// The authority is asking for a document.
     AwaitingSelection(SelectionGate),
     /// A document was chosen; the platform is being asked to hold it.
@@ -225,18 +304,24 @@ pub enum SourceLifecycle {
     /// Copying is therefore how `Process` becomes `Persisted`, which is why no
     /// separate "did we copy?" field is needed: an app-private copy is
     /// re-openable by definition, so the retention it leaves is `Persisted`.
+    #[non_exhaustive]
     Staging {
         offer: AcceptedSourceOffer,
-        retention: SourceRetention,
+        /// The duty's answer, frozen. See [`SourceRetention`].
+        acquired_retention: SourceRetention,
+        plan: StagingPlan,
     },
     /// The content is established and the source can be sent.
     ///
     /// `retention` is what a restart consults: `Persisted` can be reopened,
     /// `Process` cannot and returns the card to awaiting selection however
     /// complete it looked.
+    #[non_exhaustive]
     Ready {
         offer: AcceptedSourceOffer,
-        retention: SourceRetention,
+        /// The duty's answer, frozen. See [`SourceRetention`].
+        acquired_retention: SourceRetention,
+        backing: SourceBacking,
         content: StagedContent,
     },
 }
@@ -247,20 +332,20 @@ impl SourceLifecycle {
     /// be born awaiting a source, a sender cannot be born not needing one.
     pub const fn initial(direction: Direction) -> Self {
         match direction {
-            Direction::Receive => Self::NotRequired,
+            Direction::Receive => Self::NotRequired { peer_content: None },
             Direction::Send => Self::AwaitingSelection(SelectionGate::initial()),
         }
     }
 
     pub const fn requires_a_source(&self) -> bool {
-        !matches!(self, Self::NotRequired)
+        !matches!(self, Self::NotRequired { .. })
     }
 
     /// The acquisition this state is bound to, if any. Inputs match against the
     /// WHOLE key; "the card matches" is not the question.
     pub const fn key(&self) -> Option<&SourceAcquisitionKey> {
         match self {
-            Self::NotRequired | Self::AwaitingSelection(_) => None,
+            Self::NotRequired { .. } | Self::AwaitingSelection(_) => None,
             Self::Acquiring(offer) | Self::Staging { offer, .. } | Self::Ready { offer, .. } => {
                 Some(offer.key())
             }
@@ -358,7 +443,7 @@ impl SourceLifecycle {
 
         match self {
             // A receiver has no acquisition to name, so nothing can match.
-            Self::NotRequired => SourceOfferAnswer::NotExpected,
+            Self::NotRequired { .. } => SourceOfferAnswer::NotExpected,
             Self::AwaitingSelection(SelectionGate::Selectable { .. }) => {
                 if expected.is(candidate.key()) {
                     SourceOfferAnswer::Accepted
@@ -402,6 +487,14 @@ mod tests {
         })
     }
 
+    fn staged(total: u64) -> StagedContent {
+        StagedContent::new(
+            OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
+            ByteCount::new(total),
+            ContentHash::from_bytes([7; 32]),
+        )
+    }
+
     fn offer(generation: u32) -> AcceptedSourceOffer {
         AcceptedSourceOffer::new(
             key(generation),
@@ -416,7 +509,10 @@ mod tests {
     #[test]
     fn the_starting_state_is_a_function_of_direction_alone() {
         let receiving = SourceLifecycle::initial(Direction::Receive);
-        assert_eq!(receiving, SourceLifecycle::NotRequired);
+        assert_eq!(
+            receiving,
+            SourceLifecycle::NotRequired { peer_content: None }
+        );
         assert!(!receiving.requires_a_source());
         assert!(receiving.agrees_with(Direction::Receive));
         assert!(!receiving.agrees_with(Direction::Send));
@@ -475,7 +571,11 @@ mod tests {
     /// card match is not the question.
     #[test]
     fn only_bound_states_name_an_acquisition() {
-        assert!(SourceLifecycle::NotRequired.key().is_none());
+        assert!(
+            SourceLifecycle::NotRequired { peer_content: None }
+                .key()
+                .is_none()
+        );
         assert!(
             SourceLifecycle::AwaitingSelection(SelectionGate::initial())
                 .key()
@@ -486,15 +586,14 @@ mod tests {
             SourceLifecycle::Acquiring(offer(2)),
             SourceLifecycle::Staging {
                 offer: offer(2),
-                retention: SourceRetention::Process,
+                acquired_retention: SourceRetention::Process,
+                plan: StagingPlan::CopyToOwnedArtifact,
             },
             SourceLifecycle::Ready {
                 offer: offer(2),
-                retention: SourceRetention::Persisted,
-                content: StagedContent::new(
-                    OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
-                    ByteCount::new(4096),
-                ),
+                acquired_retention: SourceRetention::Persisted,
+                backing: SourceBacking::PersistedProvider,
+                content: staged(4096),
             },
         ];
         for state in bound {
@@ -513,21 +612,72 @@ mod tests {
         assert!(
             !SourceLifecycle::Staging {
                 offer: offer(1),
-                retention: SourceRetention::Persisted,
+                acquired_retention: SourceRetention::Persisted,
+                plan: StagingPlan::ProviderStream,
             }
             .is_ready()
         );
         assert!(
             SourceLifecycle::Ready {
                 offer: offer(1),
-                retention: SourceRetention::Persisted,
-                content: StagedContent::new(
-                    OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
-                    ByteCount::new(1),
-                ),
+                acquired_retention: SourceRetention::Persisted,
+                backing: SourceBacking::OwnedArtifact,
+                content: staged(1),
             }
             .is_ready()
         );
+    }
+
+    /// The two facts one word used to carry.
+    ///
+    /// Both of these acquired a PERSISTED grant, and they must restore
+    /// differently: the streamed one reopens the provider and revalidates its
+    /// grant, the copied one reopens its own artifact and may release the
+    /// grant. A single `retention` field could not tell them apart, and
+    /// promoting Process to Persisted after a copy would have changed the
+    /// meaning of an admitted duty result under an exact replay.
+    #[test]
+    fn retention_records_the_duty_and_backing_records_the_bytes() {
+        let streamed = SourceLifecycle::Ready {
+            offer: offer(1),
+            acquired_retention: SourceRetention::Persisted,
+            backing: SourceBacking::PersistedProvider,
+            content: staged(4096),
+        };
+        let copied = SourceLifecycle::Ready {
+            offer: offer(1),
+            // The platform only ever promised this process; copying is what
+            // made the bytes durable, and the duty's answer is left alone.
+            acquired_retention: SourceRetention::Process,
+            backing: SourceBacking::OwnedArtifact,
+            content: staged(4096),
+        };
+        assert_ne!(streamed, copied);
+        assert!(streamed.is_ready() && copied.is_ready());
+
+        let (SourceLifecycle::Ready { backing: a, .. }, SourceLifecycle::Ready { backing: b, .. }) =
+            (&streamed, &copied)
+        else {
+            panic!("both are ready");
+        };
+        assert_ne!(a, b, "restore must be able to tell these apart");
+    }
+
+    /// Same name, same length, different bytes. Without the digest a provider
+    /// could swap the document after staging measured it and the identical
+    /// record would send the replacement as what staging established.
+    #[test]
+    fn staged_content_identifies_the_bytes_not_just_their_length() {
+        let measured = staged(4096);
+        let swapped = StagedContent::new(
+            OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
+            ByteCount::new(4096),
+            ContentHash::from_bytes([9; 32]),
+        );
+        assert_eq!(measured.name(), swapped.name());
+        assert_eq!(measured.total(), swapped.total());
+        assert_ne!(measured.content_hash(), swapped.content_hash());
+        assert_ne!(measured, swapped);
     }
 
     /// The provider's claim about size and the counted total are different
@@ -540,14 +690,11 @@ mod tests {
             OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
             Some(ByteCount::new(10)),
         );
-        let counted = StagedContent::new(
-            OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
-            ByteCount::new(4096),
-        );
         let ready = SourceLifecycle::Ready {
             offer: lying.clone(),
-            retention: SourceRetention::Persisted,
-            content: counted,
+            acquired_retention: SourceRetention::Persisted,
+            backing: SourceBacking::PersistedProvider,
+            content: staged(4096),
         };
         let SourceLifecycle::Ready { offer, content, .. } = &ready else {
             panic!("constructed ready");
