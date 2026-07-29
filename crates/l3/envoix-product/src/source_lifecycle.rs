@@ -28,7 +28,8 @@ use envoix_types::{ByteCount, Direction, OfferedName};
 /// Why the authority is asking for a source. Carried so a frontend can say
 /// something true without inferring it, and so a repeat is distinguishable
 /// from a first ask.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourcePromptReason {
     /// The card was just created and has never held a source.
     Initial,
@@ -68,7 +69,8 @@ impl SourcePromptReason {
 /// `source_acquired(Process)` would then look like a conflict with state that
 /// had moved underneath it. What owns the bytes now is [`SourceBacking`], a
 /// different question with a different answer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceRetention {
     /// Readable in THIS platform process only. Honest and usable: the transfer
     /// can proceed now, and a restart returns the card to awaiting selection.
@@ -137,7 +139,8 @@ impl AcceptedSourceOffer {
 /// grant, so it is recorded rather than inferred. Restore needs to know which
 /// plan was in flight: a stream reopens the platform registry entry, a copy
 /// reconciles a partial app-private artifact.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StagingPlan {
     /// Read straight from the provider. Implies the grant is persisted and the
     /// source is seekable — the two things resume requires — which is why the
@@ -150,7 +153,8 @@ pub enum StagingPlan {
 }
 
 /// What owns the bytes once staging has finished.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceBacking {
     /// The provider, reopened through its persisted grant. That grant must be
     /// retained and revalidated.
@@ -273,7 +277,8 @@ impl SelectionGate {
 /// invalid combinations are absent rather than merely untested: no `Acquiring`
 /// without the offer it acquires, no `Staging` without a retention promise, no
 /// `Ready` without counted content.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(into = "SourceLifecycleDto", try_from = "SourceLifecycleDto")]
 pub enum SourceLifecycle {
     /// This card receives. It has no source and can never acquire one.
     ///
@@ -628,6 +633,45 @@ mod tests {
         );
     }
 
+    /// Serde must not be able to build what the constructors refuse.
+    ///
+    /// `#[non_exhaustive]` stops another CRATE constructing an invalid variant;
+    /// it does nothing about a hostile storage editor. The domain type is
+    /// therefore serialized through a plain mirror, and the only way back is
+    /// TryFrom, which re-runs the checks. Here: bytes claiming a card that
+    /// FAILED never tried.
+    #[test]
+    fn stored_bytes_cannot_construct_a_gate_the_constructors_refuse() {
+        let honest = SourceLifecycle::AwaitingSelection(
+            SelectionGate::lost(SourcePromptReason::PermissionLost, offer(1))
+                .expect("a failure reason"),
+        );
+        let encoded = serde_json::to_string(&honest).expect("encodes");
+        assert_eq!(
+            serde_json::from_str::<SourceLifecycle>(&encoded).expect("round trips"),
+            honest
+        );
+
+        // The one substitution the type system cannot prevent in stored bytes.
+        let forged = encoded.replace("permission_lost", "initial");
+        assert_ne!(forged, encoded, "the reason must appear in the bytes");
+        assert!(
+            serde_json::from_str::<SourceLifecycle>(&forged).is_err(),
+            "a re-pick gate claiming Initial must not decode"
+        );
+    }
+
+    /// An unknown field is a different build's record, not something to accept
+    /// with the rest silently applied.
+    #[test]
+    fn stored_bytes_with_an_unknown_field_are_refused() {
+        let state = SourceLifecycle::Acquiring(offer(1));
+        let encoded = serde_json::to_string(&state).expect("encodes");
+        let extended = encoded.replace(r#"{"offer""#, r#"{"surprise":1,"offer""#);
+        assert_ne!(extended, encoded);
+        assert!(serde_json::from_str::<SourceLifecycle>(&extended).is_err());
+    }
+
     /// The two facts one word used to carry.
     ///
     /// Both of these acquired a PERSISTED grant, and they must restore
@@ -872,5 +916,252 @@ mod offer_tests {
                 assert_ne!(answer, other);
             }
         }
+    }
+}
+
+// ---- the durable mirror ----
+//
+// The domain types above are NOT deserialized directly. Serde constructs
+// whatever the bytes say, which would walk straight past every checked
+// constructor and hand back an invalid live value — a receiver holding a
+// source, a `RePickRequired` claiming `Initial`, a key naming another card.
+// `#[non_exhaustive]` stops another CRATE building those; it does not stop a
+// hostile storage editor.
+//
+// So the wire shape is these plain mirrors, and the only way back into the
+// domain is `TryFrom`, which re-runs the checks. Bytes that fail become a
+// typed decode error, which the record layer quarantines.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceKeyDto {
+    card: envoix_types::RecordId,
+    generation: envoix_types::AttemptGen,
+    request: envoix_types::RequestId,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OfferDto {
+    key: SourceKeyDto,
+    display_name: OfferedName,
+    reported_size: Option<ByteCount>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContentDto {
+    name: OfferedName,
+    total: ByteCount,
+    content_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(crate) enum GateDto {
+    Selectable {
+        reason: SourcePromptReason,
+    },
+    RePickRequired {
+        reason: SourcePromptReason,
+        previous_offer: OfferDto,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(crate) enum SourceLifecycleDto {
+    NotRequired {
+        peer_content: Option<ContentDto>,
+    },
+    AwaitingSelection {
+        gate: GateDto,
+    },
+    Acquiring {
+        offer: OfferDto,
+    },
+    Staging {
+        offer: OfferDto,
+        acquired_retention: SourceRetention,
+        plan: StagingPlan,
+    },
+    Ready {
+        offer: OfferDto,
+        acquired_retention: SourceRetention,
+        backing: SourceBacking,
+        content: ContentDto,
+    },
+}
+
+/// Why stored bytes are not a source state this build will make live.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceDecodeError {
+    /// A post-failure gate claiming the card never tried.
+    ImpossiblePromptReason,
+}
+
+impl core::fmt::Display for SourceDecodeError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ImpossiblePromptReason => formatter
+                .write_str("a post-failure selection gate cannot claim the card never tried"),
+        }
+    }
+}
+
+impl From<&SourceAcquisitionKey> for SourceKeyDto {
+    fn from(key: &SourceAcquisitionKey) -> Self {
+        let provenance = key.provenance();
+        Self {
+            card: provenance.card,
+            generation: provenance.generation,
+            request: provenance.request,
+        }
+    }
+}
+
+impl From<SourceKeyDto> for SourceAcquisitionKey {
+    fn from(dto: SourceKeyDto) -> Self {
+        Self::of(envoix_capabilities::DutyProvenance {
+            card: dto.card,
+            generation: dto.generation,
+            request: dto.request,
+        })
+    }
+}
+
+impl From<&AcceptedSourceOffer> for OfferDto {
+    fn from(offer: &AcceptedSourceOffer) -> Self {
+        Self {
+            key: offer.key().into(),
+            display_name: offer.display_name().clone(),
+            reported_size: offer.reported_size(),
+        }
+    }
+}
+
+impl From<OfferDto> for AcceptedSourceOffer {
+    fn from(dto: OfferDto) -> Self {
+        Self::new(dto.key.into(), dto.display_name, dto.reported_size)
+    }
+}
+
+impl From<&StagedContent> for ContentDto {
+    fn from(content: &StagedContent) -> Self {
+        Self {
+            name: content.name().clone(),
+            total: content.total(),
+            content_hash: content.content_hash().to_bytes(),
+        }
+    }
+}
+
+impl From<ContentDto> for StagedContent {
+    fn from(dto: ContentDto) -> Self {
+        Self::new(
+            dto.name,
+            dto.total,
+            ContentHash::from_bytes(dto.content_hash),
+        )
+    }
+}
+
+impl From<SourceLifecycle> for SourceLifecycleDto {
+    fn from(state: SourceLifecycle) -> Self {
+        Self::from(&state)
+    }
+}
+
+impl From<&SourceLifecycle> for SourceLifecycleDto {
+    fn from(state: &SourceLifecycle) -> Self {
+        match state {
+            SourceLifecycle::NotRequired { peer_content } => Self::NotRequired {
+                peer_content: peer_content.as_ref().map(Into::into),
+            },
+            SourceLifecycle::AwaitingSelection(gate) => Self::AwaitingSelection {
+                gate: match gate {
+                    SelectionGate::Selectable { reason } => GateDto::Selectable { reason: *reason },
+                    SelectionGate::RePickRequired {
+                        reason,
+                        previous_offer,
+                    } => GateDto::RePickRequired {
+                        reason: *reason,
+                        previous_offer: previous_offer.into(),
+                    },
+                },
+            },
+            SourceLifecycle::Acquiring(offer) => Self::Acquiring {
+                offer: offer.into(),
+            },
+            SourceLifecycle::Staging {
+                offer,
+                acquired_retention,
+                plan,
+            } => Self::Staging {
+                offer: offer.into(),
+                acquired_retention: *acquired_retention,
+                plan: *plan,
+            },
+            SourceLifecycle::Ready {
+                offer,
+                acquired_retention,
+                backing,
+                content,
+            } => Self::Ready {
+                offer: offer.into(),
+                acquired_retention: *acquired_retention,
+                backing: *backing,
+                content: content.into(),
+            },
+        }
+    }
+}
+
+impl TryFrom<SourceLifecycleDto> for SourceLifecycle {
+    type Error = SourceDecodeError;
+
+    fn try_from(dto: SourceLifecycleDto) -> Result<Self, Self::Error> {
+        Ok(match dto {
+            SourceLifecycleDto::NotRequired { peer_content } => Self::NotRequired {
+                peer_content: peer_content.map(Into::into),
+            },
+            SourceLifecycleDto::AwaitingSelection { gate } => Self::AwaitingSelection(match gate {
+                // The checked constructors, re-run. Bytes claiming a card that
+                // failed never tried are refused rather than made live.
+                GateDto::Selectable { reason } => match reason {
+                    SourcePromptReason::Initial => SelectionGate::initial(),
+                    failure => SelectionGate::selectable_again(failure)
+                        .ok_or(SourceDecodeError::ImpossiblePromptReason)?,
+                },
+                GateDto::RePickRequired {
+                    reason,
+                    previous_offer,
+                } => SelectionGate::lost(reason, previous_offer.into())
+                    .ok_or(SourceDecodeError::ImpossiblePromptReason)?,
+            }),
+            SourceLifecycleDto::Acquiring { offer } => Self::Acquiring(offer.into()),
+            SourceLifecycleDto::Staging {
+                offer,
+                acquired_retention,
+                plan,
+            } => Self::Staging {
+                offer: offer.into(),
+                acquired_retention,
+                plan,
+            },
+            SourceLifecycleDto::Ready {
+                offer,
+                acquired_retention,
+                backing,
+                content,
+            } => Self::Ready {
+                offer: offer.into(),
+                acquired_retention,
+                backing,
+                content: content.into(),
+            },
+        })
     }
 }
