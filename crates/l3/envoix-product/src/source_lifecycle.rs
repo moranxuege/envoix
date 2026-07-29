@@ -164,17 +164,43 @@ pub enum SourceBacking {
     OwnedArtifact,
 }
 
-/// What staging established about the source — counted by us, not claimed by
-/// the provider.
+/// What a card is transferring: the name and the number of bytes.
 ///
-/// This exists as a separate type from [`AcceptedSourceOffer::reported_size`]
-/// because they are different facts with different trust: a provider states a
-/// size, and staging read the bytes. Streaming rather than copying does not
-/// change that — the read still happens, it just writes nothing.
+/// Deliberately WITHOUT a digest. A receiver learns this from the peer's
+/// header, which carries name and size and no full-file hash — that arrives
+/// only with `Complete`, after the bytes. Requiring a hash here would make the
+/// documented receiver state unconstructible at header admission unless the
+/// reducer invented one.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StagedContent {
+pub struct TransferContent {
     name: OfferedName,
     total: ByteCount,
+}
+
+impl TransferContent {
+    pub const fn new(name: OfferedName, total: ByteCount) -> Self {
+        Self { name, total }
+    }
+
+    pub const fn name(&self) -> &OfferedName {
+        &self.name
+    }
+
+    pub const fn total(&self) -> ByteCount {
+        self.total
+    }
+}
+
+/// What staging established about the SOURCE — counted by us, not claimed by
+/// the provider, and identified.
+///
+/// The digest separates this from [`TransferContent`]: staging read the bytes
+/// and can say which ones, so a provider that swaps the document afterwards
+/// cannot pass as what was staged. `reported_size` is the third, least trusted
+/// fact — what the provider merely claimed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedContent {
+    content: TransferContent,
     /// Which bytes staging actually read.
     ///
     /// Without it "staged" means only "once observed a length": a provider can
@@ -186,12 +212,15 @@ pub struct StagedContent {
 }
 
 impl StagedContent {
-    pub const fn new(name: OfferedName, total: ByteCount, content_hash: ContentHash) -> Self {
+    pub const fn new(content: TransferContent, content_hash: ContentHash) -> Self {
         Self {
-            name,
-            total,
+            content,
             content_hash,
         }
+    }
+
+    pub const fn content(&self) -> &TransferContent {
+        &self.content
     }
 
     pub const fn content_hash(&self) -> ContentHash {
@@ -199,11 +228,11 @@ impl StagedContent {
     }
 
     pub const fn name(&self) -> &OfferedName {
-        &self.name
+        self.content.name()
     }
 
     pub const fn total(&self) -> ByteCount {
-        self.total
+        self.content.total()
     }
 }
 
@@ -291,7 +320,9 @@ pub enum SourceLifecycle {
     /// says so, and inventing a placeholder is what made the old empty
     /// `offered_name` ambiguous.
     #[non_exhaustive]
-    NotRequired { peer_content: Option<StagedContent> },
+    NotRequired {
+        peer_content: Option<TransferContent>,
+    },
     /// The authority is asking for a document.
     AwaitingSelection(SelectionGate),
     /// A document was chosen; the platform is being asked to hold it.
@@ -306,9 +337,10 @@ pub enum SourceLifecycle {
     /// a `Process` grant that a restart would lose, or a source that cannot
     /// seek, which resume requires.
     ///
-    /// Copying is therefore how `Process` becomes `Persisted`, which is why no
-    /// separate "did we copy?" field is needed: an app-private copy is
-    /// re-openable by definition, so the retention it leaves is `Persisted`.
+    /// Copying does NOT rewrite `acquired_retention` — that stays the duty's
+    /// own answer. What a copy changes is the BACKING, which is why `plan`
+    /// exists: an app-private copy is re-openable whatever the platform
+    /// originally promised.
     #[non_exhaustive]
     Staging {
         offer: AcceptedSourceOffer,
@@ -318,9 +350,10 @@ pub enum SourceLifecycle {
     },
     /// The content is established and the source can be sent.
     ///
-    /// `retention` is what a restart consults: `Persisted` can be reopened,
-    /// `Process` cannot and returns the card to awaiting selection however
-    /// complete it looked.
+    /// `backing` is what a restart consults, NOT `acquired_retention`: an
+    /// `OwnedArtifact` reopens its own bytes and is valid even when the
+    /// platform only ever promised this process, while a `PersistedProvider`
+    /// must revalidate the grant it depends on.
     #[non_exhaustive]
     Ready {
         offer: AcceptedSourceOffer,
@@ -494,8 +527,10 @@ mod tests {
 
     fn staged(total: u64) -> StagedContent {
         StagedContent::new(
-            OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
-            ByteCount::new(total),
+            TransferContent::new(
+                OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
+                ByteCount::new(total),
+            ),
             ContentHash::from_bytes([7; 32]),
         )
     }
@@ -633,6 +668,40 @@ mod tests {
         );
     }
 
+    /// A receiver's content must be buildable from what the PEER HEADER
+    /// carries, and that is name and size — the full-file digest arrives only
+    /// with `Complete`, after the bytes.
+    ///
+    /// Typing this as `StagedContent`, which requires a hash, made the
+    /// documented receiver state unconstructible at header admission unless the
+    /// reducer invented a digest. Inventing one would be worse than the missing
+    /// field: it would be a verification value that verifies nothing.
+    #[test]
+    fn a_receivers_content_needs_no_digest_it_cannot_have_yet() {
+        let announced = TransferContent::new(
+            OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
+            ByteCount::new(4096),
+        );
+        let receiving = SourceLifecycle::NotRequired {
+            peer_content: Some(announced.clone()),
+        };
+        let SourceLifecycle::NotRequired {
+            peer_content: Some(stored),
+        } = &receiving
+        else {
+            panic!("a receiver holds what the peer announced");
+        };
+        assert_eq!(stored, &announced);
+        assert!(!receiving.requires_a_source());
+
+        // The sender's staged content is the same two facts PLUS the digest,
+        // so one is not the other and neither can stand in for it.
+        let staged = StagedContent::new(announced.clone(), ContentHash::from_bytes([3; 32]));
+        assert_eq!(staged.content(), &announced);
+        assert_eq!(staged.name(), announced.name());
+        assert_eq!(staged.total(), announced.total());
+    }
+
     /// Serde must not be able to build what the constructors refuse.
     ///
     /// `#[non_exhaustive]` stops another CRATE constructing an invalid variant;
@@ -714,8 +783,10 @@ mod tests {
     fn staged_content_identifies_the_bytes_not_just_their_length() {
         let measured = staged(4096);
         let swapped = StagedContent::new(
-            OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
-            ByteCount::new(4096),
+            TransferContent::new(
+                OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
+                ByteCount::new(4096),
+            ),
             ContentHash::from_bytes([9; 32]),
         );
         assert_eq!(measured.name(), swapped.name());
@@ -952,9 +1023,15 @@ pub(crate) struct OfferDto {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ContentDto {
+pub(crate) struct TransferContentDto {
     name: OfferedName,
     total: ByteCount,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContentDto {
+    content: TransferContentDto,
     content_hash: [u8; 32],
 }
 
@@ -974,7 +1051,7 @@ pub(crate) enum GateDto {
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum SourceLifecycleDto {
     NotRequired {
-        peer_content: Option<ContentDto>,
+        peer_content: Option<TransferContentDto>,
     },
     AwaitingSelection {
         gate: GateDto,
@@ -1048,11 +1125,25 @@ impl From<OfferDto> for AcceptedSourceOffer {
     }
 }
 
-impl From<&StagedContent> for ContentDto {
-    fn from(content: &StagedContent) -> Self {
+impl From<&TransferContent> for TransferContentDto {
+    fn from(content: &TransferContent) -> Self {
         Self {
             name: content.name().clone(),
             total: content.total(),
+        }
+    }
+}
+
+impl From<TransferContentDto> for TransferContent {
+    fn from(dto: TransferContentDto) -> Self {
+        Self::new(dto.name, dto.total)
+    }
+}
+
+impl From<&StagedContent> for ContentDto {
+    fn from(content: &StagedContent) -> Self {
+        Self {
+            content: content.content().into(),
             content_hash: content.content_hash().to_bytes(),
         }
     }
@@ -1061,8 +1152,7 @@ impl From<&StagedContent> for ContentDto {
 impl From<ContentDto> for StagedContent {
     fn from(dto: ContentDto) -> Self {
         Self::new(
-            dto.name,
-            dto.total,
+            dto.content.into(),
             ContentHash::from_bytes(dto.content_hash),
         )
     }
