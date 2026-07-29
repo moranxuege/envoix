@@ -2,15 +2,18 @@ use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, ResumeIntent, RetirementAck,
     RetirementIntent,
 };
-use envoix_capabilities::{AdmittedDutyResult, Duty, DutyKind, DutyProvenance};
+use envoix_capabilities::{
+    AdmittedDutyResult, Duty, DutyKind, DutyProvenance, SourceAcquisitionKey,
+};
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_types::{ArtifactId, ByteCount, Direction, RequestId, TransferId};
 
 use crate::identity::next_generation;
 use crate::{
-    CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer, PauseOrigin,
-    ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState, Quiescence,
-    SourceDecision, SourceLifecycle, StorageAction, TransferRecord, WorkerKind,
+    AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
+    PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
+    Quiescence, SourceDecision, SourceLifecycle, SourceOfferAnswer, StorageAction, TransferRecord,
+    WorkerKind,
 };
 
 /// The domain tag that separates a card's source-duty request identity from its
@@ -179,6 +182,7 @@ impl TransferRecord {
         let effects = match input {
             ProductInput::Command(command) => self.on_command(command)?,
             ProductInput::Restore => self.on_restore(),
+            ProductInput::SourceOffered { offer } => self.on_source_offered(offer)?,
             ProductInput::StageProgress { stamp, transferred } => {
                 self.on_stage_progress(stamp, transferred)
             }
@@ -362,6 +366,38 @@ impl TransferRecord {
             effects.push(self.tombstone_card());
         }
         effects
+    }
+
+    /// Binds a document to the acquisition that asked for it.
+    ///
+    /// The authority answers by comparing the WHOLE offer against the whole key
+    /// it is currently asking for — anything else is a different acquisition,
+    /// and a card match alone is how a picked document could satisfy a request
+    /// it was never chosen for. An offer that is not accepted changes nothing:
+    /// it is the caller's to be told about, not the record's to absorb.
+    fn on_source_offered(
+        &mut self,
+        offer: AcceptedSourceOffer,
+    ) -> Result<Vec<ProductEffect>, IdentityError> {
+        if self.answer_source_offer(&offer) == SourceOfferAnswer::Accepted {
+            self.source = SourceLifecycle::Acquiring(offer);
+        }
+        Ok(Vec::new())
+    }
+
+    /// What the authority would answer this offer, given the acquisition it is
+    /// currently asking for.
+    ///
+    /// The expected key is DERIVED here rather than stored a second time: it is
+    /// this card, this generation, and the source request this record already
+    /// mints for its duty, so there is one place it can be wrong.
+    pub fn answer_source_offer(&self, offer: &AcceptedSourceOffer) -> SourceOfferAnswer {
+        let expected = SourceAcquisitionKey::of(DutyProvenance {
+            card: self.identity.card,
+            generation: self.generation,
+            request: self.source_request(),
+        });
+        self.source.answer_offer(&expected, offer)
     }
 
     fn on_repick_source(&mut self) -> Result<Vec<ProductEffect>, IdentityError> {

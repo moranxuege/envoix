@@ -916,3 +916,84 @@ fn ignored_input_does_not_write_or_release_again() {
     assert!(outcome.released_after_commit.is_empty());
     assert_eq!(session.store().calls, calls);
 }
+
+// ---- the source-offer edge ----
+
+/// A minted send asks for a document, and the offer that names its exact
+/// acquisition binds. The expected key is DERIVED by the authority — card,
+/// generation and the source request this record mints — so a frontend cannot
+/// name an acquisition the authority is not asking for.
+#[test]
+fn an_offer_for_the_asked_acquisition_binds_the_document() {
+    let (mut session, _) = CommittedSession::create(
+        staged_transfer(Direction::Send),
+        &mut DeterministicEntropy::default(),
+        MemoryStore::default(),
+        attempts(1),
+    )
+    .unwrap();
+    assert!(matches!(
+        session.record().source,
+        crate::SourceLifecycle::AwaitingSelection(_)
+    ));
+
+    let offered = crate::AcceptedSourceOffer::new(
+        expected_key(session.record()),
+        OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
+        Some(ByteCount::new(4096)),
+    );
+    session
+        .apply(ProductInput::SourceOffered {
+            offer: offered.clone(),
+        })
+        .expect("the offer applies");
+
+    let crate::SourceLifecycle::Acquiring(bound) = &session.record().source else {
+        panic!("an accepted offer moves the card to acquiring");
+    };
+    assert_eq!(bound, &offered);
+    // And the name the card will show comes from the offer, not from create.
+    assert_eq!(bound.display_name().as_str(), "report.pdf");
+}
+
+/// An offer naming a different acquisition changes NOTHING. It is the caller's
+/// to be told about — the authority answers it — but the record does not absorb
+/// a document it never asked for, which is the ownership defect this whole
+/// design exists to close.
+#[test]
+fn an_offer_for_another_acquisition_leaves_the_record_alone() {
+    let (mut session, _) = CommittedSession::create(
+        staged_transfer(Direction::Send),
+        &mut DeterministicEntropy::default(),
+        MemoryStore::default(),
+        attempts(1),
+    )
+    .unwrap();
+    let before = session.record().source.clone();
+
+    let wrong = crate::AcceptedSourceOffer::new(
+        envoix_capabilities::SourceAcquisitionKey::of(envoix_capabilities::DutyProvenance {
+            card: envoix_types::RecordId::new(0xdead),
+            generation: session.record().generation,
+            request: envoix_types::RequestId::from_bytes([9; 16]),
+        }),
+        OfferedName::from_untrusted("someone-elses.pdf").expect("a bounded name"),
+        None,
+    );
+    session
+        .apply(ProductInput::SourceOffered { offer: wrong })
+        .expect("a refused offer is not an error");
+    assert_eq!(session.record().source, before);
+}
+
+fn expected_key(record: &crate::TransferRecord) -> envoix_capabilities::SourceAcquisitionKey {
+    let crate::SourceLifecycle::AwaitingSelection(_) = &record.source else {
+        panic!("only an awaiting card has an acquisition to name");
+    };
+    // Mirrors the authority's own derivation.
+    envoix_capabilities::SourceAcquisitionKey::of(envoix_capabilities::DutyProvenance {
+        card: record.identity.card,
+        generation: record.generation,
+        request: record.source_request(),
+    })
+}

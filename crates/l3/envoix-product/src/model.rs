@@ -6,7 +6,9 @@ use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RequestId};
 use serde::{Deserialize, Serialize};
 
-use crate::{PairingChannel, ProductIdentity, RoomParticipation, SourceLifecycle};
+use crate::{
+    AcceptedSourceOffer, PairingChannel, ProductIdentity, RoomParticipation, SourceLifecycle,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +132,13 @@ pub enum ProductInput {
     Command(ProductCommand),
     /// Reconciles a durable record after process-owned workers were torn down.
     Restore,
+    /// A document offered to the acquisition the authority asked for.
+    ///
+    /// Carries the WHOLE key, never the card alone: a card match is how a
+    /// picked document could satisfy a request it was never chosen for.
+    SourceOffered {
+        offer: AcceptedSourceOffer,
+    },
     StageProgress {
         stamp: AttemptStamp,
         transferred: ByteCount,
