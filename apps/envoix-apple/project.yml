@@ -58,6 +58,7 @@ targets:
         excludes:
           - Info.plist
           - Info-Debug.plist
+          - Info-macOS.plist
           - Envoix-iOS.entitlements
     dependencies:
       - package: EnvoixCore
