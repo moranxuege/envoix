@@ -168,6 +168,7 @@
     .button:hover { transform: translateY(-2px); filter: brightness(1.07); }
     .button.secondary { color: var(--cyan); border-color: var(--line-strong); background: rgba(97, 210, 221, 0.06); }
     .microcopy { margin: 14px 0 0; color: var(--faint); font-size: 0.73rem; }
+    .checksum { overflow-wrap: anywhere; }
 
     .android-options { display: grid; gap: 10px; }
     .android-option { padding: 13px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, 0.018); }
@@ -241,7 +242,7 @@
       <aside class="hero-panel" aria-label="Release status">
         <strong>Current release status</strong>
         <ul class="status-list">
-          <li><span class="dot waiting"></span>macOS v0.2.0 is awaiting Developer ID signing</li>
+          <li><span class="dot waiting"></span>macOS v0.2.0 unnotarized test build is available</li>
           <li><span class="dot"></span>Android v0.2.0 stable build is available</li>
           <li><span class="dot"></span>iOS v0.2.0 (2) is available for internal TestFlight testing</li>
         </ul>
@@ -255,12 +256,12 @@
       </div>
       <div class="client-grid">
         <article class="card">
-          <div class="card-top"><span class="platform-mark">MAC</span><span class="tag waiting">Internal test</span></div>
+          <div class="card-top"><span class="platform-mark">MAC</span><span class="tag waiting">Unnotarized test</span></div>
           <h3>macOS</h3>
-          <p class="version">v0.2.0 · Universal internal build</p>
-          <p class="description">Nearby is integrated through the local network or relay. Wi‑Fi Aware is not available on macOS; Developer ID signing and notarization are still pending.</p>
-          <span class="button secondary" aria-disabled="true">Public download pending</span>
-          <p class="microcopy">The public ZIP will be enabled only after signing, notarization, and Gatekeeper verification succeed.</p>
+          <p class="version">v0.2.0 (2) · Universal test build</p>
+          <p class="description">Nearby is integrated through the local network or relay, while Wi‑Fi Aware is not available on macOS. This build is neither Developer ID signed nor notarized by Apple.</p>
+          <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-macOS.zip">Download unnotarized macOS ZIP</a>
+          <p class="microcopy">After trying to open it once, use System Settings → Privacy &amp; Security → Open Anyway. Continue only if you trust this project and the SHA-256 is <code class="checksum">8a3b8c4d2dacd16f42e93540269164e1ed1c4d9d96bfc93ce68975cfc3130cc2</code>; do not disable Gatekeeper globally. See <a href="https://support.apple.com/en-us/102445">Apple guidance</a>.</p>
         </article>
 
         <article class="card">

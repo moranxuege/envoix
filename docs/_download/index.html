@@ -325,6 +325,8 @@
       font-size: 0.73rem;
     }
 
+    .checksum { overflow-wrap: anywhere; }
+
     .android-options {
       display: grid;
       gap: 10px;
@@ -545,7 +547,7 @@
       <aside class="hero-panel" aria-label="发布状态">
         <strong>当前发布状态</strong>
         <ul class="status-list">
-          <li><span class="dot waiting"></span>macOS v0.2.0 正等待 Developer ID 签名</li>
+          <li><span class="dot waiting"></span>macOS v0.2.0 未公证内测版可下载</li>
           <li><span class="dot"></span>Android v0.2.0 稳定版可下载</li>
           <li><span class="dot"></span>iOS v0.2.0 (2) 已开放 TestFlight 内部测试</li>
         </ul>
@@ -565,13 +567,13 @@
         <article class="card">
           <div class="card-top">
             <span class="platform-mark">MAC</span>
-            <span class="tag waiting">内部测试</span>
+            <span class="tag waiting">未公证内测</span>
           </div>
           <h3>macOS</h3>
-          <p class="version">v0.2.0 · Universal 内部构建</p>
-          <p class="description">Nearby 已融合局域网与中继路径；macOS 暂不支持 Wi‑Fi Aware，Developer ID 签名与 Apple 公证仍在准备中。</p>
-          <span class="button secondary" aria-disabled="true">公开下载待开放</span>
-          <p class="microcopy">仅在签名、公证与 Gatekeeper 验证全部通过后开放公开 ZIP。</p>
+          <p class="version">v0.2.0 (2) · Universal 内测版</p>
+          <p class="description">Nearby 已融合局域网与中继路径；macOS 暂不支持 Wi‑Fi Aware。此构建未使用 Developer ID 签名，也未经过 Apple 公证。</p>
+          <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-macOS.zip">下载未公证 macOS ZIP</a>
+          <p class="microcopy">首次尝试打开后，前往“系统设置 → 隐私与安全性 → 仍要打开”。仅在信任本项目且 SHA-256 为 <code class="checksum">8a3b8c4d2dacd16f42e93540269164e1ed1c4d9d96bfc93ce68975cfc3130cc2</code> 时继续；不要全局关闭 Gatekeeper。参见 <a href="https://support.apple.com/zh-cn/102445">Apple 官方说明</a>。</p>
         </article>
 
         <article class="card">
