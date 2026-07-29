@@ -31,6 +31,11 @@ pub enum SourcePromptReason {
     PermissionLost,
     /// Storage refused. Distinct from unreadable: the document was fine.
     StorageFault,
+    /// The source was held, and reading it through failed. Distinct from
+    /// `Unreadable`/`StorageFault` on purpose: those say ACQUISITION failed,
+    /// this says acquisition succeeded and STAGING did not, and a frontend
+    /// telling a user which happened needs them apart.
+    StagingFailed,
     /// The platform failed in a way it could not classify.
     Internal,
 }
@@ -64,6 +69,12 @@ pub enum SourceRetention {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedSourceOffer {
     key: SourceAcquisitionKey,
+    /// The name as the authority normalized it. Retained because idempotency is
+    /// classified over the WHOLE accepted offer: a retry carrying the same key
+    /// and a different name was never committed, and answering "already
+    /// accepted" would tell the frontend its payload was applied when it was
+    /// not.
+    display_name: OfferedName,
     /// What the provider SAID the size was — deliberately not the transfer's
     /// total. A provider is untrusted about length; the authoritative total
     /// comes from staging, which counted the bytes.
@@ -71,8 +82,29 @@ pub struct AcceptedSourceOffer {
 }
 
 impl AcceptedSourceOffer {
-    pub const fn new(key: SourceAcquisitionKey, reported_size: Option<ByteCount>) -> Self {
-        Self { key, reported_size }
+    pub const fn new(
+        key: SourceAcquisitionKey,
+        display_name: OfferedName,
+        reported_size: Option<ByteCount>,
+    ) -> Self {
+        Self {
+            key,
+            display_name,
+            reported_size,
+        }
+    }
+
+    pub const fn display_name(&self) -> &OfferedName {
+        &self.display_name
+    }
+
+    /// Whether `candidate` is this same offer in every accepted field.
+    ///
+    /// Spelled out because "exact" degrading to "same key" is precisely the
+    /// defect this fixes: two offers can name one acquisition and still not be
+    /// the same offer.
+    pub fn is_the_same_offer_as(&self, candidate: &Self) -> bool {
+        self == candidate
     }
 
     pub const fn key(&self) -> &SourceAcquisitionKey {
@@ -266,9 +298,15 @@ impl SourceLifecycle {
 pub enum SourceOfferAnswer {
     /// Bound to this acquisition. The card advances to `Acquiring`.
     Accepted,
-    /// This exact offer was already accepted. Idempotent re-delivery, not an
-    /// error — the frontend may have retried across a process death.
+    /// This exact offer — every accepted field — was already accepted.
+    /// Idempotent re-delivery, not an error: the frontend may have retried
+    /// across a process death.
     AlreadyAccepted,
+    /// The same acquisition, a DIFFERENT offer. The key was reused with
+    /// metadata that was never committed, so neither "accepted" nor "stale" is
+    /// true and a frontend told either would be misled about whether its
+    /// payload took effect.
+    Conflict,
     /// The key named a real card, but not its current acquisition: a re-pick
     /// advanced the generation, or the request is not the one outstanding. The
     /// frontend should release what it holds and wait to be asked again.
@@ -299,32 +337,51 @@ impl SourceLifecycle {
     pub fn answer_offer(
         &self,
         expected: &SourceAcquisitionKey,
-        offered: &SourceAcquisitionKey,
+        candidate: &AcceptedSourceOffer,
     ) -> SourceOfferAnswer {
+        // Every state that already holds an offer answers the same way about
+        // it, so the classification lives in one place: equal in every accepted
+        // field is a retry, the same key with different fields is a conflict,
+        // and a different key is not this acquisition at all.
+        fn against(
+            accepted: &AcceptedSourceOffer,
+            candidate: &AcceptedSourceOffer,
+        ) -> SourceOfferAnswer {
+            if accepted.is_the_same_offer_as(candidate) {
+                SourceOfferAnswer::AlreadyAccepted
+            } else if accepted.key().is(candidate.key()) {
+                SourceOfferAnswer::Conflict
+            } else {
+                SourceOfferAnswer::Stale
+            }
+        }
+
         match self {
             // A receiver has no acquisition to name, so nothing can match.
             Self::NotRequired => SourceOfferAnswer::NotExpected,
-            Self::AwaitingSelection(gate) => {
-                if !expected.is(offered) {
+            Self::AwaitingSelection(SelectionGate::Selectable { .. }) => {
+                if expected.is(candidate.key()) {
+                    SourceOfferAnswer::Accepted
+                } else {
                     // Another card, a superseded generation, or a request that
                     // is not the outstanding one.
                     SourceOfferAnswer::Stale
-                } else if gate.accepts_an_offer() {
-                    SourceOfferAnswer::Accepted
-                } else {
-                    // This generation already had a source and lost it. Only a
-                    // re-pick reopens it, and a re-pick mints a new key.
-                    SourceOfferAnswer::Stale
                 }
             }
-            // Already bound. The same key is the frontend retrying; a different
-            // one is an offer for an acquisition that is no longer current.
-            Self::Acquiring(offer) | Self::Staging { offer, .. } | Self::Ready { offer, .. } => {
-                if offer.key().is(offered) {
-                    SourceOfferAnswer::AlreadyAccepted
-                } else {
-                    SourceOfferAnswer::Stale
+            // This generation accepted an offer and then lost it. It cannot
+            // accept a NEW one — only a re-pick reopens it — but the answer to
+            // the offer it did accept must stay recoverable, or a frontend
+            // retrying across a process death is told its committed offer was
+            // stale.
+            Self::AwaitingSelection(SelectionGate::RePickRequired { previous_offer, .. }) => {
+                match against(previous_offer, candidate) {
+                    SourceOfferAnswer::AlreadyAccepted => SourceOfferAnswer::AlreadyAccepted,
+                    SourceOfferAnswer::Conflict => SourceOfferAnswer::Conflict,
+                    _ => SourceOfferAnswer::Stale,
                 }
+            }
+            Self::Acquiring(offer) | Self::Staging { offer, .. } | Self::Ready { offer, .. } => {
+                against(offer, candidate)
             }
         }
     }
@@ -346,7 +403,11 @@ mod tests {
     }
 
     fn offer(generation: u32) -> AcceptedSourceOffer {
-        AcceptedSourceOffer::new(key(generation), Some(ByteCount::new(4096)))
+        AcceptedSourceOffer::new(
+            key(generation),
+            OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
+            Some(ByteCount::new(4096)),
+        )
     }
 
     /// The direction/source invariant, in the one place that decides it. A
@@ -474,7 +535,11 @@ mod tests {
     /// other. A provider is untrusted about length.
     #[test]
     fn a_reported_size_is_never_the_transfers_total() {
-        let lying = AcceptedSourceOffer::new(key(1), Some(ByteCount::new(10)));
+        let lying = AcceptedSourceOffer::new(
+            key(1),
+            OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
+            Some(ByteCount::new(10)),
+        );
         let counted = StagedContent::new(
             OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
             ByteCount::new(4096),
@@ -492,9 +557,13 @@ mod tests {
 
         // A provider that reported nothing is normal and is not a failure.
         assert!(
-            AcceptedSourceOffer::new(key(1), None)
-                .reported_size()
-                .is_none()
+            AcceptedSourceOffer::new(
+                key(1),
+                OfferedName::from_untrusted("x").expect("a bounded name"),
+                None
+            )
+            .reported_size()
+            .is_none()
         );
     }
 }
@@ -515,20 +584,26 @@ mod offer_tests {
     }
 
     fn offer_of(key: SourceAcquisitionKey) -> AcceptedSourceOffer {
-        AcceptedSourceOffer::new(key, None)
+        named_offer(key, "report.pdf")
+    }
+
+    fn named_offer(key: SourceAcquisitionKey, name: &str) -> AcceptedSourceOffer {
+        AcceptedSourceOffer::new(
+            key,
+            OfferedName::from_untrusted(name).expect("a bounded name"),
+            None,
+        )
     }
 
     /// The ownership fix, stated as behaviour. A document offered for one
-    /// acquisition must not satisfy another however similar — same card and
-    /// request but a later generation is a DIFFERENT acquisition, and that is
-    /// exactly the case a global slot could not tell apart.
+    /// acquisition must not satisfy another however similar.
     #[test]
     fn an_offer_for_another_acquisition_is_never_accepted() {
         let current = key_of(0x51, 2, 0xaa);
         let bound = SourceLifecycle::Acquiring(offer_of(current));
 
         assert_eq!(
-            bound.answer_offer(&current, &current),
+            bound.answer_offer(&current, &offer_of(current)),
             SourceOfferAnswer::AlreadyAccepted
         );
         for other in [
@@ -537,64 +612,97 @@ mod offer_tests {
             key_of(0x51, 2, 0xab), // the same attempt, another request
         ] {
             assert_eq!(
-                bound.answer_offer(&current, &other),
+                bound.answer_offer(&current, &offer_of(other)),
                 SourceOfferAnswer::Stale
             );
         }
     }
 
-    /// The regression this method was rewritten for.
-    ///
-    /// An AWAITING card holds no offer, so it has no key of its own. The first
-    /// version of `answer_offer` therefore compared nothing and answered
-    /// `Accepted` to any key at all — another card's included — which reopened
-    /// the very ownership defect `SourceAcquisitionKey` was introduced to
-    /// close. Worse, the test below used to assert that as correct.
+    /// An AWAITING card holds no offer, so it has no key of its own. A version
+    /// of this that compared nothing answered `Accepted` to any key at all,
+    /// which reopened the ownership defect `SourceAcquisitionKey` closes.
     #[test]
     fn an_awaiting_card_accepts_only_the_acquisition_it_was_asked_for() {
         let expected = key_of(0x51, 2, 0xaa);
         let asking = SourceLifecycle::initial(Direction::Send);
 
         assert_eq!(
-            asking.answer_offer(&expected, &expected),
+            asking.answer_offer(&expected, &offer_of(expected)),
             SourceOfferAnswer::Accepted
         );
         for other in [
-            key_of(0x52, 2, 0xaa),  // another card entirely
-            key_of(0x51, 99, 0xaa), // a generation this card has never reached
-            key_of(0x51, 2, 0xbb),  // a request that is not the outstanding one
+            key_of(0x52, 2, 0xaa),
+            key_of(0x51, 99, 0xaa),
+            key_of(0x51, 2, 0xbb),
         ] {
             assert_eq!(
-                asking.answer_offer(&expected, &other),
+                asking.answer_offer(&expected, &offer_of(other)),
                 SourceOfferAnswer::Stale,
                 "{other:?} is not the acquisition this card was asked for"
             );
         }
     }
 
+    /// "Exact" is not key equality. A retry carrying the same key and different
+    /// metadata was NEVER committed, so answering `AlreadyAccepted` would tell
+    /// the frontend its payload took effect when it did not.
+    #[test]
+    fn the_same_key_with_different_metadata_is_a_conflict() {
+        let key = key_of(0x51, 2, 0xaa);
+        let accepted = named_offer(key, "report.pdf");
+
+        for state in [
+            SourceLifecycle::Acquiring(accepted.clone()),
+            SourceLifecycle::AwaitingSelection(
+                SelectionGate::lost(SourcePromptReason::PermissionLost, accepted.clone())
+                    .expect("a failure reason"),
+            ),
+        ] {
+            assert_eq!(
+                state.answer_offer(&key, &accepted),
+                SourceOfferAnswer::AlreadyAccepted
+            );
+            assert_eq!(
+                state.answer_offer(&key, &named_offer(key, "other.pdf")),
+                SourceOfferAnswer::Conflict
+            );
+        }
+    }
+
+    /// The cell the first implementation got wrong. A generation that lost its
+    /// source cannot accept a NEW offer, but the answer to the offer it DID
+    /// accept must stay recoverable — otherwise a frontend retrying across a
+    /// process death is told its committed offer was stale.
+    #[test]
+    fn a_lost_generation_still_recognises_the_offer_it_accepted() {
+        let key = key_of(0x51, 1, 0xaa);
+        let accepted = offer_of(key);
+        let lost = SourceLifecycle::AwaitingSelection(
+            SelectionGate::lost(SourcePromptReason::PermissionLost, accepted.clone())
+                .expect("a failure reason"),
+        );
+
+        assert_eq!(
+            lost.answer_offer(&key, &accepted),
+            SourceOfferAnswer::AlreadyAccepted
+        );
+        // A different acquisition is still refused: only a re-pick reopens it.
+        assert_eq!(
+            lost.answer_offer(&key, &offer_of(key_of(0x51, 2, 0xaa))),
+            SourceOfferAnswer::Stale
+        );
+    }
+
     /// A receiver cannot be turned into a sender by an offer, forged or
-    /// confused. The read projection publishes no source action for one, and
-    /// this is the authority answering even if something reaches it anyway.
+    /// confused.
     #[test]
     fn a_receiver_refuses_every_offer() {
         let receiving = SourceLifecycle::initial(Direction::Receive);
         let key = key_of(0x51, 1, 0xaa);
         assert_eq!(
-            receiving.answer_offer(&key, &key),
+            receiving.answer_offer(&key, &offer_of(key)),
             SourceOfferAnswer::NotExpected
         );
-    }
-
-    /// A generation that lost its source is not selectable again, so a late
-    /// offer under the discharged key is refused rather than resurrecting it.
-    #[test]
-    fn a_lost_generation_refuses_a_late_offer() {
-        let key = key_of(0x51, 1, 0xaa);
-        let lost = SourceLifecycle::AwaitingSelection(
-            SelectionGate::lost(SourcePromptReason::PermissionLost, offer_of(key))
-                .expect("a failure reason"),
-        );
-        assert_eq!(lost.answer_offer(&key, &key), SourceOfferAnswer::Stale);
     }
 
     /// Every answer is terminal and distinct. A frontend holds a platform
@@ -607,6 +715,7 @@ mod offer_tests {
         let answers = [
             SourceOfferAnswer::Accepted,
             SourceOfferAnswer::AlreadyAccepted,
+            SourceOfferAnswer::Conflict,
             SourceOfferAnswer::Stale,
             SourceOfferAnswer::UnknownCard,
             SourceOfferAnswer::NotExpected,
