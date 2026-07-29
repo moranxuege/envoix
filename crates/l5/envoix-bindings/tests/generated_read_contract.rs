@@ -219,6 +219,9 @@ fn record(
             "artifact": "101112131415161718191a1b1c1d1e1f",
         },
         "direction": "receive",
+        // A receiver needs no source, and record v5 makes that explicit rather
+        // than leaving it to be inferred from the direction.
+        "source": { "not_required": { "peer_content": null } },
         "offered_name": "quarterly-report.pdf",
         "total": 4096,
         "state": state,

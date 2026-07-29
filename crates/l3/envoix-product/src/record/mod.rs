@@ -9,14 +9,24 @@ pub mod identifiers;
 pub use identifiers::PRODUCT_RECORD_SCHEMA_ID;
 
 /// The version written by this build. Version 2 added `command_ledger` (BN2),
-/// version 3 added `pairing` (F2b), and version 4 added the create request
-/// identity. The body codec is self-describing, so every version back to
-/// [`OLDEST_READABLE_RECORD_VERSION`] decodes with absent fields defaulted. An
-/// older reader seeing a newer version takes the honest
+/// version 3 added `pairing` (F2b), version 4 added the create request
+/// identity, and version 5 made the source lifecycle durable.
+///
+/// v5 is the first version that is not backward-readable, and deliberately so.
+/// Every earlier version predates `TransferRecord::source`, and there is no
+/// honest default for it: a receiver decoded as `AwaitingSelection` would ask
+/// for a document it must never have, and a sender defaulted to `NotRequired`
+/// would claim it needs none. A defaulted field that changes what a card IS is
+/// not a migration, it is a fabrication. Nothing has ever been released
+/// (`registry/release-ledger.toml`), so the only pre-v5 records anywhere are on
+/// a development device and are quarantined intact rather than reinterpreted.
+///
+/// An older reader seeing a newer version takes the honest
 /// [`RecordDecode::UnsupportedFuture`] quarantine, never the corrupt path.
-pub const PRODUCT_RECORD_VERSION: u32 = 4;
-/// The oldest record version this build still decodes.
-pub const OLDEST_READABLE_RECORD_VERSION: u32 = 1;
+pub const PRODUCT_RECORD_VERSION: u32 = 5;
+/// The oldest record version this build still decodes. Equal to
+/// [`PRODUCT_RECORD_VERSION`] because of the fabrication argument above.
+pub const OLDEST_READABLE_RECORD_VERSION: u32 = 5;
 const MAX_RECORD_BODY_BYTES: usize = 1024 * 1024;
 const SCHEMA_LENGTH_BYTES: usize = 2;
 const VERSION_BYTES: usize = 4;

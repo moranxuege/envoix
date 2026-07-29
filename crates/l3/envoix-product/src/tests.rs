@@ -2243,6 +2243,7 @@ fn fixture_record() -> TransferRecord {
             artifact: ArtifactId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]),
         },
         direction: Direction::Send,
+        source: crate::SourceLifecycle::initial(Direction::Send),
         offered_name: OfferedName::from_untrusted("a.txt").unwrap(),
         total: ByteCount::new(10),
         state: ProductState::Paused(PauseOrigin::Local),
@@ -2278,32 +2279,44 @@ fn product_record_roundtrips() {
 }
 
 #[test]
-fn product_record_v4_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+fn product_record_v5_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"source":{"awaiting_selection":{"gate":{"selectable":{"reason":"initial"}}}},"pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&4_u32.to_be_bytes());
+    expected.extend_from_slice(&5_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);
 }
 
-/// A pre-BN2 v1 body (no `command_ledger`) still decodes: the ledger field is
-/// additive and defaulted, so existing durable records survive the upgrade.
+/// Every pre-v5 record is REFUSED, not migrated.
+///
+/// v1-v4 predate `TransferRecord::source`, and there is no honest default for
+/// it: a receiver decoded as `AwaitingSelection` would ask for a document it
+/// must never have, and a sender defaulted to `NotRequired` would claim it
+/// needs none. A defaulted field that changes what a card IS is a fabrication,
+/// not a migration — so the honest answer is a typed refusal the caller
+/// quarantines. Nothing has ever been released, so no real record is affected.
 #[test]
-fn product_record_v1_without_command_ledger_still_decodes() {
+fn every_pre_v5_record_is_refused_rather_than_defaulted() {
     let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"receipt_request":"00000000000000000000000000000004"}"#;
     let mut encoded = Vec::new();
     encoded.extend_from_slice(&23_u16.to_be_bytes());
     encoded.extend_from_slice(b"envoix/product-record/1");
-    encoded.extend_from_slice(&1_u32.to_be_bytes());
-    encoded.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    encoded.extend_from_slice(body);
-    assert_eq!(
-        decode_record(&encoded).unwrap(),
-        RecordDecode::Loaded(Box::new(fixture_record()))
-    );
+    for version in 1_u32..crate::record::PRODUCT_RECORD_VERSION {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&23_u16.to_be_bytes());
+        encoded.extend_from_slice(b"envoix/product-record/1");
+        encoded.extend_from_slice(&version.to_be_bytes());
+        encoded.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        encoded.extend_from_slice(body);
+        assert_eq!(
+            decode_record(&encoded),
+            Err(RecordCodecError::UnsupportedVersion { actual: version }),
+            "v{version} must be refused, never defaulted into a v5 shape"
+        );
+    }
 }
 
 #[test]

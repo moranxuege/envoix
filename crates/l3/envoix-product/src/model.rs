@@ -6,7 +6,7 @@ use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RequestId};
 use serde::{Deserialize, Serialize};
 
-use crate::{PairingChannel, ProductIdentity};
+use crate::{PairingChannel, ProductIdentity, SourceLifecycle};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -314,6 +314,13 @@ pub struct TransferRecord {
     pub outcome: Option<Outcome>,
     pub facts: Facts,
     pub source_recoverable: bool,
+    /// Where this card's SEND source is in its acquisition, or that it needs
+    /// none. Record v5's addition, and the reason v4 is not readable: a v4
+    /// record has no honest value for this. A receiver decoded as
+    /// `AwaitingSelection`, or a sender defaulted to `NotRequired`, would each
+    /// be a card lying about what it is — which is exactly the class of default
+    /// this record type refuses elsewhere.
+    pub source: SourceLifecycle,
     /// The channel this card was frozen to at creation. Defaulted so pre-F2b
     /// records still decode.
     ///

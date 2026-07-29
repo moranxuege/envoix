@@ -10,7 +10,7 @@ use crate::identity::next_generation;
 use crate::{
     CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer, PauseOrigin,
     ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState, Quiescence,
-    SourceDecision, StorageAction, TransferRecord, WorkerKind,
+    SourceDecision, SourceLifecycle, StorageAction, TransferRecord, WorkerKind,
 };
 
 /// The domain tag that separates a card's source-duty request identity from its
@@ -93,6 +93,10 @@ impl TransferRecord {
         let record = Self {
             identity,
             direction: transfer.direction,
+            // A pure function of direction: a receiver needs no source, a
+            // sender is born asking for one. The two states that would
+            // contradict the card's own direction are unreachable from here.
+            source: SourceLifecycle::initial(transfer.direction),
             offered_name: transfer.offered_name,
             total: transfer.total,
             state,
