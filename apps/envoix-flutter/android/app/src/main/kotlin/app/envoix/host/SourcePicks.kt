@@ -60,25 +60,38 @@ object SourcePicks {
 
     /**
      * Records a pick FOR one acquisition and reads what the frontend may be
-     * told.
+     * told. Null when the provider will not describe it.
      *
-     * Put-if-absent, not replace: a second pick under a key that already has
-     * one is a repeat of an exchange already answered, and honouring it would
-     * change which document the outstanding acquire duty will bind. A user who
-     * genuinely wants a different file re-picks, which advances the generation
-     * and mints a new key.
+     * REPLACES an unclaimed pick under the same key. A second completion for an
+     * acquisition that is still selectable is a person correcting their choice,
+     * and it is the only way they can: the authority refuses `RePickSource`
+     * while the card is `Preparing`, because that state already has this ask
+     * outstanding. Put-if-absent silently answered with the FIRST file — the
+     * user chose again and was shown what they were replacing.
+     *
+     * Once the acquisition is BOUND the pick is settled: the same document is
+     * an idempotent repeat, and a different one has to wait for a new
+     * acquisition, because the duty has already been answered with the first.
      */
+    @Synchronized
     fun offer(
         context: Context,
         acquisition: SourceAcquisitionKeyView,
         uri: Uri,
-    ): Granted {
+    ): Granted? {
         val key = keyOf(acquisition)
-        val held = offered.putIfAbsent(key, uri) ?: uri
-        return describe(context, held)
+        bound[key]?.let { settled ->
+            return if (settled == uri) describe(context, settled) else null
+        }
+        offered[key] = uri
+        return describe(context, uri)
     }
 
-    /** Drops an unclaimed pick, for an exchange the authority did not accept. */
+    /**
+     * Drops an unclaimed pick — an exchange the authority did not accept, or a
+     * card that has gone away with a selection still in hand.
+     */
+    @Synchronized
     fun discard(acquisition: SourceAcquisitionKeyView) {
         offered.remove(keyOf(acquisition))
     }
@@ -139,6 +152,13 @@ object SourcePicks {
      * a crash after it leaves an unowned persisted grant, which [recover]
      * releases; doing these operations in the opposite order could retain a
      * dead card forever after a crash.
+     *
+     * Removal arrives naming a CARD, because that is what the authority durably
+     * removes — but a card owns one entry per acquisition it ever completed, so
+     * this releases EVERY entry the card owns. Looking up the card as a whole
+     * key found nothing once the journal became acquisition-keyed, and a
+     * removed card's grant would have been retained until an unrelated
+     * [recover] happened to notice it.
      */
     @Synchronized
     fun release(
@@ -146,16 +166,46 @@ object SourcePicks {
         card: String,
     ) {
         val journal = journal(context)
-        val owned = journal.getString(card, null)?.let(Uri::parse)
-        val sharedByAnotherCard =
-            owned != null &&
-                journal.all.any { (owner, uri) ->
-                    owner != card && uri == owned.toString()
-                }
-        bound.remove(card)
-        journal.edit().remove(card).commit()
-        if (owned != null && !sharedByAnotherCard) {
-            releaseGrant(context, owned)
+        val prefix = "$card-"
+        val owned: Map<String, String> =
+            journal
+                .all
+                .asSequence()
+                .filter { (key, value) -> key.startsWith(prefix) && value is String }
+                .associate { (key, value) -> key to value as String }
+        if (owned.isEmpty()) {
+            bound.keys.removeAll { it.startsWith(prefix) }
+            return
+        }
+        val survivors: Set<String> =
+            journal
+                .all
+                .asSequence()
+                .filter { (key, _) -> !owned.containsKey(key) }
+                .mapNotNull { (_, value) -> value as? String }
+                .toSet()
+        bound.keys.removeAll { it.startsWith(prefix) }
+        // An unclaimed selection goes too. The durable card is gone, so nothing
+        // will ever claim it, and leaving it here holds the URI and its
+        // transient grant for the life of the process.
+        offered.keys.removeAll { it.startsWith(prefix) }
+        val edit = journal.edit()
+        owned.keys.forEach(edit::remove)
+        if (!edit.commit()) {
+            // The entries are still ownership on disk, so nothing may be
+            // released against them. Releasing anyway would leave a stale owner
+            // that later makes a genuinely orphaned grant look owned — to this
+            // function AND to `recover`, which trusts every journal value — and
+            // the grant would then be retained forever. The removal is re-issued
+            // idempotently by the authority's outbox, so failing closed here is
+            // a retry rather than a loss.
+            return
+        }
+        // A URI another acquisition still owns is not this card's to release.
+        // Two cards CAN name one document: nothing stops a person choosing the
+        // same file twice.
+        owned.values.toSet().filterNot(survivors::contains).forEach { uri ->
+            releaseGrant(context, Uri.parse(uri))
         }
     }
 
@@ -203,15 +253,20 @@ object SourcePicks {
         }
     }
 
+    /** Null when the provider will not say what the document is. */
     private fun describe(
         context: Context,
         uri: Uri,
-    ): Granted {
+    ): Granted? {
         val projection =
             arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
         return context.contentResolver
             .query(uri, projection, null, null, null)
             ?.use { cursor ->
+                // A provider that answers no row has not described the
+                // document. An empty name and no size is what an EXISTING file
+                // with neither looks like, and the capability contract has
+                // `metadata_unavailable` precisely so the two stay apart.
                 if (!cursor.moveToFirst()) {
                     return@use null
                 }
@@ -224,7 +279,7 @@ object SourcePicks {
                     // size as advisory either way.
                     sizeBytes = if (size >= 0 && !cursor.isNull(size)) cursor.getLong(size) else null,
                 )
-            } ?: Granted(displayName = "", sizeBytes = null)
+            }
     }
 
     private const val OWNERSHIP_JOURNAL = "envoix-source-ownership"

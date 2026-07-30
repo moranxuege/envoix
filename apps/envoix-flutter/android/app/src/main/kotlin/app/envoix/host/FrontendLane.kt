@@ -149,9 +149,26 @@ class FrontendLane(
                 }
                 // One at a time: a second request while one is open would leave
                 // the first `Result` unanswered, which a `MethodChannel` treats
-                // as a leak.
+                // as a leak. The refusal is an ANSWER on the contract rather
+                // than a channel error — a frontend that got `unavailable` here
+                // would read a busy picker as a missing adapter.
                 if (picking != null) {
-                    result.error(PICK_IN_FLIGHT, "a source pick is already open", null)
+                    result.success(
+                        EnvoixCapabilityCodec
+                            .encode(
+                                CapabilityExchangeView.PickSource(
+                                    PickSourceExchangeView(
+                                        acquisition = exchange.value.acquisition,
+                                        step =
+                                            PickSourceStepView.Failed(
+                                                PickSourceFailureReasonView(
+                                                    PickSourceFailureView.INTERNAL,
+                                                ),
+                                            ),
+                                    ),
+                                ),
+                            ).toByteArray(Charsets.UTF_8),
+                    )
                     return
                 }
                 picking = result
@@ -362,9 +379,6 @@ class FrontendLane(
          * "empty file" were the same value.
          */
         const val CAPABILITY = "capability"
-
-        /** A pick was requested while one was already open. */
-        const val PICK_IN_FLIGHT = "pick-in-flight"
 
         /** A scan was requested while one was already open. */
         const val SCAN_IN_FLIGHT = "scan-in-flight"

@@ -437,3 +437,53 @@ fn unknown_vocabulary_is_refused() {
     let unknown_capability = good.replace("scan_invite", "scan_face");
     assert!(decode_capability_frame(unknown_capability.as_bytes()).is_err());
 }
+
+/// The acquisition key is spelled in THREE schemas, and they must agree.
+///
+/// The generator has no cross-schema reference, so a type two contracts both
+/// need is declared once per contract (EH-20). That was tolerable while the
+/// duplication was `CommandView`/`CommandKindView`, which a gate already
+/// compares. It is not tolerable unchecked for this one: read/9 publishes the
+/// acquisition, a frontend carries it to its adapter over capability/2, and it
+/// comes back to the authority inside command/5's source offer. Three spellings
+/// of one identity, on one round trip.
+///
+/// If they ever differ, the failure is silent in the worst way — a field that
+/// encodes under one contract and decodes as absent or shifted under another,
+/// binding a document to an acquisition nobody asked for. Two gates already
+/// have to subtract or hide this name to stay honest, which is the smell that
+/// made this necessary; it does not remove the duplication, it removes the
+/// possibility of a divergence going unnoticed.
+#[test]
+fn the_acquisition_key_is_one_shape_in_every_contract_that_carries_it() {
+    fn declaration(schema: &str) -> Vec<(String, String)> {
+        let doc = envoix_bindings::parse_schema(schema).expect("schema parses");
+        let Some(Decl::Struct(decl)) = doc.find("SourceAcquisitionKeyView") else {
+            panic!("this contract does not declare the acquisition key");
+        };
+        decl.fields
+            .iter()
+            .map(|field| (field.name.clone(), format!("{:?}", field.ty)))
+            .collect()
+    }
+
+    let capability = declaration(envoix_bindings::capability_schema_text());
+    assert_eq!(
+        capability,
+        declaration(envoix_bindings::read_schema_text()),
+        "read and capability disagree about the acquisition key"
+    );
+    assert_eq!(
+        capability,
+        declaration(envoix_bindings::command_schema_text()),
+        "command and capability disagree about the acquisition key"
+    );
+    // Vacuity: three empty lists would agree too.
+    assert_eq!(
+        capability
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["card", "generation", "request"],
+    );
+}

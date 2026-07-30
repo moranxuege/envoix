@@ -64,7 +64,13 @@ class MainActivity : FlutterActivity() {
             lane?.sourcePickFailed(PickSourceFailureView.PICKER_UNAVAILABLE)
             return
         }
-        startActivityForResult(intent, REQUEST_PICK_SOURCE)
+        // Launching can still throw — a provider disabled between the resolve
+        // and the start, a restricted profile. The exchange answers either way.
+        runCatching { startActivityForResult(intent, REQUEST_PICK_SOURCE) }
+            .onFailure {
+                pickingFor = null
+                lane?.sourcePickFailed(PickSourceFailureView.PICKER_UNAVAILABLE)
+            }
     }
 
     /**
@@ -99,15 +105,32 @@ class MainActivity : FlutterActivity() {
             return
         }
         val uri = data?.data.takeIf { resultCode == Activity.RESULT_OK }
+        if (uri == null) {
+            lane?.sourcePicked(null)
+            return
+        }
+        // A pick owns no durable capability. The grant is taken only when a
+        // committed card claims this URI through its source duty, which gives
+        // it a lifecycle owner — and it is recorded under the ACQUISITION that
+        // asked, so a later generation cannot inherit it.
+        //
+        // Every failure here answers the EXCHANGE. An uncaught throw would
+        // leave the frontend's method result unanswered, which the channel
+        // treats as a leak and a person experiences as a picker that did
+        // nothing.
         val granted =
-            uri?.let {
-                // A pick owns no durable capability. The grant is taken only
-                // when a committed card claims this URI through its source
-                // duty, which gives it a lifecycle owner — and it is recorded
-                // under the ACQUISITION that asked, so a later generation cannot
-                // inherit it.
-                SourcePicks.offer(this, acquisition, it)
-            }
+            runCatching { SourcePicks.offer(this, acquisition, uri) }
+                .getOrElse {
+                    lane?.sourcePickFailed(PickSourceFailureView.INTERNAL)
+                    return
+                }
+        if (granted == null) {
+            // Either the provider would not describe the document, or the
+            // acquisition is already bound to a different one. Both are the
+            // platform failing to answer, not a person declining.
+            lane?.sourcePickFailed(PickSourceFailureView.METADATA_UNAVAILABLE)
+            return
+        }
         lane?.sourcePicked(granted)
     }
 
