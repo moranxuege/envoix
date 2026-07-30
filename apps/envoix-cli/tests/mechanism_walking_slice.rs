@@ -749,13 +749,27 @@ fn plan_pair(
 }
 
 fn transfer_spec() -> AttemptTransferSpec {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&source_bytes());
     AttemptTransferSpec {
         offered_name: OfferedName::from_untrusted("walking-slice.bin").unwrap(),
         file_size: ByteCount::new(SOURCE_SIZE as u64),
         chunk_size: ByteCount::new(CHUNK_SIZE),
         claimed_complete: None,
+        // What staging would have established. A send states what it intends to
+        // send, and this slice's source is deterministic, so it can say so
+        // exactly — including across the resume, which re-reads the same bytes.
+        content_hash: Some(ContentHash::from_bytes(*hasher.finalize().as_bytes())),
         timeouts: attempt_timeouts(),
     }
+}
+
+/// The deterministic payload this slice sends, in one place so the spec's
+/// digest and the file on disk cannot drift apart.
+fn source_bytes() -> Vec<u8> {
+    (0..SOURCE_SIZE)
+        .map(|index| ((index * 31 + index / 251) % 256) as u8)
+        .collect()
 }
 
 fn supervisors() -> (SharedAttemptSupervisor, SharedAttemptSupervisor) {
@@ -775,9 +789,7 @@ fn assert_same_file(expected: &[u8], actual: &[u8]) {
 async fn headless_end_to_end_transfer_and_resume() {
     init_tracing();
     let directory = TempDir::new().unwrap();
-    let source_bytes = (0..SOURCE_SIZE)
-        .map(|index| ((index * 31 + index / 251) % 256) as u8)
-        .collect::<Vec<_>>();
+    let source_bytes = source_bytes();
     let source_path = directory.path().join("source.bin");
     fs::write(&source_path, &source_bytes).unwrap();
 

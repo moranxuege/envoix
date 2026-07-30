@@ -334,11 +334,17 @@ fn plan(direction: Direction, generation: u32, resume: ResumeIntent) -> AttemptP
 }
 
 fn spec(bytes: &[u8]) -> AttemptTransferSpec {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(bytes);
     AttemptTransferSpec {
         offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
         file_size: ByteCount::new(bytes.len() as u64),
         chunk_size: ByteCount::new(1024),
         claimed_complete: None,
+        // What staging would have established over exactly these bytes. A send
+        // states what it intends to send, so a spec built for a source must say
+        // what that source hashes to.
+        content_hash: Some(ContentHash::from_bytes(*hasher.finalize().as_bytes())),
         timeouts: attempt_timeouts(),
     }
 }

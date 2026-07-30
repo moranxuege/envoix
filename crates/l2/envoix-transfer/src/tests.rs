@@ -22,20 +22,28 @@ fn transfer_id(byte: u8) -> TransferId {
     TransferId::from_bytes([byte; 16])
 }
 
-fn request(
-    id: TransferId,
-    file_size: usize,
-    chunk_size: usize,
-    resume: ResumeMode,
-) -> SenderRequest {
+/// A send request over exactly `bytes`.
+///
+/// Takes the bytes rather than their length because the request now states what
+/// they must hash to, and a length cannot say that. A test whose source and
+/// request disagree is testing the mismatch guard, which is what
+/// [`a_source_that_changed_under_the_sender_cannot_complete`] does deliberately.
+fn request(id: TransferId, bytes: &[u8], chunk_size: usize, resume: ResumeMode) -> SenderRequest {
     SenderRequest::new(
         id,
         OfferedName::from_untrusted("report.bin").unwrap(),
-        ByteCount::new(file_size as u64),
+        ByteCount::new(bytes.len() as u64),
         ByteCount::new(chunk_size as u64),
         resume,
+        hash_of(bytes),
     )
     .unwrap()
+}
+
+fn hash_of(bytes: &[u8]) -> ContentHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(bytes);
+    ContentHash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 struct MemorySource {
@@ -245,6 +253,50 @@ fn failure<T>(result: Result<T, MachineFailure>) -> MachineFailure {
     }
 }
 
+/// A provider that swaps the document under a live send cannot complete it.
+///
+/// The sender hashes what it reads and puts that hash into `Complete`. Without
+/// an expectation to hold it against, a document replaced mid-send produced a
+/// `Complete` declaring the NEW bytes' hash, the receiver verified against that,
+/// and both sides agreed on a file the authority never staged — the exact
+/// failure the staged digest exists to prevent, silently passing every check.
+///
+/// The bytes are still on the wire when this fires. That is the accepted cost of
+/// reading the source twice: the network is wasted, the transfer is not wrong.
+#[test]
+fn a_source_that_changed_under_the_sender_cannot_complete() {
+    let id = transfer_id(31);
+    let staged = vec![7_u8; 8];
+    let promised = request(id, &staged, 4, ResumeMode::Allowed);
+
+    // The provider answers different bytes of the same length — the case a size
+    // check cannot see.
+    let mut source = MemorySource::new(vec![9_u8; 8]);
+    let mut sink = MemorySink::default();
+    let (sender, _receiver) = begin(promised, &mut source, &mut sink, None).unwrap();
+    let (sender, _) = one_sender_chunk(sender, &mut source);
+    let (sender, _) = one_sender_chunk(sender, &mut source);
+
+    assert_eq!(
+        failure(sender.next_frame(&mut source)).error(),
+        TransferError::IntegrityMismatch,
+        "a swapped document completed as if it were the staged one"
+    );
+
+    // And the same drive over the bytes the request names DOES complete, so the
+    // refusal above is not passing because completion is unreachable.
+    let honest = request(id, &staged, 4, ResumeMode::Allowed);
+    let mut source = MemorySource::new(staged);
+    let mut sink = MemorySink::default();
+    let (sender, _receiver) = begin(honest, &mut source, &mut sink, None).unwrap();
+    let (sender, _) = one_sender_chunk(sender, &mut source);
+    let (sender, _) = one_sender_chunk(sender, &mut source);
+    assert!(matches!(
+        sender.next_frame(&mut source).unwrap(),
+        SenderStep::Complete { .. }
+    ));
+}
+
 #[test]
 fn transfer_resume_hash_characterization() {
     full_transfer_and_short_reads();
@@ -262,7 +314,7 @@ fn full_transfer_and_short_reads() {
     let mut source = MemorySource::new(bytes.clone());
     source.max_read = 2;
     let mut sink = MemorySink::default();
-    let request = request(id, bytes.len(), 4, ResumeMode::Allowed);
+    let request = request(id, &bytes, 4, ResumeMode::Allowed);
     let (sender, receiver) = begin(request, &mut source, &mut sink, None).unwrap();
     let driven = drive(sender, receiver, &mut source, &mut sink).unwrap();
 
@@ -281,7 +333,7 @@ fn matching_resume_sends_only_tail() {
     let bytes = (0_u8..20).collect::<Vec<_>>();
     let mut source = MemorySource::new(bytes.clone());
     let mut sink = MemorySink::default();
-    let request = request(id, bytes.len(), 4, ResumeMode::Allowed);
+    let request = request(id, &bytes, 4, ResumeMode::Allowed);
     let (mut sender, mut receiver) = begin(request.clone(), &mut source, &mut sink, None).unwrap();
 
     for _ in 0..2 {
@@ -312,7 +364,7 @@ fn corrupted_prefix_restarts_both_sides() {
     let bytes = (20_u8..40).collect::<Vec<_>>();
     let mut source = MemorySource::new(bytes.clone());
     let mut sink = MemorySink::default();
-    let request = request(id, bytes.len(), 4, ResumeMode::Allowed);
+    let request = request(id, &bytes, 4, ResumeMode::Allowed);
     let (sender, receiver) = begin(request.clone(), &mut source, &mut sink, None).unwrap();
     let (sender, first) = one_sender_chunk(sender, &mut source);
     let receiver = continue_receiver(receiver, first, &mut sink);
@@ -346,7 +398,7 @@ fn claim_complete_redelivers_ack_without_chunks() {
         file_size: ByteCount::new(bytes.len() as u64),
         file_hash: known_hash,
     };
-    let transfer_request = request(id, bytes.len(), 4, ResumeMode::Allowed);
+    let transfer_request = request(id, &bytes, 4, ResumeMode::Allowed);
     let mut sink = MemorySink::default();
 
     let mut source = MemorySource::new(bytes.clone());
@@ -392,7 +444,7 @@ fn claim_complete_redelivers_ack_without_chunks() {
     );
 
     let mut source = MemorySource::new(bytes);
-    let request = request(id, claim.file_size.get() as usize, 4, ResumeMode::Allowed);
+    let request = request(id, &source.bytes.clone(), 4, ResumeMode::Allowed);
     let (_sender, receiver) = begin(request, &mut source, &mut sink, Some(claim)).unwrap();
     let mismatch = Frame::Complete(Complete {
         transfer_id: id,
@@ -411,7 +463,7 @@ fn fresh_offer_ignores_claim_complete() {
         file_size: ByteCount::new(bytes.len() as u64),
         file_hash: ContentHash::from_bytes(*blake3::hash(&bytes).as_bytes()),
     };
-    let request = request(id, bytes.len(), 4, ResumeMode::Disabled);
+    let request = request(id, &bytes, 4, ResumeMode::Disabled);
     let mut source = MemorySource::new(bytes.clone());
     let mut sink = MemorySink::default();
     let (sender, receiver) = begin(request, &mut source, &mut sink, Some(claim)).unwrap();
@@ -489,7 +541,7 @@ fn exact_ingress_and_resume_validation() {
 fn completion_order_and_strict_ack() {
     let id = transfer_id(6);
     let bytes = b"verify-before-seal".to_vec();
-    let request = request(id, bytes.len(), 4, ResumeMode::Allowed);
+    let request = request(id, &bytes, 4, ResumeMode::Allowed);
     let mut source = MemorySource::new(bytes.clone());
     let mut sink = MemorySink::default();
     let (mut sender, mut receiver) = begin(request.clone(), &mut source, &mut sink, None).unwrap();
@@ -561,7 +613,7 @@ fn completion_order_and_strict_ack() {
 fn exact_chunk_failure(chunk: Chunk) -> TransferError {
     let id = transfer_id(5);
     let bytes = vec![7; 10];
-    let request = request(id, bytes.len(), 4, ResumeMode::Allowed);
+    let request = request(id, &bytes, 4, ResumeMode::Allowed);
     let mut source = MemorySource::new(bytes);
     let mut sink = MemorySink::default();
     let (_sender, receiver) = begin(request, &mut source, &mut sink, None).unwrap();
@@ -575,7 +627,7 @@ fn exact_chunk_failure(chunk: Chunk) -> TransferError {
 
 fn chunk_size_mismatch_is_refused() {
     let id = transfer_id(7);
-    let request = request(id, 8, 4, ResumeMode::Allowed);
+    let request = request(id, &[0_u8; 8], 4, ResumeMode::Allowed);
     let (sender, hello) = sender_start(request, DEADLINE);
     let receiver = receiver_start(ByteCount::new(8), DEADLINE).unwrap();
     let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
@@ -593,7 +645,7 @@ fn chunk_size_mismatch_is_refused() {
 
 fn oversized_resume_is_refused() {
     let id = transfer_id(8);
-    let request = request(id, 8, 4, ResumeMode::Allowed);
+    let request = request(id, &[0_u8; 8], 4, ResumeMode::Allowed);
     let mut source = MemorySource::new(vec![0; 8]);
     let (sender, _hello) = sender_start(request, DEADLINE);
     let (sender, header) = sender
@@ -619,7 +671,7 @@ fn oversized_resume_is_refused() {
 
 fn disabled_resume_is_refused() {
     let id = transfer_id(13);
-    let request = request(id, 8, 4, ResumeMode::Disabled);
+    let request = request(id, &[0_u8; 8], 4, ResumeMode::Disabled);
     let mut source = MemorySource::new(vec![0; 8]);
     let (sender, _hello) = sender_start(request, DEADLINE);
     let (sender, _header) = sender
@@ -639,7 +691,7 @@ fn disabled_resume_is_refused() {
 
 fn inconsistent_resume_fact_is_refused() {
     let id = transfer_id(9);
-    let request = request(id, 8, 4, ResumeMode::Allowed);
+    let request = request(id, &[0_u8; 8], 4, ResumeMode::Allowed);
     let mut source = MemorySource::new(vec![0; 8]);
     let mut sink = MemorySink::default();
     sink.staged.insert(id, vec![0; 4]);
@@ -684,7 +736,7 @@ fn storage_injected_fault_resume() {
     let bytes = (0..CHECKPOINT_INTERVAL as usize + chunk_size + 17)
         .map(|index| index as u8)
         .collect::<Vec<_>>();
-    let request = request(id, bytes.len(), chunk_size, ResumeMode::Allowed);
+    let request = request(id, &bytes, chunk_size, ResumeMode::Allowed);
     let mut source = MemorySource::new(bytes.clone());
     let mut sink = MemorySink {
         fail_append_at: Some(8),
@@ -745,7 +797,9 @@ fn storage_injected_fault_resume() {
 #[test]
 fn transfer_wait_closure() {
     let id = transfer_id(11);
-    let request = request(id, 4, 4, ResumeMode::Allowed);
+    // `[1; 4]` because this case drives a send to completion below, and a
+    // request now states what its source must hash to.
+    let request = request(id, &[1_u8; 4], 4, ResumeMode::Allowed);
     let (ready, hello) = sender_start(request.clone(), DEADLINE);
     assert_eq!(
         failure(ready.deadline_exceeded(EXPIRED)).error(),

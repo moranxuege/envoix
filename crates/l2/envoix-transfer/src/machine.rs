@@ -39,6 +39,15 @@ pub struct SenderRequest {
     file_size: ByteCount,
     chunk_size: ByteCount,
     resume: ResumeMode,
+    /// What the source must hash to — staging's own digest.
+    ///
+    /// Required, not optional. The sender hashes what it reads and declares that
+    /// in `Complete`, so without an expectation to hold it against, a provider
+    /// that swapped the document produced a `Complete` for the NEW bytes, the
+    /// receiver verified against that, and both sides agreed on a file the
+    /// authority never staged. Taking it here rather than comparing at a call
+    /// site means a sender cannot exist without stating what it intends to send.
+    content_hash: ContentHash,
 }
 
 impl SenderRequest {
@@ -48,6 +57,7 @@ impl SenderRequest {
         file_size: ByteCount,
         chunk_size: ByteCount,
         resume: ResumeMode,
+        content_hash: ContentHash,
     ) -> Result<Self, TransferError> {
         validate_chunk_size(chunk_size.get()).map_err(TransferError::Protocol)?;
         Ok(Self {
@@ -56,6 +66,7 @@ impl SenderRequest {
             file_size,
             chunk_size,
             resume,
+            content_hash,
         })
     }
 
@@ -69,6 +80,10 @@ impl SenderRequest {
 
     pub const fn chunk_size(&self) -> ByteCount {
         self.chunk_size
+    }
+
+    pub const fn content_hash(&self) -> ContentHash {
+        self.content_hash
     }
 }
 
@@ -357,6 +372,20 @@ impl SenderSending {
     ) -> Result<SenderStep, MachineFailure> {
         if self.offset == self.request.file_size.get() {
             let file_hash = content_hash(&self.hasher);
+            // What was READ is what was staged, or this send does not complete.
+            //
+            // The bytes are already on the wire — the network is wasted either
+            // way — but a `Complete` is a claim about which file was sent, and
+            // declaring the hash of whatever turned up would make a swapped
+            // document indistinguishable from the one the user chose. Refusing
+            // here is what makes `Ready`'s digest mean something after the fact
+            // rather than only at the moment staging ran.
+            if file_hash != self.request.content_hash {
+                return Err(MachineFailure::from_engine_error(
+                    TransferError::IntegrityMismatch,
+                    self.request.transfer_id,
+                ));
+            }
             let completed = SenderCompleted {
                 transfer_id: self.request.transfer_id,
                 file_size: self.request.file_size,

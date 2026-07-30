@@ -12,7 +12,8 @@ use envoix_auth::{
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_pairing::{DataPlaneToken, EntropySource};
 use envoix_protocol::{
-    Abort, Frame, MAX_FRAME_SIZE, ProtocolReason, ResumeMode, decode_frame, encode_frame,
+    Abort, ContentHash, Frame, MAX_FRAME_SIZE, ProtocolReason, ResumeMode, decode_frame,
+    encode_frame,
 };
 use envoix_session_iroh::{
     AuthFailureBudget, CloseOrdering, IrohListener, PathObservation, SessionCancellation,
@@ -79,7 +80,13 @@ pub struct AttemptTransferSpec {
     pub offered_name: OfferedName,
     pub file_size: ByteCount,
     pub chunk_size: ByteCount,
+    /// The receiver's durable claim about a prior run. Receive only.
     pub claimed_complete: Option<ClaimedComplete>,
+    /// What the source must hash to — staging's own digest. Send only, and
+    /// required for a send: without it the sender declares the hash of whatever
+    /// it happened to read, so a swapped document completes as if it were the
+    /// chosen one. A send that cannot state it does not start.
+    pub content_hash: Option<ContentHash>,
     pub timeouts: AttemptTimeouts,
 }
 
@@ -821,12 +828,20 @@ async fn transfer_sender(
     events: &mpsc::UnboundedSender<AttemptEvent>,
     stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
 ) -> Terminal {
+    // No staged digest, no send. The card cannot reach an attempt without a
+    // `Ready` source, which is unconstructible without one, so this is the
+    // composition root failing to carry it rather than a state the authority can
+    // produce — and sending anyway would be sending bytes nobody can vouch for.
+    let Some(content_hash) = spec.content_hash else {
+        return Terminal::from_transfer_error(TransferError::IntegrityMismatch);
+    };
     let request = match SenderRequest::new(
         plan.transfer,
         spec.offered_name.clone(),
         spec.file_size,
         spec.chunk_size,
         resume_mode(plan),
+        content_hash,
     ) {
         Ok(request) => request,
         Err(error) => return Terminal::from_transfer_error(error),
