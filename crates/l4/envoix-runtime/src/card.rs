@@ -1,14 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptStamp, AttemptSupervisor, EventAdmission,
-    RetirementAckResult,
+    RetirementAckResult, RetirementIntent,
 };
 use envoix_capabilities::AdmittedSourceResult;
 use envoix_product::{
     AcceptedSourceOffer, ApplyOutcome, CommandApplied, CommittedSession, IdentityError, LedgerHit,
     ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, RecordStore,
-    SourceOfferAnswer,
+    SourceLifecycle, SourceOfferAnswer, StagedContent, TransferContent,
 };
 use envoix_types::{CommandId, RecordId};
 use tokio::runtime::Handle;
@@ -18,7 +18,10 @@ use tokio::task::AbortHandle;
 
 use crate::command::{CommandCompletion, FrontendVerdict};
 use crate::error::CommandRejected;
-use crate::port::{AttemptExecution, AttemptExecutor, ExecutorSignal, StopHandle};
+use crate::port::{
+    AttemptExecution, AttemptExecutor, ExecutorSignal, SourceStagingExecution,
+    SourceStagingExecutor, SourceStagingSignal, StopHandle,
+};
 use crate::runtime::Shared;
 use crate::subscription::{RecordUpdateKind, SubscriptionEpoch};
 
@@ -52,12 +55,43 @@ pub(crate) enum CardMessage {
     /// Internal, not frontend-originated: it carries an `AdmittedSourceResult`,
     /// which only a `DutyLedger` can mint, so there is no epoch gate and no
     /// commander check — the authority commissioned this work itself.
-    SourceSettled(Box<AdmittedSourceResult>),
+    SourceSettled {
+        /// The token lives in a cell rather than in the message because
+        /// `AdmittedSourceResult` is deliberately not `Clone` — a duty result
+        /// the ledger admitted exactly once must not become two. A delivery
+        /// round that never ran leaves the cell full and can try again; one that
+        /// ran leaves it empty, and emptiness is what says so.
+        result: Arc<Mutex<Option<AdmittedSourceResult>>>,
+        /// Acked once the result has been APPLIED, not merely received.
+        applied: oneshot::Sender<()>,
+    },
     Shutdown(oneshot::Sender<()>),
     Signal {
         stamp: AttemptStamp,
         signal: ExecutorSignal,
     },
+    /// One observation from the source-staging worker. Stamped like an
+    /// attempt's, so a signal from a superseded generation is dropped by the
+    /// same rule rather than by a second one.
+    SourceStagingSignal {
+        stamp: AttemptStamp,
+        signal: SourceStagingSignal,
+    },
+}
+
+/// The live source-staging worker's control, shaped exactly like the attempt's
+/// and for the same reason: dropping it both requests the stop and aborts the
+/// pump, so no forwarder outlives the worker it serves.
+struct StagingMeta {
+    stamp: AttemptStamp,
+    stop: StopHandle,
+    pump: AbortHandle,
+}
+
+impl Drop for StagingMeta {
+    fn drop(&mut self) {
+        self.pump.abort();
+    }
 }
 
 /// The live attempt's control: its stop handle plus the pump task forwarding its
@@ -82,6 +116,11 @@ impl Drop for AttemptMeta {
 pub(crate) struct CardActor<R: RecordStore, E: AttemptExecutor> {
     shared: Arc<Shared>,
     executor: Arc<E>,
+    /// Injected as `dyn` rather than a third generic: the trait is object-safe,
+    /// starting one worker per card is not a hot path, and a generic here would
+    /// have rippled through every `Runtime<..>` signature in the workspace for
+    /// no property the compiler was not already giving us.
+    staging_executor: Arc<dyn SourceStagingExecutor>,
     card: RecordId,
     // `Option` so `Drop` can free the admission permit BEFORE the registry
     // entry is removed — see the `Drop` impl.
@@ -93,6 +132,7 @@ pub(crate) struct CardActor<R: RecordStore, E: AttemptExecutor> {
     inbox: mpsc::Sender<CardMessage>,
     inbox_rx: mpsc::Receiver<CardMessage>,
     current: Option<AttemptMeta>,
+    staging: Option<StagingMeta>,
     initial: Option<ApplyOutcome>,
 }
 
@@ -118,9 +158,15 @@ impl<R: RecordStore, E: AttemptExecutor> Drop for CardActor<R, E> {
 
 impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
     #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every one is a distinct injected dependency or lease; grouping \
+                  them would hide which the actor OWNS from which it borrows"
+    )]
     pub(crate) fn new(
         shared: Arc<Shared>,
         executor: Arc<E>,
+        staging_executor: Arc<dyn SourceStagingExecutor>,
         card: RecordId,
         permit: OwnedSemaphorePermit,
         session: CommittedSession<R>,
@@ -131,6 +177,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
         Self {
             shared,
             executor,
+            staging_executor,
             card,
             permit: Some(permit),
             session: Some(session),
@@ -138,6 +185,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             inbox,
             inbox_rx,
             current: None,
+            staging: None,
             initial: Some(initial),
         }
     }
@@ -201,8 +249,12 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 self.on_source_offer(epoch, *offer, answer);
                 false
             }
-            CardMessage::SourceSettled(result) => {
-                let _ = self.apply(ProductInput::SourceSettled(*result));
+            CardMessage::SourceSettled { result, applied } => {
+                let taken = result.lock().unwrap_or_else(PoisonError::into_inner).take();
+                if let Some(result) = taken {
+                    let _ = self.apply(ProductInput::SourceSettled(result));
+                    let _ = applied.send(());
+                }
                 false
             }
             CardMessage::Shutdown(reply) => {
@@ -221,6 +273,16 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                     .is_some_and(|meta| meta.stamp == stamp)
                 {
                     self.on_signal(stamp, signal);
+                }
+                false
+            }
+            CardMessage::SourceStagingSignal { stamp, signal } => {
+                if self
+                    .staging
+                    .as_ref()
+                    .is_some_and(|meta| meta.stamp == stamp)
+                {
+                    self.on_staging_signal(stamp, signal);
                 }
                 false
             }
@@ -430,11 +492,31 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                     _ => self.try_ack(stamp),
                 }
             }
-            ProductEffect::RetireStaging { stamp } => {
-                // RT1 runs no separate staging worker, so its retirement is
-                // acknowledged synchronously. A real staging executor is deferred.
-                let _ = self.apply(ProductInput::StagingRetired { stamp });
+            ProductEffect::StartSourceStaging { plan } => {
+                let SourceStagingExecution { signals, stop } = self.staging_executor.start(plan);
+                let pump = spawn_staging_pump(
+                    &self.shared.handle,
+                    self.inbox.clone(),
+                    plan.stamp,
+                    signals,
+                );
+                self.staging = Some(StagingMeta {
+                    stamp: plan.stamp,
+                    stop,
+                    pump,
+                });
             }
+            ProductEffect::RetireStaging { stamp } => match self.staging.as_mut() {
+                // Live worker: ask it to stop, and acknowledge only when it
+                // reports `Stopped` — so the source handles are proven released
+                // before the reducer sees the retirement. This used to be
+                // acknowledged synchronously, which was honest only while no
+                // worker existed.
+                Some(meta) if meta.stamp == stamp => meta.stop.stop(RetirementIntent::Finalize),
+                _ => {
+                    let _ = self.apply(ProductInput::StagingRetired { stamp });
+                }
+            },
             ProductEffect::CapabilityDuty { duty, action } => {
                 self.shared.observe_duty(self.card, duty, action);
                 // Executing the platform duty and admitting its result are BN /
@@ -475,6 +557,42 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
         }
     }
 
+    /// One observation from the source-staging worker, as a product input.
+    ///
+    /// The reducer owns every guard — a stale stamp, a card that is no longer
+    /// preparing, a total below the progress already reported. This only
+    /// translates, and it drops the worker on `Stopped` so the retirement the
+    /// reducer asked for is acknowledged with the handles proven released.
+    fn on_staging_signal(&mut self, stamp: AttemptStamp, signal: SourceStagingSignal) {
+        let input = match signal {
+            SourceStagingSignal::Progress(transferred) => {
+                ProductInput::StageProgress { stamp, transferred }
+            }
+            SourceStagingSignal::Established { total, digest } => {
+                let name = match &self.session().record().source {
+                    // The name staging establishes is the one the accepted offer
+                    // carried, normalized by the authority. A worker does not
+                    // get to rename the document it read.
+                    SourceLifecycle::Staging { offer, .. } => offer.display_name().clone(),
+                    // Not staging any more: the reducer will refuse this anyway,
+                    // and the input still has to be well formed to say so.
+                    _ => return,
+                };
+                ProductInput::StageComplete {
+                    stamp,
+                    content: StagedContent::new(TransferContent::new(name, total), digest),
+                }
+            }
+            SourceStagingSignal::Failed => ProductInput::StageFailed { stamp },
+            SourceStagingSignal::Stopped => {
+                self.staging = None;
+                let _ = self.apply(ProductInput::StagingRetired { stamp });
+                return;
+            }
+        };
+        let _ = self.apply(input);
+    }
+
     fn try_ack(&mut self, stamp: AttemptStamp) {
         if let RetirementAckResult::Acknowledged(ack) =
             self.supervisor.acknowledge_retirement(stamp)
@@ -499,6 +617,27 @@ fn is_terminal_state(state: ProductState) -> bool {
 /// the attempt stamp so a superseded attempt's stragglers are ignored. Returns
 /// the pump's abort handle so its owning [`AttemptMeta`] can guarantee teardown
 /// even if the executor never closes its signal stream.
+fn spawn_staging_pump(
+    handle: &Handle,
+    inbox: mpsc::Sender<CardMessage>,
+    stamp: AttemptStamp,
+    mut signals: mpsc::Receiver<SourceStagingSignal>,
+) -> AbortHandle {
+    handle
+        .spawn(async move {
+            while let Some(signal) = signals.recv().await {
+                if inbox
+                    .send(CardMessage::SourceStagingSignal { stamp, signal })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .abort_handle()
+}
+
 fn spawn_pump(
     handle: &Handle,
     inbox: mpsc::Sender<CardMessage>,

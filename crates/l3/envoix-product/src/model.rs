@@ -1,14 +1,14 @@
 use envoix_attempt_api::{
     AdmittedAttemptEvent, AttemptPlan, AttemptStamp, RetirementAck, RetirementIntent,
 };
-use envoix_capabilities::{AdmittedDutyResult, AdmittedSourceResult, Duty};
+use envoix_capabilities::{AdmittedDutyResult, AdmittedSourceResult, Duty, SourceAcquisitionKey};
 use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, RequestId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceptedSourceOffer, PairingChannel, ProductIdentity, RoomParticipation, SourceLifecycle,
-    StagedContent,
+    StagedContent, StagingPlan,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -209,11 +209,39 @@ pub enum StorageAction {
     TombstoneCard,
 }
 
+/// What the authority commissioned of a source-staging worker.
+///
+/// The acquisition is the WHOLE key. A plan naming only the card could be served
+/// by a document chosen for a superseded generation, which is the ownership
+/// defect the key exists to close.
+///
+/// Shaped like [`AttemptPlan`] and for the same reason: the authority states
+/// which work this is, and the executor resolves how. Nothing here is a handle,
+/// a path or a URI — the platform holds those under the acquisition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceStagingPlan {
+    pub stamp: AttemptStamp,
+    pub acquisition: SourceAcquisitionKey,
+    /// Stream from the provider, or copy into app-private bytes first. DERIVED
+    /// by the reducer from what the platform reported, never chosen by a worker.
+    pub plan: StagingPlan,
+    /// Where a copy left off. Zero for a stream, which has no durable prefix.
+    pub resume_from: ByteCount,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "effect")]
 pub enum ProductEffect {
     StartAttempt {
         plan: AttemptPlan,
+    },
+    /// Read the card's chosen document through, so `Ready` can mean "we know
+    /// these bytes" rather than "a provider once claimed a length".
+    ///
+    /// Post-commit like every other world-facing effect: the card is durably
+    /// `Staging` before any worker touches the source.
+    StartSourceStaging {
+        plan: SourceStagingPlan,
     },
     RetireAttempt {
         stamp: AttemptStamp,

@@ -1,6 +1,6 @@
 use envoix_attempt_api::{AttemptEventKind, AttemptPlan, RetirementIntent};
-use envoix_product::{CommittedSession, RecordStore};
-use envoix_types::RecordId;
+use envoix_product::{CommittedSession, ContentHash, RecordStore, SourceStagingPlan};
+use envoix_types::{ByteCount, RecordId};
 use tokio::sync::{mpsc, oneshot};
 
 /// Restores the durable authority for a card from the operation store.
@@ -44,6 +44,75 @@ pub enum ExecutorSignal {
     /// The executor crossed its single irreversible commit point.
     CommitCrossed,
     /// The executor stopped and released its lease and handles.
+    Stopped,
+}
+
+/// Establishes what a card's chosen document actually contains, injected by the
+/// composition root.
+///
+/// The `Source` prefix is deliberate. `StagingSink` is the RECEIVE side's
+/// checkpoint/append port (`envoix-transfer`), and `DutyKind::Staging` is an
+/// unrelated dormant capability arm. Two collisions, avoided by naming.
+///
+/// The work is a read-through: for the streaming case it writes nothing at all
+/// and produces a counted total and a digest, which is what makes `Ready` mean
+/// "we know these bytes" rather than "we once observed a length". A copy is the
+/// exceptional path — a grant a restart would lose, or a source that cannot
+/// seek — and it is the same signals with bytes landing somewhere.
+pub trait SourceStagingExecutor: Send + Sync + 'static {
+    /// Begin establishing `plan`, returning the runtime's view of its signals.
+    fn start(&self, plan: SourceStagingPlan) -> SourceStagingExecution;
+}
+
+/// A platform that stages no sources at all.
+///
+/// Every plan fails, immediately and honestly: this host cannot read a document,
+/// so a card that reaches `Staging` on it returns to asking for one rather than
+/// waiting on a worker that will never report. Shipped rather than left to each
+/// caller for the reason `NoRecordStore` is — a stub every test writes for
+/// itself is a stub every test can get subtly wrong, and "it never answers" is
+/// the wrong one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoSourceStaging;
+
+impl SourceStagingExecutor for NoSourceStaging {
+    fn start(&self, _plan: SourceStagingPlan) -> SourceStagingExecution {
+        let (signals_tx, signals) = mpsc::channel(2);
+        let (stop, _token) = stop_channel();
+        // Sent before the receiver is handed back, which the capacity above
+        // makes non-blocking: a worker that answered nothing would leave the
+        // card retiring forever.
+        let _ = signals_tx.try_send(SourceStagingSignal::Failed);
+        let _ = signals_tx.try_send(SourceStagingSignal::Stopped);
+        SourceStagingExecution { signals, stop }
+    }
+}
+
+/// The runtime's handle onto one running source-staging worker.
+pub struct SourceStagingExecution {
+    pub signals: mpsc::Receiver<SourceStagingSignal>,
+    pub stop: StopHandle,
+}
+
+/// One observation from a source-staging worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceStagingSignal {
+    /// Bytes observed so far. Coalesced by the same bounded lane the attempt's
+    /// progress uses: a multi-gigabyte read must not flood anything, and the
+    /// newest count is the only one that matters.
+    Progress(ByteCount),
+    /// The source was read through. `total` is COUNTED, never the provider's
+    /// claim, and `digest` identifies the bytes that were counted — without it
+    /// "staged" would mean only "once observed a length", and a provider could
+    /// swap the document across a restart.
+    Established {
+        total: ByteCount,
+        digest: ContentHash,
+    },
+    /// The source could not be read through. Distinct from an acquisition
+    /// failure: the platform DID hold it, and reading is what failed.
+    Failed,
+    /// The worker stopped and released its handles.
     Stopped,
 }
 
@@ -99,6 +168,21 @@ impl StopToken {
     /// never an authorized cancellation.
     pub async fn stopped(self) -> StopSignal {
         self.signal.await.unwrap_or(StopSignal::Detached)
+    }
+
+    /// Whether a stop has been requested, without waiting for one.
+    ///
+    /// A worker doing BLOCKING work — reading a multi-gigabyte file through —
+    /// can only notice a stop between chunks. Awaiting would mean it noticed by
+    /// finishing, which is not noticing.
+    pub fn requested(&mut self) -> Option<StopSignal> {
+        match self.signal.try_recv() {
+            Ok(signal) => Some(signal),
+            // A dropped handle is a teardown: the runtime that owned this worker
+            // is gone, so stopping is the only honest thing left.
+            Err(oneshot::error::TryRecvError::Closed) => Some(StopSignal::Detached),
+            Err(oneshot::error::TryRecvError::Empty) => None,
+        }
     }
 }
 

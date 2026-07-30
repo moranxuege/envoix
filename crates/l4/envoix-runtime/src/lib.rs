@@ -68,16 +68,17 @@ pub use envoix_attempt_api::RetirementIntent;
 pub use envoix_capabilities::{Duty, DutyKind, DutyProvenance};
 pub use envoix_evidence::{EvidenceSink, EvidenceSinkError};
 pub use envoix_product::{
-    AcceptedSourceOffer, CapabilityAction, CommandLedger, MAX_BROKER_LENGTH,
+    AcceptedSourceOffer, CapabilityAction, CommandLedger, ContentHash, MAX_BROKER_LENGTH,
     MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_RELAY_LENGTH, MAX_ROOM_CODE_LENGTH,
     NewTransfer, PairingChannel, PauseOrigin, ProductCommand, ProductIdentity, ProductState,
     QrMatrix, Quiescence, RoomParticipation, SelectionGate, SourceAcquisitionKey, SourceLifecycle,
-    SourceOfferAnswer, SourcePromptReason, SystemIdentitySource, TransferContent, TransferRecord,
-    WorkerKind,
+    SourceOfferAnswer, SourcePromptReason, SourceStagingPlan, SystemIdentitySource,
+    TransferContent, TransferRecord, WorkerKind,
 };
 pub use error::{AcquireError, CommandRejected};
 pub use port::{
-    AttemptExecution, AttemptExecutor, ExecutorSignal, SessionProvider, StopHandle, StopSignal,
+    AttemptExecution, AttemptExecutor, ExecutorSignal, NoSourceStaging, SessionProvider,
+    SourceStagingExecution, SourceStagingExecutor, SourceStagingSignal, StopHandle, StopSignal,
     StopToken, stop_channel,
 };
 pub use runtime::{Runtime, ShutdownReport};

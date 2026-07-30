@@ -1005,6 +1005,7 @@ dependencies = [
 name = "envoix-host-android"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "envoix-attempt-api",
  "envoix-attempt-iroh",
  "envoix-bindings",

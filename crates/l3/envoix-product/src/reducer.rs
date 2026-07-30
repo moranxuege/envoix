@@ -13,8 +13,8 @@ use crate::identity::next_generation;
 use crate::{
     AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
     PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
-    Quiescence, SelectionGate, SourceLifecycle, SourceOfferAnswer, StagedContent, StagingPlan,
-    StorageAction, TransferContent, TransferRecord, WorkerKind,
+    Quiescence, SelectionGate, SourceLifecycle, SourceOfferAnswer, SourceStagingPlan,
+    StagedContent, StagingPlan, StorageAction, TransferContent, TransferRecord, WorkerKind,
 };
 
 /// The domain tag that separates a card's source-duty request identity from its
@@ -489,17 +489,24 @@ impl TransferRecord {
                 retention,
                 seekability,
             } => {
-                self.source = SourceLifecycle::staging(
-                    offer,
-                    retention,
-                    StagingPlan::for_source(retention, seekability),
-                );
-                // The staging worker owns the card from here. Nothing starts it
-                // yet — the executor is Step 4 — so this states which worker
-                // the card is waiting on, exactly as creation used to.
+                let plan = StagingPlan::for_source(retention, seekability);
+                self.source = SourceLifecycle::staging(offer, retention, plan);
                 self.quiescence = Quiescence::Running {
                     worker: WorkerKind::Staging,
                 };
+                // The staging worker owns the card from here, and this is what
+                // starts it — post-commit, so the card is durably `Staging`
+                // before anything touches the document.
+                return vec![ProductEffect::StartSourceStaging {
+                    plan: SourceStagingPlan {
+                        stamp: self.stamp(),
+                        acquisition: result.acquisition(),
+                        plan,
+                        // A stream has no durable prefix; a copy resuming one is
+                        // the restore path, which supplies its own offset.
+                        resume_from: ByteCount::new(0),
+                    },
+                }];
             }
             SourceReport::Failed(failure) => {
                 // The generation is NOT advanced here. Only `RePickSource`

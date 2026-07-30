@@ -13,19 +13,25 @@ use envoix_bindings::command::{
     LocalDirectionView, MintRoomView, SourceAcquisitionKeyView, SourceOfferAnswerView,
     SourceOfferOutcomeView, SourceOfferView, decode_command_frame, encode_command_frame,
 };
-use envoix_bindings::read::{CardActionView, CardUpdateKindView, ReadBody, decode_read_frame};
-use envoix_capabilities::{SourceReport, SourceRetention, SourceSeekability};
-use envoix_host_android::{CardStores, FramePoll, Host, HostStore};
+use envoix_bindings::read::{
+    CardActionView, CardUpdateKindView, ReadBody, SourceLifecycleView, decode_read_frame,
+};
+use envoix_capabilities::{
+    DutyProvenance, SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
+};
+use envoix_host_android::{
+    BoundSourceRegistry, CardStores, FileSourceStaging, FramePoll, Host, HostStore,
+};
 use envoix_operation_store::{ArtifactKey, OperationStore, PossessionState};
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_platform_android::{Work, WorkOrder, WorkReport};
 use envoix_product::{
     CommittedSession, NewTransfer, ProductCommand, ProductEffect, ProductInput, ProductState,
-    SourceLifecycle, StagingPlan, SystemIdentitySource, TransferRecord,
+    SourceBacking, SourceLifecycle, SourcePromptReason, SystemIdentitySource, TransferRecord,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
-use envoix_types::{Direction, OfferedName, RecordId};
+use envoix_types::{AttemptGen, Direction, OfferedName, RecordId, RequestId};
 
 fn open_store(root: &std::path::Path, card: RecordId) -> OperationStore<LocalStorage> {
     let storage = LocalStorage::open(root).expect("storage opens");
@@ -546,34 +552,174 @@ fn an_admitted_acquisition_moves_the_card_out_of_acquiring() {
     // And the card moved. Streaming, because the platform promised a persisted
     // grant on a seekable source — the one product of the four that needs no
     // copy.
+    // The card RESTS at re-pick, because this host stages nothing — `Host::boot`
+    // injects `NoSourceStaging` until the Android source session lands, and it
+    // answers `Failed` at once. That resting state is the whole proof: the
+    // reason is `StagingFailed`, which is reachable from `Staging` and from
+    // nowhere else. So a card carrying it left `Acquiring`, which no card could
+    // do before duty/2.
+    //
+    // The transit itself is deliberately NOT asserted on the lane. Replaceable
+    // projection updates coalesce, so a state a card passes through in
+    // microseconds may legitimately never be published — waiting for one is
+    // waiting on something the lane does not promise, and it times out about
+    // one run in ten.
     let card = order.provenance.to_provenance().card;
-    let record = wait_for_staging(root.path(), card);
-    let SourceLifecycle::Staging { plan, .. } = &record.source else {
-        panic!("the card did not reach staging: {:?}", record.source);
-    };
-    assert_eq!(*plan, StagingPlan::ProviderStream);
-
     host.shutdown();
+    let record = durable_record(root.path(), card);
+    let SourceLifecycle::AwaitingSelection(gate) = &record.source else {
+        panic!(
+            "a card no host can stage did not return to asking: {:?}",
+            record.source
+        );
+    };
+    assert_eq!(gate.reason(), SourcePromptReason::StagingFailed);
 }
 
-/// The durable record, once the card has left `Acquiring`. Bounded: a card that
-/// never moves must FAIL this rather than park it. Read from the STORE, so what
-/// is asserted is what a fresh process would find.
-fn wait_for_staging(root: &std::path::Path, card: RecordId) -> TransferRecord {
+/// Watches the LANE until the card's published source reaches `want`.
+///
+/// Through the frame lane, not the store. A test that polls the operation store
+/// while the host is live opens a SECOND store on a card that already has one,
+/// which is exactly what `one_live_store_per_card_serializes_every_writer`
+/// forbids — and it reads torn revisions for its trouble. What a frontend sees
+/// is observable; what is on disk is checked once, after shutdown.
+fn drain_until_source(
+    host: &Host,
+    token: envoix_host_android::AttachmentToken,
+    want: fn(&SourceLifecycleView) -> bool,
+) -> SourceLifecycleView {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut last = None;
     while std::time::Instant::now() < deadline {
-        let operation = open_store(root, card);
-        if let Some(bytes) = operation.latest_record() {
-            let envoix_product::RecordDecode::Loaded(record) =
-                envoix_product::decode_record(bytes).expect("the durable record decodes")
-            else {
-                panic!("this build wrote a record it cannot read");
-            };
-            if !matches!(record.source, SourceLifecycle::Acquiring(_)) {
-                return *record;
+        match host.poll_frame(token) {
+            FramePoll::Frame(bytes) => {
+                let ReadBody::CardUpdate(update) =
+                    decode_read_frame(&bytes).expect("a read frame").body
+                else {
+                    continue;
+                };
+                let source = match update.kind {
+                    CardUpdateKindView::Snapshot(view)
+                    | CardUpdateKindView::Progress(view)
+                    | CardUpdateKindView::State(view)
+                    | CardUpdateKindView::Terminal(view) => view.source,
+                    CardUpdateKindView::CapabilityDuty(_) => continue,
+                };
+                if want(&source) {
+                    return source;
+                }
+                last = Some(source);
             }
+            FramePoll::Drained => std::thread::sleep(Duration::from_millis(25)),
+            FramePoll::Superseded => panic!("the attachment was superseded"),
         }
-        std::thread::sleep(Duration::from_millis(25));
     }
-    panic!("the card never left Acquiring");
+    panic!("the card never reached the expected source state; it rested at {last:?}");
+}
+
+/// The durable record, read ONCE with no live host competing for the store.
+fn durable_record(root: &std::path::Path, card: RecordId) -> TransferRecord {
+    let operation = open_store(root, card);
+    let bytes = operation.latest_record().expect("a committed record");
+    let envoix_product::RecordDecode::Loaded(record) =
+        envoix_product::decode_record(bytes).expect("the durable record decodes")
+    else {
+        panic!("this build wrote a record it cannot read");
+    };
+    *record
+}
+
+/// A card reaches `Ready`, and `Ready` says which bytes.
+///
+/// The edge that had no producer AND no port. `Staging → Ready` needs a counted
+/// total and a digest of the bytes that were counted — without the digest,
+/// "staged" means only "once observed a length", and a provider could swap the
+/// document across a restart. Nothing read anything, so no card had ever left
+/// `Staging`.
+///
+/// Driven through the real worker over a real file, so what is asserted is what
+/// the reader actually produced.
+#[test]
+fn staging_reads_the_source_through_and_ready_says_which_bytes() {
+    let root = tempfile::tempdir().expect("tempdir");
+    // Larger than the worker's read chunk, so the loop runs more than once and
+    // progress is a sequence rather than a single report.
+    let contents: Vec<u8> = (0..(600 * 1024_u32)).map(|byte| byte as u8).collect();
+    let source = root.path().join("chosen.bin");
+    std::fs::write(&source, &contents).expect("the source is written");
+
+    let registry = BoundSourceRegistry::default();
+    let host = Host::boot_with_staging(root.path(), FileSourceStaging::new(registry.clone()))
+        .expect("the host boots");
+    host.intent(
+        &encode_command_frame(&CommandFrame {
+            body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+                intent: CreateIntentView::MintRoom(MintRoomView {
+                    local_direction: LocalDirectionView::Send,
+                }),
+                request_id: "33".repeat(16),
+            })),
+        })
+        .expect("the create encodes"),
+    )
+    .expect("the authority answers the create");
+
+    let token = host.open_lane();
+    let acquisition = published_acquisition(&host, token);
+    // The platform binds the document under the acquisition that asked for it,
+    // exactly as Android's registry does — never by card alone.
+    registry.bind(
+        SourceAcquisitionKey::of(DutyProvenance {
+            card: RecordId::new(u64::from_str_radix(&acquisition.card, 16).expect("hex card")),
+            generation: AttemptGen::new(acquisition.generation),
+            request: RequestId::from_bytes(
+                u128::from_str_radix(&acquisition.request, 16)
+                    .expect("hex request")
+                    .to_be_bytes(),
+            ),
+        }),
+        source,
+    );
+    host.intent(&offer_bytes(&acquisition, "chosen.bin", Some(1)))
+        .expect("the authority answers the offer");
+
+    let order = poll_work(&host).expect("an accepted offer dispatches the handle duty");
+    let order = WorkOrder::decode(&order).expect("the order decodes");
+    let report = WorkReport::source(
+        order.provenance.to_provenance(),
+        SourceReport::Acquired {
+            retention: SourceRetention::Persisted,
+            seekability: SourceSeekability::Seekable,
+        },
+    );
+    assert!(host.report_duty(&report.encode().expect("the report encodes")));
+
+    drain_until_source(&host, token, |source| {
+        matches!(source, SourceLifecycleView::Ready(_))
+    });
+
+    let card = order.provenance.to_provenance().card;
+    host.shutdown();
+    let record = durable_record(root.path(), card);
+    let SourceLifecycle::Ready { content, .. } = &record.source else {
+        panic!("the card did not reach ready: {:?}", record.source);
+    };
+    // Streaming: the platform promised a persisted grant on a seekable source,
+    // the one product of the four that needs no copy — so nothing was written.
+    let SourceLifecycle::Ready { backing, .. } = &record.source else {
+        unreachable!("matched above")
+    };
+    assert_eq!(*backing, SourceBacking::PersistedProvider);
+
+    // COUNTED, not claimed. The offer reported one byte; the authority never
+    // promoted that, and what `Ready` carries is what the worker read.
+    assert_eq!(content.total().get(), contents.len() as u64);
+    assert_eq!(
+        content.content_hash(),
+        envoix_product::ContentHash::from_bytes(*blake3::hash(&contents).as_bytes()),
+        "Ready identifies bytes the worker did not read"
+    );
+    // And the name is the accepted offer's, normalized by the authority — a
+    // worker does not get to rename the document it read.
+    assert_eq!(content.name().as_str(), "chosen.bin");
 }

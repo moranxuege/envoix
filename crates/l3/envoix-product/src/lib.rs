@@ -26,8 +26,8 @@ pub use envoix_invite::{
 pub use identity::{IdentityError, IdentitySource, ProductIdentity, SystemIdentitySource};
 pub use model::{
     AppliedCommand, CapabilityAction, CommandLedger, Facts, LedgerHit, NewTransfer, PauseOrigin,
-    ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, StorageAction,
-    TransferRecord, WorkerKind,
+    ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, SourceStagingPlan,
+    StorageAction, TransferRecord, WorkerKind,
 };
 pub use pairing::PairingChannel;
 pub use participation::RoomParticipation;

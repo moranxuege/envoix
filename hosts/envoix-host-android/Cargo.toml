@@ -40,6 +40,7 @@ getrandom.workspace = true
 # points by BUILDING this cdylib and reading its exported symbols, and a claim
 # about a compiled artifact is worth more than one about source text.
 jni = "0.21"
+blake3.workspace = true
 tokio = { workspace = true }
 
 [dev-dependencies]

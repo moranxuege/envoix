@@ -28,8 +28,8 @@ use envoix_product::{
 use envoix_runtime::{
     AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, CommandCompletion,
     CommandVerdict, DutyKind, EvidenceSink, EvidenceSinkError, ExecutorSignal, LosslessUpdateKind,
-    Runtime, RuntimeConfig, SessionProvider, ShutdownReport, StopSignal, SubscribeError,
-    TryRecvError, stop_channel,
+    NoSourceStaging, Runtime, RuntimeConfig, SessionProvider, ShutdownReport, StopSignal,
+    SubscribeError, TryRecvError, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -465,6 +465,7 @@ async fn evidence_failure_is_non_authoritative() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
         evidence.clone(),
     );
 
@@ -533,6 +534,7 @@ async fn runtime_lease_shutdown_hibernate_restore() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
 
     // --- exclusive lease + shared handle (idempotent bootstrap) ---
@@ -570,6 +572,7 @@ async fn runtime_lease_shutdown_hibernate_restore() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
     runtime.restore(card).unwrap();
     // Restore reconciles + commits, then the quiescent card hibernates (owns no
@@ -612,6 +615,7 @@ async fn supervision_panic_does_not_wedge_runtime() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -649,6 +653,7 @@ async fn admission_rejects_over_cap() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
 
     let (first, first_outcome) = create_session(root, Direction::Send, 0x10);
@@ -702,6 +707,7 @@ async fn detach_reattach_epoch_backpressure() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -784,6 +790,7 @@ async fn terminal_events_and_duties_never_dropped() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
 
     let (session, outcome) = create_session(root, Direction::Receive, 0x60);
@@ -897,6 +904,7 @@ async fn an_outstanding_source_duty_is_replayed_to_every_attachment() {
         config(8),
         OpStoreProvider { root: root.into() },
         ScriptedExecutor::new(Script::RunUntilStop),
+        NoSourceStaging,
     );
     let (session, initial) = create_awaiting_session(root, 0x2b);
     let card = session.record().identity.card;
@@ -979,6 +987,7 @@ async fn removed_card_evicts_projection() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -1021,6 +1030,7 @@ async fn reissued_duty_supersedes_not_accumulates() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
 
     let (session, outcome) = create_session(root, Direction::Receive, 0x60);
@@ -1123,6 +1133,7 @@ async fn stop_intent_reaches_the_executor() {
                 root: root.to_path_buf(),
             },
             executor.clone(),
+            NoSourceStaging,
         );
 
         let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -1159,6 +1170,7 @@ async fn teardown_reaches_the_executor_as_detached_not_cancel() {
             root: root.to_path_buf(),
         },
         executor.clone(),
+        NoSourceStaging,
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x11);

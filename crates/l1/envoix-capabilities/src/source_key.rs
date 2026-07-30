@@ -19,6 +19,7 @@
 //! document to an attempt that has moved on.
 
 use envoix_types::{AttemptGen, RecordId, RequestId};
+use serde::{Deserialize, Serialize};
 
 use crate::DutyProvenance;
 
@@ -27,7 +28,7 @@ use crate::DutyProvenance;
 /// Equality is over all three fields, and that is the point: a value that
 /// matches the card but not the generation, or the generation but not the
 /// request, is a DIFFERENT acquisition and must not be honoured.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct SourceAcquisitionKey {
     card: RecordId,
     generation: AttemptGen,

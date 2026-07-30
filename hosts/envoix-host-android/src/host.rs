@@ -30,7 +30,8 @@ use envoix_product::{
 };
 use envoix_runtime::{
     AcceptedSourceOffer, CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict,
-    Runtime, RuntimeConfig, SourceOfferAnswer, SubscribeError, TransferRecord, TryRecvError,
+    NoSourceStaging, Runtime, RuntimeConfig, SourceOfferAnswer, SubscribeError, TransferRecord,
+    TryRecvError,
 };
 use envoix_storage_local::LocalStorage;
 use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId, RequestId};
@@ -315,6 +316,22 @@ impl Host {
     /// durable card, then drains each card's destructive outbox (AFTER
     /// restore — never inside it), then attaches the frame pump.
     pub fn boot(root: &Path) -> Result<Self, BootError> {
+        // Android's source session is the next slice. Until it exists this host
+        // stages nothing, and a card that reaches `Staging` returns to asking
+        // for a document rather than waiting on a worker that will never
+        // report — the honest shape, not a silent hang.
+        Self::boot_with_staging(root, NoSourceStaging)
+    }
+
+    /// Boots with a chosen source-staging worker.
+    ///
+    /// The composition root is where an L4 port is implemented, so this is where
+    /// the choice belongs. The CLI and the off-device tests hand in the
+    /// filesystem worker; Android will hand in its content-URI session.
+    pub fn boot_with_staging(
+        root: &Path,
+        staging: impl envoix_runtime::SourceStagingExecutor,
+    ) -> Result<Self, BootError> {
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -334,6 +351,7 @@ impl Host {
                 config,
                 provider,
                 PreparedIrohExecutor::default(),
+                staging,
                 EvidenceIntake(Arc::clone(&evidence)),
             ))
         };
@@ -737,7 +755,9 @@ impl Host {
         // the F-phase slice it always was.
         match admitted.into_source() {
             Some(source) => {
-                self.runtime.deliver_source_result(source);
+                let runtime = Arc::clone(&self.runtime);
+                self.tokio
+                    .block_on(async move { runtime.deliver_source_result(source).await });
                 true
             }
             None => true,

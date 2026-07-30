@@ -20,7 +20,7 @@ use crate::command::{CommandTicket, CommandVerdict, FrontendVerdict};
 use crate::config::RuntimeConfig;
 use crate::error::{AcquireError, CommandRejected};
 use crate::evidence::EvidencePublisher;
-use crate::port::{AttemptExecutor, SessionProvider};
+use crate::port::{AttemptExecutor, SessionProvider, SourceStagingExecutor};
 use crate::subscription::{
     CardSubscription, RecordUpdateKind, SubscribeError, SubscriptionEpoch, SubscriptionPublisher,
     subscription_channel,
@@ -266,6 +266,8 @@ pub struct Runtime<P: SessionProvider, E: AttemptExecutor> {
     shared: Arc<Shared>,
     provider: Arc<P>,
     executor: Arc<E>,
+    /// Injected as `dyn` rather than a third generic — see `CardActor`.
+    staging: Arc<dyn SourceStagingExecutor>,
 }
 
 impl<P: SessionProvider, E: AttemptExecutor> Clone for Runtime<P, E> {
@@ -274,6 +276,7 @@ impl<P: SessionProvider, E: AttemptExecutor> Clone for Runtime<P, E> {
             shared: self.shared.clone(),
             provider: self.provider.clone(),
             executor: self.executor.clone(),
+            staging: self.staging.clone(),
         }
     }
 }
@@ -281,8 +284,19 @@ impl<P: SessionProvider, E: AttemptExecutor> Clone for Runtime<P, E> {
 impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
     /// Builds the runtime. Must be called within a Tokio runtime; the host owns
     /// the reactor and RT1 holds its handle.
-    pub fn start(config: RuntimeConfig, provider: P, executor: E) -> Self {
-        Self::start_inner(config, provider, executor, EvidencePublisher::default())
+    pub fn start(
+        config: RuntimeConfig,
+        provider: P,
+        executor: E,
+        staging: impl SourceStagingExecutor,
+    ) -> Self {
+        Self::start_inner(
+            config,
+            provider,
+            executor,
+            Arc::new(staging),
+            EvidencePublisher::default(),
+        )
     }
 
     /// Builds the runtime with a typed evidence sink.
@@ -294,15 +308,23 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         config: RuntimeConfig,
         provider: P,
         executor: E,
+        staging: impl SourceStagingExecutor,
         sink: S,
     ) -> Self {
-        Self::start_inner(config, provider, executor, EvidencePublisher::new(sink))
+        Self::start_inner(
+            config,
+            provider,
+            executor,
+            Arc::new(staging),
+            EvidencePublisher::new(sink),
+        )
     }
 
     fn start_inner(
         config: RuntimeConfig,
         provider: P,
         executor: E,
+        staging: Arc<dyn SourceStagingExecutor>,
         evidence: EvidencePublisher,
     ) -> Self {
         let admission = Arc::new(Semaphore::new(config.max_live_cards.get()));
@@ -321,6 +343,7 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
             }),
             provider: Arc::new(provider),
             executor: Arc::new(executor),
+            staging,
         }
     }
 
@@ -536,16 +559,53 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
     /// currently asking for, so waking a card that has moved on costs a restore
     /// and changes nothing.
     ///
-    /// One round, not three. Unlike a command there is no caller waiting on a
-    /// verdict — the duty ledger has already admitted this exactly once, and a
-    /// lost race means the answer is re-delivered by the adapter's own replay.
-    pub fn deliver_source_result(&self, result: AdmittedSourceResult) -> bool {
+    /// Three rounds, exactly like a command, and for the same reason. A send
+    /// that SUCCEEDS into an actor which then exits without draining leaves the
+    /// message dead in a dropped inbox — and unlike a command there is no
+    /// frontend to re-issue it, so a lost round would strand the card on an
+    /// answer the ledger has already admitted and will never admit again.
+    ///
+    /// The ack resolves when the result has been APPLIED, not when it was
+    /// received, so a dropped sender is unambiguous evidence the message did
+    /// not land. Redelivery is safe: the reducer is inert unless the result
+    /// names the acquisition the card is currently asking for.
+    pub async fn deliver_source_result(&self, result: AdmittedSourceResult) -> bool {
         let card = result.acquisition().card();
-        let message = CardMessage::SourceSettled(Box::new(result));
-        match self.inbox(card) {
-            Some(inbox) => inbox.try_send(message).is_ok(),
-            None => self.restore_with_message(card, message).is_ok(),
+        let result = Arc::new(Mutex::new(Some(result)));
+        for _ in 0..3 {
+            let (applied_tx, applied_rx) = oneshot::channel();
+            let message = CardMessage::SourceSettled {
+                result: Arc::clone(&result),
+                applied: applied_tx,
+            };
+            match self.inbox(card) {
+                Some(inbox) => {
+                    if inbox.send(message).await.is_err() {
+                        continue;
+                    }
+                }
+                None => {
+                    if self.restore_with_message(card, message).is_err() {
+                        continue;
+                    }
+                }
+            }
+            if applied_rx.await.is_ok() {
+                return true;
+            }
+            // No ack. Either the message died in an exiting actor's inbox — the
+            // token is still in the cell and the next round rebuilds it — or the
+            // actor took it and went away mid-apply, which the empty cell says
+            // and no retry can improve on.
+            if result
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none()
+            {
+                return true;
+            }
         }
+        false
     }
 
     /// Restores a hibernated card with `message` already queued on its fresh
@@ -758,6 +818,7 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         let actor = CardActor::new(
             self.shared.clone(),
             self.executor.clone(),
+            self.staging.clone(),
             card,
             permit,
             session,

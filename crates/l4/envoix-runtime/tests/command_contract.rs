@@ -16,8 +16,8 @@ use envoix_product::{
     ProductCommand, ProductState, RecordDecode, RecordStore, TransferRecord, decode_record,
 };
 use envoix_runtime::{
-    AttemptExecution, AttemptExecutor, CommandCompletion, CommandRejected, CommandVerdict, Runtime,
-    RuntimeConfig, SessionProvider, stop_channel,
+    AttemptExecution, AttemptExecutor, CommandCompletion, CommandRejected, CommandVerdict,
+    NoSourceStaging, Runtime, RuntimeConfig, SessionProvider, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -289,6 +289,7 @@ async fn mutating_hot_restart_exactly_once() {
             script: script.clone(),
         },
         InertExecutor,
+        NoSourceStaging,
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -320,6 +321,7 @@ async fn mutating_hot_restart_exactly_once() {
             script: script.clone(),
         },
         InertExecutor,
+        NoSourceStaging,
     );
     runtime.restore(card).unwrap();
     let commander = runtime.subscribe(card, CAPACITY).unwrap();
@@ -380,6 +382,7 @@ async fn mutating_hot_restart_exactly_once() {
             script: script.clone(),
         },
         InertExecutor,
+        NoSourceStaging,
     );
     runtime.restore(second).unwrap();
     let commander = runtime.subscribe(second, CAPACITY).unwrap();
@@ -422,6 +425,7 @@ async fn stale_epoch_commands_are_inert() {
             script: script.clone(),
         },
         InertExecutor,
+        NoSourceStaging,
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -506,6 +510,7 @@ async fn acceptance_is_not_completion() {
             script: script.clone(),
         },
         InertExecutor,
+        NoSourceStaging,
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -576,6 +581,7 @@ async fn reused_identity_with_different_command_conflicts() {
             script: script.clone(),
         },
         InertExecutor,
+        NoSourceStaging,
     );
     let (session, outcome) = create_card(root, &script, 0x70);
     let card = session.record().identity.card;
@@ -649,6 +655,7 @@ async fn interrupted_command_disambiguates_after_restore() {
             script: script.clone(),
         },
         InertExecutor,
+        NoSourceStaging,
     );
     let (session, outcome) = create_card(root, &script, 0x80);
     let card = session.record().identity.card;
