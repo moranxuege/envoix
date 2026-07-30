@@ -784,9 +784,20 @@ impl Host {
         match admitted.into_source() {
             Some(source) => {
                 let runtime = Arc::clone(&self.runtime);
+                // The delivery ANSWER, not a discarded one. `true` here told the
+                // platform its work had landed even when every delivery round
+                // failed and the card was left in `Acquiring` with the duty
+                // discharged — the one state in which nothing re-asks.
+                //
+                // Reporting the failure does not by itself recover it: the
+                // ledger has already admitted this provenance, so a re-report
+                // would be refused as a duplicate. What recovers it is restore —
+                // an `Acquiring` card re-issues its source duty, and the ledger
+                // is process memory rebuilt at boot, so the re-issued duty is
+                // genuinely outstanding again. Until then the honest answer is
+                // that this did not land.
                 self.tokio
-                    .block_on(async move { runtime.deliver_source_result(source).await });
-                true
+                    .block_on(async move { runtime.deliver_source_result(source).await })
             }
             None => true,
         }

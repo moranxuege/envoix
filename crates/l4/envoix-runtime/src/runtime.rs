@@ -571,11 +571,14 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
     /// names the acquisition the card is currently asking for.
     pub async fn deliver_source_result(&self, result: AdmittedSourceResult) -> bool {
         let card = result.acquisition().card();
-        let result = Arc::new(Mutex::new(Some(result)));
         for _ in 0..3 {
             let (applied_tx, applied_rx) = oneshot::channel();
+            // A CLONE per round. The result is admitted once by the ledger and
+            // accepted once by the reducer; what travels here is a copy of that
+            // decision, so a round that fails costs nothing and the next one
+            // carries the same answer.
             let message = CardMessage::SourceSettled {
-                result: Arc::clone(&result),
+                result: result.clone(),
                 applied: applied_tx,
             };
             match self.inbox(card) {
@@ -590,18 +593,14 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
                     }
                 }
             }
+            // The acknowledgement is sent only by an actor that APPLIED and
+            // committed the answer, so it means what it says. An unacknowledged
+            // round is a round to repeat: the message may have died in an
+            // exiting actor's inbox, or the actor may have committed and gone
+            // away before answering — and a repeat of the second case is inert
+            // at the reducer, which accepts a settled answer only from
+            // `Acquiring` under the exact key.
             if applied_rx.await.is_ok() {
-                return true;
-            }
-            // No ack. Either the message died in an exiting actor's inbox — the
-            // token is still in the cell and the next round rebuilds it — or the
-            // actor took it and went away mid-apply, which the empty cell says
-            // and no retry can improve on.
-            if result
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .is_none()
-            {
                 return true;
             }
         }

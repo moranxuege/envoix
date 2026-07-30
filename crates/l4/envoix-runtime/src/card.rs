@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptStamp, AttemptSupervisor, EventAdmission,
@@ -57,13 +57,19 @@ pub(crate) enum CardMessage {
     /// which only a `DutyLedger` can mint, so there is no epoch gate and no
     /// commander check — the authority commissioned this work itself.
     SourceSettled {
-        /// The token lives in a cell rather than in the message because
-        /// `AdmittedSourceResult` is deliberately not `Clone` — a duty result
-        /// the ledger admitted exactly once must not become two. A delivery
-        /// round that never ran leaves the cell full and can try again; one that
-        /// ran leaves it empty, and emptiness is what says so.
-        result: Arc<Mutex<Option<AdmittedSourceResult>>>,
-        /// Acked once the result has been APPLIED, not merely received.
+        /// The admitted answer itself, by value.
+        ///
+        /// It used to travel in a shared cell, so that a move-only token could
+        /// be handed to one of several delivery rounds and emptiness would say
+        /// which round took it. That made an actor which died between taking and
+        /// committing indistinguishable from one that succeeded — the cell was
+        /// empty either way — and the caller reported the loss as a delivery.
+        /// Exactly-once is the ledger's guarantee and the reducer's, not this
+        /// message's, so a copy per round is free and can be repeated.
+        result: AdmittedSourceResult,
+        /// Acked once the result has been APPLIED and committed, not merely
+        /// received. An ack for anything less discharges a duty whose answer
+        /// nothing acted on.
         applied: oneshot::Sender<()>,
     },
     Shutdown(oneshot::Sender<()>),
@@ -251,9 +257,12 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 false
             }
             CardMessage::SourceSettled { result, applied } => {
-                let taken = result.lock().unwrap_or_else(PoisonError::into_inner).take();
-                if let Some(result) = taken {
-                    let _ = self.apply(ProductInput::SourceSettled(result));
+                // Acknowledged only when the answer was actually applied and
+                // committed. Acknowledging regardless discharged the duty for a
+                // result the card never took, and the host had no way to learn
+                // it: the platform is told its work is done and the card sits in
+                // `Acquiring` with nothing outstanding.
+                if self.apply(ProductInput::SourceSettled(result)).is_ok() {
                     let _ = applied.send(());
                 }
                 false

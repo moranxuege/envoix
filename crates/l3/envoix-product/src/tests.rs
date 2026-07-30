@@ -2713,6 +2713,44 @@ fn a_source_answer_for_another_acquisition_moves_nothing() {
     ));
 }
 
+/// The SAME admitted answer, delivered twice, moves the card once.
+///
+/// This is what makes delivery from the ledger to the card safe to repeat, and
+/// therefore what lets a delivery round that was not acknowledged simply run
+/// again. Without it the runtime had to hand out a move-only token and treat its
+/// disappearance as proof of success — which an actor that died mid-apply also
+/// produced.
+#[test]
+fn the_same_source_answer_delivered_twice_moves_the_card_once() {
+    let (mut card, _) = create(Direction::Send);
+    card.reduce(ProductInput::SourceOffered {
+        offer: offer(&card, STAGED_NAME, None),
+    })
+    .unwrap();
+    let acquiring = card.clone();
+
+    // Built once and delivered twice, exactly as a repeated delivery round
+    // carries the same admitted answer.
+    let ProductInput::SourceSettled(admitted) = settled(&card.clone(), acquired()) else {
+        panic!("the helper builds a settled source answer");
+    };
+    card.reduce(ProductInput::SourceSettled(admitted.clone()))
+        .unwrap();
+    assert_ne!(card, acquiring, "the first delivery did nothing");
+    let staged_once = card.clone();
+
+    assert!(
+        card.reduce(ProductInput::SourceSettled(admitted))
+            .unwrap()
+            .is_empty(),
+        "a repeated delivery produced effects"
+    );
+    assert_eq!(
+        card, staged_once,
+        "a repeated delivery moved the card again"
+    );
+}
+
 /// A copy plan cannot be established by a worker that only read the source
 /// through.
 ///

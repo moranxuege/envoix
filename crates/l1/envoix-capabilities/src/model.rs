@@ -133,8 +133,19 @@ impl AdmittedDutyResult {
 /// No public constructor: [`AdmittedDutyResult::into_source`] is the only
 /// source of one. The product's source transitions take this type rather than a
 /// key plus a report, so an unadmitted platform claim cannot reach the reducer
-/// even by naming the right acquisition.
-#[derive(Debug, Eq, PartialEq)]
+/// even by naming the right acquisition. THAT is what makes this type
+/// trustworthy, and it survives cloning untouched.
+///
+/// `Clone`, deliberately. It once was not, on the reasoning that an
+/// admitted-once answer should be a move-only token — but "exactly once" is the
+/// LEDGER's guarantee (a repeat provenance admits as `Duplicate`) and the
+/// reducer's (a settled answer is accepted only from `Acquiring` under the exact
+/// key). Move-only added nothing to either and made delivery lossy: the runtime
+/// had to hand the single value to an actor that took it before applying it, so
+/// an actor that died mid-apply destroyed the only copy, and the caller could
+/// not tell that from success. Delivery is at-least-once over an idempotent
+/// reducer, which is a shape that can retry.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmittedSourceResult {
     duty: Duty,
     report: SourceReport,
