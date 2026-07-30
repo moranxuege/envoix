@@ -6,11 +6,12 @@ use envoix_attempt_api::{
 };
 use envoix_capabilities::AdmittedSourceResult;
 use envoix_product::{
-    AcceptedSourceOffer, ApplyOutcome, CommandApplied, CommittedSession, IdentityError, LedgerHit,
-    ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, RecordStore,
-    SourceLifecycle, SourceOfferAnswer, StagedContent, TransferContent,
+    AcceptedSourceOffer, ApplyOutcome, CommandApplied, CommittedSession, ContentHash,
+    IdentityError, LedgerHit, ProductCommand, ProductEffect, ProductInput, ProductState,
+    Quiescence, RecordStore, SourceLifecycle, SourceOfferAnswer, SourcePossession, StagedContent,
+    TransferContent,
 };
-use envoix_types::{CommandId, RecordId};
+use envoix_types::{ByteCount, CommandId, RecordId};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
@@ -564,33 +565,61 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
     /// translates, and it drops the worker on `Stopped` so the retirement the
     /// reducer asked for is acknowledged with the handles proven released.
     fn on_staging_signal(&mut self, stamp: AttemptStamp, signal: SourceStagingSignal) {
-        let input = match signal {
+        let Some(input) = (match signal {
             SourceStagingSignal::Progress(transferred) => {
-                ProductInput::StageProgress { stamp, transferred }
+                Some(ProductInput::StageProgress { stamp, transferred })
             }
-            SourceStagingSignal::Established { total, digest } => {
-                let name = match &self.session().record().source {
-                    // The name staging establishes is the one the accepted offer
-                    // carried, normalized by the authority. A worker does not
-                    // get to rename the document it read.
-                    SourceLifecycle::Staging { offer, .. } => offer.display_name().clone(),
-                    // Not staging any more: the reducer will refuse this anyway,
-                    // and the input still has to be well formed to say so.
-                    _ => return,
-                };
-                ProductInput::StageComplete {
-                    stamp,
-                    content: StagedContent::new(TransferContent::new(name, total), digest),
-                }
+            // Both completions, differing only in the POSSESSION they carry —
+            // read through where it lies, or copied into an artifact this app
+            // owns. It travels with the result rather than being inferred from
+            // the plan the authority commissioned, because only the worker knows
+            // what it actually did.
+            SourceStagingSignal::Streamed { total, digest } => {
+                self.stage_complete(stamp, total, digest, SourcePossession::Streamed)
             }
-            SourceStagingSignal::Failed => ProductInput::StageFailed { stamp },
+            SourceStagingSignal::Copied {
+                total,
+                digest,
+                artifact,
+            } => self.stage_complete(stamp, total, digest, SourcePossession::Copied(artifact)),
+            SourceStagingSignal::Failed => Some(ProductInput::StageFailed { stamp }),
             SourceStagingSignal::Stopped => {
                 self.staging = None;
                 let _ = self.apply(ProductInput::StagingRetired { stamp });
                 return;
             }
+        }) else {
+            return;
         };
         let _ = self.apply(input);
+    }
+
+    /// One staging completion, whichever possession it achieved.
+    ///
+    /// `None` when the card is no longer staging: the reducer would refuse the
+    /// input anyway, and the name it needs comes from the accepted offer, which
+    /// only a staging card has.
+    fn stage_complete(
+        &self,
+        stamp: AttemptStamp,
+        total: ByteCount,
+        digest: ContentHash,
+        possession: SourcePossession,
+    ) -> Option<ProductInput> {
+        // The name staging establishes is the one the accepted offer carried,
+        // normalized by the authority. A worker does not get to rename the
+        // document it read.
+        let SourceLifecycle::Staging { offer, .. } = &self.session().record().source else {
+            return None;
+        };
+        Some(ProductInput::StageComplete {
+            stamp,
+            content: StagedContent::new(
+                TransferContent::new(offer.display_name().clone(), total),
+                digest,
+            ),
+            possession,
+        })
     }
 
     fn try_ack(&mut self, stamp: AttemptStamp) {

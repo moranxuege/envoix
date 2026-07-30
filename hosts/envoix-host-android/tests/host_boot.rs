@@ -14,14 +14,13 @@ use envoix_bindings::command::{
     SourceOfferOutcomeView, SourceOfferView, decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::read::{
-    CardActionView, CardUpdateKindView, ReadBody, SourceLifecycleView, decode_read_frame,
+    CardActionView, CardUpdateKindView, ReadBody, SourceLifecycleView, SourceSelectionGateView,
+    decode_read_frame,
 };
 use envoix_capabilities::{
     DutyProvenance, SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
 };
-use envoix_host_android::{
-    BoundSourceRegistry, CardStores, FileSourceStaging, FramePoll, Host, HostStore,
-};
+use envoix_host_android::{CardStores, FramePoll, Host, HostStore};
 use envoix_operation_store::{ArtifactKey, OperationStore, PossessionState};
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_platform_android::{Work, WorkOrder, WorkReport};
@@ -552,18 +551,23 @@ fn an_admitted_acquisition_moves_the_card_out_of_acquiring() {
     // And the card moved. Streaming, because the platform promised a persisted
     // grant on a seekable source — the one product of the four that needs no
     // copy.
-    // The card RESTS at re-pick, because this host stages nothing — `Host::boot`
-    // injects `NoSourceStaging` until the Android source session lands, and it
-    // answers `Failed` at once. That resting state is the whole proof: the
-    // reason is `StagingFailed`, which is reachable from `Staging` and from
-    // nowhere else. So a card carrying it left `Acquiring`, which no card could
-    // do before duty/2.
+    // Nothing bound a source for this acquisition, so the worker opens nothing
+    // and answers `Failed`. The card RESTS at re-pick, and that resting state is
+    // the whole proof: the reason is `StagingFailed`, which is reachable from
+    // `Staging` and from nowhere else — so a card carrying it left `Acquiring`,
+    // which no card could do before duty/2.
     //
-    // The transit itself is deliberately NOT asserted on the lane. Replaceable
-    // projection updates coalesce, so a state a card passes through in
-    // microseconds may legitimately never be published — waiting for one is
-    // waiting on something the lane does not promise, and it times out about
-    // one run in ten.
+    // The transit itself is deliberately NOT asserted. Replaceable projection
+    // updates coalesce, so a state a card passes through in microseconds may
+    // legitimately never be published; waiting for one is waiting on something
+    // the lane does not promise.
+    drain_until_source(&host, token, |source| {
+        matches!(
+            source,
+            SourceLifecycleView::AwaitingSelection(view)
+                if matches!(view.selection, SourceSelectionGateView::RePickRequired(_))
+        )
+    });
     let card = order.provenance.to_provenance().card;
     host.shutdown();
     let record = durable_record(root.path(), card);
@@ -648,9 +652,7 @@ fn staging_reads_the_source_through_and_ready_says_which_bytes() {
     let source = root.path().join("chosen.bin");
     std::fs::write(&source, &contents).expect("the source is written");
 
-    let registry = BoundSourceRegistry::default();
-    let host = Host::boot_with_staging(root.path(), FileSourceStaging::new(registry.clone()))
-        .expect("the host boots");
+    let host = Host::boot(root.path()).expect("the host boots");
     host.intent(
         &encode_command_frame(&CommandFrame {
             body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
@@ -666,9 +668,10 @@ fn staging_reads_the_source_through_and_ready_says_which_bytes() {
 
     let token = host.open_lane();
     let acquisition = published_acquisition(&host, token);
-    // The platform binds the document under the acquisition that asked for it,
-    // exactly as Android's registry does — never by card alone.
-    registry.bind(
+    // The platform binds the document under the acquisition that asked for it.
+    // A filesystem host binds a PATH; Android binds a detached descriptor
+    // through the JNI lane. Same registry, same key, two platform answers.
+    host.sources().bind(
         SourceAcquisitionKey::of(DutyProvenance {
             card: RecordId::new(u64::from_str_radix(&acquisition.card, 16).expect("hex card")),
             generation: AttemptGen::new(acquisition.generation),

@@ -1,8 +1,14 @@
 //! The JNI lane the Kotlin service drives. One global `Host` per process.
 //!
 //! Every entry point is a thin translation: bytes in, bytes out, no logic.
-//! No unsafe BLOCK appears here; the module-level allow exists only for the
-//! edition-2024 `#[unsafe(no_mangle)]` export attributes.
+//!
+//! ONE unsafe block appears here, and only here: adopting the file descriptor
+//! the platform detaches for a source acquisition. Turning a raw descriptor into
+//! an owned one asserts that nothing else will close it, and this is the only
+//! place that assertion is checkable — Kotlin's `detachFd()` is in the same
+//! call. Everything downstream takes the safe `OwnedFd`, so no other caller can
+//! get the ownership question wrong. Otherwise the module-level allow exists
+//! only for the edition-2024 `#[unsafe(no_mangle)]` export attributes.
 //!
 //! The slot is an `RwLock`: lane calls take it SHARED, so an intent awaiting
 //! the runtime never blocks the frame/work polls or another intent. Only boot
@@ -13,7 +19,7 @@ use std::sync::{OnceLock, RwLock};
 
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jbyteArray, jlong, jstring};
+use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 
 use crate::host::{AttachmentToken, FramePoll, Host, IntentRejection};
 
@@ -165,6 +171,66 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_reportDuty(
         return 0;
     };
     u8::from(with_host(|host| host.report_duty(&bytes)).unwrap_or(false))
+}
+
+/// `NativeHost.bindSourceDescriptor(card, generation, request, fd): Boolean`
+///
+/// The platform lends an open descriptor for one acquisition; this process
+/// DUPLICATES it and owns the duplicate.
+///
+/// **Kotlin keeps its descriptor and closes it.** `fd` is borrowed for the
+/// duration of this call only — the caller holds the `ParcelFileDescriptor`
+/// across it — and every path here either duplicates it or touches it not at
+/// all. A handover (`detachFd`) would make Rust the sole owner, which reads
+/// tidier until the call does not happen: a renamed symbol raises
+/// `UnsatisfiedLinkError` AFTER the detach, and the file is then open with no
+/// owner in either language. Lending has no such path, because the caller's
+/// `use` block closes whatever this does.
+///
+/// The duplicate shares the file offset with the original, which is why the
+/// staging worker reads positionally.
+///
+/// A separate crossing from `reportDuty`, correlated by the acquisition key.
+/// Folding the descriptor into the report would need a sentinel on every duty
+/// that has none, and a sentinel is exactly the "absent looks like a value"
+/// shape this contract vocabulary refuses everywhere else. Registering first and
+/// reporting second is also the safe order: a report admitted with no descriptor
+/// makes staging answer `Failed` and the card re-pick, whereas a descriptor with
+/// no admitted report is discarded when the acquisition is superseded.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_envoix_host_NativeHost_bindSourceDescriptor(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    card: JString<'_>,
+    generation: jint,
+    request: JString<'_>,
+    fd: jint,
+) -> jboolean {
+    // A negative descriptor is Android saying it had none to lend; borrowing it
+    // would turn a refusal into a file this process believes it can read.
+    if fd < 0 {
+        return 0;
+    }
+    let (Ok(card), Ok(request)) = (env.get_string(&card), env.get_string(&request)) else {
+        return 0;
+    };
+    let Some(acquisition) = crate::host::acquisition_from_hex(
+        &String::from(card),
+        u32::from_ne_bytes(generation.to_ne_bytes()),
+        &String::from(request),
+    ) else {
+        return 0;
+    };
+    // SAFETY: `fd` is open for the whole of this call — the caller holds the
+    // `ParcelFileDescriptor` it came from across it — and the borrow is consumed
+    // here, never stored. Only the duplicate outlives the call. Asserted here
+    // because here is the only place the calling contract is visible.
+    #[allow(unsafe_code)]
+    let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+    let Ok(descriptor) = borrowed.try_clone_to_owned() else {
+        return 0;
+    };
+    u8::from(with_host(|host| host.bind_source_descriptor(acquisition, descriptor)).is_some())
 }
 
 /// `NativeHost.shutdown()`

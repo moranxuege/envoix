@@ -122,18 +122,48 @@ class DutyExecutor(
             } else {
                 SourceRetentionView.PROCESS
             }
-        val seekability =
-            when (SourcePicks.probeSeekable(context, claimed)) {
-                null ->
-                    return SourceReportView.Failed(
-                        SourceFailedView(SourceFailureView.UNREADABLE),
-                    )
-                true -> SourceSeekabilityView.SEEKABLE
-                false -> SourceSeekabilityView.SEQUENTIAL_ONLY
+        // ONE open, held across everything that is asked of it and everything
+        // that is done with it. `use` closes it however this returns — including
+        // when the native call below cannot link — because the descriptor is
+        // LENT to Rust, which duplicates it and owns only the duplicate.
+        return SourcePicks.open(context, claimed)?.use { descriptor ->
+            // Asked of THIS descriptor, the one handed down, so the property the
+            // authority stores and the bytes Rust reads belong to one open
+            // document. Probing one open and handing down another would let a
+            // provider answer two.
+            val seekability =
+                if (SourcePicks.probeSeekable(descriptor)) {
+                    SourceSeekabilityView.SEEKABLE
+                } else {
+                    SourceSeekabilityView.SEQUENTIAL_ONLY
+                }
+            // Handed down BEFORE the acquisition is claimed. Kotlin cannot report
+            // what a multi-gigabyte file contains over the duty lane, and it
+            // should not — the send reads its source positionally in Rust, so
+            // staging reads it the same way, through the descriptor this side was
+            // allowed to open.
+            //
+            // This order is the recoverable one: a report admitted with no
+            // descriptor makes staging answer `Failed` and the card ask again,
+            // while a descriptor bound for a report that was never admitted is an
+            // orphan the registry discards.
+            if (!NativeHost.bindSourceDescriptor(
+                    acquisition.card,
+                    acquisition.generation.toInt(),
+                    acquisition.request,
+                    descriptor.fd,
+                )
+            ) {
+                // The document was readable; this process had no host to give it
+                // to. `unreadable` would send the user back to the picker to
+                // re-choose a file that was never the problem.
+                SourceReportView.Failed(SourceFailedView(SourceFailureView.INTERNAL))
+            } else {
+                SourceReportView.Acquired(
+                    SourceAcquiredView(retention = retention, seekability = seekability),
+                )
             }
-        return SourceReportView.Acquired(
-            SourceAcquiredView(retention = retention, seekability = seekability),
-        )
+        } ?: SourceReportView.Failed(SourceFailedView(SourceFailureView.UNREADABLE))
     }
 
     override fun holdLock(directive: LockDirectiveView): OutcomeCodeView {

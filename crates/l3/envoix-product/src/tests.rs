@@ -4,7 +4,8 @@ use envoix_attempt_api::{
 };
 use envoix_capabilities::{
     Admission, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult, GenerationUpdate,
-    Registration, SourceAcquisitionFailure, SourceReport, SourceRetention, SourceSeekability,
+    Registration, SourceAcquisitionFailure, SourceAcquisitionKey, SourceReport, SourceRetention,
+    SourceSeekability,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_protocol::ContentHash;
@@ -23,6 +24,7 @@ use crate::{
     Quiescence, RecordCodecError, RecordDecode, StorageAction, TransferRecord, WorkerKind,
     decode_record, encode_record,
 };
+use crate::{SourcePossession, StagingPlan};
 
 #[derive(Default)]
 struct DeterministicEntropy {
@@ -103,6 +105,7 @@ fn launched(direction: Direction) -> (TransferRecord, Vec<ProductEffect>) {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, STAGED_TOTAL),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     let effects = record
@@ -447,6 +450,7 @@ fn stage_complete_launches_the_first_attempt_fresh() {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, 80),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     assert_eq!(record.state, ProductState::Preparing);
@@ -594,6 +598,7 @@ fn stage_inputs_off_preparing_are_dropped() {
             .reduce(ProductInput::StageComplete {
                 stamp,
                 content: staged(STAGED_NAME, 100),
+                possession: SourcePossession::Streamed,
             })
             .unwrap()
             .is_empty()
@@ -627,6 +632,7 @@ fn stale_generation_staging_inputs_are_rejected_after_retry() {
         ProductInput::StageComplete {
             stamp: first,
             content: staged(STAGED_NAME, 100),
+            possession: SourcePossession::Streamed,
         },
         ProductInput::StageFailed { stamp: first },
         ProductInput::StageProgress {
@@ -643,6 +649,7 @@ fn stale_generation_staging_inputs_are_rejected_after_retry() {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, 100),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     assert_eq!(staged, vec![ProductEffect::RetireStaging { stamp }]);
@@ -710,6 +717,7 @@ fn resume_after_completed_staging_goes_to_the_wire() {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, 100),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     record
@@ -1469,6 +1477,7 @@ fn staging_handoff_state_round_trips_through_the_codec() {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, 90),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     assert_eq!(record.state, ProductState::Preparing);
@@ -1527,6 +1536,7 @@ fn stage_complete_refuses_a_total_below_the_progress_it_already_reported() {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, 50),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
 
@@ -1556,6 +1566,7 @@ fn stage_complete_refuses_a_total_below_the_progress_it_already_reported() {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, 80),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     assert!(exact.source_is_ready());
@@ -2700,6 +2711,207 @@ fn a_source_answer_for_another_acquisition_moves_nothing() {
         card.source,
         crate::SourceLifecycle::Staging { .. }
     ));
+}
+
+/// A copy plan cannot be established by a worker that only read the source
+/// through.
+///
+/// The backing used to be derived from the PLAN, so a worker with no copy sink
+/// answered the same completion for both — and the card rested at `Ready` over
+/// an `OwnedArtifact` that had never been written. A restart would then reopen
+/// bytes nobody had. The completion now names the possession it achieved and
+/// the two must agree.
+#[test]
+fn a_copy_plan_is_not_established_by_a_stream() {
+    let (mut card, _) = create(Direction::Send);
+    card.reduce(ProductInput::SourceOffered {
+        offer: offer(&card, STAGED_NAME, None),
+    })
+    .unwrap();
+    // A grant that survives, over a source that cannot seek: resume needs both,
+    // so the authority commissions a copy.
+    card.reduce(settled(
+        &card.clone(),
+        SourceReport::Acquired {
+            retention: SourceRetention::Persisted,
+            seekability: SourceSeekability::SequentialOnly,
+        },
+    ))
+    .unwrap();
+    assert!(matches!(
+        card.source,
+        crate::SourceLifecycle::Staging {
+            plan: StagingPlan::CopyToOwnedArtifact,
+            ..
+        }
+    ));
+
+    let stamp = card.stamp();
+    card.reduce(ProductInput::StageComplete {
+        stamp,
+        content: staged(STAGED_NAME, STAGED_TOTAL),
+        possession: SourcePossession::Streamed,
+    })
+    .unwrap();
+
+    assert!(
+        !card.source.is_ready(),
+        "a streamed completion established a copy plan: {:?}",
+        card.source
+    );
+    assert_eq!(card.state, ProductState::Failed);
+
+    // And the possession the plan DID commission establishes it, so the refusal
+    // above is not passing because nothing works.
+    let mut copied = create(Direction::Send).0;
+    copied
+        .reduce(ProductInput::SourceOffered {
+            offer: offer(&copied, STAGED_NAME, None),
+        })
+        .unwrap();
+    copied
+        .reduce(settled(
+            &copied.clone(),
+            SourceReport::Acquired {
+                retention: SourceRetention::Persisted,
+                seekability: SourceSeekability::SequentialOnly,
+            },
+        ))
+        .unwrap();
+    let stamp = copied.stamp();
+    copied
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            content: staged(STAGED_NAME, STAGED_TOTAL),
+            possession: SourcePossession::Copied(ArtifactId::from_bytes([3; 16])),
+        })
+        .unwrap();
+    assert!(matches!(
+        copied.source,
+        crate::SourceLifecycle::Ready {
+            backing: crate::SourceBacking::OwnedArtifact,
+            ..
+        }
+    ));
+}
+
+/// A persisted source that was mid-staging when the process died is REACQUIRED,
+/// not failed.
+///
+/// The staging worker and its handle die with the process; the platform's
+/// `Persisted` grant does not. Failing the card here would send the user back to
+/// the picker to choose the file Android is still holding on their behalf — and
+/// the record already says the grant survives, which is the whole reason
+/// `acquired_retention` is frozen onto it.
+///
+/// The re-issued duty must name the SAME acquisition, because the platform
+/// resolves its ownership journal by that key: a fresh one would find nothing
+/// and the recovery would fail for a reason it invented itself.
+#[test]
+fn a_persisted_staging_reacquires_across_a_restart() {
+    let (mut card, _) = create(Direction::Send);
+    give_a_source(&mut card);
+    let acquisition = SourceAcquisitionKey::of(DutyProvenance {
+        card: card.identity.card,
+        generation: card.generation,
+        request: card.source_request(),
+    });
+    assert!(matches!(
+        card.source,
+        crate::SourceLifecycle::Staging {
+            acquired_retention: SourceRetention::Persisted,
+            ..
+        }
+    ));
+    // Bytes were counted before the crash, and none of them were established.
+    card.reduce(ProductInput::StageProgress {
+        stamp: card.stamp(),
+        transferred: ByteCount::new(4096),
+    })
+    .unwrap();
+    assert_eq!(card.bytes.get(), 4096);
+
+    let effects = card.reduce(ProductInput::Restore).unwrap();
+
+    assert_eq!(card.state, ProductState::Preparing);
+    let crate::SourceLifecycle::Acquiring(offer) = &card.source else {
+        panic!(
+            "a persisted staging did not go back to acquiring: {:?}",
+            card.source
+        );
+    };
+    assert!(
+        offer.key().is(&acquisition),
+        "the restart asked for a different acquisition than the platform holds"
+    );
+    assert_eq!(
+        card.bytes.get(),
+        0,
+        "a read that has not restarted still showed progress"
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            ProductEffect::CapabilityDuty {
+                duty,
+                action: CapabilityAction::AcquireSource,
+            } if SourceAcquisitionKey::of(duty.provenance).is(&acquisition)
+        )),
+        "the acquire duty was not re-issued: {effects:?}"
+    );
+
+    // And the re-issued duty can actually be ANSWERED. Emitting it is not the
+    // recovery — a duty whose answer the reducer then refuses would leave the
+    // card acquiring forever, which is what going back to `Acquiring` rather
+    // than inventing a second accepted input is for.
+    card.reduce(settled(&card.clone(), acquired())).unwrap();
+    assert!(
+        matches!(
+            card.source,
+            crate::SourceLifecycle::Staging {
+                acquired_retention: SourceRetention::Persisted,
+                plan: StagingPlan::ProviderStream,
+                ..
+            }
+        ),
+        "the platform's answer did not restart staging: {:?}",
+        card.source
+    );
+}
+
+/// The other half: a `Process` grant promised THIS process, and this is a
+/// different one. Asking the platform would spend a round trip to be told what
+/// the record already says, so the card asks for a document instead.
+#[test]
+fn a_process_only_staging_asks_for_a_document_again_across_a_restart() {
+    let (mut card, _) = create(Direction::Send);
+    card.reduce(ProductInput::SourceOffered {
+        offer: offer(&card, STAGED_NAME, None),
+    })
+    .unwrap();
+    card.reduce(settled(
+        &card.clone(),
+        SourceReport::Acquired {
+            retention: SourceRetention::Process,
+            seekability: SourceSeekability::Seekable,
+        },
+    ))
+    .unwrap();
+    assert!(matches!(
+        card.source,
+        crate::SourceLifecycle::Staging {
+            acquired_retention: SourceRetention::Process,
+            ..
+        }
+    ));
+
+    assert!(card.reduce(ProductInput::Restore).unwrap().is_empty());
+
+    assert_eq!(card.state, ProductState::Failed);
+    assert_eq!(
+        card.outcome.as_ref().and_then(|outcome| outcome.recovery),
+        Some(Recovery::RePickSource)
+    );
 }
 
 /// A card that has just been minted can be cancelled, and restarted afterwards.

@@ -4,7 +4,7 @@ use envoix_attempt_api::{
 };
 use envoix_capabilities::{
     AdmittedDutyResult, AdmittedSourceResult, Duty, DutyKind, DutyProvenance, SourceAcquisitionKey,
-    SourceReport,
+    SourceReport, SourceRetention,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_types::{ArtifactId, ByteCount, Direction, RequestId, TransferId};
@@ -13,8 +13,9 @@ use crate::identity::next_generation;
 use crate::{
     AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
     PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
-    Quiescence, SelectionGate, SourceLifecycle, SourceOfferAnswer, SourceStagingPlan,
-    StagedContent, StagingPlan, StorageAction, TransferContent, TransferRecord, WorkerKind,
+    Quiescence, SelectionGate, SourceLifecycle, SourceOfferAnswer, SourcePossession,
+    SourceStagingPlan, StagedContent, StagingPlan, StorageAction, TransferContent, TransferRecord,
+    WorkerKind,
 };
 
 /// The domain tag that separates a card's source-duty request identity from its
@@ -224,9 +225,11 @@ impl TransferRecord {
             ProductInput::StageProgress { stamp, transferred } => {
                 self.on_stage_progress(stamp, transferred)
             }
-            ProductInput::StageComplete { stamp, content } => {
-                self.on_stage_complete(stamp, content)
-            }
+            ProductInput::StageComplete {
+                stamp,
+                content,
+                possession,
+            } => self.on_stage_complete(stamp, content, possession),
             ProductInput::StageFailed { stamp } => self.on_stage_failed(stamp),
             ProductInput::Advertised { stamp } => self.on_advertised(stamp),
             ProductInput::VerificationStarted { stamp } => self.on_verification_started(stamp),
@@ -697,9 +700,43 @@ impl TransferRecord {
             ProductState::Preparing if matches!(self.source, SourceLifecycle::Acquiring(_)) => {
                 vec![self.acquire_source()]
             }
-            // A document was held and the process died holding it. The grant and
-            // the staging worker died with it, and neither can be proven from
-            // the record alone, so the card asks for a document again.
+            // The staging worker died mid-read, but the grant it was reading
+            // through is `Persisted` — the platform said it would survive a
+            // restart, and that promise is exactly what this arm consults.
+            //
+            // Re-issuing the ACQUIRE duty, not the staging, because the read
+            // needs a handle and every handle this process held is gone. The
+            // duty is the same one under the same acquisition key (the request
+            // is derived, the generation unchanged), so the platform re-claims
+            // the SAME document from its ownership journal and answers again —
+            // or answers that the grant did not survive after all, which is the
+            // only honest way to learn it. Nothing is invented on the record's
+            // word alone.
+            ProductState::Preparing
+                if matches!(
+                    &self.source,
+                    SourceLifecycle::Staging {
+                        acquired_retention: SourceRetention::Persisted,
+                        ..
+                    }
+                ) =>
+            {
+                let SourceLifecycle::Staging { offer, .. } = self.source.clone() else {
+                    unreachable!("the guard matched Staging")
+                };
+                // The bytes counted before the crash were never established, so
+                // the count goes with them. Carrying it would show progress
+                // against a read that has not restarted.
+                self.clear_progress();
+                self.source = SourceLifecycle::Acquiring(offer);
+                vec![self.acquire_source()]
+            }
+            // A document was held and the process died holding it. What was held
+            // was a `Process` grant — the platform promised this process only,
+            // and this is a different one — or the card was `Staging` a source
+            // whose own retention says it cannot be reopened. Asking the
+            // platform a question its answer already settled would spend a round
+            // trip to be told what the record says.
             ProductState::Preparing => {
                 self.state = ProductState::Failed;
                 self.phase = Phase::Restoring;
@@ -737,6 +774,7 @@ impl TransferRecord {
         &mut self,
         stamp: AttemptStamp,
         content: StagedContent,
+        possession: SourcePossession,
     ) -> Vec<ProductEffect> {
         if !self.is_current(stamp)
             || self.state != ProductState::Preparing
@@ -758,6 +796,18 @@ impl TransferRecord {
         else {
             return Vec::new();
         };
+        // The worker must have PERFORMED the plan it was given. The backing was
+        // once derived from the plan alone, which meant a worker that only read a
+        // copy plan's source through still produced `Ready { OwnedArtifact }` —
+        // a card claiming possession of an artifact nobody had written, which a
+        // restart would then try to reopen.
+        //
+        // A worker with no copy sink cannot spell `Copied`, so this arm is what
+        // turns "this host cannot perform that plan" into an honest failure
+        // instead of a lie on the record.
+        if !possession.performs(plan) {
+            return self.fail_staging(stamp);
+        }
         // Staging counted the bytes and can say which ones; that is what makes
         // the card's content authoritative, so it is recorded where the
         // lifecycle keeps it and nowhere else.
@@ -772,7 +822,7 @@ impl TransferRecord {
         self.source = SourceLifecycle::Ready {
             offer,
             acquired_retention,
-            backing: plan.backing(),
+            backing: possession.backing(),
             content,
         };
         self.bytes = total;

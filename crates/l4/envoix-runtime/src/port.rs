@@ -1,6 +1,6 @@
 use envoix_attempt_api::{AttemptEventKind, AttemptPlan, RetirementIntent};
 use envoix_product::{CommittedSession, ContentHash, RecordStore, SourceStagingPlan};
-use envoix_types::{ByteCount, RecordId};
+use envoix_types::{ArtifactId, ByteCount, RecordId};
 use tokio::sync::{mpsc, oneshot};
 
 /// Restores the durable authority for a card from the operation store.
@@ -101,13 +101,31 @@ pub enum SourceStagingSignal {
     /// progress uses: a multi-gigabyte read must not flood anything, and the
     /// newest count is the only one that matters.
     Progress(ByteCount),
-    /// The source was read through. `total` is COUNTED, never the provider's
-    /// claim, and `digest` identifies the bytes that were counted — without it
-    /// "staged" would mean only "once observed a length", and a provider could
-    /// swap the document across a restart.
-    Established {
+    /// The source was read through WHERE IT LIES, and nothing was copied.
+    ///
+    /// `total` is COUNTED, never the provider's claim, and `digest` identifies
+    /// the bytes that were counted — without it "staged" would mean only "once
+    /// observed a length", and a provider could swap the document across a
+    /// restart.
+    Streamed {
         total: ByteCount,
         digest: ContentHash,
+    },
+    /// The bytes were copied into an artifact this app owns outright.
+    ///
+    /// A separate arm from [`Self::Streamed`] because the two establish
+    /// different POSSESSION, and the record says which: a card backed by an
+    /// owned artifact reopens its own bytes, while a provider-backed one must
+    /// revalidate a grant. One arm for both let a worker that only read the
+    /// source through satisfy a copy plan, and the card then rested at `Ready`
+    /// claiming an artifact nobody had written.
+    ///
+    /// The `ArtifactId` is the proof, not a label: it can only be had by
+    /// writing one, so a worker without a copy sink cannot spell this arm.
+    Copied {
+        total: ByteCount,
+        digest: ContentHash,
+        artifact: ArtifactId,
     },
     /// The source could not be read through. Distinct from an acquisition
     /// failure: the platform DID hold it, and reading is what failed.

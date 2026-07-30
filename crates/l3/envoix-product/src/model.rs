@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceptedSourceOffer, PairingChannel, ProductIdentity, RoomParticipation, SourceLifecycle,
-    StagedContent, StagingPlan,
+    SourcePossession, StagedContent, StagingPlan,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -150,9 +150,16 @@ pub enum ProductInput {
     ///
     /// Carries the digest, not just the length: `Ready` is unconstructible
     /// without one, so the reducer cannot invent a hash that verifies nothing.
+    ///
+    /// And it carries WHICH possession was achieved, because the two plans end
+    /// in different backings and only the worker knows which one it performed.
+    /// Without it the reducer derived the backing from the plan it commissioned
+    /// — so a worker that merely read a copy plan's source through produced a
+    /// card resting at `Ready` over an artifact that was never written.
     StageComplete {
         stamp: AttemptStamp,
         content: StagedContent,
+        possession: SourcePossession,
     },
     StageFailed {
         stamp: AttemptStamp,

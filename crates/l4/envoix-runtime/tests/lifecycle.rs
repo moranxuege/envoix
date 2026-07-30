@@ -22,8 +22,8 @@ use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_product::{
     AcceptedSourceOffer, ApplyOutcome, CommitError, CommittedSession, ContentHash, IdentityError,
     IdentitySource, NewTransfer, ProductCommand, ProductInput, ProductState, Quiescence,
-    RecordDecode, RecordStore, SourceLifecycle, StagedContent, TransferContent, TransferRecord,
-    decode_record,
+    RecordDecode, RecordStore, SourceLifecycle, SourcePossession, StagedContent, TransferContent,
+    TransferRecord, decode_record,
 };
 use envoix_runtime::{
     AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, CommandCompletion,
@@ -349,6 +349,7 @@ fn stage_the_source(
                 ),
                 ContentHash::from_bytes([7; 32]),
             ),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     session

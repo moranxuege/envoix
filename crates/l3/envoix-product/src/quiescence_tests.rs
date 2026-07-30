@@ -6,6 +6,7 @@ use envoix_attempt_api::{
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_types::{AttemptGen, ByteCount, Direction};
 
+use crate::SourcePossession;
 use crate::test_support::{STAGED_NAME, STAGED_TOTAL, give_a_source, staged};
 use crate::{
     CapabilityAction, IdentityError, IdentitySource, NewTransfer, ProductCommand, ProductEffect,
@@ -53,6 +54,7 @@ fn ready(direction: Direction) -> (TransferRecord, Vec<ProductEffect>) {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, STAGED_TOTAL),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     let launched = record
@@ -407,6 +409,7 @@ fn completed_staging_launches_only_after_the_worker_retires() {
         .reduce(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, 90),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     assert_eq!(record.state, ProductState::Preparing);

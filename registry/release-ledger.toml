@@ -98,8 +98,24 @@ bundled_libraries = ["libapp.so", "libflutter.so", "libimage_processing_util_jni
 # narrow as it was. Both intents are the same act — a frontend asking the
 # authority for something and being told what happened — and the authority
 # answers each in its own arm.
+#
+# `bindSourceDescriptor` is the one door that carries a raw platform handle
+# rather than contract bytes, and it is on this list deliberately rather than by
+# drift. It exists because the send reads its source in Rust — `spawn_sender`
+# takes a positional reader — so the bytes of a `content://` document have to
+# reach this process somehow, and an open descriptor Android detaches is the
+# narrowest thing that does it. The alternative, Kotlin reading and reporting
+# over the duty lane, would put a multi-gigabyte file's contents on a control
+# channel and move the digest out of the authority.
+#
+# It is a second crossing rather than a field on `reportDuty` because every
+# other duty has no descriptor, and folding it in would need a sentinel for
+# them — the "absent looks like a value" shape this vocabulary refuses
+# everywhere else. The acquisition key correlates the two, the same way a
+# frontend attachment token correlates `pollFrame` with `attach`.
 allowed_native_symbols = [
     "Java_app_envoix_host_NativeHost_attach",
+    "Java_app_envoix_host_NativeHost_bindSourceDescriptor",
     "Java_app_envoix_host_NativeHost_boot",
     "Java_app_envoix_host_NativeHost_intent",
     "Java_app_envoix_host_NativeHost_pollFrame",

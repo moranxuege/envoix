@@ -24,8 +24,8 @@ use envoix_pairing::{
 use envoix_product::{
     AcceptedSourceOffer, ApplyOutcome, CommitError, CommitStatus, CommittedSession, ContentHash,
     IdentityError, IdentitySource, NewTransfer, ProductCommand, ProductEffect, ProductInput,
-    ProductState, Quiescence, RecordDecode, RecordStore, StagedContent, StorageAction,
-    TransferContent, TransferRecord, decode_record,
+    ProductState, Quiescence, RecordDecode, RecordStore, SourcePossession, StagedContent,
+    StorageAction, TransferContent, TransferRecord, decode_record,
 };
 use envoix_rendezvous::{ClientConfig, ControlLimits, Role};
 use envoix_rendezvous_iroh::{
@@ -419,6 +419,7 @@ fn stage_the_source<S: RecordStore>(
                 TransferContent::new(offered_name.clone(), total),
                 ContentHash::from_bytes([7; 32]),
             ),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     session

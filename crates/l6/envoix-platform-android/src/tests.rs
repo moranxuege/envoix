@@ -737,6 +737,7 @@ fn the_frontend_kotlin_speaks_only_the_observer_vocabulary() {
         "reportDuty",
         "pollWork",
         "pollSourceRelease",
+        "bindSourceDescriptor",
     ] {
         assert!(
             declared.contains(verb),
@@ -948,26 +949,51 @@ fn emitted_kinds_are_supported_and_supported_kinds_are_in_the_vocabulary() {
         .0;
     // Every fact it reports is ASKED FOR, not assumed. Retention is what the
     // claim actually retained rather than what the pick requested, and
-    // seekability is probed — a source reported seekable that is not would make
-    // every resume silently restart from zero.
+    // seekability is SEEKED for rather than read off a size — a stat answer is
+    // not a positional-I/O test, and a source wrongly reported seekable would
+    // make every resume silently restart from zero.
+    //
+    // ONE open answers seekability and becomes the session Rust reads through,
+    // so `open` appears once and its result is both probed and handed down.
+    // Probing with one open and handing down another would let a provider
+    // answer two documents, and the property the authority stored would then
+    // describe bytes nobody reads.
+    //
+    // And the descriptor is LENT: `use` closes it however this returns, so no
+    // path can leave the file open with no owner. `detachFd` is the shape that
+    // can, on exactly the path where the native call does not happen.
     for required in [
         "SourcePicks.claim(",
         "SourcePicks.isPersisted(",
-        "SourcePicks.probeSeekable(",
+        "SourcePicks.open(",
+        "SourcePicks.probeSeekable(descriptor)",
+        "NativeHost.bindSourceDescriptor(",
+        "descriptor.fd,",
     ] {
         assert!(
             bind.contains(required),
             "bindSource never reaches {required}: it reports without asking"
         );
     }
-    // Both ways of not holding a readable source — no pick at all, and a pick
-    // that will not open — answer a typed FAILURE, and exactly one path answers
-    // an acquisition. Counting rather than matching a shape, so reformatting an
-    // arm is free while collapsing a failure into success is not.
+    // The descriptor is registered BEFORE the acquisition is claimed. That order
+    // is the recoverable one: a report admitted with no descriptor makes staging
+    // answer `Failed` and the card ask again, while a descriptor bound for a
+    // report that was never admitted is an orphan the registry discards. The
+    // reverse order can leave the authority holding a source with no bytes
+    // behind it and no event to tell it so.
+    assert!(
+        bind.find("NativeHost.bindSourceDescriptor(") < bind.find("SourceReportView.Acquired("),
+        "bindSource claims an acquisition before handing the descriptor down"
+    );
+    // Three ways of not holding a readable source — no pick at all, a pick that
+    // will not open, and no live host to give the descriptor to — each answer a
+    // typed FAILURE, and exactly one path answers an acquisition. Counting
+    // rather than matching a shape, so reformatting an arm is free while
+    // collapsing a failure into success is not.
     assert_eq!(
         bind.matches("SourceReportView.Failed(").count(),
-        2,
-        "bindSource has {} failure answers, not two: {bind}",
+        3,
+        "bindSource has {} failure answers, not three: {bind}",
         bind.matches("SourceReportView.Failed(").count()
     );
     assert_eq!(

@@ -17,15 +17,17 @@
 //! mean "we know these bytes" without doubling disk.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::fs::File;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use envoix_runtime::{
     ContentHash, SourceAcquisitionKey, SourceStagingExecution, SourceStagingExecutor,
-    SourceStagingPlan, SourceStagingSignal, StopToken, stop_channel,
+    SourceStagingPlan, SourceStagingSignal, StagingPlan, StopToken, stop_channel,
 };
-use envoix_types::ByteCount;
+use envoix_types::{AttemptGen, ByteCount};
 use tokio::sync::mpsc;
 
 /// How much is read between progress reports.
@@ -35,50 +37,141 @@ use tokio::sync::mpsc;
 /// syscalls rather than against correctness.
 const READ_CHUNK_BYTES: usize = 256 * 1024;
 
-/// This host's source registry: which path a given acquisition owns.
+/// How this host can open the bytes for one acquisition.
 ///
-/// Keyed by the WHOLE acquisition, exactly as Android's is. A registry keyed by
-/// card would let a later generation inherit an earlier one's document, which is
-/// the ownership defect the key exists to close.
+/// Two ways because there are two platforms, not two designs: a filesystem has
+/// paths and Android has a descriptor its own side opened. Both resolve to a
+/// readable file, which is why one worker serves both.
+enum BoundSource {
+    /// A path this process may open whenever it likes.
+    Path(PathBuf),
+    /// A descriptor the platform opened and HANDED OVER. Rust owns it from that
+    /// moment and closes it; a platform that kept its own copy would give the
+    /// file two closers.
+    ///
+    /// Process-local by nature, and correctly so: an open descriptor means
+    /// nothing after the process that holds it dies. A registry that tried to
+    /// survive one would be claiming something untrue.
+    Descriptor(OwnedFd),
+}
+
+/// This host's source registry: how a given acquisition's bytes are reached.
+///
+/// Keyed by the WHOLE acquisition. A registry keyed by card would let a later
+/// generation inherit an earlier one's document, which is the ownership defect
+/// the key exists to close — and is the defect Android's own `SourcePicks` had
+/// until it was rekeyed.
 #[derive(Clone, Default)]
 pub struct BoundSourceRegistry {
-    sources: Arc<Mutex<HashMap<SourceAcquisitionKey, PathBuf>>>,
+    sources: Arc<Mutex<HashMap<SourceAcquisitionKey, BoundSource>>>,
 }
 
 impl BoundSourceRegistry {
     /// Binds a path to one acquisition. The authority publishes the key; this is
-    /// the local answer to it.
+    /// a filesystem host's answer to it.
     pub fn bind(&self, acquisition: SourceAcquisitionKey, path: PathBuf) {
-        self.lock().insert(acquisition, path);
+        self.lock().insert(acquisition, BoundSource::Path(path));
     }
 
-    fn path(&self, acquisition: &SourceAcquisitionKey) -> Option<PathBuf> {
-        self.lock().get(acquisition).cloned()
+    /// Adopts a descriptor the platform opened for one acquisition.
+    ///
+    /// Takes an `OwnedFd`, not an integer. Turning a raw descriptor into an
+    /// owned one is unsafe by nature — it asserts that nothing else will close
+    /// it — and that assertion is only checkable at the JNI boundary, where
+    /// Kotlin's `detachFd()` is in the same call. So the boundary makes it and
+    /// this takes the safe result: no caller of this registry can get the
+    /// ownership question wrong, because it is not asked here.
+    pub fn adopt_descriptor(&self, acquisition: SourceAcquisitionKey, descriptor: OwnedFd) {
+        self.lock()
+            .insert(acquisition, BoundSource::Descriptor(descriptor));
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SourceAcquisitionKey, PathBuf>> {
+    /// Drops what an acquisition was bound to, closing a descriptor if it held
+    /// one.
+    ///
+    /// Called when the acquisition is superseded or its card goes away. Without
+    /// it a report the authority refused would leave a descriptor resident for
+    /// the life of the process — the orphan this registry's process-local
+    /// lifetime does not by itself prevent.
+    pub fn discard(&self, acquisition: &SourceAcquisitionKey) {
+        self.lock().remove(acquisition);
+    }
+
+    /// Everything this card owns, discarded. A durable removal names a CARD,
+    /// because that is what the authority removes.
+    pub fn discard_card(&self, card: envoix_types::RecordId) {
+        self.lock().retain(|key, _| key.card() != card);
+    }
+
+    /// Discards what this card bound under a generation older than `current`.
+    ///
+    /// A re-pick advances the generation, so every entry below it names an
+    /// acquisition no duty can still be answered for. Without this, a document
+    /// the user replaced would hold its descriptor for the life of the process —
+    /// the orphan that a process-local registry does not prevent by itself.
+    ///
+    /// A descriptor that arrives AFTER the generation has already advanced is
+    /// not caught here; it waits for the next advance or for the card's removal.
+    /// That is one handle per card in the worst case, and the alternative —
+    /// refusing a bind against the current generation — would need the registry
+    /// to hold an authority answer it cannot read without racing the card actor.
+    pub fn discard_superseded(&self, card: envoix_types::RecordId, current: AttemptGen) {
+        self.lock()
+            .retain(|key, _| key.card() != card || key.generation() >= current);
+    }
+
+    /// Opens the bytes for one acquisition.
+    ///
+    /// A descriptor is opened by DUPLICATING it, so the registry keeps
+    /// ownership: a staging run that consumed the descriptor would leave a
+    /// second run — a restart, a resume — with nothing.
+    ///
+    /// A duplicate shares the file DESCRIPTION, and therefore the offset, which
+    /// is why [`scan`] reads positionally. Sequential reads through this would
+    /// leave a second run starting wherever the first stopped, and it would
+    /// report the remainder as the whole file.
+    fn open(&self, acquisition: &SourceAcquisitionKey) -> Option<File> {
+        match self.lock().get(acquisition)? {
+            BoundSource::Path(path) => File::open(path).ok(),
+            BoundSource::Descriptor(owned) => owned.try_clone().ok().map(File::from),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SourceAcquisitionKey, BoundSource>> {
         self.sources.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// Reads the bound file through and reports what it contains.
+/// Reads the bound source through and reports what it contains.
 #[derive(Clone, Default)]
-pub struct FileSourceStaging {
+pub struct BoundSourceStaging {
     registry: BoundSourceRegistry,
 }
 
-impl FileSourceStaging {
+impl BoundSourceStaging {
     pub fn new(registry: BoundSourceRegistry) -> Self {
         Self { registry }
     }
 }
 
-impl SourceStagingExecutor for FileSourceStaging {
+impl SourceStagingExecutor for BoundSourceStaging {
     fn start(&self, plan: SourceStagingPlan) -> SourceStagingExecution {
         let (signals_tx, signals) = mpsc::channel(32);
         let (stop, token) = stop_channel();
-        let path = self.registry.path(&plan.acquisition);
-        tokio::task::spawn_blocking(move || read_through(path, &signals_tx, token));
+        // Opened HERE, on the runtime's thread, so a card whose acquisition this
+        // host does not hold fails immediately rather than after a task hop.
+        //
+        // A copy plan opens nothing. This worker reads through and writes
+        // nothing, so it cannot produce the artifact a copy establishes — and
+        // `SourceStagingSignal::Copied` carries an `ArtifactId` it therefore
+        // cannot spell. Failing is the honest answer until the copy sink exists;
+        // the alternative is what the possession split removed, a card resting at
+        // `Ready` over an owned artifact that was never written.
+        let source = match plan.plan {
+            StagingPlan::ProviderStream => self.registry.open(&plan.acquisition),
+            StagingPlan::CopyToOwnedArtifact => None,
+        };
+        tokio::task::spawn_blocking(move || read_through(source, &signals_tx, token));
         SourceStagingExecution { signals, stop }
     }
 }
@@ -87,16 +180,18 @@ impl SourceStagingExecutor for FileSourceStaging {
 /// async pool would stall every other card's actor for the length of a
 /// multi-gigabyte file.
 fn read_through(
-    path: Option<PathBuf>,
+    source: Option<File>,
     signals: &mpsc::Sender<SourceStagingSignal>,
     mut token: StopToken,
 ) {
-    let outcome = match path {
-        // The authority commissioned work for an acquisition this platform does
-        // not hold. Reading is what failed, which is a different sentence to the
-        // acquisition failing — the reducer has both.
+    let outcome = match source {
+        // Nothing to read: an acquisition this platform does not hold — a
+        // descriptor never registered, or one discarded when the acquisition was
+        // superseded — or a plan this worker cannot perform. Reading is what
+        // failed, which is a different sentence to the acquisition failing, and
+        // the reducer has both.
         None => SourceStagingSignal::Failed,
-        Some(path) => scan(&path, signals, &mut token),
+        Some(file) => scan(file, signals, &mut token),
     };
     let _ = signals.blocking_send(outcome);
     // Stopped LAST and always: it is what releases the handles and lets the
@@ -105,14 +200,22 @@ fn read_through(
     let _ = signals.blocking_send(SourceStagingSignal::Stopped);
 }
 
+/// Reads the whole source POSITIONALLY and reports what it holds.
+///
+/// Positional (`pread`) rather than sequential, for two reasons that agree. The
+/// handle may be a duplicate of a descriptor the platform opened, so it shares
+/// an offset with every other duplicate; and the send path reads its source
+/// positionally too (`SourceReader`), so staging and sending observe the file
+/// the same way. A source that cannot serve a positional read fails here — that
+/// is a sequential-only provider, whose plan is [`StagingPlan::CopyToOwnedArtifact`]
+/// and whose copy sink is not built yet.
+///
+/// [`StagingPlan::CopyToOwnedArtifact`]: envoix_product::StagingPlan::CopyToOwnedArtifact
 fn scan(
-    path: &PathBuf,
+    file: File,
     signals: &mpsc::Sender<SourceStagingSignal>,
     token: &mut StopToken,
 ) -> SourceStagingSignal {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return SourceStagingSignal::Failed;
-    };
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
     let mut total: u64 = 0;
@@ -123,7 +226,7 @@ fn scan(
             // length" lie the digest exists to prevent.
             return SourceStagingSignal::Failed;
         }
-        match file.read(&mut buffer) {
+        match file.read_at(&mut buffer, total) {
             Ok(0) => break,
             Ok(read) => {
                 hasher.update(&buffer[..read]);
@@ -134,8 +237,69 @@ fn scan(
             Err(_) => return SourceStagingSignal::Failed,
         }
     }
-    SourceStagingSignal::Established {
+    SourceStagingSignal::Streamed {
         total: ByteCount::new(total),
         digest: ContentHash::from_bytes(*hasher.finalize().as_bytes()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use envoix_capabilities::{DutyProvenance, SourceAcquisitionKey};
+    use envoix_types::{AttemptGen, RecordId, RequestId};
+
+    use super::*;
+
+    fn acquisition() -> SourceAcquisitionKey {
+        SourceAcquisitionKey::of(DutyProvenance {
+            card: RecordId::new(7),
+            generation: AttemptGen::new(1),
+            request: RequestId::from_bytes([9; 16]),
+        })
+    }
+
+    fn scan_once(registry: &BoundSourceRegistry) -> SourceStagingSignal {
+        let file = registry.open(&acquisition()).expect("the source opens");
+        let (signals, _drain) = mpsc::channel(1024);
+        let (_stop, mut token) = stop_channel();
+        scan(file, &signals, &mut token)
+    }
+
+    /// A second staging run must observe the same file as the first.
+    ///
+    /// The registry hands out DUPLICATES of a platform descriptor, and a
+    /// duplicate shares the file offset. Read sequentially, a stop-then-retry
+    /// would resume at the first run's offset and report the remainder as the
+    /// whole document — an `Established` with a short total and a digest of a
+    /// suffix, which is worse than a failure because the card would rest at
+    /// `Ready` believing it.
+    #[test]
+    fn a_repeated_scan_of_one_descriptor_establishes_the_same_bytes() {
+        let mut file = tempfile::NamedTempFile::new().expect("a temp file");
+        file.write_all(&vec![0xab_u8; READ_CHUNK_BYTES * 2 + 7])
+            .expect("the source is written");
+        let descriptor = OwnedFd::from(
+            std::fs::File::open(file.path()).expect("the source opens for the platform"),
+        );
+        let registry = BoundSourceRegistry::default();
+        registry.adopt_descriptor(acquisition(), descriptor);
+
+        let first = scan_once(&registry);
+        let second = scan_once(&registry);
+
+        let SourceStagingSignal::Streamed { total, digest } = first else {
+            panic!("the first scan did not establish the source: {first:?}");
+        };
+        assert_eq!(total.get(), (READ_CHUNK_BYTES * 2 + 7) as u64);
+        assert!(
+            matches!(
+                second,
+                SourceStagingSignal::Streamed { total: again, digest: same }
+                    if again == total && same == digest
+            ),
+            "a second scan of the same descriptor saw different bytes: {second:?}"
+        );
     }
 }

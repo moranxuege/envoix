@@ -53,6 +53,27 @@ object NativeHost {
     /** Reports one executed work order; true when admitted fresh. */
     external fun reportDuty(report: ByteArray): Boolean
 
+    /**
+     * Hands one acquisition's open source descriptor down to Rust, which reads
+     * the bytes itself.
+     *
+     * A crossing of its own, correlated by the whole acquisition — card,
+     * generation and request — rather than folded into [reportDuty], which
+     * would need a sentinel on every duty that has no descriptor.
+     *
+     * **The descriptor is LENT, not handed over.** Rust duplicates it inside the
+     * call and owns only the duplicate; this side keeps its own and must close
+     * it, which a `use` block does whatever happens here — including when the
+     * call itself fails to link. Detaching would read tidier and leave the file
+     * open with no owner in either language on exactly that path.
+     */
+    external fun bindSourceDescriptor(
+        card: String,
+        generation: Int,
+        request: String,
+        fd: Int,
+    ): Boolean
+
     /** Stops the runtime; durable truth is already on disk. */
     external fun shutdown()
 }

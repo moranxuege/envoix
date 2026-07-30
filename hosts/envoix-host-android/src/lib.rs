@@ -33,6 +33,6 @@ mod jni_lane;
 pub use executor::PreparedIrohExecutor;
 pub use host::{AttachmentToken, BootError, FramePoll, Host, IntentRejection};
 pub use provider::HostProvider;
-pub use staging::{BoundSourceRegistry, FileSourceStaging};
+pub use staging::{BoundSourceRegistry, BoundSourceStaging};
 pub use store::HostStore;
 pub use stores::{CardStores, LiveStore};

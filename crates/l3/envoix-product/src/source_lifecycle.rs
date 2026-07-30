@@ -25,7 +25,7 @@ use envoix_capabilities::{
     SourceAcquisitionFailure, SourceAcquisitionKey, SourceRetention, SourceSeekability,
 };
 use envoix_protocol::ContentHash;
-use envoix_types::{ByteCount, Direction, OfferedName};
+use envoix_types::{ArtifactId, ByteCount, Direction, OfferedName};
 
 /// Why the authority is asking for a source. Carried so a frontend can say
 /// something true without inferring it, and so a repeat is distinguishable
@@ -211,6 +211,49 @@ pub enum SourceBacking {
     /// An app-private artifact this build owns outright. The provider grant can
     /// be released.
     OwnedArtifact,
+}
+
+/// What staging actually achieved, reported by the worker that did it.
+///
+/// The counterpart of [`StagingPlan`]: the plan is what was commissioned, this
+/// is what was performed, and the reducer requires them to agree. They were once
+/// the same value — the backing was derived from the plan — and that made a
+/// worker's silence about what it had done indistinguishable from a copy.
+///
+/// [`Self::Copied`] carries the artifact rather than a flag because an
+/// `ArtifactId` cannot be produced without writing one. A worker with no copy
+/// sink is unable to spell it, which is why a plan it cannot perform fails
+/// instead of resting at `Ready` over nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourcePossession {
+    /// Read through where it lies. Nothing was written.
+    Streamed,
+    /// Copied into an artifact this app owns outright.
+    Copied(ArtifactId),
+}
+
+impl SourcePossession {
+    /// The backing this possession establishes.
+    pub const fn backing(self) -> SourceBacking {
+        match self {
+            Self::Streamed => SourceBacking::PersistedProvider,
+            Self::Copied(_) => SourceBacking::OwnedArtifact,
+        }
+    }
+
+    /// Whether this is what `plan` commissioned.
+    ///
+    /// Checked rather than assumed. A worker that streamed a copy plan's source
+    /// has not produced the artifact the record would claim, and a worker that
+    /// copied a stream plan's source has spent disk the authority did not ask
+    /// for — neither is a state the record should be able to describe.
+    pub const fn performs(self, plan: StagingPlan) -> bool {
+        matches!(
+            (plan, self),
+            (StagingPlan::ProviderStream, Self::Streamed)
+                | (StagingPlan::CopyToOwnedArtifact, Self::Copied(_))
+        )
+    }
 }
 
 impl SourceBacking {

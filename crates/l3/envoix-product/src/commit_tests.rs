@@ -8,6 +8,7 @@ use envoix_attempt_api::{
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_types::{ArtifactId, ByteCount, Direction, OfferedName, TransferId};
 
+use crate::SourcePossession;
 use crate::test_support::{STAGED_NAME, STAGED_TOTAL, acquired, offer, settled, staged};
 use crate::{
     CapabilityAction, CommitError, CommitFailure, CommitStatus, CommittedSession, IdentityError,
@@ -157,6 +158,7 @@ fn stage_the_source(session: &mut CommittedSession<MemoryStore>) {
         .apply(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, STAGED_TOTAL),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     session
@@ -193,6 +195,7 @@ fn staging_completes_through_the_commit_barrier() {
         .apply(ProductInput::StageComplete {
             stamp,
             content: staged(STAGED_NAME, 90),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     assert!(

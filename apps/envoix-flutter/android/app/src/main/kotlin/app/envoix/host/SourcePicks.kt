@@ -3,7 +3,10 @@ package app.envoix.host
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
+import android.system.Os
+import android.system.OsConstants
 import com.envoix.bindings.capability.SourceAcquisitionKeyView
 import java.util.concurrent.ConcurrentHashMap
 
@@ -252,24 +255,39 @@ object SourcePicks {
         }
 
     /**
-     * Whether the source can be re-read from an offset. Null = it could not be
-     * opened at all, which is a different answer to either.
+     * Opens the bound source for reading. Null when it cannot be opened at all,
+     * which is a different answer to any property of an open document.
      *
-     * Probed, not assumed. Resume re-reads from an offset, and a provider that
-     * only streams cannot serve one — so a source reported seekable that is not
-     * would make every resume silently restart from zero.
+     * ONE open, deliberately. It answers seekability AND becomes the descriptor
+     * Rust reads through, so what was probed and what is read are the same open
+     * document. Probing with one open and handing down another would leave a
+     * window in which a provider could answer two — and the seekability the
+     * authority stored would then describe a document nobody reads.
+     *
+     * The caller owns what comes back and must close it.
      */
-    fun probeSeekable(
+    fun open(
         context: Context,
         uri: Uri,
-    ): Boolean? =
+    ): ParcelFileDescriptor? = runCatching { context.contentResolver.openFileDescriptor(uri, "r") }.getOrNull()
+
+    /**
+     * Whether THIS open descriptor can be re-read from an offset.
+     *
+     * Asked of the OS about the exact open file description, not inferred from
+     * `statSize`. A size is a stat answer — a provider can report one for a
+     * stream, and report `-1` for a file it simply will not measure — whereas
+     * a seek asks the only question that matters: does this description have a
+     * position at all? A pipe answers `ESPIPE`, and a source wrongly reported
+     * seekable would make every resume silently restart from zero.
+     *
+     * `SEEK_CUR` with a zero offset, so the probe is also the identity: it
+     * cannot disturb the position of a descriptor that does have one.
+     */
+    fun probeSeekable(descriptor: ParcelFileDescriptor): Boolean =
         runCatching {
-            context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
-                // A descriptor with a real length is one the OS can seek within;
-                // a stream-only provider reports UNKNOWN_LENGTH.
-                descriptor.statSize >= 0
-            }
-        }.getOrNull()
+            Os.lseek(descriptor.fileDescriptor, 0, OsConstants.SEEK_CUR)
+        }.isSuccess
 
     private fun journal(context: Context) =
         context.getSharedPreferences(

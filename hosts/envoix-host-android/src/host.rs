@@ -30,8 +30,7 @@ use envoix_product::{
 };
 use envoix_runtime::{
     AcceptedSourceOffer, CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict,
-    NoSourceStaging, Runtime, RuntimeConfig, SourceOfferAnswer, SubscribeError, TransferRecord,
-    TryRecvError,
+    Runtime, RuntimeConfig, SourceOfferAnswer, SubscribeError, TransferRecord, TryRecvError,
 };
 use envoix_storage_local::LocalStorage;
 use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId, RequestId};
@@ -39,6 +38,7 @@ use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, Rec
 use crate::create;
 use crate::executor::PreparedIrohExecutor;
 use crate::provider::HostProvider;
+use crate::staging::{BoundSourceRegistry, BoundSourceStaging};
 use crate::store::HostStore;
 use crate::stores::CardStores;
 
@@ -181,6 +181,15 @@ impl CreateIndex {
 struct Shared {
     state: Mutex<SharedState>,
     evidence: Arc<Evidence>,
+    /// How this process reaches the bytes for each live acquisition.
+    ///
+    /// Beside the lane rather than under its mutex, because it has its own and
+    /// the two are never both held: the JNI lane adopts descriptors into it, the
+    /// pump prunes superseded and removed ones, and the staging worker opens
+    /// them. Process-local by nature — an open descriptor means nothing after
+    /// the process holding it dies, so a durable version would claim something
+    /// untrue.
+    sources: BoundSourceRegistry,
 }
 
 /// The host's diagnostics projection (RT3) and the sessions the current
@@ -316,22 +325,6 @@ impl Host {
     /// durable card, then drains each card's destructive outbox (AFTER
     /// restore — never inside it), then attaches the frame pump.
     pub fn boot(root: &Path) -> Result<Self, BootError> {
-        // Android's source session is the next slice. Until it exists this host
-        // stages nothing, and a card that reaches `Staging` returns to asking
-        // for a document rather than waiting on a worker that will never
-        // report — the honest shape, not a silent hang.
-        Self::boot_with_staging(root, NoSourceStaging)
-    }
-
-    /// Boots with a chosen source-staging worker.
-    ///
-    /// The composition root is where an L4 port is implemented, so this is where
-    /// the choice belongs. The CLI and the off-device tests hand in the
-    /// filesystem worker; Android will hand in its content-URI session.
-    pub fn boot_with_staging(
-        root: &Path,
-        staging: impl envoix_runtime::SourceStagingExecutor,
-    ) -> Result<Self, BootError> {
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -345,13 +338,19 @@ impl Host {
         let stores = CardStores::new(root.to_path_buf());
         let provider = HostProvider::new(stores.clone(), NonZeroUsize::new(3).expect("nonzero"));
         let evidence = Arc::new(Evidence::new());
+        let sources = BoundSourceRegistry::default();
         let runtime = {
             let _guard = tokio.enter();
             Arc::new(Runtime::start_with_evidence(
                 config,
                 provider,
                 PreparedIrohExecutor::default(),
-                staging,
+                // One worker, both platforms. It opens whatever the registry
+                // bound for an acquisition — a path on a filesystem host, a
+                // descriptor Android detached — because both resolve to a
+                // readable file and the difference is the platform's, not the
+                // design's.
+                BoundSourceStaging::new(sources.clone()),
                 EvidenceIntake(Arc::clone(&evidence)),
             ))
         };
@@ -363,6 +362,7 @@ impl Host {
             shared: Arc::new(Shared {
                 state: Mutex::new(SharedState::default()),
                 evidence,
+                sources,
             }),
         };
 
@@ -384,7 +384,7 @@ impl Host {
                 .durable_record(card)
                 .is_some_and(|record| record.facts.remove_requested)
             {
-                enqueue_source_release(&mut host.shared.lock(), card);
+                enqueue_source_release(&host.shared, card);
             }
             // Absent/corrupt cards stay quarantined in storage; a restore
             // refusal must not fail the boot of every other card.
@@ -501,6 +501,34 @@ impl Host {
     /// within one: releasing an Android URI grant is itself idempotent.
     pub fn poll_source_release(&self) -> Option<RecordId> {
         self.shared.lock().source_releases.pop_front()
+    }
+
+    /// How this process reaches the bytes for each acquisition.
+    ///
+    /// Exposed because a filesystem host binds PATHS through it — the CLI and
+    /// the off-device tests — while Android binds descriptors through the JNI
+    /// lane. Same registry, same key, two platform answers.
+    pub fn sources(&self) -> &BoundSourceRegistry {
+        &self.shared.sources
+    }
+
+    /// Adopts this process's duplicate of the descriptor the platform opened for
+    /// one acquisition.
+    ///
+    /// Infallible on purpose. Whether the authority ever asked for this
+    /// acquisition is not knowable here without racing the card's own actor, and
+    /// a descriptor nobody asked for is not an error — it is an orphan, which
+    /// the registry discards when the acquisition is superseded or its card goes
+    /// away. Refusing here would trade a harmless orphan for a refusal the
+    /// platform could only answer by re-picking.
+    pub fn bind_source_descriptor(
+        &self,
+        acquisition: SourceAcquisitionKey,
+        descriptor: std::os::fd::OwnedFd,
+    ) {
+        self.shared
+            .sources
+            .adopt_descriptor(acquisition, descriptor);
     }
 
     /// Takes one frontend-originated intent frame and returns the encoded
@@ -902,6 +930,7 @@ fn restore(
 /// Drains every subscription once: contract frames to the frame lane, duty
 /// updates through the adapter to the work lane.
 fn pump_once(shared: &Shared) {
+    let sources = &shared.sources;
     let mut state = shared.lock();
     let SharedState {
         attachment: _,
@@ -940,6 +969,11 @@ fn pump_once(shared: &Shared) {
                     // generation is established before any duty can register.
                     if let Some(record) = observed_record(&update.kind) {
                         ledger.advance_generation(update.card, record.generation);
+                        // The same fact the ledger uses to refuse a superseded
+                        // duty also retires the document that duty was answered
+                        // with. A re-pick advances the generation, and the file
+                        // the user replaced must stop being held open.
+                        sources.discard_superseded(update.card, record.generation);
                         if record.facts.remove_requested && source_releases_seen.insert(update.card)
                         {
                             source_releases.push_back(update.card);
@@ -978,7 +1012,16 @@ fn pump_once(shared: &Shared) {
     }
 }
 
-fn enqueue_source_release(state: &mut SharedState, card: RecordId) {
+/// One durably removed card: its platform grant is released and everything this
+/// process bound for it is dropped.
+///
+/// Both halves of the same fact. The Android grant outlives the process and is
+/// released by Kotlin off the release lane; the descriptors do not and are
+/// closed here. A removal that did only the first would hold a file open for the
+/// life of the process with no card left to read it.
+fn enqueue_source_release(shared: &Shared, card: RecordId) {
+    shared.sources.discard_card(card);
+    let mut state = shared.lock();
     if state.source_releases_seen.insert(card) {
         state.source_releases.push_back(card);
     }
@@ -993,6 +1036,26 @@ const fn observed_record(kind: &CardUpdateKind) -> Option<&TransferRecord> {
         | CardUpdateKind::Terminal(record) => Some(record),
         CardUpdateKind::CapabilityDuty { .. } => None,
     }
+}
+
+/// One acquisition, parsed from the identifiers a platform lane spells it with.
+///
+/// `None` for anything that is not the exact shape — 16 and 32 lowercase hex.
+/// A key assembled from a partly-parsed identifier would name an acquisition
+/// nobody asked for, which is the one thing this type exists to prevent.
+pub(crate) fn acquisition_from_hex(
+    card: &str,
+    generation: u32,
+    request: &str,
+) -> Option<SourceAcquisitionKey> {
+    if card.len() != 16 || request.len() != 32 {
+        return None;
+    }
+    Some(SourceAcquisitionKey::of(DutyProvenance {
+        card: RecordId::new(u64::from_str_radix(card, 16).ok()?),
+        generation: AttemptGen::new(generation),
+        request: RequestId::from_bytes(u128::from_str_radix(request, 16).ok()?.to_be_bytes()),
+    }))
 }
 
 /// The acquisition a source offer named, echoed back on its answer.

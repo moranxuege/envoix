@@ -19,7 +19,7 @@ use envoix_pairing::{
 use envoix_product::{
     AcceptedSourceOffer, ApplyOutcome, CapabilityAction, CommitError, CommittedSession,
     IdentityError, IdentitySource, NewTransfer, ProductEffect, ProductInput, ProductState,
-    RecordStore, StagedContent, TransferContent,
+    RecordStore, SourcePossession, StagedContent, TransferContent,
 };
 use envoix_protocol::mailbox::{
     MailboxProtocolError, ReceiptPayload, SealedReceipt, open_receipt, receipt_slot, seal_receipt,
@@ -161,6 +161,7 @@ fn stage_the_source<S: RecordStore>(
                 TransferContent::new(offered_name.clone(), total),
                 ContentHash::from_bytes([7; 32]),
             ),
+            possession: SourcePossession::Streamed,
         })
         .unwrap();
     session

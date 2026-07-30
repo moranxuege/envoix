@@ -72,8 +72,8 @@ pub use envoix_product::{
     MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_RELAY_LENGTH, MAX_ROOM_CODE_LENGTH,
     NewTransfer, PairingChannel, PauseOrigin, ProductCommand, ProductIdentity, ProductState,
     QrMatrix, Quiescence, RoomParticipation, SelectionGate, SourceAcquisitionKey, SourceLifecycle,
-    SourceOfferAnswer, SourcePromptReason, SourceStagingPlan, SystemIdentitySource,
-    TransferContent, TransferRecord, WorkerKind,
+    SourceOfferAnswer, SourcePossession, SourcePromptReason, SourceStagingPlan, StagingPlan,
+    SystemIdentitySource, TransferContent, TransferRecord, WorkerKind,
 };
 pub use error::{AcquireError, CommandRejected};
 pub use port::{
