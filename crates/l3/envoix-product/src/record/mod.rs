@@ -10,23 +10,31 @@ pub use identifiers::PRODUCT_RECORD_SCHEMA_ID;
 
 /// The version written by this build. Version 2 added `command_ledger` (BN2),
 /// version 3 added `pairing` (F2b), version 4 added the create request
-/// identity, and version 5 made the source lifecycle durable.
+/// identity, version 5 made the source lifecycle durable, and version 6 made
+/// what decodes strictly narrower than what parses.
 ///
-/// v5 is the first version that is not backward-readable, and deliberately so.
+/// v6's break is not a field. The BODY is byte-identical to v5's; what changed
+/// is that a v5 record could carry a receiver holding a send source, an accepted
+/// acquisition naming another card, or a `Process` grant claiming a reopenable
+/// provider — and all of those decoded. A version is a promise about what
+/// becomes LIVE, not only about layout, so records written under the older
+/// promise are refused rather than re-examined.
+///
+/// v5 was the first version that is not backward-readable, and deliberately so.
 /// Every earlier version predates `TransferRecord::source`, and there is no
 /// honest default for it: a receiver decoded as `AwaitingSelection` would ask
 /// for a document it must never have, and a sender defaulted to `NotRequired`
 /// would claim it needs none. A defaulted field that changes what a card IS is
 /// not a migration, it is a fabrication. Nothing has ever been released
-/// (`registry/release-ledger.toml`), so the only pre-v5 records anywhere are on
+/// (`registry/release-ledger.toml`), so the only pre-v6 records anywhere are on
 /// a development device and are quarantined intact rather than reinterpreted.
 ///
 /// An older reader seeing a newer version takes the honest
 /// [`RecordDecode::UnsupportedFuture`] quarantine, never the corrupt path.
-pub const PRODUCT_RECORD_VERSION: u32 = 5;
+pub const PRODUCT_RECORD_VERSION: u32 = 6;
 /// The oldest record version this build still decodes. Equal to
 /// [`PRODUCT_RECORD_VERSION`] because of the fabrication argument above.
-pub const OLDEST_READABLE_RECORD_VERSION: u32 = 5;
+pub const OLDEST_READABLE_RECORD_VERSION: u32 = 6;
 const MAX_RECORD_BODY_BYTES: usize = 1024 * 1024;
 const SCHEMA_LENGTH_BYTES: usize = 2;
 const VERSION_BYTES: usize = 4;
@@ -61,6 +69,13 @@ pub enum RecordInvariant {
     ZeroGeneration,
     ProgressExceedsTotal,
     ReadySourceIsPreparing,
+    /// A receiver holding a send source, or a sender holding none. The two
+    /// states that contradict the card's own direction.
+    DirectionDisagreesWithSource,
+    /// An accepted acquisition naming a card, a request or a generation this
+    /// record cannot have issued. `agrees_with` and the checked constructors
+    /// stop this being BUILT; only bytes can still claim it.
+    ForeignAcquisition,
 }
 
 impl fmt::Display for RecordCodecError {
@@ -177,6 +192,34 @@ fn validate_record(record: &TransferRecord) -> Result<(), RecordCodecError> {
         return Err(RecordCodecError::InvalidRecord(
             RecordInvariant::ProgressExceedsTotal,
         ));
+    }
+    // The direction/source invariant, ENFORCED rather than detected. It holds by
+    // construction everywhere a record is built — creation derives the lifecycle
+    // from the direction — so this is the boundary where untrusted bytes are the
+    // only way in.
+    if !record.source.agrees_with(record.direction) {
+        return Err(RecordCodecError::InvalidRecord(
+            RecordInvariant::DirectionDisagreesWithSource,
+        ));
+    }
+    // An accepted offer names an acquisition, and this record must be able to
+    // have issued it. Card and request are exact — the request is derived from
+    // this record's own receipt request, so a value that differs was minted for
+    // somebody else. The generation is a RANGE rather than an equality: a
+    // network retry advances the record's generation while the accepted offer
+    // keeps the one it was accepted under, and that history is deliberately
+    // retained so a replayed offer still answers duplicate/conflict. What it may
+    // never be is zero, or ahead of this record.
+    if let Some(key) = record.source.key() {
+        let mine = key.card() == record.identity.card
+            && key.request() == record.source_request()
+            && key.generation().get() != 0
+            && key.generation() <= record.generation;
+        if !mine {
+            return Err(RecordCodecError::InvalidRecord(
+                RecordInvariant::ForeignAcquisition,
+            ));
+        }
     }
     // A `Preparing` card with a ready source is normally invalid — EXCEPT the
     // staging-retirement handoff window: `StageComplete` promotes the lifecycle

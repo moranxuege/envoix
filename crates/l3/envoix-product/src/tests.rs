@@ -13,6 +13,7 @@ use envoix_types::{
     TransferId,
 };
 
+use crate::record::RecordInvariant;
 use crate::test_support::{
     STAGED_NAME, STAGED_TOTAL, acquired, give_a_source, offer, settled, staged,
 };
@@ -2427,7 +2428,34 @@ fn a_cards_channel_survives_the_record_and_re_encodes_to_its_invite() {
     assert_eq!(round_tripped, invite);
 }
 
+/// The acquisition the fixture record's own identity mints, taken from the
+/// record rather than restated.
+fn fixture_acquisition() -> envoix_capabilities::SourceAcquisitionKey {
+    fixture_skeleton().current_acquisition()
+}
+
 fn fixture_record() -> TransferRecord {
+    let mut record = fixture_skeleton();
+    record.source = crate::SourceLifecycle::Ready {
+        offer: crate::AcceptedSourceOffer::new(
+            fixture_acquisition(),
+            OfferedName::from_untrusted("a.txt").unwrap(),
+            Some(ByteCount::new(10)),
+        ),
+        acquired_retention: crate::SourceRetention::Persisted,
+        backing: crate::SourceBacking::PersistedProvider,
+        content: crate::StagedContent::new(
+            crate::TransferContent::new(
+                OfferedName::from_untrusted("a.txt").unwrap(),
+                ByteCount::new(10),
+            ),
+            ContentHash::from_bytes([5; 32]),
+        ),
+    };
+    record
+}
+
+fn fixture_skeleton() -> TransferRecord {
     TransferRecord {
         identity: ProductIdentity {
             card: RecordId::new(1),
@@ -2435,30 +2463,9 @@ fn fixture_record() -> TransferRecord {
             artifact: ArtifactId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]),
         },
         direction: Direction::Send,
-        // A staged send: the name and total live in the lifecycle now, which is
-        // the point — one authority for what the card is transferring.
-        source: crate::SourceLifecycle::Ready {
-            offer: crate::AcceptedSourceOffer::new(
-                envoix_capabilities::SourceAcquisitionKey::of(
-                    envoix_capabilities::DutyProvenance {
-                        card: RecordId::new(1),
-                        generation: AttemptGen::new(7),
-                        request: RequestId::from_bytes([4; 16]),
-                    },
-                ),
-                OfferedName::from_untrusted("a.txt").unwrap(),
-                Some(ByteCount::new(10)),
-            ),
-            acquired_retention: crate::SourceRetention::Persisted,
-            backing: crate::SourceBacking::PersistedProvider,
-            content: crate::StagedContent::new(
-                crate::TransferContent::new(
-                    OfferedName::from_untrusted("a.txt").unwrap(),
-                    ByteCount::new(10),
-                ),
-                ContentHash::from_bytes([5; 32]),
-            ),
-        },
+        // Replaced by `fixture_record`. The skeleton exists only so the
+        // acquisition can be taken FROM the record it belongs to.
+        source: crate::SourceLifecycle::initial(Direction::Send),
         participation: crate::RoomParticipation::Minted,
         state: ProductState::Paused(PauseOrigin::Local),
         quiescence: crate::Quiescence::Quiescent,
@@ -2491,12 +2498,12 @@ fn product_record_roundtrips() {
 }
 
 #[test]
-fn product_record_v5_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"04040404040404040404040404040404"},"display_name":"a.txt","reported_size":10},"acquired_retention":"persisted","backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+fn product_record_v6_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"display_name":"a.txt","reported_size":10},"acquired_retention":"persisted","backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&5_u32.to_be_bytes());
+    expected.extend_from_slice(&6_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);
@@ -2740,4 +2747,107 @@ fn a_minted_send_can_be_cancelled_and_then_asked_again() {
     };
     card.reduce(offered).unwrap();
     assert!(matches!(card.source, crate::SourceLifecycle::Acquiring(_)));
+}
+
+/// Wraps a hand-written body in the v6 envelope, so a fixture is BYTES rather
+/// than a constructed value. The constructors already refuse these; only a
+/// hostile storage editor can still write them, and this is the boundary that
+/// has to say no.
+fn hostile_record(body: &str) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(&23_u16.to_be_bytes());
+    encoded.extend_from_slice(b"envoix/product-record/1");
+    encoded.extend_from_slice(&crate::PRODUCT_RECORD_VERSION.to_be_bytes());
+    encoded.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    encoded.extend_from_slice(body.as_bytes());
+    encoded
+}
+
+/// The body of the byte-exact fixture, with one substring replaced. Every
+/// hostile case below is the VALID record differing in exactly one place, so a
+/// refusal cannot be passing for an unrelated reason.
+fn fixture_body_with(from: &str, to: &str) -> String {
+    let encoded = encode_record(&fixture_record()).unwrap();
+    let body = String::from_utf8(encoded[33..].to_vec()).unwrap();
+    assert!(body.contains(from), "the fixture body has no {from:?}");
+    body.replace(from, to)
+}
+
+/// Bytes a hostile editor can write, and the decoder refuses.
+///
+/// These are the combinations the checked constructors make unbuildable in
+/// Rust. Testing the constructors alone proves nothing about them: storage is
+/// not a constructor, and until v6 every one of these DECODED — a receiver
+/// holding a send source, an acquisition belonging to another card, and a
+/// process-only grant claiming a provider it could reopen.
+#[test]
+fn hostile_v6_bytes_are_refused_one_invariant_at_a_time() {
+    // Sanity: the unmodified body is accepted, so each refusal below is caused
+    // by its own edit rather than by the harness.
+    assert!(matches!(
+        decode_record(&hostile_record(&fixture_body_with("\"send\"", "\"send\""))),
+        Ok(RecordDecode::Loaded(_))
+    ));
+
+    let cases: [(&str, &str, &str, RecordInvariant); 5] = [
+        (
+            "a receiver cannot hold a send source",
+            "\"direction\":\"send\"",
+            "\"direction\":\"receive\"",
+            RecordInvariant::DirectionDisagreesWithSource,
+        ),
+        (
+            "an acquisition belonging to another card",
+            "\"key\":{\"card\":1",
+            "\"key\":{\"card\":2",
+            RecordInvariant::ForeignAcquisition,
+        ),
+        (
+            "an acquisition ahead of the record that would have issued it",
+            "\"generation\":7,\"request\"",
+            "\"generation\":8,\"request\"",
+            RecordInvariant::ForeignAcquisition,
+        ),
+        (
+            "an acquisition minted for a request this record never derives",
+            "\"request\":\"656e766f69782f736f757263652f7635\"",
+            "\"request\":\"ffffffffffffffffffffffffffffffff\"",
+            RecordInvariant::ForeignAcquisition,
+        ),
+        (
+            "progress past the counted total",
+            "\"bytes\":4",
+            "\"bytes\":11",
+            RecordInvariant::ProgressExceedsTotal,
+        ),
+    ];
+    for (what, from, to, invariant) in cases {
+        assert_eq!(
+            decode_record(&hostile_record(&fixture_body_with(from, to))),
+            Err(RecordCodecError::InvalidRecord(invariant)),
+            "{what}"
+        );
+    }
+
+    // The impossible retention products are refused by the lifecycle DTO before
+    // the record validator sees them, so they surface as a malformed body
+    // rather than an invariant — the conversion is where they die.
+    for (what, from, to) in [
+        (
+            "a process grant claiming a provider it can reopen",
+            "\"acquired_retention\":\"persisted\"",
+            "\"acquired_retention\":\"process\"",
+        ),
+        (
+            "a byte count past what this product can carry end to end",
+            "\"total\":10",
+            "\"total\":9223372036854775808",
+        ),
+    ] {
+        assert_eq!(
+            decode_record(&hostile_record(&fixture_body_with(from, to))),
+            Err(RecordCodecError::MalformedBody),
+            "{what}"
+        );
+    }
 }

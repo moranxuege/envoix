@@ -147,7 +147,32 @@ pub enum StagingPlan {
     CopyToOwnedArtifact,
 }
 
+/// The largest source this product can carry from end to end.
+///
+/// DERIVED, not chosen. The generated read contract's byte counts are `u63`
+/// specifically so every native target holds one in a signed 64-bit integer
+/// (`schema/read.schema`), so that is the narrowest representation on the whole
+/// path and therefore the real ceiling. A product limit below it would be a
+/// number invented about somebody else's data; a value above it would be one
+/// this product could count and then fail to publish.
+///
+/// In practice device storage, provider behaviour or a quota fails long before
+/// this. That is the honest answer to "what is the maximum file size" — there
+/// is no product-imposed one.
+pub const MAX_SOURCE_BYTES: u64 = i64::MAX as u64;
+
 impl StagingPlan {
+    /// Whether this plan can be true of a source the platform holds under
+    /// `retention`. See [`SourceDecodeError::ImpossibleRetention`].
+    pub const fn is_possible_with(self, retention: SourceRetention) -> bool {
+        match (self, retention) {
+            (Self::ProviderStream, SourceRetention::Process) => false,
+            (Self::ProviderStream, SourceRetention::Persisted) | (Self::CopyToOwnedArtifact, _) => {
+                true
+            }
+        }
+    }
+
     /// The plan for a source the platform will serve under these terms.
     ///
     /// Streaming is the default and the copy is the exception: copying every
@@ -186,6 +211,21 @@ pub enum SourceBacking {
     /// An app-private artifact this build owns outright. The provider grant can
     /// be released.
     OwnedArtifact,
+}
+
+impl SourceBacking {
+    /// Whether this backing can be true of a source the platform held under
+    /// `retention`. An owned copy is valid whatever the platform promised —
+    /// that is the point of copying — but a provider we intend to REOPEN
+    /// requires a grant that survives a restart.
+    pub const fn is_possible_with(self, retention: SourceRetention) -> bool {
+        match (self, retention) {
+            (Self::PersistedProvider, SourceRetention::Process) => false,
+            (Self::PersistedProvider, SourceRetention::Persisted) | (Self::OwnedArtifact, _) => {
+                true
+            }
+        }
+    }
 }
 
 /// What a card is transferring: the name and the number of bytes.
@@ -1170,6 +1210,18 @@ pub(crate) enum SourceLifecycleDto {
 pub enum SourceDecodeError {
     /// A post-failure gate claiming the card never tried.
     ImpossiblePromptReason,
+    /// A retention the plan or the backing beside it cannot be true with.
+    ///
+    /// `ProviderStream` means the grant is persisted and the source can seek —
+    /// a `Process` grant satisfies neither. `PersistedProvider` means the bytes
+    /// are reopened through a grant that survives a restart, which a `Process`
+    /// grant is by definition not. Both products decoded before this: the DTO
+    /// exposed the raw pair and rebuilt it without asking whether the two facts
+    /// could hold together.
+    ImpossibleRetention,
+    /// A byte count past the narrowest representation this product can carry
+    /// end to end. See [`MAX_SOURCE_BYTES`].
+    SourceTooLarge,
 }
 
 impl core::fmt::Display for SourceDecodeError {
@@ -1177,7 +1229,26 @@ impl core::fmt::Display for SourceDecodeError {
         match self {
             Self::ImpossiblePromptReason => formatter
                 .write_str("a post-failure selection gate cannot claim the card never tried"),
+            Self::ImpossibleRetention => formatter
+                .write_str("the platform retention cannot be true beside this plan or backing"),
+            Self::SourceTooLarge => {
+                formatter.write_str("the source byte count exceeds the representable maximum")
+            }
         }
+    }
+}
+
+/// An accepted offer whose provider claim is representable.
+///
+/// `reported_size` is the provider's, so hostile bytes can put anything in it.
+/// It is advisory and never becomes a total — but a value this product cannot
+/// carry end to end must not become a live one either, or a frontend would be
+/// handed a size it cannot render.
+fn checked_offer(offer: OfferDto) -> Result<AcceptedSourceOffer, SourceDecodeError> {
+    let offer: AcceptedSourceOffer = offer.into();
+    match offer.reported_size() {
+        Some(size) if size.get() > MAX_SOURCE_BYTES => Err(SourceDecodeError::SourceTooLarge),
+        _ => Ok(offer),
     }
 }
 
@@ -1324,27 +1395,41 @@ impl TryFrom<SourceLifecycleDto> for SourceLifecycle {
                 } => SelectionGate::lost(reason, previous_offer.into())
                     .ok_or(SourceDecodeError::ImpossiblePromptReason)?,
             }),
-            SourceLifecycleDto::Acquiring { offer } => Self::Acquiring(offer.into()),
+            SourceLifecycleDto::Acquiring { offer } => Self::Acquiring(checked_offer(offer)?),
             SourceLifecycleDto::Staging {
                 offer,
                 acquired_retention,
                 plan,
-            } => Self::Staging {
-                offer: offer.into(),
-                acquired_retention,
-                plan,
-            },
+            } => {
+                if !plan.is_possible_with(acquired_retention) {
+                    return Err(SourceDecodeError::ImpossibleRetention);
+                }
+                Self::Staging {
+                    offer: checked_offer(offer)?,
+                    acquired_retention,
+                    plan,
+                }
+            }
             SourceLifecycleDto::Ready {
                 offer,
                 acquired_retention,
                 backing,
                 content,
-            } => Self::Ready {
-                offer: offer.into(),
-                acquired_retention,
-                backing,
-                content: content.into(),
-            },
+            } => {
+                if !backing.is_possible_with(acquired_retention) {
+                    return Err(SourceDecodeError::ImpossibleRetention);
+                }
+                let content: StagedContent = content.into();
+                if content.total().get() > MAX_SOURCE_BYTES {
+                    return Err(SourceDecodeError::SourceTooLarge);
+                }
+                Self::Ready {
+                    offer: checked_offer(offer)?,
+                    acquired_retention,
+                    backing,
+                    content,
+                }
+            }
         })
     }
 }
