@@ -257,7 +257,7 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_shutdown(
 #[cfg(feature = "e2e-instrumentation")]
 mod e2e {
     use jni::JNIEnv;
-    use jni::objects::{JClass, JString};
+    use jni::objects::JClass;
     use jni::sys::{jlong, jstring};
 
     use super::with_host;

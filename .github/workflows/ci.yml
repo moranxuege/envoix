@@ -35,8 +35,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all -- --check
+      # `--all-features` because the packaged instrumentation lane is behind
+      # `e2e-instrumentation` and was therefore never compiled by this gate — the
+      # one body of code BN5 pins symbol-by-symbol was the one body of code
+      # nothing linted.
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: tests
         run: cargo test --workspace
       - name: identifier registry gate
