@@ -347,7 +347,7 @@ impl Host {
                 PreparedIrohExecutor::default(),
                 // One worker, both platforms. It opens whatever the registry
                 // bound for an acquisition — a path on a filesystem host, a
-                // descriptor Android detached — because both resolve to a
+                // descriptor Android lent — because both resolve to a
                 // readable file and the difference is the platform's, not the
                 // design's.
                 BoundSourceStaging::new(sources.clone()),
@@ -512,23 +512,25 @@ impl Host {
         &self.shared.sources
     }
 
-    /// Adopts this process's duplicate of the descriptor the platform opened for
-    /// one acquisition.
+    /// Binds this process's duplicate of the descriptor the platform opened for
+    /// one acquisition. Returns whether it was taken.
     ///
-    /// Infallible on purpose. Whether the authority ever asked for this
-    /// acquisition is not knowable here without racing the card's own actor, and
-    /// a descriptor nobody asked for is not an error — it is an orphan, which
-    /// the registry discards when the acquisition is superseded or its card goes
-    /// away. Refusing here would trade a harmless orphan for a refusal the
-    /// platform could only answer by re-picking.
+    /// Whether the AUTHORITY ever asked for this acquisition is not checked, and
+    /// could not be here without racing the card's own actor — a descriptor
+    /// nobody asked for is an orphan, not an error, and the registry discards it
+    /// when the acquisition is superseded or its card goes away.
+    ///
+    /// What IS checked is that the acquisition is not already bound. False means
+    /// it was, and this process's duplicate has been closed. See
+    /// [`BoundSourceRegistry::adopt_descriptor`].
     pub fn bind_source_descriptor(
         &self,
         acquisition: SourceAcquisitionKey,
         descriptor: std::os::fd::OwnedFd,
-    ) {
+    ) -> bool {
         self.shared
             .sources
-            .adopt_descriptor(acquisition, descriptor);
+            .adopt_descriptor(acquisition, descriptor)
     }
 
     /// Takes one frontend-originated intent frame and returns the encoded
@@ -980,11 +982,16 @@ fn pump_once(shared: &Shared) {
                     // generation is established before any duty can register.
                     if let Some(record) = observed_record(&update.kind) {
                         ledger.advance_generation(update.card, record.generation);
-                        // The same fact the ledger uses to refuse a superseded
-                        // duty also retires the document that duty was answered
-                        // with. A re-pick advances the generation, and the file
-                        // the user replaced must stop being held open.
-                        sources.discard_superseded(update.card, record.generation);
+                        // The document a superseded acquisition was answered
+                        // with stops being held open. Driven by the record's own
+                        // SOURCE reference, not by the generation the ledger uses:
+                        // a resume advances the attempt generation and keeps the
+                        // ready source, so the ledger's fact would close the very
+                        // descriptor the card is about to send from.
+                        sources.discard_superseded(
+                            update.card,
+                            record.source.key().map(SourceAcquisitionKey::generation),
+                        );
                         if record.facts.remove_requested && source_releases_seen.insert(update.card)
                         {
                             source_releases.push_back(update.card);

@@ -2,13 +2,14 @@
 //!
 //! Every entry point is a thin translation: bytes in, bytes out, no logic.
 //!
-//! ONE unsafe block appears here, and only here: adopting the file descriptor
-//! the platform detaches for a source acquisition. Turning a raw descriptor into
-//! an owned one asserts that nothing else will close it, and this is the only
-//! place that assertion is checkable — Kotlin's `detachFd()` is in the same
-//! call. Everything downstream takes the safe `OwnedFd`, so no other caller can
-//! get the ownership question wrong. Otherwise the module-level allow exists
-//! only for the edition-2024 `#[unsafe(no_mangle)]` export attributes.
+//! ONE unsafe block appears here, and only here: borrowing the file descriptor
+//! the platform LENDS for a source acquisition, so this process can duplicate
+//! it. Borrowing a raw descriptor asserts the number is open and outlives the
+//! borrow, and this is the only place that assertion is checkable — the caller
+//! holds its `ParcelFileDescriptor` across the call. Everything downstream takes
+//! the safe `OwnedFd` duplicate, so no other caller can get the ownership
+//! question wrong. Otherwise the module-level allow exists only for the
+//! edition-2024 `#[unsafe(no_mangle)]` export attributes.
 //!
 //! The slot is an `RwLock`: lane calls take it SHARED, so an intent awaiting
 //! the runtime never blocks the frame/work polls or another intent. Only boot
@@ -230,7 +231,9 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_bindSourceDescriptor(
     let Ok(descriptor) = borrowed.try_clone_to_owned() else {
         return 0;
     };
-    u8::from(with_host(|host| host.bind_source_descriptor(acquisition, descriptor)).is_some())
+    u8::from(
+        with_host(|host| host.bind_source_descriptor(acquisition, descriptor)).unwrap_or(false),
+    )
 }
 
 /// `NativeHost.shutdown()`

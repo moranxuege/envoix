@@ -802,9 +802,12 @@ impl TransferRecord {
         // a card claiming possession of an artifact nobody had written, which a
         // restart would then try to reopen.
         //
-        // A worker with no copy sink cannot spell `Copied`, so this arm is what
-        // turns "this host cannot perform that plan" into an honest failure
-        // instead of a lie on the record.
+        // This turns "this host cannot perform that plan" into an honest failure
+        // instead of a lie on the record. It is NOT proof that a copy happened:
+        // `ArtifactId::from_bytes` is public, so a dishonest worker can still
+        // name an artifact it never wrote, and the id is not retained on the
+        // backing to check later. Both want a witness only the bulk store can
+        // mint; neither is reachable while no worker emits `Copied` at all.
         if !possession.performs(plan) {
             return self.fail_staging(stamp);
         }

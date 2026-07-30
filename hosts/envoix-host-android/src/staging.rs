@@ -45,9 +45,9 @@ const READ_CHUNK_BYTES: usize = 256 * 1024;
 enum BoundSource {
     /// A path this process may open whenever it likes.
     Path(PathBuf),
-    /// A descriptor the platform opened and HANDED OVER. Rust owns it from that
-    /// moment and closes it; a platform that kept its own copy would give the
-    /// file two closers.
+    /// This process's DUPLICATE of a descriptor the platform opened. The
+    /// platform lends its own and closes it; this one is closed here. Two
+    /// descriptors, one open file description, one closer each.
     ///
     /// Process-local by nature, and correctly so: an open descriptor means
     /// nothing after the process that holds it dies. A registry that tried to
@@ -73,17 +73,29 @@ impl BoundSourceRegistry {
         self.lock().insert(acquisition, BoundSource::Path(path));
     }
 
-    /// Adopts a descriptor the platform opened for one acquisition.
+    /// Binds this process's duplicate of a platform descriptor to one
+    /// acquisition. Returns whether it was taken.
     ///
-    /// Takes an `OwnedFd`, not an integer. Turning a raw descriptor into an
-    /// owned one is unsafe by nature — it asserts that nothing else will close
-    /// it — and that assertion is only checkable at the JNI boundary, where
-    /// Kotlin's `detachFd()` is in the same call. So the boundary makes it and
-    /// this takes the safe result: no caller of this registry can get the
-    /// ownership question wrong, because it is not asked here.
-    pub fn adopt_descriptor(&self, acquisition: SourceAcquisitionKey, descriptor: OwnedFd) {
-        self.lock()
-            .insert(acquisition, BoundSource::Descriptor(descriptor));
+    /// Takes an `OwnedFd`, not an integer. Borrowing a raw descriptor is unsafe
+    /// by nature — it asserts the number is open and will outlive the borrow —
+    /// and that assertion is only checkable at the JNI boundary, where the
+    /// caller's `ParcelFileDescriptor` is held across the call. So the boundary
+    /// makes it and this takes the safe result: no caller of this registry can
+    /// get the ownership question wrong, because it is not asked here.
+    ///
+    /// FIRST BIND WINS for an acquisition. A later bind under a key already
+    /// bound is refused and its descriptor closed, because staging has by then
+    /// read the source through and established a digest against that exact open
+    /// file description — replacing it would leave the attempt reading a
+    /// different document than the one the record vouches for, silently. A new
+    /// document is a new acquisition, which is what a re-pick mints.
+    pub fn adopt_descriptor(&self, acquisition: SourceAcquisitionKey, descriptor: OwnedFd) -> bool {
+        let mut sources = self.lock();
+        if sources.contains_key(&acquisition) {
+            return false;
+        }
+        sources.insert(acquisition, BoundSource::Descriptor(descriptor));
+        true
     }
 
     /// Drops what an acquisition was bound to, closing a descriptor if it held
@@ -103,19 +115,29 @@ impl BoundSourceRegistry {
         self.lock().retain(|key, _| key.card() != card);
     }
 
-    /// Discards what this card bound under a generation older than `current`.
+    /// Discards what this card bound for an acquisition older than the one its
+    /// committed record now names.
     ///
-    /// A re-pick advances the generation, so every entry below it names an
-    /// acquisition no duty can still be answered for. Without this, a document
-    /// the user replaced would hold its descriptor for the life of the process —
-    /// the orphan that a process-local registry does not prevent by itself.
+    /// Driven by the ACQUISITION's generation, never the record's. The two are not the same —
+    /// a resume advances the attempt generation and deliberately keeps the ready
+    /// source, so cleaning up by the record's generation closed the descriptor
+    /// the still-`Ready` card was about to send from. A re-pick is what mints a
+    /// new acquisition, and only then is the old one dead.
     ///
-    /// A descriptor that arrives AFTER the generation has already advanced is
-    /// not caught here; it waits for the next advance or for the card's removal.
-    /// That is one handle per card in the worst case, and the alternative —
-    /// refusing a bind against the current generation — would need the registry
-    /// to hold an authority answer it cannot read without racing the card actor.
-    pub fn discard_superseded(&self, card: envoix_types::RecordId, current: AttemptGen) {
+    /// `None` — the card names no acquisition at all — discards NOTHING, and that
+    /// is deliberate. Projections are observed asynchronously, so an update from
+    /// before a pick can arrive after the descriptor for that pick was bound;
+    /// treating "no source" as "close everything" would let a stale observation
+    /// close a live handle. What it costs is a descriptor for an abandoned
+    /// acquisition living until the next re-pick or the card's removal.
+    ///
+    /// A descriptor that arrives AFTER the acquisition advanced is likewise not
+    /// caught here. Same bound, same reason: the alternative is the registry
+    /// holding an authority answer it cannot read without racing the card actor.
+    pub fn discard_superseded(&self, card: envoix_types::RecordId, current: Option<AttemptGen>) {
+        let Some(current) = current else {
+            return;
+        };
         self.lock()
             .retain(|key, _| key.card() != card || key.generation() >= current);
     }
@@ -162,11 +184,10 @@ impl SourceStagingExecutor for BoundSourceStaging {
         // host does not hold fails immediately rather than after a task hop.
         //
         // A copy plan opens nothing. This worker reads through and writes
-        // nothing, so it cannot produce the artifact a copy establishes — and
-        // `SourceStagingSignal::Copied` carries an `ArtifactId` it therefore
-        // cannot spell. Failing is the honest answer until the copy sink exists;
-        // the alternative is what the possession split removed, a card resting at
-        // `Ready` over an owned artifact that was never written.
+        // nothing, so it cannot produce the artifact a copy establishes, and it
+        // does not claim one. Failing is the honest answer until the copy sink
+        // exists; the alternative is what the possession split removed, a card
+        // resting at `Ready` over an owned artifact that was never written.
         let source = match plan.plan {
             StagingPlan::ProviderStream => self.registry.open(&plan.acquisition),
             StagingPlan::CopyToOwnedArtifact => None,
@@ -253,11 +274,7 @@ mod tests {
     use super::*;
 
     fn acquisition() -> SourceAcquisitionKey {
-        SourceAcquisitionKey::of(DutyProvenance {
-            card: RecordId::new(7),
-            generation: AttemptGen::new(1),
-            request: RequestId::from_bytes([9; 16]),
-        })
+        acquisition_at(1)
     }
 
     fn scan_once(registry: &BoundSourceRegistry) -> SourceStagingSignal {
@@ -265,6 +282,91 @@ mod tests {
         let (signals, _drain) = mpsc::channel(1024);
         let (_stop, mut token) = stop_channel();
         scan(file, &signals, &mut token)
+    }
+
+    fn acquisition_at(generation: u32) -> SourceAcquisitionKey {
+        SourceAcquisitionKey::of(DutyProvenance {
+            card: RecordId::new(7),
+            generation: AttemptGen::new(generation),
+            request: RequestId::from_bytes([9; 16]),
+        })
+    }
+
+    fn a_descriptor() -> OwnedFd {
+        OwnedFd::from(std::fs::File::open("/dev/null").expect("a descriptor"))
+    }
+
+    /// A resume must not close the source the card is about to send from.
+    ///
+    /// The attempt generation and the ACQUISITION's generation are different
+    /// facts with different lifetimes: resume advances the first and
+    /// deliberately keeps the ready source, while only a re-pick mints a new
+    /// acquisition. Cleaning up by the record's generation — the same one the
+    /// duty ledger uses to refuse a stale duty — closed the descriptor of a card
+    /// whose lifecycle still named it.
+    #[test]
+    fn a_resumed_attempt_keeps_the_source_its_record_still_names() {
+        let registry = BoundSourceRegistry::default();
+        let bound = acquisition_at(1);
+        registry.adopt_descriptor(bound, a_descriptor());
+
+        // The card resumed: the record's generation moved on, the acquisition
+        // did not, so the lifecycle still names `bound`.
+        registry.discard_superseded(bound.card(), Some(bound.generation()));
+        assert!(
+            registry.open(&bound).is_some(),
+            "a resume closed the source the card was about to send from"
+        );
+
+        // A re-pick DOES mint a new acquisition, and only then is the old one
+        // dead — so the retention above is not passing because nothing is ever
+        // discarded.
+        let repicked = acquisition_at(2);
+        registry.adopt_descriptor(repicked, a_descriptor());
+        registry.discard_superseded(repicked.card(), Some(repicked.generation()));
+        assert!(
+            registry.open(&bound).is_none(),
+            "a re-picked source was kept"
+        );
+        assert!(registry.open(&repicked).is_some());
+    }
+
+    /// A card that names no acquisition discards nothing.
+    ///
+    /// Projections are observed asynchronously, so an update from before a pick
+    /// can arrive after that pick's descriptor was bound. Treating "no source"
+    /// as "close everything" lets a stale observation close a live handle.
+    #[test]
+    fn an_observation_with_no_acquisition_closes_nothing() {
+        let registry = BoundSourceRegistry::default();
+        let bound = acquisition_at(1);
+        registry.adopt_descriptor(bound, a_descriptor());
+
+        registry.discard_superseded(bound.card(), None);
+
+        assert!(
+            registry.open(&bound).is_some(),
+            "a stale observation closed a live descriptor"
+        );
+    }
+
+    /// The first bind for an acquisition is the one that counts.
+    ///
+    /// Staging reads the source through and establishes a digest against one
+    /// exact open file description. A later bind replacing it would leave the
+    /// attempt reading a different document than the record vouches for, and
+    /// nothing would say so — positional reads make concurrent offsets safe, not
+    /// the identity of what is being read.
+    #[test]
+    fn a_second_bind_for_one_acquisition_is_refused() {
+        let registry = BoundSourceRegistry::default();
+        let bound = acquisition_at(1);
+
+        assert!(registry.adopt_descriptor(bound, a_descriptor()));
+        assert!(
+            !registry.adopt_descriptor(bound, a_descriptor()),
+            "a second document replaced the one staging established"
+        );
     }
 
     /// A second staging run must observe the same file as the first.

@@ -120,8 +120,12 @@ pub enum SourceStagingSignal {
     /// source through satisfy a copy plan, and the card then rested at `Ready`
     /// claiming an artifact nobody had written.
     ///
-    /// The `ArtifactId` is the proof, not a label: it can only be had by
-    /// writing one, so a worker without a copy sink cannot spell this arm.
+    /// The `ArtifactId` is NOT proof of a copy — `ArtifactId::from_bytes` is
+    /// public, so any executor can name an artifact it never wrote. What this
+    /// arm buys today is that a worker must STATE which operation it performed,
+    /// which is enough to stop the reducer inferring possession from the plan it
+    /// commissioned. Proof needs a witness the bulk store alone can mint, binding
+    /// the artifact to a durable seal, and that arrives with the store.
     Copied {
         total: ByteCount,
         digest: ContentHash,
