@@ -159,10 +159,16 @@ internal fun ConnectionHubScreen(
                         modifier = Modifier.weight(1f),
                     )
                     TextButton(
-                        onClick = discoveryViewModel::restart,
+                        onClick = {
+                            if (discovery.active) discoveryViewModel.stop()
+                            else discoveryViewModel.start()
+                        },
                         modifier = Modifier.testTag("hub_restart_nearby"),
                     ) {
-                        Text(appText("Restart", "重新搜索"), color = colors.accent)
+                        Text(
+                            if (discovery.active) appText("Stop", "停止") else appText("Start", "开始搜索"),
+                            color = colors.accent,
+                        )
                     }
                 }
             }
