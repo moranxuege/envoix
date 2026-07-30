@@ -531,6 +531,10 @@ fn frontend_lane_channel_is_one_name() {
         "FrontendLane.kt"
     ));
     const DART: &str = include_str!("../../../../apps/envoix-flutter/lib/lane.dart");
+    // The capability method is declared beside the seam that uses it, not in
+    // `lane.dart`, so this file states the whole exchange in one place.
+    const CAPABILITY_DART: &str =
+        include_str!("../../../../apps/envoix-flutter/lib/capability.dart");
 
     fn literal(text: &str, declaration: &str, quote: char) -> String {
         text.split_once(declaration)
@@ -567,55 +571,27 @@ fn frontend_lane_channel_is_one_name() {
         literal(DART, "const String intentMethod = ", '\'')
     );
     assert_eq!(
-        literal(KOTLIN, "const val PICK_SOURCE = ", '"'),
-        literal(DART, "const String pickSourceMethod = ", '\'')
+        literal(KOTLIN, "const val CAPABILITY = ", '"'),
+        literal(CAPABILITY_DART, "const String capabilityMethod = ", '\'')
     );
     assert_ne!(
-        literal(KOTLIN, "const val PICK_SOURCE = ", '"'),
+        literal(KOTLIN, "const val CAPABILITY = ", '"'),
         literal(KOTLIN, "const val INTENT = ", '"'),
         "two methods, two names"
     );
-    // The pick's reply keys, which the Dart side reads back by name. A key the
-    // platform sends under one name and Dart reads under another is a picked
-    // file that always looks unnamed and zero bytes long.
-    for declaration in ["const val DISPLAY_NAME = ", "const val SIZE_BYTES = "] {
-        let key = literal(KOTLIN, declaration, '"');
-        assert!(
-            DART.contains(&format!("granted['{key}']")),
-            "the Dart lane never reads the `{key}` the platform sends"
-        );
-    }
-    // And the reply carries THOSE TWO KEYS AND NOTHING ELSE. This is what makes
-    // "Dart never holds a URI" a checked property rather than a promise: the
-    // only thing that could hand one over is this map, and its shape is pinned
-    // to the two scalars the frontend is allowed to know.
-    let reply = code_only(KOTLIN)
-        .split_once("mapOf(")
-        .expect("the pick answers with a map")
-        .1
-        .split_once(')')
-        .expect("the map literal closes")
-        .0
-        .to_owned();
-    let pairs: Vec<&str> = reply.split(" to ").collect();
-    // `a to x, b to y` splits into [a, "x, b", y]: every segment but the last
-    // ends with the NEXT key, and the first segment is a key on its own.
-    let keys: Vec<&str> = pairs[..pairs.len() - 1]
-        .iter()
-        .map(|segment| segment.rsplit(',').next().unwrap_or(segment).trim())
-        .collect();
-    assert_eq!(
-        keys.len(),
-        2,
-        "the pick reply carries {} values, not two: {reply}",
-        keys.len()
+
+    // "Dart never holds a URI" used to be checked by pinning the shape of a
+    // hand-written reply map to two scalars. The map is gone: the picker
+    // answers on the capability contract, whose scalar vocabulary has no handle,
+    // path or URI type at all — so a URI is not spellable rather than merely
+    // absent from a map somebody remembered to check.
+    //
+    // What is left to check is that this file does not reach for one anyway.
+    assert!(
+        !code_only(KOTLIN).contains("Uri"),
+        "FrontendLane.kt names a Uri; the picked document's handle stays in \
+         SourcePicks, and the lane carries only what the contract can spell"
     );
-    for key in keys {
-        assert!(
-            ["DISPLAY_NAME", "SIZE_BYTES"].contains(&key),
-            "the pick reply carries {key}; only sanitized metadata may cross"
-        );
-    }
 }
 
 /// The frontend Kotlin sources: the shim between the Dart lane and the JNI
@@ -774,12 +750,23 @@ fn the_frontend_kotlin_speaks_only_the_observer_vocabulary() {
         );
     }
 
+    // The HOST's contracts, minus anything the CAPABILITY contract also
+    // declares. Kotlin is a first-class peer of that one, and the generator has
+    // no cross-schema reference — so `SourceAcquisitionKeyView` is spelled once
+    // per schema that carries it (EH-20) and a name-only rule cannot tell the
+    // read contract's copy from the capability contract's. Subtracting is the
+    // honest resolution: this gate is about the two contracts Kotlin must not
+    // speak, and a type it legitimately speaks is not evidence about them.
+    let capability = declared_types(include_str!(
+        "../../../l5/envoix-bindings/generated/kotlin/EnvoixCapability.kt"
+    ));
     let generated: BTreeSet<String> = declared_types(include_str!(
         "../../../l5/envoix-bindings/generated/kotlin/EnvoixRead.kt"
     ))
     .union(&declared_types(include_str!(
         "../../../l5/envoix-bindings/generated/kotlin/EnvoixCommand.kt"
     )))
+    .filter(|name| !capability.contains(*name))
     .cloned()
     .collect();
     assert!(

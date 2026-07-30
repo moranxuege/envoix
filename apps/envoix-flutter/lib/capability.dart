@@ -16,7 +16,7 @@ import 'bindings/envoix_capability.dart';
 /// The capability method on the command channel. A method name is a slot inside
 /// one channel rather than a name in the process-wide channel namespace, so it
 /// is pinned by the adapter beside it (`FrontendLane.CAPABILITY`) exactly as
-/// `intent` and `pickSource` are, not by the identifier catalog.
+/// `intent` is, not by the identifier catalog.
 const String capabilityMethod = 'capability';
 
 /// What a capability answered. Four outcomes, and three of them are answers
@@ -27,13 +27,35 @@ sealed class CapabilityAnswer {
   const CapabilityAnswer();
 }
 
-/// The capability produced text. Opaque here: this app does not parse it, does
+/// The scanner produced text. Opaque here: this app does not parse it, does
 /// not validate it and does not decide a role — it hands it to the SAME
 /// create-join call the paste field fills, and the grammar in Rust judges it.
 final class CapabilityProvided extends CapabilityAnswer {
   const CapabilityProvided(this.text);
 
   final String text;
+}
+
+/// The picker produced a document, described. No handle, no path, no URI: those
+/// stay in the adapter, registered under the acquisition this answer names.
+final class SourcePicked extends CapabilityAnswer {
+  const SourcePicked({required this.displayName, required this.reportedSize});
+
+  final String displayName;
+
+  /// Null when the provider did not say. NOT zero — an empty file reports
+  /// zero, and a frontend that could not tell them apart would offer a size it
+  /// had invented.
+  final int? reportedSize;
+}
+
+/// The picker itself could not run. Distinct from `declined`, which is a person
+/// answering: showing "you cancelled" for a picker that was never installed
+/// blames the user for the platform.
+final class SourcePickFailed extends CapabilityAnswer {
+  const SourcePickFailed(this.reason);
+
+  final PickSourceFailureView reason;
 }
 
 /// The capability was not exercised, and why.
@@ -54,8 +76,31 @@ final class CapabilityUnavailable extends CapabilityAnswer {
 
 /// Asks the platform adapter for one capability and reports what it answered.
 typedef CapabilityAsk = Future<CapabilityAnswer> Function(
-  CapabilityRequestView capability,
+  CapabilityExchangeView request,
 );
+
+/// Asks for an invite to be scanned.
+Future<CapabilityAnswer> askToScan(CapabilityAsk ask) =>
+    ask(const CapabilityExchangeViewScanInvite(
+      ScanInviteExchangeView(step: ScanInviteStepViewRequested()),
+    ));
+
+/// Asks for a document to be picked FOR one acquisition.
+///
+/// The key travels because the answer must name it: the authority accepts an
+/// offer only for the acquisition it published, so a picker answer that could
+/// not say which one it belonged to would be unusable — or, worse, usable for
+/// the wrong one.
+Future<CapabilityAnswer> askToPickSource(
+  CapabilityAsk ask,
+  SourceAcquisitionKeyView acquisition,
+) =>
+    ask(CapabilityExchangeViewPickSource(
+      PickSourceExchangeView(
+        acquisition: acquisition,
+        step: const PickSourceStepViewRequested(),
+      ),
+    ));
 
 /// The real capability client, over the channel the intent lane already uses.
 ///
@@ -66,14 +111,9 @@ typedef CapabilityAsk = Future<CapabilityAnswer> Function(
 /// Collapsing them lets a registration bug present itself as a hardware fact —
 /// permanently, since a frontend that believes `unsupported` stops asking.
 Future<CapabilityAnswer> platformCapability(
-  CapabilityRequestView capability,
+  CapabilityExchangeView requested,
 ) async {
-  final String request = encodeCapabilityFrame(
-    CapabilityExchangeView(
-      capability: capability,
-      step: const CapabilityStepViewRequested(),
-    ),
-  );
+  final String request = encodeCapabilityFrame(requested);
   final Uint8List? reply;
   try {
     reply = await const MethodChannel(commandChannelName)
@@ -102,22 +142,64 @@ Future<CapabilityAnswer> platformCapability(
   };
   // An adapter that answered a different capability answered a question nobody
   // asked. Say so rather than believe it.
-  if (exchange.capability != capability) {
-    return const CapabilityUnavailable(
-      'the adapter answered a capability nobody asked for',
-    );
-  }
-  return switch (exchange.step) {
-    CapabilityStepViewProvided(value: final ScannedTextView text) =>
-      CapabilityProvided(text.text.expose()),
-    CapabilityStepViewDeclined(value: final DeclinedReasonView declined) =>
-      CapabilityDeclined(declined.reason),
-    // The frontend's own half echoed back is not an answer to it.
-    CapabilityStepViewRequested() => const CapabilityUnavailable(
-        'the adapter echoed the request instead of answering it',
+  return switch ((requested, exchange)) {
+    (
+      CapabilityExchangeViewScanInvite(),
+      CapabilityExchangeViewScanInvite(value: final ScanInviteExchangeView it)
+    ) =>
+      switch (it.step) {
+        ScanInviteStepViewProvided(value: final ScannedTextView text) =>
+          CapabilityProvided(text.text.expose()),
+        ScanInviteStepViewDeclined(value: final DeclinedReasonView declined) =>
+          CapabilityDeclined(declined.reason),
+        // The frontend's own half echoed back is not an answer to it.
+        ScanInviteStepViewRequested() => const CapabilityUnavailable(
+            'the adapter echoed the request instead of answering it',
+          ),
+      },
+    (
+      CapabilityExchangeViewPickSource(value: final PickSourceExchangeView ask),
+      CapabilityExchangeViewPickSource(value: final PickSourceExchangeView it)
+    ) =>
+      // The acquisition is checked before the payload is believed. An answer
+      // for a different one would otherwise become an offer for whichever ask
+      // happened to be outstanding — the exact ownership defect the key exists
+      // to close.
+      !_sameAcquisition(ask.acquisition, it.acquisition)
+          ? const CapabilityUnavailable(
+              'the adapter answered a different acquisition',
+            )
+          : switch (it.step) {
+              PickSourceStepViewProvided(value: final PickedSourceView picked) =>
+                SourcePicked(
+                  displayName: picked.displayName,
+                  reportedSize: picked.reportedSize,
+                ),
+              PickSourceStepViewDeclined(
+                value: final DeclinedReasonView declined
+              ) =>
+                CapabilityDeclined(declined.reason),
+              PickSourceStepViewFailed(
+                value: final PickSourceFailureReasonView failed
+              ) =>
+                SourcePickFailed(failed.reason),
+              PickSourceStepViewRequested() => const CapabilityUnavailable(
+                  'the adapter echoed the request instead of answering it',
+                ),
+            },
+    _ => const CapabilityUnavailable(
+        'the adapter answered a capability nobody asked for',
       ),
   };
 }
+
+bool _sameAcquisition(
+  SourceAcquisitionKeyView asked,
+  SourceAcquisitionKeyView answered,
+) =>
+    asked.card == answered.card &&
+    asked.generation == answered.generation &&
+    asked.request == answered.request;
 
 /// The channel the capability method shares with the intent lane. Declared here
 /// rather than imported from `lane.dart` so this file states the whole seam;

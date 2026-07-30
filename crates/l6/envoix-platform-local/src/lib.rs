@@ -10,8 +10,10 @@
 pub mod identifiers;
 
 use envoix_bindings::capability::{
-    CapabilityBody, CapabilityError, CapabilityExchangeView, CapabilityFrame, CapabilityStepView,
-    DeclinedReasonView, DeclinedView, decode_capability_frame, encode_capability_frame,
+    CapabilityBody, CapabilityError, CapabilityExchangeView, CapabilityFrame, DeclinedReasonView,
+    DeclinedView, PickSourceExchangeView, PickSourceFailureReasonView, PickSourceFailureView,
+    PickSourceStepView, ScanInviteExchangeView, ScanInviteStepView, decode_capability_frame,
+    encode_capability_frame,
 };
 
 /// A malformed or directionally-invalid request at the local adapter boundary.
@@ -34,23 +36,48 @@ impl std::error::Error for CapabilityAdapterError {}
 
 /// Answers one generated capability request with honest local-platform truth.
 ///
-/// The only capability in version 1 is invite scanning. A desktop CLI has no
-/// camera adapter, so it declines that request as `unsupported`. The reply
-/// remains a successful generated-contract exchange rather than an error.
+/// Answered PER CAPABILITY, not blanket-declined. This build has no camera and
+/// no document picker, and those are two different sentences: a scanner this
+/// platform has nothing to say yes with is `unsupported`, while a picker that is
+/// simply not built here is `picker_unavailable` — an answer in the pick's own
+/// vocabulary, which exists so a frontend does not have to read "you cancelled"
+/// as "there is nothing to cancel with".
+///
+/// Neither is a statement that a desktop CANNOT do these things. A desktop has a
+/// filesystem and often a camera; when either is implemented it replaces one
+/// match arm here, and nothing in this file has to be argued with first.
 pub fn answer_capability(bytes: &[u8]) -> Result<Vec<u8>, CapabilityAdapterError> {
     let CapabilityBody::Exchange(exchange) = decode_capability_frame(bytes)
         .map_err(CapabilityAdapterError::Contract)?
         .body;
-    if exchange.step != CapabilityStepView::Requested {
-        return Err(CapabilityAdapterError::NotARequest);
-    }
+    let answered = match exchange {
+        CapabilityExchangeView::ScanInvite(scan) => {
+            if scan.step != ScanInviteStepView::Requested {
+                return Err(CapabilityAdapterError::NotARequest);
+            }
+            CapabilityExchangeView::ScanInvite(ScanInviteExchangeView {
+                step: ScanInviteStepView::Declined(DeclinedReasonView {
+                    reason: DeclinedView::Unsupported,
+                }),
+            })
+        }
+        CapabilityExchangeView::PickSource(pick) => {
+            if pick.step != PickSourceStepView::Requested {
+                return Err(CapabilityAdapterError::NotARequest);
+            }
+            // The acquisition is echoed back unchanged. Even a refusal names
+            // which ask it refused, so a frontend waiting on two cards can tell
+            // them apart.
+            CapabilityExchangeView::PickSource(PickSourceExchangeView {
+                acquisition: pick.acquisition,
+                step: PickSourceStepView::Failed(PickSourceFailureReasonView {
+                    reason: PickSourceFailureView::PickerUnavailable,
+                }),
+            })
+        }
+    };
     encode_capability_frame(&CapabilityFrame {
-        body: CapabilityBody::Exchange(CapabilityExchangeView {
-            capability: exchange.capability,
-            step: CapabilityStepView::Declined(DeclinedReasonView {
-                reason: DeclinedView::Unsupported,
-            }),
-        }),
+        body: CapabilityBody::Exchange(answered),
     })
     .map_err(CapabilityAdapterError::Contract)
 }
@@ -58,53 +85,78 @@ pub fn answer_capability(bytes: &[u8]) -> Result<Vec<u8>, CapabilityAdapterError
 #[cfg(test)]
 mod tests {
     use envoix_bindings::capability::{
-        CapabilityBody, CapabilityExchangeView, CapabilityFrame, CapabilityRequestView,
-        CapabilityStepView, DeclinedReasonView, DeclinedView, decode_capability_frame,
-        encode_capability_frame,
+        CapabilityBody, CapabilityExchangeView, CapabilityFrame, DeclinedReasonView, DeclinedView,
+        PickSourceExchangeView, PickSourceFailureReasonView, PickSourceFailureView,
+        PickSourceStepView, ScanInviteExchangeView, ScanInviteStepView, SourceAcquisitionKeyView,
+        decode_capability_frame, encode_capability_frame,
     };
 
     use super::{CapabilityAdapterError, answer_capability};
 
+    fn acquisition() -> SourceAcquisitionKeyView {
+        SourceAcquisitionKeyView {
+            card: "00000000000000ab".to_owned(),
+            generation: 7,
+            request: "0123456789abcdef0123456789abcdef".to_owned(),
+        }
+    }
+
+    fn answered(request: &CapabilityExchangeView) -> CapabilityExchangeView {
+        let encoded = encode_capability_frame(&CapabilityFrame {
+            body: CapabilityBody::Exchange(request.clone()),
+        })
+        .expect("the generated request encodes");
+        let CapabilityBody::Exchange(answer) = decode_capability_frame(
+            &answer_capability(&encoded).expect("a request shape is answered"),
+        )
+        .expect("the local answer uses the generated codec")
+        .body;
+        answer
+    }
+
+    /// Every capability gets its OWN answer, in its own vocabulary. A blanket
+    /// decline would say "you cancelled" for a picker that was never built.
     #[test]
     fn every_published_local_capability_gets_an_honest_answer() {
         assert_eq!(
-            CapabilityRequestView::ALL,
-            [CapabilityRequestView::ScanInvite],
-            "a new capability needs an explicit local-platform answer"
-        );
-        for capability in CapabilityRequestView::ALL {
-            let request = encode_capability_frame(&CapabilityFrame {
-                body: CapabilityBody::Exchange(CapabilityExchangeView {
-                    capability,
-                    step: CapabilityStepView::Requested,
+            answered(&CapabilityExchangeView::ScanInvite(
+                ScanInviteExchangeView {
+                    step: ScanInviteStepView::Requested,
+                }
+            )),
+            CapabilityExchangeView::ScanInvite(ScanInviteExchangeView {
+                step: ScanInviteStepView::Declined(DeclinedReasonView {
+                    reason: DeclinedView::Unsupported,
                 }),
             })
-            .expect("the generated request encodes");
-            let answer = decode_capability_frame(
-                &answer_capability(&request).expect("a supported request shape is answered"),
-            )
-            .expect("the local answer uses the generated codec");
-            assert_eq!(
-                answer.body,
-                CapabilityBody::Exchange(CapabilityExchangeView {
-                    capability,
-                    step: CapabilityStepView::Declined(DeclinedReasonView {
-                        reason: DeclinedView::Unsupported,
-                    }),
-                })
-            );
-        }
+        );
+        assert_eq!(
+            answered(&CapabilityExchangeView::PickSource(
+                PickSourceExchangeView {
+                    acquisition: acquisition(),
+                    step: PickSourceStepView::Requested,
+                }
+            )),
+            CapabilityExchangeView::PickSource(PickSourceExchangeView {
+                // Echoed unchanged, so even a refusal says which ask it refused.
+                acquisition: acquisition(),
+                step: PickSourceStepView::Failed(PickSourceFailureReasonView {
+                    reason: PickSourceFailureView::PickerUnavailable,
+                }),
+            })
+        );
     }
 
     #[test]
     fn an_answer_cannot_be_presented_as_a_request() {
         let answer = encode_capability_frame(&CapabilityFrame {
-            body: CapabilityBody::Exchange(CapabilityExchangeView {
-                capability: CapabilityRequestView::ScanInvite,
-                step: CapabilityStepView::Declined(DeclinedReasonView {
-                    reason: DeclinedView::Unsupported,
-                }),
-            }),
+            body: CapabilityBody::Exchange(CapabilityExchangeView::ScanInvite(
+                ScanInviteExchangeView {
+                    step: ScanInviteStepView::Declined(DeclinedReasonView {
+                        reason: DeclinedView::Unsupported,
+                    }),
+                },
+            )),
         })
         .expect("the generated answer encodes");
         assert_eq!(

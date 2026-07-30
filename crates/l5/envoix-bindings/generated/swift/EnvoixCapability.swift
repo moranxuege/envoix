@@ -17,8 +17,10 @@ import Foundation
 
 public enum EnvoixCapability {
 
-public static let capabilitySchemaId = "envoix/binding/capability/1"
+public static let capabilitySchemaId = "envoix/binding/capability/2"
 public static let capabilityMaxFrameBytes = 65536
+private static let u63Max: Int64 = 9_223_372_036_854_775_807
+
 public enum CapabilityErrorKind {
     case frameTooLarge
     case malformedJson
@@ -51,10 +53,6 @@ public struct CapabilitySecretString: Equatable, CustomStringConvertible {
     public var description: String { "CapabilitySecretString([redacted])" }
 }
 
-public enum CapabilityRequestView: String, Equatable {
-    case scanInvite = "scan_invite"
-}
-
 public struct ScannedTextView: Equatable {
     public let text: CapabilitySecretString
 
@@ -77,20 +75,76 @@ public struct DeclinedReasonView: Equatable {
     }
 }
 
-public enum CapabilityStepView: Equatable {
+public enum ScanInviteStepView: Equatable {
     case requested
     case provided(ScannedTextView)
     case declined(DeclinedReasonView)
 }
 
-public struct CapabilityExchangeView: Equatable {
-    public let capability: CapabilityRequestView
-    public let step: CapabilityStepView
+public struct ScanInviteExchangeView: Equatable {
+    public let step: ScanInviteStepView
 
-    public init(capability: CapabilityRequestView, step: CapabilityStepView) {
-        self.capability = capability
+    public init(step: ScanInviteStepView) {
         self.step = step
     }
+}
+
+public struct SourceAcquisitionKeyView: Equatable {
+    public let card: String
+    public let generation: Int64
+    public let request: String
+
+    public init(card: String, generation: Int64, request: String) {
+        self.card = card
+        self.generation = generation
+        self.request = request
+    }
+}
+
+public struct PickedSourceView: Equatable {
+    public let displayName: String
+    public let reportedSize: Int64?
+
+    public init(displayName: String, reportedSize: Int64?) {
+        self.displayName = displayName
+        self.reportedSize = reportedSize
+    }
+}
+
+public enum PickSourceFailureView: String, Equatable {
+    case pickerUnavailable = "picker_unavailable"
+    case metadataUnavailable = "metadata_unavailable"
+    case `internal` = "internal"
+}
+
+public struct PickSourceFailureReasonView: Equatable {
+    public let reason: PickSourceFailureView
+
+    public init(reason: PickSourceFailureView) {
+        self.reason = reason
+    }
+}
+
+public enum PickSourceStepView: Equatable {
+    case requested
+    case provided(PickedSourceView)
+    case declined(DeclinedReasonView)
+    case failed(PickSourceFailureReasonView)
+}
+
+public struct PickSourceExchangeView: Equatable {
+    public let acquisition: SourceAcquisitionKeyView
+    public let step: PickSourceStepView
+
+    public init(acquisition: SourceAcquisitionKeyView, step: PickSourceStepView) {
+        self.acquisition = acquisition
+        self.step = step
+    }
+}
+
+public enum CapabilityExchangeView: Equatable {
+    case scanInvite(ScanInviteExchangeView)
+    case pickSource(PickSourceExchangeView)
 }
 
 public enum CapabilityBody: Equatable {
@@ -166,6 +220,42 @@ public enum EnvoixCapabilityCodec {
         return value is NSNull ? nil : value
     }
 
+    private static func integer(_ value: Any?, _ max: Int64, _ context: String) throws -> Int64 {
+        guard let number = value as? NSNumber else {
+            throw CapabilityContractError(kind: .shape, context: context)
+        }
+        let objCType = String(cString: number.objCType)
+        if objCType == "c" || objCType == "B" || objCType == "d" || objCType == "f" {
+            throw CapabilityContractError(kind: .shape, context: context)
+        }
+        let wide = number.int64Value
+        guard wide >= 0, wide <= max else {
+            throw CapabilityContractError(kind: .range, context: context)
+        }
+        return wide
+    }
+
+    private static func hexChars(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            let digit = (scalar.value >= 0x30 && scalar.value <= 0x39)
+                || (scalar.value >= 0x61 && scalar.value <= 0x66)
+            if !digit {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func hexFixed(_ value: Any?, _ chars: Int, _ context: String) throws -> String {
+        guard let text = value as? String else {
+            throw CapabilityContractError(kind: .shape, context: context)
+        }
+        guard text.utf8.count == chars, hexChars(text) else {
+            throw CapabilityContractError(kind: .bound, context: context)
+        }
+        return text
+    }
+
     private static func utf8Bounded(_ value: Any?, _ maxBytes: Int, _ context: String) throws -> String {
         guard let text = value as? String else {
             throw CapabilityContractError(kind: .shape, context: context)
@@ -189,22 +279,16 @@ public enum EnvoixCapabilityCodec {
         }
     }
 
+    private static func encodeInteger(_ value: Int64, _ max: Int64, _ context: String) throws -> Int64 {
+        return try integer(NSNumber(value: value), max, context)
+    }
+
+    private static func encodeHexFixed(_ value: String, _ chars: Int, _ context: String) throws -> String {
+        return try hexFixed(value, chars, context)
+    }
+
     private static func encodeUtf8Bounded(_ value: String, _ maxBytes: Int, _ context: String) throws -> String {
         return try utf8Bounded(value, maxBytes, context)
-    }
-
-    private static func decodeCapabilityRequestView(_ value: Any?, _ context: String) throws -> CapabilityRequestView {
-        guard let text = value as? String else {
-            throw CapabilityContractError(kind: .shape, context: context)
-        }
-        guard let decoded = CapabilityRequestView(rawValue: text) else {
-            throw CapabilityContractError(kind: .unknownVariant, context: context)
-        }
-        return decoded
-    }
-
-    private static func encodeCapabilityRequestView(_ value: CapabilityRequestView) -> String {
-        return value.rawValue
     }
 
     private static func decodeScannedTextView(_ value: Any?, _ context: String) throws -> ScannedTextView {
@@ -251,7 +335,7 @@ public enum EnvoixCapabilityCodec {
         return map
     }
 
-    private static func decodeCapabilityStepView(_ value: Any?, _ context: String) throws -> CapabilityStepView {
+    private static func decodeScanInviteStepView(_ value: Any?, _ context: String) throws -> ScanInviteStepView {
         let map = try object(value, context)
         try knownKeys(map, ["kind", "value"], context)
         guard let kind = try field(map, "kind", context) as? String else {
@@ -259,18 +343,18 @@ public enum EnvoixCapabilityCodec {
         }
         switch kind {
         case "requested":
-            try unitPayload(map, "CapabilityStepView.requested")
+            try unitPayload(map, "ScanInviteStepView.requested")
             return .requested
         case "provided":
-            return .provided(try decodeScannedTextView(payload(map, "CapabilityStepView.provided"), "CapabilityStepView.provided"))
+            return .provided(try decodeScannedTextView(payload(map, "ScanInviteStepView.provided"), "ScanInviteStepView.provided"))
         case "declined":
-            return .declined(try decodeDeclinedReasonView(payload(map, "CapabilityStepView.declined"), "CapabilityStepView.declined"))
+            return .declined(try decodeDeclinedReasonView(payload(map, "ScanInviteStepView.declined"), "ScanInviteStepView.declined"))
         default:
             throw CapabilityContractError(kind: .unknownVariant, context: context)
         }
     }
 
-    private static func encodeCapabilityStepView(_ value: CapabilityStepView) throws -> [String: Any] {
+    private static func encodeScanInviteStepView(_ value: ScanInviteStepView) throws -> [String: Any] {
         switch value {
         case .requested:
             return ["kind": "requested"]
@@ -283,22 +367,178 @@ public enum EnvoixCapabilityCodec {
         }
     }
 
-    private static func decodeCapabilityExchangeView(_ value: Any?, _ context: String) throws -> CapabilityExchangeView {
+    private static func decodeScanInviteExchangeView(_ value: Any?, _ context: String) throws -> ScanInviteExchangeView {
         let map = try object(value, context)
-        try knownKeys(map, ["capability", "step"], context)
-        let capability = try decodeCapabilityRequestView(try field(map, "capability", "CapabilityExchangeView.capability"), "CapabilityExchangeView.capability")
-        let step = try decodeCapabilityStepView(try field(map, "step", "CapabilityExchangeView.step"), "CapabilityExchangeView.step")
-        return CapabilityExchangeView(
-            capability: capability,
+        try knownKeys(map, ["step"], context)
+        let step = try decodeScanInviteStepView(try field(map, "step", "ScanInviteExchangeView.step"), "ScanInviteExchangeView.step")
+        return ScanInviteExchangeView(
             step: step
         )
     }
 
-    private static func encodeCapabilityExchangeView(_ value: CapabilityExchangeView) throws -> [String: Any] {
+    private static func encodeScanInviteExchangeView(_ value: ScanInviteExchangeView) throws -> [String: Any] {
         var map: [String: Any] = [:]
-        map["capability"] = encodeCapabilityRequestView(value.capability)
-        map["step"] = try encodeCapabilityStepView(value.step)
+        map["step"] = try encodeScanInviteStepView(value.step)
         return map
+    }
+
+    private static func decodeSourceAcquisitionKeyView(_ value: Any?, _ context: String) throws -> SourceAcquisitionKeyView {
+        let map = try object(value, context)
+        try knownKeys(map, ["card", "generation", "request"], context)
+        let card = try hexFixed(try field(map, "card", "SourceAcquisitionKeyView.card"), 16, "SourceAcquisitionKeyView.card")
+        let generation = try integer(try field(map, "generation", "SourceAcquisitionKeyView.generation"), 4294967295, "SourceAcquisitionKeyView.generation")
+        let request = try hexFixed(try field(map, "request", "SourceAcquisitionKeyView.request"), 32, "SourceAcquisitionKeyView.request")
+        return SourceAcquisitionKeyView(
+            card: card,
+            generation: generation,
+            request: request
+        )
+    }
+
+    private static func encodeSourceAcquisitionKeyView(_ value: SourceAcquisitionKeyView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["card"] = try encodeHexFixed(value.card, 16, "SourceAcquisitionKeyView.card")
+        map["generation"] = try encodeInteger(value.generation, 4294967295, "SourceAcquisitionKeyView.generation")
+        map["request"] = try encodeHexFixed(value.request, 32, "SourceAcquisitionKeyView.request")
+        return map
+    }
+
+    private static func decodePickedSourceView(_ value: Any?, _ context: String) throws -> PickedSourceView {
+        let map = try object(value, context)
+        try knownKeys(map, ["display_name", "reported_size"], context)
+        let displayName = try utf8Bounded(try field(map, "display_name", "PickedSourceView.display_name"), 1020, "PickedSourceView.display_name")
+        let reportedSize: Int64?
+        if let present = try field(map, "reported_size", "PickedSourceView.reported_size") {
+            reportedSize = try integer(present, u63Max, "PickedSourceView.reported_size")
+        } else {
+            reportedSize = nil
+        }
+        return PickedSourceView(
+            displayName: displayName,
+            reportedSize: reportedSize
+        )
+    }
+
+    private static func encodePickedSourceView(_ value: PickedSourceView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["display_name"] = try encodeUtf8Bounded(value.displayName, 1020, "PickedSourceView.display_name")
+        if let present = value.reportedSize {
+            map["reported_size"] = try encodeInteger(present, u63Max, "PickedSourceView.reported_size")
+        } else {
+            map["reported_size"] = NSNull()
+        }
+        return map
+    }
+
+    private static func decodePickSourceFailureView(_ value: Any?, _ context: String) throws -> PickSourceFailureView {
+        guard let text = value as? String else {
+            throw CapabilityContractError(kind: .shape, context: context)
+        }
+        guard let decoded = PickSourceFailureView(rawValue: text) else {
+            throw CapabilityContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func encodePickSourceFailureView(_ value: PickSourceFailureView) -> String {
+        return value.rawValue
+    }
+
+    private static func decodePickSourceFailureReasonView(_ value: Any?, _ context: String) throws -> PickSourceFailureReasonView {
+        let map = try object(value, context)
+        try knownKeys(map, ["reason"], context)
+        let reason = try decodePickSourceFailureView(try field(map, "reason", "PickSourceFailureReasonView.reason"), "PickSourceFailureReasonView.reason")
+        return PickSourceFailureReasonView(
+            reason: reason
+        )
+    }
+
+    private static func encodePickSourceFailureReasonView(_ value: PickSourceFailureReasonView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["reason"] = encodePickSourceFailureView(value.reason)
+        return map
+    }
+
+    private static func decodePickSourceStepView(_ value: Any?, _ context: String) throws -> PickSourceStepView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw CapabilityContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "requested":
+            try unitPayload(map, "PickSourceStepView.requested")
+            return .requested
+        case "provided":
+            return .provided(try decodePickedSourceView(payload(map, "PickSourceStepView.provided"), "PickSourceStepView.provided"))
+        case "declined":
+            return .declined(try decodeDeclinedReasonView(payload(map, "PickSourceStepView.declined"), "PickSourceStepView.declined"))
+        case "failed":
+            return .failed(try decodePickSourceFailureReasonView(payload(map, "PickSourceStepView.failed"), "PickSourceStepView.failed"))
+        default:
+            throw CapabilityContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func encodePickSourceStepView(_ value: PickSourceStepView) throws -> [String: Any] {
+        switch value {
+        case .requested:
+            return ["kind": "requested"]
+        case .provided(let payload):
+            let encoded = try encodePickedSourceView(payload)
+            return ["kind": "provided", "value": encoded]
+        case .declined(let payload):
+            let encoded = try encodeDeclinedReasonView(payload)
+            return ["kind": "declined", "value": encoded]
+        case .failed(let payload):
+            let encoded = try encodePickSourceFailureReasonView(payload)
+            return ["kind": "failed", "value": encoded]
+        }
+    }
+
+    private static func decodePickSourceExchangeView(_ value: Any?, _ context: String) throws -> PickSourceExchangeView {
+        let map = try object(value, context)
+        try knownKeys(map, ["acquisition", "step"], context)
+        let acquisition = try decodeSourceAcquisitionKeyView(try field(map, "acquisition", "PickSourceExchangeView.acquisition"), "PickSourceExchangeView.acquisition")
+        let step = try decodePickSourceStepView(try field(map, "step", "PickSourceExchangeView.step"), "PickSourceExchangeView.step")
+        return PickSourceExchangeView(
+            acquisition: acquisition,
+            step: step
+        )
+    }
+
+    private static func encodePickSourceExchangeView(_ value: PickSourceExchangeView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["acquisition"] = try encodeSourceAcquisitionKeyView(value.acquisition)
+        map["step"] = try encodePickSourceStepView(value.step)
+        return map
+    }
+
+    private static func decodeCapabilityExchangeView(_ value: Any?, _ context: String) throws -> CapabilityExchangeView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw CapabilityContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "scan_invite":
+            return .scanInvite(try decodeScanInviteExchangeView(payload(map, "CapabilityExchangeView.scan_invite"), "CapabilityExchangeView.scan_invite"))
+        case "pick_source":
+            return .pickSource(try decodePickSourceExchangeView(payload(map, "CapabilityExchangeView.pick_source"), "CapabilityExchangeView.pick_source"))
+        default:
+            throw CapabilityContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func encodeCapabilityExchangeView(_ value: CapabilityExchangeView) throws -> [String: Any] {
+        switch value {
+        case .scanInvite(let payload):
+            let encoded = try encodeScanInviteExchangeView(payload)
+            return ["kind": "scan_invite", "value": encoded]
+        case .pickSource(let payload):
+            let encoded = try encodePickSourceExchangeView(payload)
+            return ["kind": "pick_source", "value": encoded]
+        }
     }
 
     private static func decodeCapabilityBody(_ value: Any?, _ context: String) throws -> CapabilityBody {

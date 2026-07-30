@@ -17,22 +17,6 @@ typedef LaneSource = Stream<List<int>> Function();
 /// the intent does, and says so.
 typedef CommandSink = Future<List<int>?> Function(List<int> frame);
 
-/// Asks the platform to open the document picker.
-///
-/// It answers with what the provider says the document is called and how big it
-/// is — sanitized metadata (`SF09`) — or null when the user cancelled. It never
-/// answers with a URI or a handle: the picked source stays on the platform side
-/// (`XP01`), and this app has no type that could hold one.
-typedef SourcePicker = Future<PickedSource?> Function();
-
-/// What the platform will tell this app about a document the user picked.
-class PickedSource {
-  const PickedSource({required this.displayName, required this.sizeBytes});
-
-  final String displayName;
-  final int sizeBytes;
-}
-
 /// Mirrors the catalogued `android.frontend_lane_channel`.
 const String laneChannel = 'app.envoix.host/frontend-lane';
 
@@ -41,9 +25,6 @@ const String commandChannel = 'app.envoix.host/frontend-commands';
 
 /// The intent method that channel carries.
 const String intentMethod = 'intent';
-
-/// The platform-capability method: open the document picker.
-const String pickSourceMethod = 'pickSource';
 
 /// Platform error code for a frame the authority received and rejected.
 const String hostRejected = 'host-rejected';
@@ -59,20 +40,6 @@ Stream<List<int>> platformLane() => const EventChannel(laneChannel)
 Future<List<int>?> platformCommands(List<int> frame) =>
     const MethodChannel(commandChannel)
         .invokeMethod<Uint8List>(intentMethod, Uint8List.fromList(frame));
-
-/// The real source picker. The reply carries two scalars and nothing else.
-Future<PickedSource?> platformPickSource() async {
-  final Map<Object?, Object?>? granted =
-      await const MethodChannel(commandChannel)
-          .invokeMethod<Map<Object?, Object?>>(pickSourceMethod);
-  if (granted == null) {
-    return null;
-  }
-  return PickedSource(
-    displayName: granted['displayName'] as String? ?? '',
-    sizeBytes: granted['sizeBytes'] as int? ?? 0,
-  );
-}
 
 /// One frontend attachment: the [Attachment], the frames that feed it, and the
 /// commander that speaks for it — created together and reachable only through

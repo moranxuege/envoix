@@ -4,8 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.envoix.bindings.capability.SourceAcquisitionKeyView
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The document the user picked, held by the PLATFORM between the picker and the
@@ -18,53 +18,89 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * A pick has no durable authority. Only a card whose initial record has
  * committed may claim it; that claim takes the persistable read grant and
- * journals CARD → URI before reporting the source duty complete. Durable
+ * journals ACQUISITION → URI before reporting the source duty complete. Durable
  * removal travels back from the Rust authority on a separate service lane and
  * deletes the journal ownership before releasing the OS grant. Thus retained
  * access without a live card is not a state this object can represent.
+ *
+ * Everything here is keyed by the WHOLE acquisition — card, generation and
+ * request — never by the card alone. Card-keyed storage meant an acquire duty
+ * for generation 2 was answered with the document bound in generation 1: a
+ * later ask silently inherited an earlier one's file. That is the ownership
+ * defect `SourceAcquisitionKey` exists to close, and it reopened here because
+ * this registry was the one place that did not carry the key.
  */
 object SourcePicks {
-    /** What the platform will tell the frontend about a pick. */
+    /**
+     * What the platform will tell the frontend about a pick.
+     *
+     * `sizeBytes` is NULLABLE. A provider may genuinely not know, and `0` is a
+     * real empty file — collapsing the two is what the untyped map this
+     * replaces did, and it made "unknown" and "empty" the same answer.
+     */
     data class Granted(
         val displayName: String,
-        val sizeBytes: Long,
+        val sizeBytes: Long?,
     )
 
-    /**
-     * The pick no card has claimed yet. One slot, because there is one picker
-     * and one Activity: picking again replaces it, which is what the user just
-     * asked for.
-     */
-    private val offered = AtomicReference<Uri?>(null)
+    /** The whole acquisition, as one storage key. */
+    private fun keyOf(acquisition: SourceAcquisitionKeyView): String =
+        "${acquisition.card}-${"%08x".format(acquisition.generation)}-${acquisition.request}"
 
-    /** Card id (16 hex digits) to the source bound to it. */
+    /**
+     * Picks that have been made but not yet claimed by their card's duty, one
+     * per acquisition. Keyed rather than a single slot: two cards can be
+     * awaiting a document at once, and a single slot let the second pick
+     * silently overwrite the first.
+     */
+    private val offered = ConcurrentHashMap<String, Uri>()
+
+    /** Acquisition key to the source bound to it. */
     private val bound = ConcurrentHashMap<String, Uri>()
 
-    /** Records an ephemeral pick and reads what the frontend may be told. */
+    /**
+     * Records a pick FOR one acquisition and reads what the frontend may be
+     * told.
+     *
+     * Put-if-absent, not replace: a second pick under a key that already has
+     * one is a repeat of an exchange already answered, and honouring it would
+     * change which document the outstanding acquire duty will bind. A user who
+     * genuinely wants a different file re-picks, which advances the generation
+     * and mints a new key.
+     */
     fun offer(
         context: Context,
+        acquisition: SourceAcquisitionKeyView,
         uri: Uri,
     ): Granted {
-        offered.set(uri)
-        return describe(context, uri)
+        val key = keyOf(acquisition)
+        val held = offered.putIfAbsent(key, uri) ?: uri
+        return describe(context, held)
+    }
+
+    /** Drops an unclaimed pick, for an exchange the authority did not accept. */
+    fun discard(acquisition: SourceAcquisitionKeyView) {
+        offered.remove(keyOf(acquisition))
     }
 
     /**
-     * The source this card owns, binding the outstanding pick to it the first
-     * time. Idempotent per card: a duty re-delivered for a card that already
-     * holds a source resolves to the same one instead of eating the next pick.
+     * The source this ACQUISITION owns, binding its outstanding pick the first
+     * time. Idempotent per acquisition: a duty re-delivered under the same key
+     * resolves to the same document instead of eating another acquisition's
+     * pick.
      */
     @Synchronized
     fun claim(
         context: Context,
-        card: String,
+        acquisition: SourceAcquisitionKeyView,
     ): Uri? {
+        val card = keyOf(acquisition)
         bound[card]?.let { return it }
         val journal = journal(context)
         journal.getString(card, null)?.let(Uri::parse)?.let { owned ->
             return bound.putIfAbsent(card, owned) ?: owned
         }
-        val picked = offered.getAndSet(null) ?: return null
+        val picked = offered.remove(card) ?: return null
         val source = bound.putIfAbsent(card, picked) ?: picked
         // Some providers grant only process-lifetime access. Such a source can
         // still satisfy this process's duty honestly, but it is not written as
@@ -183,9 +219,12 @@ object SourcePicks {
                 val size = cursor.getColumnIndex(OpenableColumns.SIZE)
                 Granted(
                     displayName = if (name >= 0) cursor.getString(name).orEmpty() else "",
-                    sizeBytes = if (size >= 0 && !cursor.isNull(size)) cursor.getLong(size) else 0L,
+                    // Absent, not zero, when the provider did not say. The
+                    // contract carries the difference and Rust treats a claimed
+                    // size as advisory either way.
+                    sizeBytes = if (size >= 0 && !cursor.isNull(size)) cursor.getLong(size) else null,
                 )
-            } ?: Granted(displayName = "", sizeBytes = 0L)
+            } ?: Granted(displayName = "", sizeBytes = null)
     }
 
     private const val OWNERSHIP_JOURNAL = "envoix-source-ownership"

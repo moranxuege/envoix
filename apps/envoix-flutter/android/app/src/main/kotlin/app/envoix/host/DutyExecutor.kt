@@ -8,6 +8,7 @@ import android.database.sqlite.SQLiteConstraintException
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.MediaStore
+import com.envoix.bindings.capability.SourceAcquisitionKeyView
 import com.envoix.bindings.duty.DutyProvenanceView
 import com.envoix.bindings.duty.LockDirectiveView
 import com.envoix.bindings.duty.NoticeView
@@ -23,8 +24,8 @@ import java.io.File
  * lock, re-asserting foreground state). Publication is repeat-safe too — its
  * recovery journal reuses one deterministic MediaStore row and never loses the
  * last copy (see [publish]). Binding a picked source is repeat-safe by the same
- * standard: [SourcePicks] resolves a card to the SAME document however often
- * the duty is delivered. The remaining kinds (grants, staging roots, share
+ * standard: [SourcePicks] resolves an ACQUISITION to the SAME document however
+ * often the duty is delivered. The remaining kinds (grants, staging roots, share
  * sheets) are deliberately NOT reported — an unreported duty stays outstanding
  * and is re-delivered, which is the honest state until F3 can execute it.
  */
@@ -93,8 +94,18 @@ class DutyExecutor(
      * `source_unreadable`, which is the outcome that means "re-pick".
      */
     override fun bindSource(provenance: DutyProvenanceView): OutcomeCodeView {
+        // The WHOLE provenance, never the card alone: the duty is issued for one
+        // acquisition, and claiming by card would hand generation 2 the document
+        // that generation 1 was given.
         val source =
-            SourcePicks.claim(context, provenance.card) ?: return OutcomeCodeView.SOURCE_UNREADABLE
+            SourcePicks.claim(
+                context,
+                SourceAcquisitionKeyView(
+                    card = provenance.card,
+                    generation = provenance.generation,
+                    request = provenance.request,
+                ),
+            ) ?: return OutcomeCodeView.SOURCE_UNREADABLE
         return if (SourcePicks.readable(context, source)) {
             OutcomeCodeView.COMPLETED
         } else {

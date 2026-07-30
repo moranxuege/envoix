@@ -13,7 +13,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use envoix_bindings::capability::{
-    CapabilityBody, CapabilityStepView, DeclinedView, decode_capability_frame,
+    CapabilityBody, CapabilityExchangeView, DeclinedView, PickSourceStepView, ScanInviteStepView,
+    decode_capability_frame,
 };
 use envoix_bindings::command::{
     AcceptanceView, CommandBody, CompletionView, CreateOutcomeView, DispositionView, PauseCauseView,
@@ -111,18 +112,56 @@ fn anchor(witness: &str) {
     );
 }
 
+/// This build has no camera and no document picker, and it says so in each
+/// capability's OWN vocabulary rather than declining everything the same way.
+///
+/// Neither answer says a desktop cannot do these things. When either is built,
+/// one match arm in the local adapter changes and this test changes with it —
+/// it pins what this build does, not what the platform is capable of.
 #[test]
-fn local_cli_declines_camera_scanning_as_unsupported() {
+fn the_local_adapter_answers_each_capability_in_its_own_words() {
     let answer = run_cli_frame(&["capability", "scan-invite"], &[]);
     let CapabilityBody::Exchange(exchange) = decode_capability_frame(&answer)
         .expect("the CLI emits a generated capability answer")
         .body;
+    let CapabilityExchangeView::ScanInvite(scan) = exchange else {
+        panic!("a scan request was answered as something else");
+    };
     assert_eq!(
-        exchange.step,
-        CapabilityStepView::Declined(envoix_bindings::capability::DeclinedReasonView {
+        scan.step,
+        ScanInviteStepView::Declined(envoix_bindings::capability::DeclinedReasonView {
             reason: DeclinedView::Unsupported,
         })
     );
+
+    // A picker that was never built is `picker_unavailable`, not "you
+    // cancelled": one blames the platform, the other blames the user.
+    let answer = run_cli_frame(
+        &[
+            "capability",
+            "pick-source",
+            "00000000000000ab",
+            "7",
+            "0123456789abcdef0123456789abcdef",
+        ],
+        &[],
+    );
+    let CapabilityBody::Exchange(exchange) = decode_capability_frame(&answer)
+        .expect("the CLI emits a generated capability answer")
+        .body;
+    let CapabilityExchangeView::PickSource(pick) = exchange else {
+        panic!("a pick request was answered as something else");
+    };
+    assert_eq!(
+        pick.step,
+        PickSourceStepView::Failed(envoix_bindings::capability::PickSourceFailureReasonView {
+            reason: envoix_bindings::capability::PickSourceFailureView::PickerUnavailable,
+        })
+    );
+    // And it echoes the acquisition it refused, so a frontend waiting on two
+    // cards can tell which ask this answers.
+    assert_eq!(pick.acquisition.card, "00000000000000ab");
+    assert_eq!(pick.acquisition.generation, 7);
 }
 
 fn drive_cli(work: &Path) -> String {

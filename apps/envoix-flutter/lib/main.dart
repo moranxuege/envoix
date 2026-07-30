@@ -18,14 +18,11 @@ class EnvoixApp extends StatelessWidget {
     super.key,
     this.lane = platformLane,
     this.commands = platformCommands,
-    this.picker = platformPickSource,
     this.ask = platformCapability,
   });
 
   final LaneSource lane;
   final CommandSink commands;
-  final SourcePicker picker;
-
   /// How this app asks the platform for a capability. Injectable so a test
   /// drives every answer without a camera.
   final CapabilityAsk ask;
@@ -38,7 +35,6 @@ class EnvoixApp extends StatelessWidget {
         home: Shell(
           lane: lane,
           commands: commands,
-          picker: picker,
           ask: ask,
         ),
       );
@@ -60,14 +56,12 @@ class Shell extends StatefulWidget {
   const Shell({
     required this.lane,
     required this.commands,
-    required this.picker,
     required this.ask,
     super.key,
   });
 
   final LaneSource lane;
   final CommandSink commands;
-  final SourcePicker picker;
   final CapabilityAsk ask;
 
   @override
@@ -118,7 +112,6 @@ class _ShellState extends State<Shell> {
           ),
           child: NewTransferSheet(
             creator: _lane.creator,
-            picker: widget.picker,
             ask: widget.ask,
           ),
         );

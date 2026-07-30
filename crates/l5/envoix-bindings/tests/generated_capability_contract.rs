@@ -4,9 +4,10 @@
 
 use envoix_bindings::capability::{
     CAPABILITY_MAX_FRAME_BYTES, CAPABILITY_SCHEMA_ID, CapabilityBody, CapabilityError,
-    CapabilityExchangeView, CapabilityFrame, CapabilityRequestView, CapabilityStepView,
-    DeclinedReasonView, DeclinedView, ScannedTextView, decode_capability_frame,
-    encode_capability_frame,
+    CapabilityExchangeView, CapabilityFrame, DeclinedReasonView, DeclinedView,
+    PickSourceExchangeView, PickSourceFailureReasonView, PickSourceFailureView, PickSourceStepView,
+    PickedSourceView, ScanInviteExchangeView, ScanInviteStepView, ScannedTextView,
+    SourceAcquisitionKeyView, decode_capability_frame, encode_capability_frame,
 };
 use envoix_bindings::{Decl, FieldTy, emit};
 use envoix_types::Secret;
@@ -55,43 +56,121 @@ fn generated_artifacts_match_capability_schema() {
     }
 }
 
-fn frame(step: CapabilityStepView) -> CapabilityFrame {
+fn frame(step: ScanInviteStepView) -> CapabilityFrame {
     CapabilityFrame {
-        body: CapabilityBody::Exchange(CapabilityExchangeView {
-            capability: CapabilityRequestView::ScanInvite,
-            step,
-        }),
+        body: CapabilityBody::Exchange(CapabilityExchangeView::ScanInvite(
+            ScanInviteExchangeView { step },
+        )),
+    }
+}
+
+fn acquisition() -> SourceAcquisitionKeyView {
+    SourceAcquisitionKeyView {
+        card: "00000000000000ab".to_owned(),
+        generation: u32::MAX,
+        request: "0123456789abcdef0123456789abcdef".to_owned(),
+    }
+}
+
+fn pick(step: PickSourceStepView) -> CapabilityFrame {
+    CapabilityFrame {
+        body: CapabilityBody::Exchange(CapabilityExchangeView::PickSource(
+            PickSourceExchangeView {
+                acquisition: acquisition(),
+                step,
+            },
+        )),
     }
 }
 
 fn declined(reason: DeclinedView) -> CapabilityFrame {
-    frame(CapabilityStepView::Declined(DeclinedReasonView { reason }))
+    frame(ScanInviteStepView::Declined(DeclinedReasonView { reason }))
 }
 
-/// The round trip both peers depend on, for every step the contract has.
+/// The round trip both peers depend on, for every step of every capability.
 #[test]
 fn every_exchange_step_round_trips() {
-    let steps = [
-        CapabilityStepView::Requested,
-        CapabilityStepView::Provided(ScannedTextView {
+    let scans = [
+        ScanInviteStepView::Requested,
+        ScanInviteStepView::Provided(ScannedTextView {
             text: Secret::new("envoix://qr/1/abc".to_owned()),
         }),
-        CapabilityStepView::Declined(DeclinedReasonView {
+        ScanInviteStepView::Declined(DeclinedReasonView {
             reason: DeclinedView::Cancelled,
         }),
-        CapabilityStepView::Declined(DeclinedReasonView {
+        ScanInviteStepView::Declined(DeclinedReasonView {
             reason: DeclinedView::Refused,
         }),
-        CapabilityStepView::Declined(DeclinedReasonView {
+        ScanInviteStepView::Declined(DeclinedReasonView {
             reason: DeclinedView::Unsupported,
         }),
     ];
-    for step in steps {
+    let picks = [
+        PickSourceStepView::Requested,
+        // An unknown size and a zero size are two values, and both survive as
+        // themselves: the untyped map this replaced could only spell one.
+        PickSourceStepView::Provided(PickedSourceView {
+            display_name: "quarterly report.pdf".to_owned(),
+            reported_size: None,
+        }),
+        PickSourceStepView::Provided(PickedSourceView {
+            display_name: String::new(),
+            reported_size: Some(0),
+        }),
+        PickSourceStepView::Provided(PickedSourceView {
+            display_name: "é".repeat(510),
+            reported_size: Some(9_223_372_036_854_775_807),
+        }),
+        PickSourceStepView::Declined(DeclinedReasonView {
+            reason: DeclinedView::Cancelled,
+        }),
+        PickSourceStepView::Failed(PickSourceFailureReasonView {
+            reason: PickSourceFailureView::PickerUnavailable,
+        }),
+        PickSourceStepView::Failed(PickSourceFailureReasonView {
+            reason: PickSourceFailureView::MetadataUnavailable,
+        }),
+        PickSourceStepView::Failed(PickSourceFailureReasonView {
+            reason: PickSourceFailureView::Internal,
+        }),
+    ];
+    for step in scans {
         let original = frame(step);
         let encoded = encode_capability_frame(&original).expect("encodes");
         let decoded = decode_capability_frame(&encoded).expect("decodes");
         assert_eq!(decoded, original);
     }
+    for step in picks {
+        let original = pick(step);
+        let encoded = encode_capability_frame(&original).expect("encodes");
+        let decoded = decode_capability_frame(&encoded).expect("decodes");
+        assert_eq!(decoded, original);
+    }
+}
+
+/// A picker answer that names a different acquisition is a different value on
+/// the wire, so a frontend comparing keys can see it. Without the key on the
+/// answer, an offer would be built for whichever ask was outstanding.
+#[test]
+fn a_pick_answers_the_acquisition_it_was_asked_about() {
+    let asked = pick(PickSourceStepView::Provided(PickedSourceView {
+        display_name: "a.bin".to_owned(),
+        reported_size: Some(1),
+    }));
+    let CapabilityBody::Exchange(CapabilityExchangeView::PickSource(mut other)) =
+        asked.body.clone()
+    else {
+        panic!("a pick frame carries a pick exchange");
+    };
+    other.acquisition.generation = other.acquisition.generation.wrapping_sub(1);
+    let elsewhere = CapabilityFrame {
+        body: CapabilityBody::Exchange(CapabilityExchangeView::PickSource(other)),
+    };
+    assert_ne!(
+        encode_capability_frame(&asked).expect("encodes"),
+        encode_capability_frame(&elsewhere).expect("encodes"),
+        "one generation apart must not be the same frame"
+    );
 }
 
 /// Declining is an ANSWER, not an error: all three reasons decode as ordinary
@@ -127,10 +206,15 @@ fn the_three_declines_are_three_distinct_answers() {
             decode_capability_frame(&encode_capability_frame(&declined(reason)).expect("encodes"))
                 .expect("decodes");
         match decoded.body {
-            CapabilityBody::Exchange(exchange) => match exchange.step {
-                CapabilityStepView::Declined(view) => assert_eq!(view.reason, reason),
-                _ => panic!("a decline must decode as a decline"),
-            },
+            CapabilityBody::Exchange(CapabilityExchangeView::ScanInvite(exchange)) => {
+                match exchange.step {
+                    ScanInviteStepView::Declined(view) => assert_eq!(view.reason, reason),
+                    _ => panic!("a decline must decode as a decline"),
+                }
+            }
+            CapabilityBody::Exchange(CapabilityExchangeView::PickSource(_)) => {
+                panic!("a scan decline must decode as a scan")
+            }
         }
     }
 }
@@ -175,12 +259,12 @@ fn scanned_text_is_bounded_at_the_join_intents_own_limit() {
     );
 
     let widest = "a".repeat(scanned as usize);
-    let accepted = frame(CapabilityStepView::Provided(ScannedTextView {
+    let accepted = frame(ScanInviteStepView::Provided(ScannedTextView {
         text: Secret::new(widest.clone()),
     }));
     encode_capability_frame(&accepted).expect("the widest carriable scan encodes");
 
-    let overlong = frame(CapabilityStepView::Provided(ScannedTextView {
+    let overlong = frame(ScanInviteStepView::Provided(ScannedTextView {
         text: Secret::new(format!("{widest}a")),
     }));
     assert!(
@@ -271,9 +355,15 @@ fn every_native_artifact_can_both_ask_and_answer() {
     let doc = doc();
     let spoken = [
         "CapabilityExchangeView",
-        "CapabilityRequestView",
-        "CapabilityStepView",
+        "ScanInviteExchangeView",
+        "ScanInviteStepView",
         "ScannedTextView",
+        "PickSourceExchangeView",
+        "PickSourceStepView",
+        "PickedSourceView",
+        "PickSourceFailureReasonView",
+        "PickSourceFailureView",
+        "SourceAcquisitionKeyView",
         "DeclinedReasonView",
         "DeclinedView",
     ];
@@ -304,20 +394,24 @@ fn hostile_bytes_are_typed_refusals() {
         b"".as_slice(),
         b"{",
         b"null",
-        b"{\"schema\":\"envoix/binding/capability/1\"}",
-        b"{\"schema\":\"envoix/binding/capability/2\",\"body\":{\"kind\":\"exchange\"}}",
-        b"{\"schema\":\"envoix/binding/capability/1\",\"body\":{\"kind\":\"nope\"}}",
+        b"{\"schema\":\"envoix/binding/capability/2\"}",
+        b"{\"schema\":\"envoix/binding/capability/3\",\"body\":{\"kind\":\"exchange\"}}",
+        b"{\"schema\":\"envoix/binding/capability/2\",\"body\":{\"kind\":\"nope\"}}",
+        // A pick answer with no acquisition: the field is required, so an
+        // adapter cannot omit the identity its answer must carry.
+        b"{\"schema\":\"envoix/binding/capability/2\",\"body\":{\"kind\":\"exchange\",\
+          \"value\":{\"kind\":\"pick_source\",\"value\":{\"step\":{\"kind\":\"requested\"}}}}}",
     ] {
         assert!(
             decode_capability_frame(hostile).is_err(),
             "hostile input must be refused, not believed"
         );
     }
-    assert_eq!(CAPABILITY_SCHEMA_ID, "envoix/binding/capability/1");
+    assert_eq!(CAPABILITY_SCHEMA_ID, "envoix/binding/capability/2");
     // The envelope must be able to carry the widest thing the contract permits,
     // or the bound below it would be unreachable and a legal scan would be
     // refused by the frame cap instead of admitted.
-    let widest = frame(CapabilityStepView::Provided(ScannedTextView {
+    let widest = frame(ScanInviteStepView::Provided(ScannedTextView {
         text: Secret::new("a".repeat(16_384)),
     }));
     assert!(

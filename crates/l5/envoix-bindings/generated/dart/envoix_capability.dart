@@ -11,8 +11,10 @@
 
 import 'dart:convert';
 
-const String capabilitySchemaId = 'envoix/binding/capability/1';
+const String capabilitySchemaId = 'envoix/binding/capability/2';
 const int capabilityMaxFrameBytes = 65536;
+const int _u63Max = 9223372036854775807;
+
 enum CapabilityErrorKind {
   frameTooLarge,
   malformedJson,
@@ -49,10 +51,6 @@ final class CapabilitySecretString {
   String toString() => 'CapabilitySecretString([redacted])';
 }
 
-enum CapabilityRequestView {
-  scanInvite,
-}
-
 final class ScannedTextView {
   const ScannedTextView({
     required this.text,
@@ -75,34 +73,120 @@ final class DeclinedReasonView {
   final DeclinedView reason;
 }
 
-sealed class CapabilityStepView {
-  const CapabilityStepView();
+sealed class ScanInviteStepView {
+  const ScanInviteStepView();
 }
 
-final class CapabilityStepViewRequested extends CapabilityStepView {
-  const CapabilityStepViewRequested();
+final class ScanInviteStepViewRequested extends ScanInviteStepView {
+  const ScanInviteStepViewRequested();
 }
 
-final class CapabilityStepViewProvided extends CapabilityStepView {
-  const CapabilityStepViewProvided(this.value);
+final class ScanInviteStepViewProvided extends ScanInviteStepView {
+  const ScanInviteStepViewProvided(this.value);
 
   final ScannedTextView value;
 }
 
-final class CapabilityStepViewDeclined extends CapabilityStepView {
-  const CapabilityStepViewDeclined(this.value);
+final class ScanInviteStepViewDeclined extends ScanInviteStepView {
+  const ScanInviteStepViewDeclined(this.value);
 
   final DeclinedReasonView value;
 }
 
-final class CapabilityExchangeView {
-  const CapabilityExchangeView({
-    required this.capability,
+final class ScanInviteExchangeView {
+  const ScanInviteExchangeView({
     required this.step,
   });
 
-  final CapabilityRequestView capability;
-  final CapabilityStepView step;
+  final ScanInviteStepView step;
+}
+
+final class SourceAcquisitionKeyView {
+  const SourceAcquisitionKeyView({
+    required this.card,
+    required this.generation,
+    required this.request,
+  });
+
+  final String card;
+  final int generation;
+  final String request;
+}
+
+final class PickedSourceView {
+  const PickedSourceView({
+    required this.displayName,
+    required this.reportedSize,
+  });
+
+  final String displayName;
+  final int? reportedSize;
+}
+
+enum PickSourceFailureView {
+  pickerUnavailable,
+  metadataUnavailable,
+  internal,
+}
+
+final class PickSourceFailureReasonView {
+  const PickSourceFailureReasonView({
+    required this.reason,
+  });
+
+  final PickSourceFailureView reason;
+}
+
+sealed class PickSourceStepView {
+  const PickSourceStepView();
+}
+
+final class PickSourceStepViewRequested extends PickSourceStepView {
+  const PickSourceStepViewRequested();
+}
+
+final class PickSourceStepViewProvided extends PickSourceStepView {
+  const PickSourceStepViewProvided(this.value);
+
+  final PickedSourceView value;
+}
+
+final class PickSourceStepViewDeclined extends PickSourceStepView {
+  const PickSourceStepViewDeclined(this.value);
+
+  final DeclinedReasonView value;
+}
+
+final class PickSourceStepViewFailed extends PickSourceStepView {
+  const PickSourceStepViewFailed(this.value);
+
+  final PickSourceFailureReasonView value;
+}
+
+final class PickSourceExchangeView {
+  const PickSourceExchangeView({
+    required this.acquisition,
+    required this.step,
+  });
+
+  final SourceAcquisitionKeyView acquisition;
+  final PickSourceStepView step;
+}
+
+sealed class CapabilityExchangeView {
+  const CapabilityExchangeView();
+}
+
+final class CapabilityExchangeViewScanInvite extends CapabilityExchangeView {
+  const CapabilityExchangeViewScanInvite(this.value);
+
+  final ScanInviteExchangeView value;
+}
+
+final class CapabilityExchangeViewPickSource extends CapabilityExchangeView {
+  const CapabilityExchangeViewPickSource(this.value);
+
+  final PickSourceExchangeView value;
 }
 
 sealed class CapabilityBody {
@@ -186,6 +270,37 @@ Object? _field(Map<String, Object?> map, String key, String context) {
   return map[key];
 }
 
+int _integer(Object? value, int max, String context) {
+  if (value is! int) {
+    throw CapabilityContractException(CapabilityErrorKind.shape, context);
+  }
+  if (value < 0 || value > max) {
+    throw CapabilityContractException(CapabilityErrorKind.range, context);
+  }
+  return value;
+}
+
+bool _hexChars(String text) {
+  for (final unit in text.codeUnits) {
+    final digit =
+        (unit >= 0x30 && unit <= 0x39) || (unit >= 0x61 && unit <= 0x66);
+    if (!digit) {
+      return false;
+    }
+  }
+  return true;
+}
+
+String _hexFixed(Object? value, int chars, String context) {
+  if (value is! String) {
+    throw CapabilityContractException(CapabilityErrorKind.shape, context);
+  }
+  if (value.length != chars || !_hexChars(value)) {
+    throw CapabilityContractException(CapabilityErrorKind.bound, context);
+  }
+  return value;
+}
+
 String _utf8Bounded(Object? value, int maxBytes, String context) {
   if (value is! String) {
     throw CapabilityContractException(CapabilityErrorKind.shape, context);
@@ -230,23 +345,14 @@ void _unitPayload(Map<String, Object?> map, String context) {
   }
 }
 
+int _encodeInteger(int value, int max, String context) =>
+    _integer(value, max, context);
+
+String _encodeHexFixed(String value, int chars, String context) =>
+    _hexFixed(value, chars, context);
+
 String _encodeUtf8Bounded(String value, int maxBytes, String context) =>
     _utf8Bounded(value, maxBytes, context);
-
-CapabilityRequestView _decodeCapabilityRequestView(Object? value, String context) {
-  return switch (value) {
-    'scan_invite' => CapabilityRequestView.scanInvite,
-    String() =>
-      throw CapabilityContractException(CapabilityErrorKind.unknownVariant, context),
-    _ => throw CapabilityContractException(CapabilityErrorKind.shape, context),
-  };
-}
-
-String _encodeCapabilityRequestView(CapabilityRequestView value) {
-  return switch (value) {
-    CapabilityRequestView.scanInvite => 'scan_invite',
-  };
-}
 
 ScannedTextView _decodeScannedTextView(Object? value, String context) {
   final map = _object(value, context);
@@ -295,7 +401,7 @@ Map<String, Object?> _encodeDeclinedReasonView(DeclinedReasonView value) {
   };
 }
 
-CapabilityStepView _decodeCapabilityStepView(Object? value, String context) {
+ScanInviteStepView _decodeScanInviteStepView(Object? value, String context) {
   final map = _object(value, context);
   _knownKeys(map, const {'kind', 'value'}, context);
   final kind = _field(map, 'kind', context);
@@ -304,48 +410,212 @@ CapabilityStepView _decodeCapabilityStepView(Object? value, String context) {
   }
   switch (kind) {
     case 'requested':
-      _unitPayload(map, 'CapabilityStepView.requested');
-      return const CapabilityStepViewRequested();
+      _unitPayload(map, 'ScanInviteStepView.requested');
+      return const ScanInviteStepViewRequested();
     case 'provided':
-      return CapabilityStepViewProvided(
-        _decodeScannedTextView(_payload(map, 'CapabilityStepView.provided'), 'CapabilityStepView.provided'),
+      return ScanInviteStepViewProvided(
+        _decodeScannedTextView(_payload(map, 'ScanInviteStepView.provided'), 'ScanInviteStepView.provided'),
       );
     case 'declined':
-      return CapabilityStepViewDeclined(
-        _decodeDeclinedReasonView(_payload(map, 'CapabilityStepView.declined'), 'CapabilityStepView.declined'),
+      return ScanInviteStepViewDeclined(
+        _decodeDeclinedReasonView(_payload(map, 'ScanInviteStepView.declined'), 'ScanInviteStepView.declined'),
       );
     default:
       throw CapabilityContractException(CapabilityErrorKind.unknownVariant, context);
   }
 }
 
-Map<String, Object?> _encodeCapabilityStepView(CapabilityStepView value) {
+Map<String, Object?> _encodeScanInviteStepView(ScanInviteStepView value) {
   return switch (value) {
-    CapabilityStepViewRequested() => <String, Object?>{'kind': 'requested'},
-    CapabilityStepViewProvided(value: final payload) => <String, Object?>{
+    ScanInviteStepViewRequested() => <String, Object?>{'kind': 'requested'},
+    ScanInviteStepViewProvided(value: final payload) => <String, Object?>{
         'kind': 'provided',
         'value': _encodeScannedTextView(payload),
       },
-    CapabilityStepViewDeclined(value: final payload) => <String, Object?>{
+    ScanInviteStepViewDeclined(value: final payload) => <String, Object?>{
         'kind': 'declined',
         'value': _encodeDeclinedReasonView(payload),
       },
   };
 }
 
-CapabilityExchangeView _decodeCapabilityExchangeView(Object? value, String context) {
+ScanInviteExchangeView _decodeScanInviteExchangeView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'capability', 'step'}, context);
-  return CapabilityExchangeView(
-    capability: _decodeCapabilityRequestView(_field(map, 'capability', 'CapabilityExchangeView.capability'), 'CapabilityExchangeView.capability'),
-    step: _decodeCapabilityStepView(_field(map, 'step', 'CapabilityExchangeView.step'), 'CapabilityExchangeView.step'),
+  _knownKeys(map, const {'step'}, context);
+  return ScanInviteExchangeView(
+    step: _decodeScanInviteStepView(_field(map, 'step', 'ScanInviteExchangeView.step'), 'ScanInviteExchangeView.step'),
   );
 }
 
-Map<String, Object?> _encodeCapabilityExchangeView(CapabilityExchangeView value) {
+Map<String, Object?> _encodeScanInviteExchangeView(ScanInviteExchangeView value) {
   return <String, Object?>{
-    'capability': _encodeCapabilityRequestView(value.capability),
-    'step': _encodeCapabilityStepView(value.step),
+    'step': _encodeScanInviteStepView(value.step),
+  };
+}
+
+SourceAcquisitionKeyView _decodeSourceAcquisitionKeyView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'card', 'generation', 'request'}, context);
+  return SourceAcquisitionKeyView(
+    card: _hexFixed(_field(map, 'card', 'SourceAcquisitionKeyView.card'), 16, 'SourceAcquisitionKeyView.card'),
+    generation: _integer(_field(map, 'generation', 'SourceAcquisitionKeyView.generation'), 4294967295, 'SourceAcquisitionKeyView.generation'),
+    request: _hexFixed(_field(map, 'request', 'SourceAcquisitionKeyView.request'), 32, 'SourceAcquisitionKeyView.request'),
+  );
+}
+
+Map<String, Object?> _encodeSourceAcquisitionKeyView(SourceAcquisitionKeyView value) {
+  return <String, Object?>{
+    'card': _encodeHexFixed(value.card, 16, 'SourceAcquisitionKeyView.card'),
+    'generation': _encodeInteger(value.generation, 4294967295, 'SourceAcquisitionKeyView.generation'),
+    'request': _encodeHexFixed(value.request, 32, 'SourceAcquisitionKeyView.request'),
+  };
+}
+
+PickedSourceView _decodePickedSourceView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'display_name', 'reported_size'}, context);
+  return PickedSourceView(
+    displayName: _utf8Bounded(_field(map, 'display_name', 'PickedSourceView.display_name'), 1020, 'PickedSourceView.display_name'),
+    reportedSize: switch (_field(map, 'reported_size', 'PickedSourceView.reported_size')) {
+      null => null,
+      final present => _integer(present, _u63Max, 'PickedSourceView.reported_size'),
+    },
+  );
+}
+
+Map<String, Object?> _encodePickedSourceView(PickedSourceView value) {
+  return <String, Object?>{
+    'display_name': _encodeUtf8Bounded(value.displayName, 1020, 'PickedSourceView.display_name'),
+    'reported_size': value.reportedSize == null ? null : _encodeInteger(value.reportedSize!, _u63Max, 'PickedSourceView.reported_size'),
+  };
+}
+
+PickSourceFailureView _decodePickSourceFailureView(Object? value, String context) {
+  return switch (value) {
+    'picker_unavailable' => PickSourceFailureView.pickerUnavailable,
+    'metadata_unavailable' => PickSourceFailureView.metadataUnavailable,
+    'internal' => PickSourceFailureView.internal,
+    String() =>
+      throw CapabilityContractException(CapabilityErrorKind.unknownVariant, context),
+    _ => throw CapabilityContractException(CapabilityErrorKind.shape, context),
+  };
+}
+
+String _encodePickSourceFailureView(PickSourceFailureView value) {
+  return switch (value) {
+    PickSourceFailureView.pickerUnavailable => 'picker_unavailable',
+    PickSourceFailureView.metadataUnavailable => 'metadata_unavailable',
+    PickSourceFailureView.internal => 'internal',
+  };
+}
+
+PickSourceFailureReasonView _decodePickSourceFailureReasonView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'reason'}, context);
+  return PickSourceFailureReasonView(
+    reason: _decodePickSourceFailureView(_field(map, 'reason', 'PickSourceFailureReasonView.reason'), 'PickSourceFailureReasonView.reason'),
+  );
+}
+
+Map<String, Object?> _encodePickSourceFailureReasonView(PickSourceFailureReasonView value) {
+  return <String, Object?>{
+    'reason': _encodePickSourceFailureView(value.reason),
+  };
+}
+
+PickSourceStepView _decodePickSourceStepView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw CapabilityContractException(CapabilityErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'requested':
+      _unitPayload(map, 'PickSourceStepView.requested');
+      return const PickSourceStepViewRequested();
+    case 'provided':
+      return PickSourceStepViewProvided(
+        _decodePickedSourceView(_payload(map, 'PickSourceStepView.provided'), 'PickSourceStepView.provided'),
+      );
+    case 'declined':
+      return PickSourceStepViewDeclined(
+        _decodeDeclinedReasonView(_payload(map, 'PickSourceStepView.declined'), 'PickSourceStepView.declined'),
+      );
+    case 'failed':
+      return PickSourceStepViewFailed(
+        _decodePickSourceFailureReasonView(_payload(map, 'PickSourceStepView.failed'), 'PickSourceStepView.failed'),
+      );
+    default:
+      throw CapabilityContractException(CapabilityErrorKind.unknownVariant, context);
+  }
+}
+
+Map<String, Object?> _encodePickSourceStepView(PickSourceStepView value) {
+  return switch (value) {
+    PickSourceStepViewRequested() => <String, Object?>{'kind': 'requested'},
+    PickSourceStepViewProvided(value: final payload) => <String, Object?>{
+        'kind': 'provided',
+        'value': _encodePickedSourceView(payload),
+      },
+    PickSourceStepViewDeclined(value: final payload) => <String, Object?>{
+        'kind': 'declined',
+        'value': _encodeDeclinedReasonView(payload),
+      },
+    PickSourceStepViewFailed(value: final payload) => <String, Object?>{
+        'kind': 'failed',
+        'value': _encodePickSourceFailureReasonView(payload),
+      },
+  };
+}
+
+PickSourceExchangeView _decodePickSourceExchangeView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'acquisition', 'step'}, context);
+  return PickSourceExchangeView(
+    acquisition: _decodeSourceAcquisitionKeyView(_field(map, 'acquisition', 'PickSourceExchangeView.acquisition'), 'PickSourceExchangeView.acquisition'),
+    step: _decodePickSourceStepView(_field(map, 'step', 'PickSourceExchangeView.step'), 'PickSourceExchangeView.step'),
+  );
+}
+
+Map<String, Object?> _encodePickSourceExchangeView(PickSourceExchangeView value) {
+  return <String, Object?>{
+    'acquisition': _encodeSourceAcquisitionKeyView(value.acquisition),
+    'step': _encodePickSourceStepView(value.step),
+  };
+}
+
+CapabilityExchangeView _decodeCapabilityExchangeView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw CapabilityContractException(CapabilityErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'scan_invite':
+      return CapabilityExchangeViewScanInvite(
+        _decodeScanInviteExchangeView(_payload(map, 'CapabilityExchangeView.scan_invite'), 'CapabilityExchangeView.scan_invite'),
+      );
+    case 'pick_source':
+      return CapabilityExchangeViewPickSource(
+        _decodePickSourceExchangeView(_payload(map, 'CapabilityExchangeView.pick_source'), 'CapabilityExchangeView.pick_source'),
+      );
+    default:
+      throw CapabilityContractException(CapabilityErrorKind.unknownVariant, context);
+  }
+}
+
+Map<String, Object?> _encodeCapabilityExchangeView(CapabilityExchangeView value) {
+  return switch (value) {
+    CapabilityExchangeViewScanInvite(value: final payload) => <String, Object?>{
+        'kind': 'scan_invite',
+        'value': _encodeScanInviteExchangeView(payload),
+      },
+    CapabilityExchangeViewPickSource(value: final payload) => <String, Object?>{
+        'kind': 'pick_source',
+        'value': _encodePickSourceExchangeView(payload),
+      },
   };
 }
 

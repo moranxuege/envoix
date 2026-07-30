@@ -5,8 +5,10 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const CAPABILITY_SCHEMA_ID: &str = "envoix/binding/capability/1";
+pub const CAPABILITY_SCHEMA_ID: &str = "envoix/binding/capability/2";
 pub const CAPABILITY_MAX_FRAME_BYTES: usize = 65536;
+
+const U63_MAX: u64 = 9_223_372_036_854_775_807;
 
 /// Typed codec failure. It carries only static schema context, never a
 /// fragment of the (possibly hostile) input.
@@ -20,17 +22,6 @@ pub enum CapabilityError {
     UnknownVariant { context: &'static str },
     Range { context: &'static str },
     Bound { context: &'static str },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CapabilityRequestView {
-    ScanInvite,
-}
-
-impl CapabilityRequestView {
-    pub const ALL: [Self; 1] = [
-        Self::ScanInvite,
-    ];
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,16 +50,68 @@ pub struct DeclinedReasonView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CapabilityStepView {
+pub enum ScanInviteStepView {
     Requested,
     Provided(ScannedTextView),
     Declined(DeclinedReasonView),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CapabilityExchangeView {
-    pub capability: CapabilityRequestView,
-    pub step: CapabilityStepView,
+pub struct ScanInviteExchangeView {
+    pub step: ScanInviteStepView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceAcquisitionKeyView {
+    pub card: String,
+    pub generation: u32,
+    pub request: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PickedSourceView {
+    pub display_name: String,
+    pub reported_size: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PickSourceFailureView {
+    PickerUnavailable,
+    MetadataUnavailable,
+    Internal,
+}
+
+impl PickSourceFailureView {
+    pub const ALL: [Self; 3] = [
+        Self::PickerUnavailable,
+        Self::MetadataUnavailable,
+        Self::Internal,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PickSourceFailureReasonView {
+    pub reason: PickSourceFailureView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PickSourceStepView {
+    Requested,
+    Provided(PickedSourceView),
+    Declined(DeclinedReasonView),
+    Failed(PickSourceFailureReasonView),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PickSourceExchangeView {
+    pub acquisition: SourceAcquisitionKeyView,
+    pub step: PickSourceStepView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CapabilityExchangeView {
+    ScanInvite(ScanInviteExchangeView),
+    PickSource(PickSourceExchangeView),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,6 +234,43 @@ fn field<'a>(map: &'a Map<String, Value>, key: &str, context: &'static str) -> R
     map.get(key).ok_or(CapabilityError::Shape { context })
 }
 
+fn integer(value: &Value, max: u64, context: &'static str) -> Result<u64, CapabilityError> {
+    let number = value.as_u64().ok_or(CapabilityError::Shape { context })?;
+    if number > max {
+        return Err(CapabilityError::Range { context });
+    }
+    Ok(number)
+}
+
+fn encode_u63(number: u64, context: &'static str) -> Result<Value, CapabilityError> {
+    if number > U63_MAX {
+        return Err(CapabilityError::Range { context });
+    }
+    Ok(Value::from(number))
+}
+
+fn integer_u32(value: &Value, context: &'static str) -> Result<u32, CapabilityError> {
+    let number = integer(value, 4_294_967_295, context)?;
+    u32::try_from(number).map_err(|_| CapabilityError::Range { context })
+}
+
+fn hex_chars(text: &str) -> bool {
+    text.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn hex_fixed(value: &Value, chars: usize, context: &'static str) -> Result<String, CapabilityError> {
+    let text = value.as_str().ok_or(CapabilityError::Shape { context })?;
+    encode_hex_fixed(text, chars, context)?;
+    Ok(text.to_owned())
+}
+
+fn encode_hex_fixed(text: &str, chars: usize, context: &'static str) -> Result<Value, CapabilityError> {
+    if text.len() != chars || !hex_chars(text) {
+        return Err(CapabilityError::Bound { context });
+    }
+    Ok(Value::from(text))
+}
+
 fn utf8_bounded(value: &Value, max_bytes: usize, context: &'static str) -> Result<String, CapabilityError> {
     let text = value.as_str().ok_or(CapabilityError::Shape { context })?;
     encode_utf8_bounded(text, max_bytes, context)?;
@@ -216,20 +296,6 @@ fn unit_payload(map: &Map<String, Value>, context: &'static str) -> Result<(), C
         None | Some(Value::Null) => Ok(()),
         Some(_) => Err(CapabilityError::Shape { context }),
     }
-}
-
-fn decode_capability_request_view_value(value: &Value, context: &'static str) -> Result<CapabilityRequestView, CapabilityError> {
-    let text = value.as_str().ok_or(CapabilityError::Shape { context })?;
-    match text {
-        "scan_invite" => Ok(CapabilityRequestView::ScanInvite),
-        _ => Err(CapabilityError::UnknownVariant { context }),
-    }
-}
-
-fn encode_capability_request_view_value(value: &CapabilityRequestView) -> Value {
-    Value::from(match value {
-        CapabilityRequestView::ScanInvite => "scan_invite",
-    })
 }
 
 fn decode_scanned_text_view_value(value: &Value, context: &'static str) -> Result<ScannedTextView, CapabilityError> {
@@ -280,7 +346,7 @@ fn encode_declined_reason_view_value(value: &DeclinedReasonView) -> Result<Value
     Ok(Value::Object(map))
 }
 
-fn decode_capability_step_view_value(value: &Value, context: &'static str) -> Result<CapabilityStepView, CapabilityError> {
+fn decode_scan_invite_step_view_value(value: &Value, context: &'static str) -> Result<ScanInviteStepView, CapabilityError> {
     let map = frame_object(value, context)?;
     known_keys(map, &["kind", "value"], context)?;
     let kind = field(map, "kind", context)?
@@ -288,26 +354,26 @@ fn decode_capability_step_view_value(value: &Value, context: &'static str) -> Re
         .ok_or(CapabilityError::Shape { context })?;
     match kind {
         "requested" => {
-            unit_payload(map, "CapabilityStepView.requested")?;
-            Ok(CapabilityStepView::Requested)
+            unit_payload(map, "ScanInviteStepView.requested")?;
+            Ok(ScanInviteStepView::Requested)
         }
-        "provided" => Ok(CapabilityStepView::Provided(decode_scanned_text_view_value(payload(map, "CapabilityStepView.provided")?, "CapabilityStepView.provided")?)),
-        "declined" => Ok(CapabilityStepView::Declined(decode_declined_reason_view_value(payload(map, "CapabilityStepView.declined")?, "CapabilityStepView.declined")?)),
+        "provided" => Ok(ScanInviteStepView::Provided(decode_scanned_text_view_value(payload(map, "ScanInviteStepView.provided")?, "ScanInviteStepView.provided")?)),
+        "declined" => Ok(ScanInviteStepView::Declined(decode_declined_reason_view_value(payload(map, "ScanInviteStepView.declined")?, "ScanInviteStepView.declined")?)),
         _ => Err(CapabilityError::UnknownVariant { context }),
     }
 }
 
-fn encode_capability_step_view_value(value: &CapabilityStepView) -> Result<Value, CapabilityError> {
+fn encode_scan_invite_step_view_value(value: &ScanInviteStepView) -> Result<Value, CapabilityError> {
     let mut map = Map::new();
     match value {
-        CapabilityStepView::Requested => {
+        ScanInviteStepView::Requested => {
             map.insert("kind".to_owned(), Value::from("requested"));
         }
-        CapabilityStepView::Provided(payload) => {
+        ScanInviteStepView::Provided(payload) => {
             map.insert("kind".to_owned(), Value::from("provided"));
             map.insert("value".to_owned(), encode_scanned_text_view_value(payload)?);
         }
-        CapabilityStepView::Declined(payload) => {
+        ScanInviteStepView::Declined(payload) => {
             map.insert("kind".to_owned(), Value::from("declined"));
             map.insert("value".to_owned(), encode_declined_reason_view_value(payload)?);
         }
@@ -315,21 +381,185 @@ fn encode_capability_step_view_value(value: &CapabilityStepView) -> Result<Value
     Ok(Value::Object(map))
 }
 
-fn decode_capability_exchange_view_value(value: &Value, context: &'static str) -> Result<CapabilityExchangeView, CapabilityError> {
+fn decode_scan_invite_exchange_view_value(value: &Value, context: &'static str) -> Result<ScanInviteExchangeView, CapabilityError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["capability", "step"], context)?;
-    let capability = decode_capability_request_view_value(field(map, "capability", "CapabilityExchangeView.capability")?, "CapabilityExchangeView.capability")?;
-    let step = decode_capability_step_view_value(field(map, "step", "CapabilityExchangeView.step")?, "CapabilityExchangeView.step")?;
-    Ok(CapabilityExchangeView {
-        capability,
+    known_keys(map, &["step"], context)?;
+    let step = decode_scan_invite_step_view_value(field(map, "step", "ScanInviteExchangeView.step")?, "ScanInviteExchangeView.step")?;
+    Ok(ScanInviteExchangeView {
         step,
     })
 }
 
+fn encode_scan_invite_exchange_view_value(value: &ScanInviteExchangeView) -> Result<Value, CapabilityError> {
+    let mut map = Map::new();
+    map.insert("step".to_owned(), encode_scan_invite_step_view_value(&value.step)?);
+    Ok(Value::Object(map))
+}
+
+fn decode_source_acquisition_key_view_value(value: &Value, context: &'static str) -> Result<SourceAcquisitionKeyView, CapabilityError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["card", "generation", "request"], context)?;
+    let card = hex_fixed(field(map, "card", "SourceAcquisitionKeyView.card")?, 16, "SourceAcquisitionKeyView.card")?;
+    let generation = integer_u32(field(map, "generation", "SourceAcquisitionKeyView.generation")?, "SourceAcquisitionKeyView.generation")?;
+    let request = hex_fixed(field(map, "request", "SourceAcquisitionKeyView.request")?, 32, "SourceAcquisitionKeyView.request")?;
+    Ok(SourceAcquisitionKeyView {
+        card,
+        generation,
+        request,
+    })
+}
+
+fn encode_source_acquisition_key_view_value(value: &SourceAcquisitionKeyView) -> Result<Value, CapabilityError> {
+    let mut map = Map::new();
+    map.insert("card".to_owned(), encode_hex_fixed(&value.card, 16, "SourceAcquisitionKeyView.card")?);
+    map.insert("generation".to_owned(), Value::from(value.generation));
+    map.insert("request".to_owned(), encode_hex_fixed(&value.request, 32, "SourceAcquisitionKeyView.request")?);
+    Ok(Value::Object(map))
+}
+
+fn decode_picked_source_view_value(value: &Value, context: &'static str) -> Result<PickedSourceView, CapabilityError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["display_name", "reported_size"], context)?;
+    let display_name = utf8_bounded(field(map, "display_name", "PickedSourceView.display_name")?, 1020, "PickedSourceView.display_name")?;
+    let reported_size = match field(map, "reported_size", "PickedSourceView.reported_size")? {
+        Value::Null => None,
+        present => Some(integer(present, U63_MAX, "PickedSourceView.reported_size")?),
+    };
+    Ok(PickedSourceView {
+        display_name,
+        reported_size,
+    })
+}
+
+fn encode_picked_source_view_value(value: &PickedSourceView) -> Result<Value, CapabilityError> {
+    let mut map = Map::new();
+    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 1020, "PickedSourceView.display_name")?);
+    map.insert(
+        "reported_size".to_owned(),
+        match &value.reported_size {
+            None => Value::Null,
+            Some(inner) => encode_u63(*inner, "PickedSourceView.reported_size")?,
+        },
+    );
+    Ok(Value::Object(map))
+}
+
+fn decode_pick_source_failure_view_value(value: &Value, context: &'static str) -> Result<PickSourceFailureView, CapabilityError> {
+    let text = value.as_str().ok_or(CapabilityError::Shape { context })?;
+    match text {
+        "picker_unavailable" => Ok(PickSourceFailureView::PickerUnavailable),
+        "metadata_unavailable" => Ok(PickSourceFailureView::MetadataUnavailable),
+        "internal" => Ok(PickSourceFailureView::Internal),
+        _ => Err(CapabilityError::UnknownVariant { context }),
+    }
+}
+
+fn encode_pick_source_failure_view_value(value: &PickSourceFailureView) -> Value {
+    Value::from(match value {
+        PickSourceFailureView::PickerUnavailable => "picker_unavailable",
+        PickSourceFailureView::MetadataUnavailable => "metadata_unavailable",
+        PickSourceFailureView::Internal => "internal",
+    })
+}
+
+fn decode_pick_source_failure_reason_view_value(value: &Value, context: &'static str) -> Result<PickSourceFailureReasonView, CapabilityError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["reason"], context)?;
+    let reason = decode_pick_source_failure_view_value(field(map, "reason", "PickSourceFailureReasonView.reason")?, "PickSourceFailureReasonView.reason")?;
+    Ok(PickSourceFailureReasonView {
+        reason,
+    })
+}
+
+fn encode_pick_source_failure_reason_view_value(value: &PickSourceFailureReasonView) -> Result<Value, CapabilityError> {
+    let mut map = Map::new();
+    map.insert("reason".to_owned(), encode_pick_source_failure_view_value(&value.reason));
+    Ok(Value::Object(map))
+}
+
+fn decode_pick_source_step_view_value(value: &Value, context: &'static str) -> Result<PickSourceStepView, CapabilityError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(CapabilityError::Shape { context })?;
+    match kind {
+        "requested" => {
+            unit_payload(map, "PickSourceStepView.requested")?;
+            Ok(PickSourceStepView::Requested)
+        }
+        "provided" => Ok(PickSourceStepView::Provided(decode_picked_source_view_value(payload(map, "PickSourceStepView.provided")?, "PickSourceStepView.provided")?)),
+        "declined" => Ok(PickSourceStepView::Declined(decode_declined_reason_view_value(payload(map, "PickSourceStepView.declined")?, "PickSourceStepView.declined")?)),
+        "failed" => Ok(PickSourceStepView::Failed(decode_pick_source_failure_reason_view_value(payload(map, "PickSourceStepView.failed")?, "PickSourceStepView.failed")?)),
+        _ => Err(CapabilityError::UnknownVariant { context }),
+    }
+}
+
+fn encode_pick_source_step_view_value(value: &PickSourceStepView) -> Result<Value, CapabilityError> {
+    let mut map = Map::new();
+    match value {
+        PickSourceStepView::Requested => {
+            map.insert("kind".to_owned(), Value::from("requested"));
+        }
+        PickSourceStepView::Provided(payload) => {
+            map.insert("kind".to_owned(), Value::from("provided"));
+            map.insert("value".to_owned(), encode_picked_source_view_value(payload)?);
+        }
+        PickSourceStepView::Declined(payload) => {
+            map.insert("kind".to_owned(), Value::from("declined"));
+            map.insert("value".to_owned(), encode_declined_reason_view_value(payload)?);
+        }
+        PickSourceStepView::Failed(payload) => {
+            map.insert("kind".to_owned(), Value::from("failed"));
+            map.insert("value".to_owned(), encode_pick_source_failure_reason_view_value(payload)?);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+fn decode_pick_source_exchange_view_value(value: &Value, context: &'static str) -> Result<PickSourceExchangeView, CapabilityError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["acquisition", "step"], context)?;
+    let acquisition = decode_source_acquisition_key_view_value(field(map, "acquisition", "PickSourceExchangeView.acquisition")?, "PickSourceExchangeView.acquisition")?;
+    let step = decode_pick_source_step_view_value(field(map, "step", "PickSourceExchangeView.step")?, "PickSourceExchangeView.step")?;
+    Ok(PickSourceExchangeView {
+        acquisition,
+        step,
+    })
+}
+
+fn encode_pick_source_exchange_view_value(value: &PickSourceExchangeView) -> Result<Value, CapabilityError> {
+    let mut map = Map::new();
+    map.insert("acquisition".to_owned(), encode_source_acquisition_key_view_value(&value.acquisition)?);
+    map.insert("step".to_owned(), encode_pick_source_step_view_value(&value.step)?);
+    Ok(Value::Object(map))
+}
+
+fn decode_capability_exchange_view_value(value: &Value, context: &'static str) -> Result<CapabilityExchangeView, CapabilityError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(CapabilityError::Shape { context })?;
+    match kind {
+        "scan_invite" => Ok(CapabilityExchangeView::ScanInvite(decode_scan_invite_exchange_view_value(payload(map, "CapabilityExchangeView.scan_invite")?, "CapabilityExchangeView.scan_invite")?)),
+        "pick_source" => Ok(CapabilityExchangeView::PickSource(decode_pick_source_exchange_view_value(payload(map, "CapabilityExchangeView.pick_source")?, "CapabilityExchangeView.pick_source")?)),
+        _ => Err(CapabilityError::UnknownVariant { context }),
+    }
+}
+
 fn encode_capability_exchange_view_value(value: &CapabilityExchangeView) -> Result<Value, CapabilityError> {
     let mut map = Map::new();
-    map.insert("capability".to_owned(), encode_capability_request_view_value(&value.capability));
-    map.insert("step".to_owned(), encode_capability_step_view_value(&value.step)?);
+    match value {
+        CapabilityExchangeView::ScanInvite(payload) => {
+            map.insert("kind".to_owned(), Value::from("scan_invite"));
+            map.insert("value".to_owned(), encode_scan_invite_exchange_view_value(payload)?);
+        }
+        CapabilityExchangeView::PickSource(payload) => {
+            map.insert("kind".to_owned(), Value::from("pick_source"));
+            map.insert("value".to_owned(), encode_pick_source_exchange_view_value(payload)?);
+        }
+    }
     Ok(Value::Object(map))
 }
 

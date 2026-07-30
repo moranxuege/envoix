@@ -16,11 +16,12 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:envoix/attachment.dart';
-import 'package:envoix/bindings/envoix_capability.dart';
-// Both contracts declare `SourceAcquisitionKeyView`: the generator has no
+// Three contracts declare `SourceAcquisitionKeyView`: the generator has no
 // cross-schema reference, so the acquisition key is spelled once per schema
 // that carries it (EH-20). They are structurally identical by gate, not by
-// type, so this file names the READ one and hides the command's.
+// type, so this file names the READ one and hides the other two.
+import 'package:envoix/bindings/envoix_capability.dart'
+    hide SourceAcquisitionKeyView;
 import 'package:envoix/bindings/envoix_command.dart'
     hide SourceAcquisitionKeyView;
 import 'package:envoix/bindings/envoix_read.dart';
@@ -2156,13 +2157,11 @@ void main() {
     Future<void> openSheet(
       WidgetTester tester,
       RecordingCreateSink sink, {
-      SourcePicker picker = _noPick,
       CapabilityAsk ask = _noScanner,
     }) async {
       await tester.pumpWidget(EnvoixApp(
         lane: () => const Stream<List<int>>.empty(),
         commands: sink.call,
-        picker: picker,
         ask: ask,
       ));
       await tester.pumpAndSettle();
@@ -2333,37 +2332,27 @@ void main() {
       expect(createAnswerLabel(request), contains('Rename it'));
     });
 
-    testWidgets('the send button waits for the platform, not for a rule',
+    testWidgets('a send is created BEFORE a document is chosen',
         (WidgetTester tester) async {
-      bool picked = false;
       final RecordingCreateSink sink = RecordingCreateSink(
         (CreateView create) => createdOf(create.requestId, other),
       );
-      await openSheet(
-        tester,
-        sink,
-        picker: () async {
-          picked = true;
-          return const PickedSource(
-            displayName: 'holiday.mp4',
-            sizeBytes: 2048,
-          );
-        },
-      );
+      await openSheet(tester, sink);
+      // No picker on this sheet at all any more. A file used to be chosen here,
+      // before the card existed, which meant the pick belonged to no
+      // acquisition — the card publishes `pick_source` now, carrying the one an
+      // offer must name.
+      expect(find.widgetWithText(OutlinedButton, 'Choose a file'), findsNothing);
       final Finder start = find.widgetWithText(FilledButton, 'Start sending');
-      expect(tester.widget<FilledButton>(start).onPressed, isNull);
-
-      await tester.tap(find.widgetWithText(OutlinedButton, 'Choose a file'));
-      await tester.pumpAndSettle();
-      expect(picked, isTrue);
-      expect(find.textContaining('holiday.mp4'), findsOneWidget);
-      expect(tester.widget<FilledButton>(start).onPressed, isNotNull);
+      expect(
+        tester.widget<FilledButton>(start).onPressed,
+        isNotNull,
+        reason: 'a send no longer waits on a pick that could not be delivered',
+      );
 
       await tester.tap(start);
       await tester.pumpAndSettle();
       final CreateIntentView intent = sink.requested.single.intent;
-      // The picked file gated the button; the frame carries only the room's
-      // direction, because a document is offered after the card exists.
       expect(
         (intent as CreateIntentViewMintRoom).value.localDirection,
         LocalDirectionView.send,
@@ -2521,8 +2510,8 @@ void main() {
       await openSheet(
         tester,
         sink,
-        ask: (CapabilityRequestView capability) async {
-          expect(capability, CapabilityRequestView.scanInvite);
+        ask: (CapabilityExchangeView request) async {
+          expect(request, isA<CapabilityExchangeViewScanInvite>());
           return const CapabilityProvided(invite);
         },
       );
@@ -2580,7 +2569,7 @@ void main() {
         await openSheet(
           tester,
           sink,
-          ask: (CapabilityRequestView capability) async =>
+          ask: (CapabilityExchangeView request) async =>
               CapabilityDeclined(answer.key),
         );
         await tester.tap(find.widgetWithText(OutlinedButton, 'Scan a code'));
@@ -2620,7 +2609,7 @@ void main() {
       await openSheet(
         tester,
         sink,
-        ask: (CapabilityRequestView capability) async =>
+        ask: (CapabilityExchangeView request) async =>
             const CapabilityUnavailable('no handler is registered'),
       );
       await tester.tap(find.widgetWithText(OutlinedButton, 'Scan a code'));
@@ -2641,7 +2630,7 @@ void main() {
       // exactly what a build that forgot to register the adapter does.
       TestWidgetsFlutterBinding.ensureInitialized();
       final CapabilityAnswer answer =
-          await platformCapability(CapabilityRequestView.scanInvite);
+          await askToScan(platformCapability);
       expect(answer, isA<CapabilityUnavailable>());
       expect(answer, isNot(isA<CapabilityDeclined>()));
     });
@@ -2671,13 +2660,9 @@ void main() {
   });
 }
 
-/// A picker the user never used. The sheet must still build and still refuse to
-/// send, because nothing has been granted.
-Future<PickedSource?> _noPick() async => null;
-
 /// A platform with no scanner adapter — the desktop/CLI case. It answers, and
 /// what it answers is a first-class part of the contract.
-Future<CapabilityAnswer> _noScanner(CapabilityRequestView capability) async =>
+Future<CapabilityAnswer> _noScanner(CapabilityExchangeView request) async =>
     const CapabilityDeclined(DeclinedView.unsupported);
 
 /// The 13 shapes a `DispositionView` can take (11 variants, 3 pause causes).

@@ -17,19 +17,19 @@ import 'theme.dart';
 /// id, and does not claim a card was made — every one of those is the answer
 /// the authority sends back, rendered here in its own words.
 ///
-/// The one thing this screen does decide is whether the platform has granted a
-/// source yet, and that is not a judgement about a transfer: there is no card
-/// to have a rule about, only a picker that has or has not been used.
+/// It no longer asks for a document either. A file used to be chosen HERE,
+/// before the card existed — which meant the pick belonged to no acquisition and
+/// could be consumed by whichever card asked next. The card is created first
+/// now, and it publishes the `pick_source` action carrying the acquisition an
+/// offer must name.
 class NewTransferSheet extends StatefulWidget {
   const NewTransferSheet({
     required this.creator,
-    required this.picker,
     required this.ask,
     super.key,
   });
 
   final Creator creator;
-  final SourcePicker picker;
 
   /// Asks the platform for a capability. A platform whose adapter ANSWERS
   /// `unsupported` gets an absent button rather than a broken one; an adapter
@@ -43,14 +43,9 @@ class NewTransferSheet extends StatefulWidget {
 class _NewTransferSheetState extends State<NewTransferSheet> {
   final TextEditingController _invite = TextEditingController();
 
-  /// What the platform said about the document the user picked. Metadata, and
-  /// the app holds nothing else about it — no URI, no handle, no stream.
-  PickedSource? _source;
-
   /// The request in flight or the answer to the last one.
   CreateIntent? _request;
 
-  bool _picking = false;
   bool _scanning = false;
 
   /// Why the last scan produced no text, or null when none has. It is drawn as
@@ -92,26 +87,6 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
     super.dispose();
   }
 
-  Future<void> _pick() async {
-    setState(() => _picking = true);
-    PickedSource? granted;
-    try {
-      granted = await widget.picker();
-    } finally {
-      if (mounted) {
-        setState(() {
-          _picking = false;
-          if (granted != null) {
-            _source = granted;
-            // A newly chosen source is a new user intent, even when its
-            // provider metadata happens to equal the previous pick.
-            _sendRequestId = null;
-          }
-        });
-      }
-    }
-  }
-
   Future<void> _ask(Future<CreateIntent> Function() request) async {
     setState(() => _request = null);
     final CreateIntent answered = await request();
@@ -121,21 +96,11 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
   }
 
   Future<void> _send() {
-    final PickedSource? source = _source;
-    if (source == null) {
-      return Future<void>.value();
-    }
     final String id = _sendRequestId ??= mintCommandId();
-    // The create frame carries NO document. The picked source is delivered
-    // afterwards, on the source-offer intent, under the acquisition identity
-    // the authority mints — which is why a document chosen here can no longer
-    // be consumed by a different card.
-    //
-    // That offer is not wired yet, so today the pick gates this button and is
-    // then not delivered. It was never delivered to the product before either
-    // (no reducer edge consumed it), so this changes what is TRUE about the
-    // card, not what happens: it is now honestly nameless instead of carrying
-    // a name nothing had staged.
+    // The create frame carries NO document, and this screen no longer asks for
+    // one first. The card is minted, and it then publishes the acquisition a
+    // document must be offered against — so a pick belongs to one card by
+    // construction instead of to whoever asked next.
     return _ask(() => widget.creator.mint(
           id: id,
           direction: LocalDirectionView.send,
@@ -151,8 +116,7 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
       _scanning = true;
       _declined = null;
     });
-    final CapabilityAnswer answer =
-        await widget.ask(CapabilityRequestView.scanInvite);
+    final CapabilityAnswer answer = await askToScan(widget.ask);
     if (!mounted) {
       return;
     }
@@ -172,6 +136,12 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
           // withdrawn scanner would make a registration bug look permanent and
           // unfixable to the one person who could report it.
           _scanUnreachable = true;
+        // A picker answer to a scan request. The client already refuses a
+        // mismatched capability, so reaching here would mean it stopped doing
+        // that; treat it the same as no answer at all.
+        case SourcePicked():
+        case SourcePickFailed():
+          _scanUnreachable = true;
       }
     });
   }
@@ -187,7 +157,6 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
   @override
   Widget build(BuildContext context) {
     final EnvoixTokens tokens = EnvoixTokens.of(context);
-    final PickedSource? source = _source;
     final CreateIntent? request = _request;
     return Padding(
       padding: EdgeInsets.only(
@@ -208,48 +177,9 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
             const SizedBox(height: EnvoixSpace.block),
             const _Section(label: 'Send a file'),
             const SizedBox(height: EnvoixSpace.tight),
-            Row(
-              children: <Widget>[
-                Builder(
-                  builder: (BuildContext context) {
-                    reportSheetControl(context, 'choose');
-                    return OutlinedButton(
-                      onPressed: _picking ? null : _pick,
-                      child: Text(
-                        source == null ? 'Choose a file' : 'Choose another',
-                      ),
-                    );
-                  },
-                ),
-                const SizedBox(width: EnvoixSpace.row),
-                Expanded(
-                  child: Semantics(
-                    container: true,
-                    label: 'Chosen file',
-                    value: source == null
-                        ? 'nothing chosen yet'
-                        : '${source.displayName}, ${source.sizeBytes} bytes',
-                    child: ExcludeSemantics(
-                      // A chosen file's name and size come from the provider,
-                      // not from a person; the prompt in its place does not.
-                      child: source == null
-                          ? Text(
-                              'No file chosen yet.',
-                              style: EnvoixType.subtitle.copyWith(
-                                color: tokens.muted,
-                              ),
-                            )
-                          : Text(
-                              '${source.displayName} · '
-                              '${source.sizeBytes} bytes',
-                              style: EnvoixType.monoLine.copyWith(
-                                color: tokens.text,
-                              ),
-                            ),
-                    ),
-                  ),
-                ),
-              ],
+            Text(
+              'Envoix will ask which file after the transfer is created.',
+              style: EnvoixType.subtitle.copyWith(color: tokens.muted),
             ),
             const SizedBox(height: EnvoixSpace.row),
             Builder(
@@ -261,7 +191,7 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
                   width: double.infinity,
                   height: 46,
                   child: FilledButton(
-                    onPressed: source == null ? null : _send,
+                    onPressed: _send,
                     child: const Text('Start sending'),
                   ),
                 );

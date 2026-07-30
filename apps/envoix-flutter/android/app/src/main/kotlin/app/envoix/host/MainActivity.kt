@@ -2,6 +2,8 @@ package app.envoix.host
 
 import android.app.Activity
 import android.content.Intent
+import com.envoix.bindings.capability.PickSourceFailureView
+import com.envoix.bindings.capability.SourceAcquisitionKeyView
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 
@@ -39,7 +41,11 @@ class MainActivity : FlutterActivity() {
             )
     }
 
-    private fun pickSource() {
+    /** Which acquisition the open pick belongs to, so its answer can name it. */
+    private var pickingFor: SourceAcquisitionKeyView? = null
+
+    private fun pickSource(acquisition: SourceAcquisitionKeyView) {
+        pickingFor = acquisition
         val intent =
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
@@ -50,6 +56,14 @@ class MainActivity : FlutterActivity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
             }
+        // A device with no document provider at all answers the exchange rather
+        // than throwing: "there is no picker here" is a first-class answer, and
+        // it is what a desktop or CLI adapter says unconditionally.
+        if (intent.resolveActivity(packageManager) == null) {
+            pickingFor = null
+            lane?.sourcePickFailed(PickSourceFailureView.PICKER_UNAVAILABLE)
+            return
+        }
         startActivityForResult(intent, REQUEST_PICK_SOURCE)
     }
 
@@ -78,13 +92,21 @@ class MainActivity : FlutterActivity() {
             super.onActivityResult(requestCode, resultCode, data)
             return
         }
+        val acquisition = pickingFor
+        pickingFor = null
+        if (acquisition == null) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
         val uri = data?.data.takeIf { resultCode == Activity.RESULT_OK }
         val granted =
             uri?.let {
                 // A pick owns no durable capability. The grant is taken only
                 // when a committed card claims this URI through its source
-                // duty, which gives it a lifecycle owner.
-                SourcePicks.offer(this, it)
+                // duty, which gives it a lifecycle owner — and it is recorded
+                // under the ACQUISITION that asked, so a later generation cannot
+                // inherit it.
+                SourcePicks.offer(this, acquisition, it)
             }
         lane?.sourcePicked(granted)
     }

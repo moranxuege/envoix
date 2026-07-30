@@ -4,13 +4,19 @@ import android.os.Handler
 import android.os.Looper
 import com.envoix.bindings.capability.CapabilityBody
 import com.envoix.bindings.capability.CapabilityExchangeView
-import com.envoix.bindings.capability.CapabilityRequestView
 import com.envoix.bindings.capability.CapabilitySecretString
-import com.envoix.bindings.capability.CapabilityStepView
 import com.envoix.bindings.capability.DeclinedReasonView
 import com.envoix.bindings.capability.DeclinedView
 import com.envoix.bindings.capability.EnvoixCapabilityCodec
+import com.envoix.bindings.capability.PickSourceExchangeView
+import com.envoix.bindings.capability.PickSourceFailureReasonView
+import com.envoix.bindings.capability.PickSourceFailureView
+import com.envoix.bindings.capability.PickSourceStepView
+import com.envoix.bindings.capability.PickedSourceView
+import com.envoix.bindings.capability.ScanInviteExchangeView
+import com.envoix.bindings.capability.ScanInviteStepView
 import com.envoix.bindings.capability.ScannedTextView
+import com.envoix.bindings.capability.SourceAcquisitionKeyView
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -37,18 +43,24 @@ import kotlin.concurrent.thread
  * The other direction is two methods on [COMMAND_CHANNEL]. [INTENT] hands an
  * intent frame to the host and returns the host's encoded answer; it is not a
  * transfer verb — the host decides what the intent does, and a committed
- * completion arrives later on the frame lane above. [PICK_SOURCE] opens the
- * platform document picker and answers with the provider's display name and
- * size; the URI itself stays in [SourcePicks] and is never part of the reply,
- * so the frontend can describe a chosen file without ever holding one.
+ * completion arrives later on the frame lane above. [CAPABILITY] carries a
+ * capability exchange between the frontend and THIS adapter, which the Rust
+ * authority never sees.
  *
- * Kotlin never looks inside a frame. It moves `ByteArray`s between the JNI lane
- * and the message channels; the generated Dart codec is the only thing that
- * decodes them, and this class carries no contract type at all.
+ * The document picker used to be a third method with an untyped map for its
+ * answer (`displayName`/`sizeBytes`, absent collapsing to `""` and `0`). It is
+ * a capability arm now, so the pick names the acquisition it is for and an
+ * unknown size stays unknown. The URI itself is still never part of any reply:
+ * it lives in [SourcePicks] under that acquisition, so a frontend can describe
+ * a chosen file without ever holding one.
+ *
+ * Apart from that one contract, Kotlin never looks inside a frame: it moves
+ * `ByteArray`s between the JNI lane and the message channels, and the generated
+ * Dart codec is the only thing that decodes them.
  */
 class FrontendLane(
     messenger: BinaryMessenger,
-    private val pickSource: () -> Unit,
+    private val pickSource: (SourceAcquisitionKeyView) -> Unit,
     private val scanInvite: () -> Unit,
 ) : EventChannel.StreamHandler {
     private val channel = EventChannel(messenger, CHANNEL)
@@ -83,39 +95,13 @@ class FrontendLane(
     ) {
         when (call.method) {
             INTENT -> onIntent(call, result)
-            PICK_SOURCE -> onPickSource(result)
             CAPABILITY -> onCapability(call, result)
             else -> result.notImplemented()
         }
     }
 
-    /**
-     * Opens the picker. One at a time: a second request while one is open would
-     * leave the first `Result` unanswered, which a `MethodChannel` treats as a
-     * leak.
-     */
-    private fun onPickSource(result: MethodChannel.Result) {
-        if (picking != null) {
-            result.error(PICK_IN_FLIGHT, "a source pick is already open", null)
-            return
-        }
-        picking = result
-        pickSource()
-    }
-
-    /**
-     * The Activity's answer: the sanitized metadata for the picked document, or
-     * null when the user cancelled. Never a URI.
-     */
-    fun sourcePicked(granted: SourcePicks.Granted?) {
-        val result = picking ?: return
-        picking = null
-        result.success(
-            granted?.let {
-                mapOf(DISPLAY_NAME to it.displayName, SIZE_BYTES to it.sizeBytes)
-            },
-        )
-    }
+    /** Which acquisition the open pick is for, so its answer can name it. */
+    private var pickingFor: SourceAcquisitionKeyView? = null
 
     /**
      * The capability seam, and the ONE place this class decodes a frame.
@@ -142,14 +128,13 @@ class FrontendLane(
                 result.error(NOT_A_FRAME, malformed.message ?: "not a capability frame", null)
                 return
             }
-        val exchange = (request.body as CapabilityBody.Exchange).value
-        if (exchange.step !is CapabilityStepView.Requested) {
-            // The adapter's own half echoed back is not a question.
-            result.error(NOT_A_FRAME, "a capability request was expected", null)
-            return
-        }
-        when (exchange.capability) {
-            CapabilityRequestView.SCAN_INVITE -> {
+        when (val exchange = (request.body as CapabilityBody.Exchange).value) {
+            is CapabilityExchangeView.ScanInvite -> {
+                if (exchange.value.step !is ScanInviteStepView.Requested) {
+                    // The adapter's own half echoed back is not a question.
+                    result.error(NOT_A_FRAME, "a capability request was expected", null)
+                    return
+                }
                 if (scanning != null) {
                     result.error(SCAN_IN_FLIGHT, "a scan is already open", null)
                     return
@@ -157,7 +142,73 @@ class FrontendLane(
                 scanning = result
                 scanInvite()
             }
+            is CapabilityExchangeView.PickSource -> {
+                if (exchange.value.step !is PickSourceStepView.Requested) {
+                    result.error(NOT_A_FRAME, "a capability request was expected", null)
+                    return
+                }
+                // One at a time: a second request while one is open would leave
+                // the first `Result` unanswered, which a `MethodChannel` treats
+                // as a leak.
+                if (picking != null) {
+                    result.error(PICK_IN_FLIGHT, "a source pick is already open", null)
+                    return
+                }
+                picking = result
+                pickingFor = exchange.value.acquisition
+                pickSource(exchange.value.acquisition)
+            }
         }
+    }
+
+    /**
+     * The Activity's answer for the pick in flight: the sanitized metadata for
+     * the chosen document, or which decline it was. Never a URI, and always
+     * naming the acquisition the request named — a frontend that receives an
+     * answer for a different one refuses it before building an offer.
+     */
+    fun sourcePicked(granted: SourcePicks.Granted?) {
+        val result = picking ?: return
+        val acquisition = pickingFor ?: return
+        picking = null
+        pickingFor = null
+        val step =
+            when (granted) {
+                null ->
+                    PickSourceStepView.Declined(DeclinedReasonView(DeclinedView.CANCELLED))
+                else ->
+                    PickSourceStepView.Provided(
+                        PickedSourceView(
+                            displayName = granted.displayName,
+                            reportedSize = granted.sizeBytes,
+                        ),
+                    )
+            }
+        val answer =
+            EnvoixCapabilityCodec.encode(
+                CapabilityExchangeView.PickSource(
+                    PickSourceExchangeView(acquisition = acquisition, step = step),
+                ),
+            )
+        result.success(answer.toByteArray(Charsets.UTF_8))
+    }
+
+    /** The picker itself could not run — not a person declining it. */
+    fun sourcePickFailed(reason: PickSourceFailureView) {
+        val result = picking ?: return
+        val acquisition = pickingFor ?: return
+        picking = null
+        pickingFor = null
+        val answer =
+            EnvoixCapabilityCodec.encode(
+                CapabilityExchangeView.PickSource(
+                    PickSourceExchangeView(
+                        acquisition = acquisition,
+                        step = PickSourceStepView.Failed(PickSourceFailureReasonView(reason)),
+                    ),
+                ),
+            )
+        result.success(answer.toByteArray(Charsets.UTF_8))
     }
 
     /**
@@ -173,9 +224,9 @@ class FrontendLane(
         val step =
             when {
                 text != null ->
-                    CapabilityStepView.Provided(ScannedTextView(CapabilitySecretString(text)))
+                    ScanInviteStepView.Provided(ScannedTextView(CapabilitySecretString(text)))
                 else ->
-                    CapabilityStepView.Declined(
+                    ScanInviteStepView.Declined(
                         DeclinedReasonView(
                             when (declined) {
                                 ScanActivity.DECLINED_REFUSED -> DeclinedView.REFUSED
@@ -187,10 +238,7 @@ class FrontendLane(
             }
         val answer =
             EnvoixCapabilityCodec.encode(
-                CapabilityExchangeView(
-                    capability = CapabilityRequestView.SCAN_INVITE,
-                    step = step,
-                ),
+                CapabilityExchangeView.ScanInvite(ScanInviteExchangeView(step = step)),
             )
         result.success(answer.toByteArray(Charsets.UTF_8))
     }
@@ -302,20 +350,18 @@ class FrontendLane(
         /** The intent method that channel carries. */
         const val INTENT = "intent"
 
-        /** The platform-capability method: open the document picker. */
-        const val PICK_SOURCE = "pickSource"
-
         /**
          * The generated-capability method. Mirrors the catalogued
          * `android.frontend_capability_method`; it carries a capability frame
-         * in and one out, unlike [PICK_SOURCE], whose untyped map predates the
-         * contract and is the sibling still owed this treatment.
+         * in and one out.
+         *
+         * It is now the ONLY platform-capability method. The document picker
+         * had its own method and an untyped map for its answer; that map had no
+         * acquisition key and collapsed an unknown size to zero, so a pick could
+         * satisfy whichever ask happened to be outstanding and "unknown" and
+         * "empty file" were the same value.
          */
         const val CAPABILITY = "capability"
-
-        /** Keys of the pick reply. Sanitized metadata only — never a URI. */
-        const val DISPLAY_NAME = "displayName"
-        const val SIZE_BYTES = "sizeBytes"
 
         /** A pick was requested while one was already open. */
         const val PICK_IN_FLIGHT = "pick-in-flight"

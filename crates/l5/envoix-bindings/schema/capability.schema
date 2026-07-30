@@ -43,13 +43,24 @@
 # `provided` / `declined`, would hand an encoder to one peer and leave the other
 # unable to reply.
 #
+# WHY THE EXCHANGE IS ITSELF A UNION (capability/2). Version 1 had one enum
+# naming the capability and ONE `provided` payload for all of them. A second
+# capability broke that immediately: a scan answers opaque text, a document pick
+# answers a name and a size, and the pick's REQUEST must carry the acquisition
+# it is for while a scan has no card at all. Squeezing both through one payload
+# would have meant a struct with everything optional, where "which fields are
+# meaningful" is a rule written in prose instead of a type. So the capability is
+# the union arm, and each arm carries its own request identity and its own
+# answers. Adding a third capability adds an arm; it does not widen a shared
+# payload that the other two then have to ignore.
+#
 # CONTAINMENT. The scalar vocabulary and grammar are identical to
 # schema/read.schema: no bytes/blob type and no handle/path/URI type. A camera
 # frame, an image, a device identifier or a file handle cannot be spelled here,
 # which is what keeps a platform's implementation out of the contract that
 # names its capability.
 
-id = "envoix/binding/capability/1"
+id = "envoix/binding/capability/2"
 root = "CapabilityFrame"
 direction = "bidirectional"
 
@@ -57,18 +68,6 @@ direction = "bidirectional"
 # A scanned invite is the largest thing that crosses, and its own bound below
 # is what limits it; this envelope only refuses the absurd.
 max_frame_bytes = 65536
-
-# The capabilities a frontend may ask its platform adapter for.
-#
-# One variant, because one is what exists. The document picker is this
-# contract's sibling in fact but not yet in code: it still crosses as an ad-hoc
-# method name and an untyped map. Moving it here is a wiring change rather than
-# a contract argument, but it is a change nobody has made, so it is not
-# pre-declared.
-[[decl]]
-kind = "enum"
-name = "CapabilityRequestView"
-variants = ["scan_invite"]
 
 [[decl]]
 kind = "struct"
@@ -108,12 +107,12 @@ kind = "struct"
 name = "DeclinedReasonView"
 fields = [{ name = "reason", type = "DeclinedView" }]
 
-# One half of one exchange. `requested` is the frontend speaking; the other two
-# are the adapter answering, and they are exhaustive over what can happen: the
-# capability produced text, or it did not and said why.
+# One half of a SCAN. `requested` is the frontend speaking; the other two are
+# the adapter answering, and they are exhaustive over what can happen: the
+# camera produced text, or it did not and said why.
 [[decl]]
 kind = "union"
-name = "CapabilityStepView"
+name = "ScanInviteStepView"
 variants = [
   { name = "requested" },
   { name = "provided", payload = "ScannedTextView" },
@@ -122,13 +121,91 @@ variants = [
 
 [[decl]]
 kind = "struct"
-name = "CapabilityExchangeView"
+name = "ScanInviteExchangeView"
+fields = [{ name = "step", type = "ScanInviteStepView" }]
+
+# Which source acquisition a pick is FOR.
+#
+# All three components, always. A picker answer that named only the card could
+# satisfy a request from a superseded generation — which is the ownership defect
+# the acquisition key exists to close, and it would reopen here if this contract
+# carried anything less. Read/9 hands a frontend exactly this value in the
+# card's `pick_source` action; this is that value travelling on to the adapter.
+[[decl]]
+kind = "struct"
+name = "SourceAcquisitionKeyView"
 fields = [
-  # Which capability is being spoken about. Carried on BOTH halves, so an
-  # adapter that answered a different capability than the one asked for is
-  # visibly answering a question nobody asked rather than silently believed.
-  { name = "capability", type = "CapabilityRequestView" },
-  { name = "step", type = "CapabilityStepView" },
+  { name = "card", type = "hex16" },
+  { name = "generation", type = "u32" },
+  { name = "request", type = "hex32" },
+]
+
+# What the platform can say about the document a person chose.
+#
+# Metadata only, and deliberately so: the URI, the descriptor and the grant stay
+# inside the adapter, registered under the acquisition key. The scalar
+# vocabulary has no handle type, so this contract could not carry one even by
+# accident.
+[[decl]]
+kind = "struct"
+name = "PickedSourceView"
+fields = [
+  # The provider's claim, not yet normalized — Rust owns normalization and the
+  # `name_too_long` answer, so the bound here is the command contract's intake
+  # bound rather than `OfferedName`'s stricter maximum. A platform-specific
+  # encoder must not become product policy by silently truncating first.
+  { name = "display_name", type = "str(1020)" },
+  # OPTIONAL, because a provider may genuinely not know. `0` is an empty file
+  # and stays distinct from absent; collapsing the two is what the untyped map
+  # this replaces did (`sizeBytes ?? 0`), and it made "unknown" indistinguishable
+  # from "empty".
+  { name = "reported_size", type = "option(u63)" },
+]
+
+# The picker could not run, as distinct from a person declining it.
+#
+# `declined` says a human answered no; these say the exchange never reached one.
+# A frontend showing "you cancelled" for a picker that was never installed would
+# be blaming the user for the platform.
+[[decl]]
+kind = "enum"
+name = "PickSourceFailureView"
+variants = ["picker_unavailable", "metadata_unavailable", "internal"]
+
+[[decl]]
+kind = "struct"
+name = "PickSourceFailureReasonView"
+fields = [{ name = "reason", type = "PickSourceFailureView" }]
+
+[[decl]]
+kind = "union"
+name = "PickSourceStepView"
+variants = [
+  { name = "requested" },
+  { name = "provided", payload = "PickedSourceView" },
+  { name = "declined", payload = "DeclinedReasonView" },
+  { name = "failed", payload = "PickSourceFailureReasonView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "PickSourceExchangeView"
+fields = [
+  # On the request AND on every answer. An adapter replying about a different
+  # acquisition is then visibly answering a question nobody asked, and the
+  # frontend refuses it before building an offer — rather than binding a
+  # document to whichever acquisition happened to be outstanding.
+  { name = "acquisition", type = "SourceAcquisitionKeyView" },
+  { name = "step", type = "PickSourceStepView" },
+]
+
+# The capability IS the arm. See the note at the top of this file.
+[[decl]]
+kind = "union"
+name = "CapabilityExchangeView"
+variants = [
+  { name = "scan_invite", payload = "ScanInviteExchangeView" },
+  { name = "pick_source", payload = "PickSourceExchangeView" },
 ]
 
 [[decl]]

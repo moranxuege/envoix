@@ -9,7 +9,7 @@
 # this declaration.
 
 [identity]
-abi_schema_capability_binding_schema_id = "envoix/binding/capability/1"
+abi_schema_capability_binding_schema_id = "envoix/binding/capability/2"
 abi_schema_command_binding_schema_id = "envoix/binding/command/5"
 abi_schema_evidence_rust_abi_id = "envoix/evidence-rust-abi/1"
 abi_schema_evidence_timeline_schema_id = "envoix/evidence-timeline/1"

@@ -7,8 +7,9 @@ use std::io::{self, BufRead, Read, Write};
 use std::process::ExitCode;
 
 use envoix_bindings::capability::{
-    CapabilityBody, CapabilityExchangeView, CapabilityFrame, CapabilityRequestView,
-    CapabilityStepView, encode_capability_frame,
+    CapabilityBody, CapabilityExchangeView, CapabilityFrame, PickSourceExchangeView,
+    PickSourceStepView, ScanInviteExchangeView, ScanInviteStepView, SourceAcquisitionKeyView,
+    encode_capability_frame,
 };
 use envoix_bindings::command::LocalDirectionView;
 use envoix_bindings::read::CommandKindView;
@@ -22,6 +23,7 @@ Usage:
   envoix join REQUEST_ID
   envoix command CARD COMMAND_ID pause|cancel|resume|remove|re-pick-source
   envoix capability scan-invite
+  envoix capability pick-source CARD GENERATION REQUEST
 
 observe and command read newline-delimited generated lane frames from stdin.
 join reads opaque invite text from stdin unchanged. Generated frames are
@@ -84,15 +86,33 @@ fn run() -> Result<(), String> {
             )
         }
         Some("capability") => {
-            if arguments.next().as_deref() != Some("scan-invite") {
-                return Err(USAGE.to_owned());
-            }
+            let exchange = match arguments.next().as_deref() {
+                Some("scan-invite") => CapabilityExchangeView::ScanInvite(ScanInviteExchangeView {
+                    step: ScanInviteStepView::Requested,
+                }),
+                // The acquisition a real frontend would take from the card's
+                // published `pick_source` action. Spelled on the command line
+                // here because this CLI holds no card of its own.
+                Some("pick-source") => {
+                    let acquisition = SourceAcquisitionKeyView {
+                        card: arguments.next().ok_or_else(|| USAGE.to_owned())?,
+                        generation: arguments
+                            .next()
+                            .ok_or_else(|| USAGE.to_owned())?
+                            .parse()
+                            .map_err(|_| USAGE.to_owned())?,
+                        request: arguments.next().ok_or_else(|| USAGE.to_owned())?,
+                    };
+                    CapabilityExchangeView::PickSource(PickSourceExchangeView {
+                        acquisition,
+                        step: PickSourceStepView::Requested,
+                    })
+                }
+                _ => return Err(USAGE.to_owned()),
+            };
             no_more(arguments)?;
             let request = encode_capability_frame(&CapabilityFrame {
-                body: CapabilityBody::Exchange(CapabilityExchangeView {
-                    capability: CapabilityRequestView::ScanInvite,
-                    step: CapabilityStepView::Requested,
-                }),
+                body: CapabilityBody::Exchange(exchange),
             })
             .map_err(|error| format!("capability contract error: {error:?}"))?;
             write_frame(&answer_capability(&request).map_err(|error| error.to_string())?)
