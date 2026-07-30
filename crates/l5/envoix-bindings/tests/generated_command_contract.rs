@@ -125,7 +125,7 @@ fn generated_command_schema_exhaustiveness() {
         assert!(SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY);
         assert!(RETRY_HORIZON_COMPLETIONS as usize == CommandLedger::RETENTION);
     }
-    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/5");
+    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/6");
 
     // The invite field carries text the grammar has not seen yet, so its bound
     // is the one place `MAX_INVITE_INPUT_LENGTH` — the parser's permissive
@@ -287,7 +287,20 @@ fn generated_command_schema_exhaustiveness() {
         Some(Decl::Union(decl)) => decl.variants.len(),
         _ => panic!("union {name} expected"),
     };
-    assert_eq!(union_len("CommandBody"), 4);
+    // intent, acceptance, completion, create_result, source_offer_result — the
+    // fifth arrived when a source offer gained an ANSWER. It had an intent and
+    // nothing to reply with, so the host refused every one it decoded.
+    assert_eq!(union_len("CommandBody"), 5);
+    assert_eq!(union_len("SourceOfferOutcomeView"), 2);
+    assert_eq!(
+        doc.find("SourceOfferAnswerView")
+            .map_or(0, |decl| match decl {
+                Decl::Enum(decl) => decl.variants.len(),
+                _ => 0,
+            }),
+        6,
+        "the answer vocabulary must mirror the domain classifier exactly"
+    );
     // command, create, source_offer — the third arrived with acquisition.
     assert_eq!(union_len("FrontendIntentView"), 3);
     assert_eq!(union_len("CreateIntentView"), 2);
@@ -352,7 +365,7 @@ fn command_frames_reject_hostile_input() {
     );
 
     let future_version = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/command/6");
+        value["schema"] = serde_json::json!("envoix/binding/command/7");
     });
     assert_eq!(
         decode_command_frame(&future_version),

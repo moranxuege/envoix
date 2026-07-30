@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String commandSchemaId = 'envoix/binding/command/5';
+const String commandSchemaId = 'envoix/binding/command/6';
 const int commandMaxFrameBytes = 1048576;
 // Contract rules frozen by schema/command.schema.
 const bool newestAttachmentCommands = true;
@@ -212,6 +212,50 @@ final class CreateView {
   final String requestId;
 }
 
+enum SourceOfferAnswerView {
+  accepted,
+  alreadyAccepted,
+  conflict,
+  stale,
+  unknownCard,
+  notExpected,
+}
+
+enum SourceOfferRefusalView {
+  staleEpoch,
+  nameTooLong,
+  runtimeStopped,
+  interrupted,
+  storageFault,
+  internal,
+}
+
+sealed class SourceOfferOutcomeView {
+  const SourceOfferOutcomeView();
+}
+
+final class SourceOfferOutcomeViewAnswered extends SourceOfferOutcomeView {
+  const SourceOfferOutcomeViewAnswered(this.value);
+
+  final SourceOfferAnswerView value;
+}
+
+final class SourceOfferOutcomeViewRefused extends SourceOfferOutcomeView {
+  const SourceOfferOutcomeViewRefused(this.value);
+
+  final SourceOfferRefusalView value;
+}
+
+final class SourceOfferResultView {
+  const SourceOfferResultView({
+    required this.key,
+    required this.outcome,
+  });
+
+  final SourceAcquisitionKeyView key;
+  final SourceOfferOutcomeView outcome;
+}
+
 sealed class FrontendIntentView {
   const FrontendIntentView();
 }
@@ -386,6 +430,12 @@ final class CommandBodyCreateResult extends CommandBody {
   const CommandBodyCreateResult(this.value);
 
   final CreateResultView value;
+}
+
+final class CommandBodySourceOfferResult extends CommandBody {
+  const CommandBodySourceOfferResult(this.value);
+
+  final SourceOfferResultView value;
 }
 
 final class CommandFrame {
@@ -786,6 +836,64 @@ Map<String, Object?> _encodeCreateView(CreateView value) {
   };
 }
 
+SourceOfferAnswerView _decodeSourceOfferAnswerView(Object? value, String context) {
+  return switch (value) {
+    'accepted' => SourceOfferAnswerView.accepted,
+    'already_accepted' => SourceOfferAnswerView.alreadyAccepted,
+    'conflict' => SourceOfferAnswerView.conflict,
+    'stale' => SourceOfferAnswerView.stale,
+    'unknown_card' => SourceOfferAnswerView.unknownCard,
+    'not_expected' => SourceOfferAnswerView.notExpected,
+    String() =>
+      throw CommandContractException(CommandErrorKind.unknownVariant, context),
+    _ => throw CommandContractException(CommandErrorKind.shape, context),
+  };
+}
+
+SourceOfferRefusalView _decodeSourceOfferRefusalView(Object? value, String context) {
+  return switch (value) {
+    'stale_epoch' => SourceOfferRefusalView.staleEpoch,
+    'name_too_long' => SourceOfferRefusalView.nameTooLong,
+    'runtime_stopped' => SourceOfferRefusalView.runtimeStopped,
+    'interrupted' => SourceOfferRefusalView.interrupted,
+    'storage_fault' => SourceOfferRefusalView.storageFault,
+    'internal' => SourceOfferRefusalView.internal,
+    String() =>
+      throw CommandContractException(CommandErrorKind.unknownVariant, context),
+    _ => throw CommandContractException(CommandErrorKind.shape, context),
+  };
+}
+
+SourceOfferOutcomeView _decodeSourceOfferOutcomeView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw CommandContractException(CommandErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'answered':
+      return SourceOfferOutcomeViewAnswered(
+        _decodeSourceOfferAnswerView(_payload(map, 'SourceOfferOutcomeView.answered'), 'SourceOfferOutcomeView.answered'),
+      );
+    case 'refused':
+      return SourceOfferOutcomeViewRefused(
+        _decodeSourceOfferRefusalView(_payload(map, 'SourceOfferOutcomeView.refused'), 'SourceOfferOutcomeView.refused'),
+      );
+    default:
+      throw CommandContractException(CommandErrorKind.unknownVariant, context);
+  }
+}
+
+SourceOfferResultView _decodeSourceOfferResultView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'key', 'outcome'}, context);
+  return SourceOfferResultView(
+    key: _decodeSourceAcquisitionKeyView(_field(map, 'key', 'SourceOfferResultView.key'), 'SourceOfferResultView.key'),
+    outcome: _decodeSourceOfferOutcomeView(_field(map, 'outcome', 'SourceOfferResultView.outcome'), 'SourceOfferResultView.outcome'),
+  );
+}
+
 FrontendIntentView _decodeFrontendIntentView(Object? value, String context) {
   final map = _object(value, context);
   _knownKeys(map, const {'kind', 'value'}, context);
@@ -994,6 +1102,10 @@ CommandBody _decodeCommandBody(Object? value, String context) {
     case 'create_result':
       return CommandBodyCreateResult(
         _decodeCreateResultView(_payload(map, 'CommandBody.create_result'), 'CommandBody.create_result'),
+      );
+    case 'source_offer_result':
+      return CommandBodySourceOfferResult(
+        _decodeSourceOfferResultView(_payload(map, 'CommandBody.source_offer_result'), 'CommandBody.source_offer_result'),
       );
     default:
       throw CommandContractException(CommandErrorKind.unknownVariant, context);

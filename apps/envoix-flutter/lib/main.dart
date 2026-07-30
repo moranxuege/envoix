@@ -166,6 +166,7 @@ class _ShellState extends State<Shell> {
             ? HomeScreen(
                 attachment: _lane.attachment,
                 commander: _lane.commander,
+                ask: widget.ask,
                 fault: fault,
               )
             : LogsScreen(attachment: _lane.attachment),

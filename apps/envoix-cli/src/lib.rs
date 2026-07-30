@@ -378,6 +378,10 @@ pub fn render(event: &Ingested) -> String {
             CommandBody::CreateResult(answer) => {
                 format!("request={} create={:?}", answer.request_id, answer.outcome)
             }
+            CommandBody::SourceOfferResult(answer) => format!(
+                "acquisition={} offer={:?}",
+                answer.key.request, answer.outcome
+            ),
             CommandBody::Intent(_) => "contract breach: inbound intent".to_owned(),
         },
     }

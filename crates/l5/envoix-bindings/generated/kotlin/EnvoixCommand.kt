@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/5"
+const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/6"
 const val COMMAND_MAX_FRAME_BYTES: Int = 1048576
 
 // Contract rules frozen by schema/command.schema.
@@ -125,6 +125,34 @@ data class CreateView(
     val requestId: String,
 )
 
+enum class SourceOfferAnswerView {
+    ACCEPTED,
+    ALREADY_ACCEPTED,
+    CONFLICT,
+    STALE,
+    UNKNOWN_CARD,
+    NOT_EXPECTED,
+}
+
+enum class SourceOfferRefusalView {
+    STALE_EPOCH,
+    NAME_TOO_LONG,
+    RUNTIME_STOPPED,
+    INTERRUPTED,
+    STORAGE_FAULT,
+    INTERNAL,
+}
+
+sealed interface SourceOfferOutcomeView {
+    data class Answered(val value: SourceOfferAnswerView) : SourceOfferOutcomeView
+    data class Refused(val value: SourceOfferRefusalView) : SourceOfferOutcomeView
+}
+
+data class SourceOfferResultView(
+    val key: SourceAcquisitionKeyView,
+    val outcome: SourceOfferOutcomeView,
+)
+
 sealed interface FrontendIntentView {
     data class Command(val value: SubmitView) : FrontendIntentView
     data class Create(val value: CreateView) : FrontendIntentView
@@ -196,6 +224,7 @@ sealed interface CommandBody {
     data class Acceptance(val value: CommandAcceptanceView) : CommandBody
     data class Completion(val value: CommandCompletionView) : CommandBody
     data class CreateResult(val value: CreateResultView) : CommandBody
+    data class SourceOfferResult(val value: SourceOfferResultView) : CommandBody
 }
 
 data class CommandFrame(
@@ -567,6 +596,53 @@ object EnvoixCommandCodec {
         return map
     }
 
+    private fun decodeSourceOfferAnswerView(value: Any?, context: String): SourceOfferAnswerView = when (value) {
+        "accepted" -> SourceOfferAnswerView.ACCEPTED
+        "already_accepted" -> SourceOfferAnswerView.ALREADY_ACCEPTED
+        "conflict" -> SourceOfferAnswerView.CONFLICT
+        "stale" -> SourceOfferAnswerView.STALE
+        "unknown_card" -> SourceOfferAnswerView.UNKNOWN_CARD
+        "not_expected" -> SourceOfferAnswerView.NOT_EXPECTED
+        is String -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw CommandContractException(CommandErrorKind.SHAPE, context)
+    }
+
+    private fun decodeSourceOfferRefusalView(value: Any?, context: String): SourceOfferRefusalView = when (value) {
+        "stale_epoch" -> SourceOfferRefusalView.STALE_EPOCH
+        "name_too_long" -> SourceOfferRefusalView.NAME_TOO_LONG
+        "runtime_stopped" -> SourceOfferRefusalView.RUNTIME_STOPPED
+        "interrupted" -> SourceOfferRefusalView.INTERRUPTED
+        "storage_fault" -> SourceOfferRefusalView.STORAGE_FAULT
+        "internal" -> SourceOfferRefusalView.INTERNAL
+        is String -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw CommandContractException(CommandErrorKind.SHAPE, context)
+    }
+
+    private fun decodeSourceOfferOutcomeView(value: Any?, context: String): SourceOfferOutcomeView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
+        return when (kind) {
+            "answered" -> SourceOfferOutcomeView.Answered(
+                decodeSourceOfferAnswerView(payload(map, "SourceOfferOutcomeView.answered"), "SourceOfferOutcomeView.answered"),
+            )
+            "refused" -> SourceOfferOutcomeView.Refused(
+                decodeSourceOfferRefusalView(payload(map, "SourceOfferOutcomeView.refused"), "SourceOfferOutcomeView.refused"),
+            )
+            else -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun decodeSourceOfferResultView(value: Any?, context: String): SourceOfferResultView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("key", "outcome"), context)
+        return SourceOfferResultView(
+            key = decodeSourceAcquisitionKeyView(field(map, "key", "SourceOfferResultView.key"), "SourceOfferResultView.key"),
+            outcome = decodeSourceOfferOutcomeView(field(map, "outcome", "SourceOfferResultView.outcome"), "SourceOfferResultView.outcome"),
+        )
+    }
+
     private fun decodeFrontendIntentView(value: Any?, context: String): FrontendIntentView {
         val map = obj(value, context)
         knownKeys(map, setOf("kind", "value"), context)
@@ -736,6 +812,9 @@ object EnvoixCommandCodec {
             )
             "create_result" -> CommandBody.CreateResult(
                 decodeCreateResultView(payload(map, "CommandBody.create_result"), "CommandBody.create_result"),
+            )
+            "source_offer_result" -> CommandBody.SourceOfferResult(
+                decodeSourceOfferResultView(payload(map, "CommandBody.source_offer_result"), "CommandBody.source_offer_result"),
             )
             else -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
         }

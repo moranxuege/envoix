@@ -50,12 +50,17 @@ pub enum CommandRejected {
     Interrupted,
     /// Restoring the card or reducing the command failed internally.
     Internal,
+    /// The authority accepted the offer and its record did not commit. Distinct
+    /// from `Internal`: the card is unchanged and the caller still holds what it
+    /// picked, so re-offering the SAME document is the recovery.
+    StorageFault,
 }
 
 impl fmt::Display for CommandRejected {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownCard => formatter.write_str("the runtime has no projection for the card"),
+            Self::StorageFault => formatter.write_str("the authority could not commit the record"),
             Self::StaleEpoch => {
                 formatter.write_str("a newer attachment superseded the issuing epoch")
             }

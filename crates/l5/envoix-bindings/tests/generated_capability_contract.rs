@@ -445,7 +445,7 @@ fn unknown_vocabulary_is_refused() {
 /// duplication was `CommandView`/`CommandKindView`, which a gate already
 /// compares. It is not tolerable unchecked for this one: read/9 publishes the
 /// acquisition, a frontend carries it to its adapter over capability/2, and it
-/// comes back to the authority inside command/5's source offer. Three spellings
+/// comes back to the authority inside command/6's source offer. Three spellings
 /// of one identity, on one round trip.
 ///
 /// If they ever differ, the failure is silent in the worst way — a field that

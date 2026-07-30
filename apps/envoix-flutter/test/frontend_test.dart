@@ -24,6 +24,11 @@ import 'package:envoix/bindings/envoix_capability.dart'
     hide SourceAcquisitionKeyView;
 import 'package:envoix/bindings/envoix_command.dart'
     hide SourceAcquisitionKeyView;
+// The command contract's own acquisition key, named through a prefix because
+// this file already uses read/9's. Three contracts declare the type and a
+// parity gate proves they agree field-for-field, but they are three Dart types
+// and the analyzer is right to say so.
+import 'package:envoix/bindings/envoix_command.dart' as cmd;
 import 'package:envoix/bindings/envoix_read.dart';
 import 'package:envoix/capability.dart';
 import 'package:envoix/commands.dart';
@@ -237,6 +242,7 @@ String _encoded(CommandFrame frame) {
     CommandBodyAcceptance() => 'acceptance',
     CommandBodyCompletion() => 'completion',
     CommandBodyCreateResult() => 'create_result',
+    CommandBodySourceOfferResult() => 'source_offer_result',
   };
   return '{"body":{"kind":"$kind","value":${_body(body)}},'
       '"schema":"$commandSchemaId"}';
@@ -253,7 +259,25 @@ String _body(CommandBody body) => switch (body) {
       CommandBodyCreateResult(:final CreateResultView value) =>
         '{"outcome":${_createOutcome(value.outcome)},'
             '"request_id":"${value.requestId}"}',
+      CommandBodySourceOfferResult(:final SourceOfferResultView value) =>
+        '{"key":${_acquisition(value.key)},'
+            '"outcome":${_offerOutcome(value.outcome)}}',
     };
+
+String _acquisition(cmd.SourceAcquisitionKeyView key) =>
+    '{"card":"${key.card}","generation":${key.generation},'
+    '"request":"${key.request}"}';
+
+String _offerOutcome(SourceOfferOutcomeView outcome) => switch (outcome) {
+      SourceOfferOutcomeViewAnswered(:final SourceOfferAnswerView value) =>
+        '{"kind":"answered","value":"${_snake(value.name)}"}',
+      SourceOfferOutcomeViewRefused(:final SourceOfferRefusalView value) =>
+        '{"kind":"refused","value":"${_snake(value.name)}"}',
+    };
+
+/// Dart enum members are lowerCamel; the wire is snake_case.
+String _snake(String name) => name
+    .replaceAllMapped(RegExp(r'[A-Z]'), (Match m) => '_${m[0]!.toLowerCase()}');
 
 String _intent(FrontendIntentView intent) => switch (intent) {
       FrontendIntentViewCommand(:final SubmitView value) =>
@@ -377,6 +401,7 @@ Future<void> pumpTile(
           body: CardTile(
             row: row,
             commander: commander ?? commanderOf(Attachment()),
+            ask: _noScanner,
             intents: intents,
           ),
         ),
@@ -395,6 +420,7 @@ Future<void> pumpHome(
           body: HomeScreen(
             attachment: attachment,
             commander: commander ?? commanderOf(attachment),
+            ask: _noScanner,
           ),
         ),
       ),

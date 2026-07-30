@@ -5,17 +5,21 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use envoix_bindings::bridge::{
-    CreateSpec, FrontendIntent, SubmitDecodeError, SubmitSpec, acceptance_frame, completion_frame,
-    create_result_frame, decode_intent,
+    CreateSpec, FrontendIntent, SourceOfferSpec, SubmitDecodeError, SubmitSpec, acceptance_frame,
+    completion_frame, create_result_frame, decode_intent, source_offer_answer_view,
+    source_offer_refusal_view, source_offer_result_frame,
 };
 use envoix_bindings::command::{
-    CardCreatedView, CreateOutcomeView, CreateRefusalView, encode_command_frame,
+    CardCreatedView, CreateOutcomeView, CreateRefusalView, SourceAcquisitionKeyView,
+    SourceOfferOutcomeView, SourceOfferRefusalView, encode_command_frame,
 };
 use envoix_bindings::read::{ReadError, ReadFrame, encode_read_frame};
 use envoix_bindings::{
     card_update_frame, closed_frame, evidence_frame, lag_frame, subscribe_rejected_frame,
 };
-use envoix_capabilities::{Admission, DutyLedger, Registration};
+use envoix_capabilities::{
+    Admission, DutyLedger, DutyProvenance, Registration, SourceAcquisitionKey,
+};
 use envoix_evidence::{EvidenceRecord, EvidenceSink, EvidenceSinkError, SessionKey, TimelineStore};
 use envoix_platform_android::{DutyAdapter, IssueDecision, WorkOrder, WorkReport, platform_work};
 #[cfg(feature = "e2e-instrumentation")]
@@ -25,11 +29,11 @@ use envoix_product::{
     SystemIdentitySource, decode_record,
 };
 use envoix_runtime::{
-    CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict, Runtime, RuntimeConfig,
-    SubscribeError, TransferRecord, TryRecvError,
+    AcceptedSourceOffer, CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict,
+    Runtime, RuntimeConfig, SourceOfferAnswer, SubscribeError, TransferRecord, TryRecvError,
 };
 use envoix_storage_local::LocalStorage;
-use envoix_types::{CommandId, Direction, RecordId};
+use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId, RequestId};
 
 use crate::create;
 use crate::executor::PreparedIrohExecutor;
@@ -492,18 +496,7 @@ impl Host {
         match decode_intent(bytes) {
             Ok(FrontendIntent::Command(spec)) => Ok(self.submit_command(spec)),
             Ok(FrontendIntent::Create(spec)) => Ok(self.create(&spec)),
-            // The acquisition protocol's intake, decodable but not yet
-            // answerable: the reducer edge that accepts an offer lands with the
-            // source-acquisition step, and there is no typed "not yet" on this
-            // verb to answer with.
-            //
-            // So today this is refused, and the refusal is honest rather than
-            // right: a frontend that sent a well-formed offer would be told its
-            // frame was a contract breach. Nothing sends one — the frontend
-            // still has no source flow — and the alternative, inventing an
-            // answer the product cannot stand behind, is worse. Stated here so
-            // the next step replaces it rather than discovering it.
-            Ok(FrontendIntent::SourceOffer(_)) => Err(IntentRejection::Contract),
+            Ok(FrontendIntent::SourceOffer(spec)) => Ok(self.submit_source_offer(&spec)),
             // Hostile or non-intent bytes carry no usable request id. This is
             // nevertheless a typed authority refusal, not zero bytes that a
             // frontend can only misreport as a lost answer.
@@ -614,6 +607,62 @@ impl Host {
             return None;
         };
         Some(*record)
+    }
+
+    /// Offers a document to the acquisition a card published, and answers.
+    ///
+    /// ONE answer, unlike a command's acceptance-then-completion. The frontend
+    /// is holding a platform resource under this acquisition and needs to know
+    /// whether to release it, so a two-part answer would leave it holding one
+    /// through the gap — and `accepted` is emitted only once the record has
+    /// committed, which is what makes releasing on any other answer safe.
+    ///
+    /// The name arrives as the PROVIDER spelled it, at the command contract's
+    /// wider bound. Normalizing it is the authority's, and so is refusing one
+    /// that cannot be a name — a frontend that truncated first would make a
+    /// platform's encoder into product policy.
+    fn submit_source_offer(&self, spec: &SourceOfferSpec) -> Vec<u8> {
+        let Ok(display_name) = OfferedName::from_untrusted(&spec.display_name) else {
+            return encode_command_frame(&source_offer_result_frame(
+                offer_key_view(spec),
+                SourceOfferOutcomeView::Refused(SourceOfferRefusalView::NameTooLong),
+            ))
+            .unwrap_or_default();
+        };
+        let offer = AcceptedSourceOffer::new(
+            SourceAcquisitionKey::of(DutyProvenance {
+                card: spec.card,
+                generation: AttemptGen::new(spec.generation),
+                request: RequestId::from_bytes(spec.request.to_bytes()),
+            }),
+            display_name,
+            spec.reported_size.map(ByteCount::new),
+        );
+        let shared = Arc::clone(&self.shared);
+        let runtime = Arc::clone(&self.runtime);
+        let outcome = self.tokio.block_on(async move {
+            let (attachment, taken) = {
+                let mut state = shared.lock();
+                (state.attachment, state.subscriptions.remove(&spec.card))
+            };
+            match taken {
+                Some(subscription) => {
+                    let answered = runtime.submit_source_offer(&subscription, offer).await;
+                    restore(&shared, attachment, spec.card, subscription);
+                    answered
+                }
+                // No subscription means no projection to answer against. That
+                // is the CARD being unknown to this host, which the answer
+                // vocabulary can say — it is not a refusal.
+                None => Ok(SourceOfferAnswer::UnknownCard),
+            }
+        });
+        let outcome = match outcome {
+            Ok(answer) => SourceOfferOutcomeView::Answered(source_offer_answer_view(answer)),
+            Err(rejected) => SourceOfferOutcomeView::Refused(source_offer_refusal_view(rejected)),
+        };
+        encode_command_frame(&source_offer_result_frame(offer_key_view(spec), outcome))
+            .unwrap_or_default()
     }
 
     fn submit_command(&self, spec: SubmitSpec) -> Vec<u8> {
@@ -906,6 +955,15 @@ const fn observed_record(kind: &CardUpdateKind) -> Option<&TransferRecord> {
         | CardUpdateKind::State(record)
         | CardUpdateKind::Terminal(record) => Some(record),
         CardUpdateKind::CapabilityDuty { .. } => None,
+    }
+}
+
+/// The acquisition a source offer named, echoed back on its answer.
+fn offer_key_view(spec: &SourceOfferSpec) -> SourceAcquisitionKeyView {
+    SourceAcquisitionKeyView {
+        card: format!("{:016x}", spec.card.get()),
+        generation: spec.generation,
+        request: format!("{:032x}", u128::from_be_bytes(spec.request.to_bytes())),
     }
 }
 

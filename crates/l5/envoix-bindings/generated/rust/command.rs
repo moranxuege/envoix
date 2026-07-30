@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/5";
+pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/6";
 pub const COMMAND_MAX_FRAME_BYTES: usize = 1048576;
 
 // Contract rules frozen by schema/command.schema.
@@ -140,6 +140,60 @@ pub struct CreateView {
     pub request_id: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceOfferAnswerView {
+    Accepted,
+    AlreadyAccepted,
+    Conflict,
+    Stale,
+    UnknownCard,
+    NotExpected,
+}
+
+impl SourceOfferAnswerView {
+    pub const ALL: [Self; 6] = [
+        Self::Accepted,
+        Self::AlreadyAccepted,
+        Self::Conflict,
+        Self::Stale,
+        Self::UnknownCard,
+        Self::NotExpected,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceOfferRefusalView {
+    StaleEpoch,
+    NameTooLong,
+    RuntimeStopped,
+    Interrupted,
+    StorageFault,
+    Internal,
+}
+
+impl SourceOfferRefusalView {
+    pub const ALL: [Self; 6] = [
+        Self::StaleEpoch,
+        Self::NameTooLong,
+        Self::RuntimeStopped,
+        Self::Interrupted,
+        Self::StorageFault,
+        Self::Internal,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceOfferOutcomeView {
+    Answered(SourceOfferAnswerView),
+    Refused(SourceOfferRefusalView),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceOfferResultView {
+    pub key: SourceAcquisitionKeyView,
+    pub outcome: SourceOfferOutcomeView,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FrontendIntentView {
     Command(SubmitView),
@@ -248,6 +302,7 @@ pub enum CommandBody {
     Acceptance(CommandAcceptanceView),
     Completion(CommandCompletionView),
     CreateResult(CreateResultView),
+    SourceOfferResult(SourceOfferResultView),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -744,6 +799,100 @@ fn encode_create_view_value(value: &CreateView) -> Result<Value, CommandError> {
     Ok(Value::Object(map))
 }
 
+fn decode_source_offer_answer_view_value(value: &Value, context: &'static str) -> Result<SourceOfferAnswerView, CommandError> {
+    let text = value.as_str().ok_or(CommandError::Shape { context })?;
+    match text {
+        "accepted" => Ok(SourceOfferAnswerView::Accepted),
+        "already_accepted" => Ok(SourceOfferAnswerView::AlreadyAccepted),
+        "conflict" => Ok(SourceOfferAnswerView::Conflict),
+        "stale" => Ok(SourceOfferAnswerView::Stale),
+        "unknown_card" => Ok(SourceOfferAnswerView::UnknownCard),
+        "not_expected" => Ok(SourceOfferAnswerView::NotExpected),
+        _ => Err(CommandError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_offer_answer_view_value(value: &SourceOfferAnswerView) -> Value {
+    Value::from(match value {
+        SourceOfferAnswerView::Accepted => "accepted",
+        SourceOfferAnswerView::AlreadyAccepted => "already_accepted",
+        SourceOfferAnswerView::Conflict => "conflict",
+        SourceOfferAnswerView::Stale => "stale",
+        SourceOfferAnswerView::UnknownCard => "unknown_card",
+        SourceOfferAnswerView::NotExpected => "not_expected",
+    })
+}
+
+fn decode_source_offer_refusal_view_value(value: &Value, context: &'static str) -> Result<SourceOfferRefusalView, CommandError> {
+    let text = value.as_str().ok_or(CommandError::Shape { context })?;
+    match text {
+        "stale_epoch" => Ok(SourceOfferRefusalView::StaleEpoch),
+        "name_too_long" => Ok(SourceOfferRefusalView::NameTooLong),
+        "runtime_stopped" => Ok(SourceOfferRefusalView::RuntimeStopped),
+        "interrupted" => Ok(SourceOfferRefusalView::Interrupted),
+        "storage_fault" => Ok(SourceOfferRefusalView::StorageFault),
+        "internal" => Ok(SourceOfferRefusalView::Internal),
+        _ => Err(CommandError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_offer_refusal_view_value(value: &SourceOfferRefusalView) -> Value {
+    Value::from(match value {
+        SourceOfferRefusalView::StaleEpoch => "stale_epoch",
+        SourceOfferRefusalView::NameTooLong => "name_too_long",
+        SourceOfferRefusalView::RuntimeStopped => "runtime_stopped",
+        SourceOfferRefusalView::Interrupted => "interrupted",
+        SourceOfferRefusalView::StorageFault => "storage_fault",
+        SourceOfferRefusalView::Internal => "internal",
+    })
+}
+
+fn decode_source_offer_outcome_view_value(value: &Value, context: &'static str) -> Result<SourceOfferOutcomeView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(CommandError::Shape { context })?;
+    match kind {
+        "answered" => Ok(SourceOfferOutcomeView::Answered(decode_source_offer_answer_view_value(payload(map, "SourceOfferOutcomeView.answered")?, "SourceOfferOutcomeView.answered")?)),
+        "refused" => Ok(SourceOfferOutcomeView::Refused(decode_source_offer_refusal_view_value(payload(map, "SourceOfferOutcomeView.refused")?, "SourceOfferOutcomeView.refused")?)),
+        _ => Err(CommandError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_offer_outcome_view_value(value: &SourceOfferOutcomeView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    match value {
+        SourceOfferOutcomeView::Answered(payload) => {
+            map.insert("kind".to_owned(), Value::from("answered"));
+            map.insert("value".to_owned(), encode_source_offer_answer_view_value(payload));
+        }
+        SourceOfferOutcomeView::Refused(payload) => {
+            map.insert("kind".to_owned(), Value::from("refused"));
+            map.insert("value".to_owned(), encode_source_offer_refusal_view_value(payload));
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+fn decode_source_offer_result_view_value(value: &Value, context: &'static str) -> Result<SourceOfferResultView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["key", "outcome"], context)?;
+    let key = decode_source_acquisition_key_view_value(field(map, "key", "SourceOfferResultView.key")?, "SourceOfferResultView.key")?;
+    let outcome = decode_source_offer_outcome_view_value(field(map, "outcome", "SourceOfferResultView.outcome")?, "SourceOfferResultView.outcome")?;
+    Ok(SourceOfferResultView {
+        key,
+        outcome,
+    })
+}
+
+fn encode_source_offer_result_view_value(value: &SourceOfferResultView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("key".to_owned(), encode_source_acquisition_key_view_value(&value.key)?);
+    map.insert("outcome".to_owned(), encode_source_offer_outcome_view_value(&value.outcome)?);
+    Ok(Value::Object(map))
+}
+
 fn decode_frontend_intent_view_value(value: &Value, context: &'static str) -> Result<FrontendIntentView, CommandError> {
     let map = frame_object(value, context)?;
     known_keys(map, &["kind", "value"], context)?;
@@ -1023,6 +1172,7 @@ fn decode_command_body_value(value: &Value, context: &'static str) -> Result<Com
         "acceptance" => Ok(CommandBody::Acceptance(decode_command_acceptance_view_value(payload(map, "CommandBody.acceptance")?, "CommandBody.acceptance")?)),
         "completion" => Ok(CommandBody::Completion(decode_command_completion_view_value(payload(map, "CommandBody.completion")?, "CommandBody.completion")?)),
         "create_result" => Ok(CommandBody::CreateResult(decode_create_result_view_value(payload(map, "CommandBody.create_result")?, "CommandBody.create_result")?)),
+        "source_offer_result" => Ok(CommandBody::SourceOfferResult(decode_source_offer_result_view_value(payload(map, "CommandBody.source_offer_result")?, "CommandBody.source_offer_result")?)),
         _ => Err(CommandError::UnknownVariant { context }),
     }
 }
@@ -1045,6 +1195,10 @@ fn encode_command_body_value(value: &CommandBody) -> Result<Value, CommandError>
         CommandBody::CreateResult(payload) => {
             map.insert("kind".to_owned(), Value::from("create_result"));
             map.insert("value".to_owned(), encode_create_result_view_value(payload)?);
+        }
+        CommandBody::SourceOfferResult(payload) => {
+            map.insert("kind".to_owned(), Value::from("source_offer_result"));
+            map.insert("value".to_owned(), encode_source_offer_result_view_value(payload)?);
         }
     }
     Ok(Value::Object(map))

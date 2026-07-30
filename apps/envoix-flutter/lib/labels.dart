@@ -14,7 +14,10 @@ library;
 
 import 'attachment.dart';
 import 'bindings/envoix_capability.dart';
+import 'bindings/envoix_capability.dart';
 import 'bindings/envoix_command.dart';
+// The vocabulary, not the channel: this file is read by the headless replays.
+import 'capability_answer.dart';
 import 'bindings/envoix_read.dart';
 import 'commands.dart';
 
@@ -178,6 +181,72 @@ String sourceLabel(SourceLifecycleView source) => switch (source) {
       SourceLifecycleViewStaging(:final value) => 'Reading ${value.displayName}',
       SourceLifecycleViewReady(:final value) =>
         'Sending ${value.content.offeredName}',
+    };
+
+/// How choosing a file for a card ended, in one line a person can act on.
+///
+/// Every arm is somebody else's answer — the platform's or the authority's —
+/// rendered, never interpreted. This app has no opinion about whether a
+/// document was acceptable.
+String sourceExchangeLabel(CapabilityAnswer answer) => switch (answer) {
+      SourceOffered(:final SourceOfferOutcomeView outcome) =>
+        switch (outcome) {
+          SourceOfferOutcomeViewAnswered(:final SourceOfferAnswerView value) =>
+            switch (value) {
+              SourceOfferAnswerView.accepted => 'Chosen.',
+              SourceOfferAnswerView.alreadyAccepted =>
+                'Chosen — that file was already accepted.',
+              SourceOfferAnswerView.conflict =>
+                'Not chosen — a different file was already offered for this. '
+                    'Try again.',
+              SourceOfferAnswerView.stale =>
+                'Not chosen — this card has moved on. Try again.',
+              SourceOfferAnswerView.unknownCard =>
+                'Not chosen — Envoix no longer has this transfer.',
+              SourceOfferAnswerView.notExpected =>
+                'Not chosen — this transfer is receiving, so it takes no file.',
+            },
+          SourceOfferOutcomeViewRefused(:final SourceOfferRefusalView value) =>
+            switch (value) {
+              SourceOfferRefusalView.staleEpoch =>
+                'Not chosen — a newer view of this app is in charge. '
+                    'Re-attach and try again.',
+              SourceOfferRefusalView.nameTooLong =>
+                'Not chosen — that file\'s name is too long. Rename it.',
+              SourceOfferRefusalView.runtimeStopped =>
+                'Not chosen — Envoix is shutting down.',
+              SourceOfferRefusalView.interrupted =>
+                'Not chosen — Envoix did not answer. Try again.',
+              SourceOfferRefusalView.storageFault =>
+                'Not chosen — Envoix could not save it. Try again.',
+              SourceOfferRefusalView.internal =>
+                'Not chosen — Envoix could not say why.',
+            },
+        },
+      CapabilityDeclined(:final DeclinedView reason) => switch (reason) {
+          DeclinedView.cancelled => 'No file chosen.',
+          DeclinedView.refused => 'No file chosen — access was refused.',
+          DeclinedView.unsupported =>
+            'No file chosen — this device has no file picker.',
+        },
+      SourcePickFailed(:final PickSourceFailureView reason) => switch (reason) {
+          PickSourceFailureView.pickerUnavailable =>
+            'No file chosen — this device has no file picker.',
+          PickSourceFailureView.metadataUnavailable =>
+            'No file chosen — that file could not be described.',
+          PickSourceFailureView.internal =>
+            'No file chosen — the file picker could not say why.',
+        },
+      CapabilityUnavailable() =>
+        'No file chosen — Envoix could not reach the file picker.',
+      // Neither can reach here: a pick that PRODUCED a document goes on to the
+      // authority and comes back as `SourceOffered`, and a scan answer to a pick
+      // request is refused by the capability client before this. Both are
+      // spelled rather than defaulted, so a future arm cannot silently join
+      // them.
+      SourcePicked() ||
+      CapabilityProvided() =>
+        'No file chosen — Envoix asked the wrong thing.',
     };
 
 /// Why the authority is asking for a file. Its words, not this app's guess.

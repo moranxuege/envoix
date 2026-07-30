@@ -5,8 +5,9 @@ use envoix_attempt_api::{
     RetirementAckResult,
 };
 use envoix_product::{
-    ApplyOutcome, CommandApplied, CommittedSession, IdentityError, LedgerHit, ProductCommand,
-    ProductEffect, ProductInput, ProductState, Quiescence, RecordStore,
+    AcceptedSourceOffer, ApplyOutcome, CommandApplied, CommittedSession, IdentityError, LedgerHit,
+    ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, RecordStore,
+    SourceOfferAnswer,
 };
 use envoix_types::{CommandId, RecordId};
 use tokio::runtime::Handle;
@@ -33,6 +34,17 @@ pub(crate) enum CardMessage {
         command: ProductCommand,
         acceptance: oneshot::Sender<Result<FrontendVerdict, CommandRejected>>,
         completion: oneshot::Sender<CommandCompletion>,
+    },
+    /// A document offered to the acquisition this card published.
+    ///
+    /// Answered SYNCHRONOUSLY and once: the frontend is holding a platform
+    /// resource under that key and must be told whether to release it, so
+    /// there is no acceptance/completion pair here — silence would leak the
+    /// pick and invite a blind retry.
+    SourceOffer {
+        epoch: SubscriptionEpoch,
+        offer: Box<AcceptedSourceOffer>,
+        answer: oneshot::Sender<Result<SourceOfferAnswer, CommandRejected>>,
     },
     Shutdown(oneshot::Sender<()>),
     Signal {
@@ -174,6 +186,14 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 self.on_frontend(epoch, id, command, acceptance, completion);
                 false
             }
+            CardMessage::SourceOffer {
+                epoch,
+                offer,
+                answer,
+            } => {
+                self.on_source_offer(epoch, *offer, answer);
+                false
+            }
             CardMessage::Shutdown(reply) => {
                 // Stop the live worker without mutating product truth: a
                 // process stop is not a transfer cancel (Pillar 7). Dropping
@@ -234,6 +254,49 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             .apply_frontend(id, command)
             .unwrap_or(CommandCompletion::Internal);
         let _ = completion.send(resolved);
+    }
+
+    /// The source offer's linearization point.
+    ///
+    /// The authority classifies the offer FIRST, on this single-threaded actor,
+    /// so the answer describes the record the offer will be applied to. Only
+    /// `Accepted` mutates; every other answer is the caller's to be told about,
+    /// not the record's to absorb.
+    ///
+    /// `Accepted` is reported only after the commit holds. A frontend told its
+    /// document was accepted releases nothing and waits for the card to move —
+    /// so answering before the barrier would strand a pick against a card that
+    /// never took it.
+    fn on_source_offer(
+        &mut self,
+        epoch: SubscriptionEpoch,
+        offer: AcceptedSourceOffer,
+        answer: oneshot::Sender<Result<SourceOfferAnswer, CommandRejected>>,
+    ) {
+        if self.shared.commander_epoch(self.card) != Some(epoch) {
+            let _ = answer.send(Err(CommandRejected::Superseded));
+            return;
+        }
+        let classified = self.session().record().answer_source_offer(&offer);
+        if classified != SourceOfferAnswer::Accepted {
+            let _ = answer.send(Ok(classified));
+            return;
+        }
+        let Ok(outcome) = self
+            .session_mut()
+            .apply(ProductInput::SourceOffered { offer })
+        else {
+            let _ = answer.send(Err(CommandRejected::Interrupted));
+            return;
+        };
+        if !outcome.commit.authorizing_commit_succeeded() {
+            let _ = answer.send(Err(CommandRejected::StorageFault));
+            return;
+        }
+        let record = self.session().record().clone();
+        self.shared.observe_record(RecordUpdateKind::State, record);
+        self.dispatch(outcome);
+        let _ = answer.send(Ok(SourceOfferAnswer::Accepted));
     }
 
     /// Applies an accepted frontend command through the exactly-once barrier,

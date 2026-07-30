@@ -141,6 +141,7 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
         // that; treat it the same as no answer at all.
         case SourcePicked():
         case SourcePickFailed():
+        case SourceOffered():
           _scanUnreachable = true;
       }
     });

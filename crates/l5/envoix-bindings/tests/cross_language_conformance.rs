@@ -110,7 +110,7 @@ fields = [
 /// statement of intent have to agree.
 fn originable_decls(id: &str) -> &'static [&'static str] {
     match id {
-        "envoix/binding/command/5" => &[
+        "envoix/binding/command/6" => &[
             "CommandView",
             "SubmitView",
             "CreateIntentView",

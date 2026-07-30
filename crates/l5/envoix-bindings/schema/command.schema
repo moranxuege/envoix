@@ -15,7 +15,7 @@
 # bytes/blob type and no handle/path/URI type, so a command can never carry
 # file bytes or an OS handle.
 
-id = "envoix/binding/command/5"
+id = "envoix/binding/command/6"
 root = "CommandFrame"
 # Frontends originate frames on this contract, so every native artifact carries
 # an encoder that enforces the same bounds its decoder checks. Which frames is
@@ -184,6 +184,63 @@ fields = [
   { name = "request_id", type = "hex32" },
 ]
 
+# What the AUTHORITY says about an offered document.
+#
+# Six values, mirroring the domain classifier one for one. They are answers, not
+# failures, and a frontend must be able to tell them apart: `accepted` means
+# hold the platform resource, `stale` and `not_expected` mean release it,
+# `already_accepted` means a retry landed on a commit that already happened, and
+# `conflict` means the key was reused with metadata that was never committed —
+# so its payload was NOT applied, which is the one thing "already accepted"
+# would wrongly imply.
+[[decl]]
+kind = "enum"
+name = "SourceOfferAnswerView"
+variants = [
+  "accepted",
+  "already_accepted",
+  "conflict",
+  "stale",
+  "unknown_card",
+  "not_expected",
+]
+
+# Why the authority did not get as far as classifying.
+#
+# Separate from the answers above because the card was never consulted: nothing
+# about the acquisition is now known that was not known before, and re-offering
+# the SAME document is the recovery for every one of them.
+[[decl]]
+kind = "enum"
+name = "SourceOfferRefusalView"
+variants = [
+  "stale_epoch",
+  "name_too_long",
+  "runtime_stopped",
+  "interrupted",
+  "storage_fault",
+  "internal",
+]
+
+[[decl]]
+kind = "union"
+name = "SourceOfferOutcomeView"
+variants = [
+  { name = "answered", payload = "SourceOfferAnswerView" },
+  { name = "refused", payload = "SourceOfferRefusalView" },
+]
+
+# The acquisition is echoed so an answer names the offer it answers. A frontend
+# may hold a pick for more than one card, and an unaddressed answer would be
+# unusable — or worse, applied to the wrong pick.
+[[decl]]
+kind = "struct"
+name = "SourceOfferResultView"
+fields = [
+  { name = "key", type = "SourceAcquisitionKeyView" },
+  { name = "outcome", type = "SourceOfferOutcomeView" },
+]
+
 [[decl]]
 kind = "union"
 name = "FrontendIntentView"
@@ -306,6 +363,7 @@ variants = [
   { name = "acceptance", payload = "CommandAcceptanceView" },
   { name = "completion", payload = "CommandCompletionView" },
   { name = "create_result", payload = "CreateResultView" },
+  { name = "source_offer_result", payload = "SourceOfferResultView" },
 ]
 
 [[decl]]

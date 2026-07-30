@@ -12,6 +12,7 @@
 
 use envoix_runtime::{
     CommandCompletion, CommandRejected, CommandVerdict, PauseOrigin, ProductCommand, ProductState,
+    SourceOfferAnswer,
 };
 use envoix_types::{CommandId, Direction, RecordId};
 
@@ -19,7 +20,9 @@ use crate::command::{
     AcceptanceView, CommandAcceptanceView, CommandBody, CommandCompletionView, CommandError,
     CommandFrame, CommandView, CompletionView, CreateIntentView, CreateOutcomeView,
     CreateResultView, CreateView, DispositionView, FrontendIntentView, LocalDirectionView,
-    PausedStateView, RejectionView, SourceOfferView, SubmitView, decode_command_frame,
+    PausedStateView, RejectionView, SourceAcquisitionKeyView, SourceOfferAnswerView,
+    SourceOfferOutcomeView, SourceOfferRefusalView, SourceOfferResultView, SourceOfferView,
+    SubmitView, decode_command_frame,
 };
 
 /// A decoded, validated submit request. The host resolves `card` to the live
@@ -247,7 +250,58 @@ fn rejection_view(rejected: CommandRejected) -> RejectionView {
         CommandRejected::AtCapacity => RejectionView::AtCapacity,
         CommandRejected::RuntimeStopped => RejectionView::RuntimeStopped,
         CommandRejected::Interrupted => RejectionView::Interrupted,
-        CommandRejected::Internal => RejectionView::Internal,
+        // A command's own commit failure already reports as a COMPLETION
+        // (`commit_failed`), so this refusal reaches the command lane only if a
+        // source-offer rejection is routed here by mistake. `internal` is the
+        // honest projection: this vocabulary cannot say it, and inventing a
+        // closer-sounding value would tell a frontend something untrue about
+        // its command.
+        CommandRejected::StorageFault | CommandRejected::Internal => RejectionView::Internal,
+    }
+}
+
+/// The answer to one offered document, addressed to the acquisition it names.
+///
+/// The key is echoed because a frontend may hold picks for more than one card,
+/// and an unaddressed answer is unusable — or worse, applied to the wrong pick.
+pub fn source_offer_result_frame(
+    key: SourceAcquisitionKeyView,
+    outcome: SourceOfferOutcomeView,
+) -> CommandFrame {
+    CommandFrame {
+        body: CommandBody::SourceOfferResult(SourceOfferResultView { key, outcome }),
+    }
+}
+
+/// The authority's answer to an offered document, in the contract's words.
+pub fn source_offer_answer_view(answer: SourceOfferAnswer) -> SourceOfferAnswerView {
+    match answer {
+        SourceOfferAnswer::Accepted => SourceOfferAnswerView::Accepted,
+        SourceOfferAnswer::AlreadyAccepted => SourceOfferAnswerView::AlreadyAccepted,
+        SourceOfferAnswer::Conflict => SourceOfferAnswerView::Conflict,
+        SourceOfferAnswer::Stale => SourceOfferAnswerView::Stale,
+        SourceOfferAnswer::UnknownCard => SourceOfferAnswerView::UnknownCard,
+        SourceOfferAnswer::NotExpected => SourceOfferAnswerView::NotExpected,
+    }
+}
+
+/// Why the authority never got as far as classifying the offer.
+pub fn source_offer_refusal_view(rejected: CommandRejected) -> SourceOfferRefusalView {
+    match rejected {
+        // The card was not found by the RUNTIME rather than by the classifier.
+        // It is still the same fact a frontend needs, so it is answered rather
+        // than refused — see `unknown_card` in the answer vocabulary.
+        CommandRejected::UnknownCard | CommandRejected::Internal => {
+            SourceOfferRefusalView::Internal
+        }
+        CommandRejected::StaleEpoch | CommandRejected::Superseded => {
+            SourceOfferRefusalView::StaleEpoch
+        }
+        CommandRejected::AtCapacity | CommandRejected::Interrupted => {
+            SourceOfferRefusalView::Interrupted
+        }
+        CommandRejected::RuntimeStopped => SourceOfferRefusalView::RuntimeStopped,
+        CommandRejected::StorageFault => SourceOfferRefusalView::StorageFault,
     }
 }
 

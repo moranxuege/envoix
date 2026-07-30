@@ -6,8 +6,8 @@ use envoix_attempt_api::AttemptStamp;
 use envoix_capabilities::Duty;
 use envoix_evidence::{EvidenceProgress, EvidenceRecord, EvidenceSink, EvidenceValue};
 use envoix_product::{
-    ApplyOutcome, CapabilityAction, CommittedSession, LedgerHit, ProductCommand, ProductInput,
-    TransferRecord,
+    AcceptedSourceOffer, ApplyOutcome, CapabilityAction, CommittedSession, LedgerHit,
+    ProductCommand, ProductInput, SourceOfferAnswer, TransferRecord,
 };
 use envoix_types::{CommandId, RecordId};
 use tokio::runtime::Handle;
@@ -453,6 +453,65 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
                             completion: completion_rx,
                         }));
                     }
+                },
+                Err(Undelivered::Refused(rejected)) => return Err(rejected),
+                Err(Undelivered::Raced) => {}
+            }
+        }
+        Err(CommandRejected::Interrupted)
+    }
+
+    /// Offers a document to the acquisition a card published.
+    ///
+    /// Delivery follows `submit_command` exactly — the commander gate, the
+    /// three rounds that absorb a hibernate/spawn race — but the answer is ONE
+    /// value, not an acceptance and a completion. A source offer is synchronous
+    /// by nature: the frontend is holding a platform resource under that key
+    /// and cannot know whether to release it until the authority has classified
+    /// the offer, so there is nothing useful to say in two parts.
+    ///
+    /// There is no command identity either. The whole acquisition key IS the
+    /// idempotency identity, and the authority classifies a repeat by comparing
+    /// the whole accepted offer — a second identity whose disagreement needed
+    /// its own policy would be the second authority this arc removed.
+    ///
+    /// Redelivery after a lost round is safe for the same reason: an equal
+    /// offer answers `AlreadyAccepted` rather than binding twice.
+    pub async fn submit_source_offer(
+        &self,
+        origin: &CardSubscription,
+        offer: AcceptedSourceOffer,
+    ) -> Result<SourceOfferAnswer, CommandRejected> {
+        let card = origin.card();
+        {
+            let inner = self.shared.lock();
+            if inner.stopped {
+                return Err(CommandRejected::RuntimeStopped);
+            }
+            let Some(projection) = inner.projections.get(&card) else {
+                return Err(CommandRejected::UnknownCard);
+            };
+            if projection.commander != Some(origin.epoch()) {
+                return Err(CommandRejected::StaleEpoch);
+            }
+        }
+        for _ in 0..3 {
+            let (answer_tx, answer_rx) = oneshot::channel();
+            let message = CardMessage::SourceOffer {
+                epoch: origin.epoch(),
+                offer: Box::new(offer.clone()),
+                answer: answer_tx,
+            };
+            let outcome = match self.inbox(card) {
+                Some(inbox) => inbox.send(message).await.map_err(|_| Undelivered::Raced),
+                None => self.restore_with_message(card, message),
+            };
+            match outcome {
+                Ok(()) => match answer_rx.await {
+                    // The message died undelivered with an exiting actor's
+                    // inbox; retry the round. Nothing was applied.
+                    Err(_) => continue,
+                    Ok(answer) => return answer,
                 },
                 Err(Undelivered::Refused(rejected)) => return Err(rejected),
                 Err(Undelivered::Raced) => {}

@@ -4,7 +4,15 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 
 import 'attachment.dart';
-import 'bindings/envoix_command.dart';
+// The acquisition key is declared by three contracts (EH-20). A card publishes
+// READ/9's; an offer carries COMMAND/6's. A parity gate proves they agree
+// field-for-field, and they are still two Dart types — so this file names the
+// command one through a prefix and takes the read one plainly.
+import 'bindings/envoix_command.dart' hide SourceAcquisitionKeyView;
+import 'bindings/envoix_command.dart' as cmd;
+import 'bindings/envoix_read.dart';
+import 'bindings/envoix_capability.dart' as cap;
+import 'capability.dart';
 import 'commands.dart';
 
 /// A source of encoded contract frames. Listening to it IS attaching: the
@@ -216,6 +224,14 @@ class Creator {
 /// generated encoder, and records what came back. It decides nothing: every
 /// verdict, every completion and every refusal is the authority's, and an
 /// answer that does not arrive stays an answer that did not arrive.
+/// Read/9's acquisition key, as capability/2 spells it. See [Commander.offerSource].
+cap.SourceAcquisitionKeyView capabilityKey(SourceAcquisitionKeyView key) =>
+    cap.SourceAcquisitionKeyView(
+      card: key.card,
+      generation: key.generation,
+      request: key.request,
+    );
+
 class Commander {
   Commander({
     required Attachment attachment,
@@ -232,6 +248,75 @@ class Commander {
   /// Issues `command` for `row` under a fresh identity.
   Future<void> issue(CardRow row, CommandView command) =>
       _send(row, command, null);
+
+  /// Asks this device for a document and offers it to `acquisition`.
+  ///
+  /// Two exchanges, and the order is the point: the platform is asked FIRST and
+  /// the authority second, so nothing is offered that was not chosen. A pick
+  /// that is declined, fails, or answers a different acquisition never becomes
+  /// an offer — the authority is not told about a document that does not exist.
+  ///
+  /// The answer is returned rather than journaled. A source offer is addressed
+  /// by acquisition, not by command identity, so the intent journal has nothing
+  /// to route it to; the caller is the one holding the platform resource and is
+  /// the one that needs to know whether to release it.
+  Future<CapabilityAnswer> offerSource(
+    CapabilityAsk ask,
+    SourceAcquisitionKeyView acquisition,
+  ) async {
+    // One identity, three Dart types. The generator has no cross-schema
+    // reference, so read/9, capability/2 and command/6 each declare the
+    // acquisition key (EH-20) — and a value published by one contract cannot be
+    // passed to another without being rebuilt field by field. What makes that
+    // safe rather than a place to drift is
+    // `the_acquisition_key_is_one_shape_in_every_contract_that_carries_it`,
+    // which compares all three declarations. What makes it ugly is that it is
+    // written out twice below.
+    final CapabilityAnswer picked = await askToPickSource(
+      ask,
+      capabilityKey(acquisition),
+    );
+    if (picked is! SourcePicked) {
+      return picked;
+    }
+    final List<int> frame;
+    try {
+      frame = sourceOfferFrame(
+        key: cmd.SourceAcquisitionKeyView(
+          card: acquisition.card,
+          generation: acquisition.generation,
+          request: acquisition.request,
+        ),
+        displayName: picked.displayName,
+        reportedSize: picked.reportedSize,
+      );
+    } on CommandContractException catch (error) {
+      // The encoder enforces every bound its decoder checks, so an offer that
+      // does not encode never leaves the process.
+      return CapabilityUnavailable(error);
+    }
+    try {
+      final List<int>? reply = await _sink(frame);
+      if (reply == null) {
+        return const CapabilityUnavailable('the host answered nothing');
+      }
+      return SourceOffered(_offerOutcome(reply));
+    } on PlatformException catch (error) {
+      return CapabilityUnavailable(error);
+    } on MissingPluginException catch (error) {
+      return CapabilityUnavailable(error);
+    }
+  }
+
+  SourceOfferOutcomeView _offerOutcome(List<int> reply) {
+    final CommandFrame answer = decodeCommandFrame(utf8.decode(reply));
+    return switch (answer.body) {
+      CommandBodySourceOfferResult(:final SourceOfferResultView value) =>
+        value.outcome,
+      // Any other body is an answer to a question this did not ask.
+      _ => const SourceOfferOutcomeViewRefused(SourceOfferRefusalView.internal),
+    };
+  }
 
   /// Re-presents an intent's identity — the documented `Interrupted`
   /// disambiguation. A `Duplicate` answer means the first submission had

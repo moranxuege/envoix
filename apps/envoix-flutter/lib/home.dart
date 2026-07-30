@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'attachment.dart';
-import 'bindings/envoix_command.dart';
+// The acquisition key is declared by three contracts (EH-20); a card publishes
+// read/9's, which is the one this screen renders and passes on.
+import 'bindings/envoix_command.dart' hide SourceAcquisitionKeyView;
 import 'bindings/envoix_read.dart';
+import 'capability.dart';
 import 'commands.dart';
 import 'instrumentation.dart';
 import 'labels.dart';
@@ -21,6 +24,7 @@ class HomeScreen extends StatelessWidget {
   const HomeScreen({
     required this.attachment,
     required this.commander,
+    required this.ask,
     this.fault,
     super.key,
   });
@@ -29,6 +33,10 @@ class HomeScreen extends StatelessWidget {
 
   /// Speaks for this attachment, at its epochs.
   final Commander commander;
+
+  /// Asks this device's platform for a capability. A card that needs a document
+  /// publishes the acquisition; this is how one is chosen for it.
+  final CapabilityAsk ask;
 
   /// Why the lane is not delivering, when it is not.
   final Object? fault;
@@ -65,6 +73,7 @@ class HomeScreen extends StatelessWidget {
           CardTile(
             row: row,
             commander: commander,
+            ask: ask,
             intents: attachment.commands.forCard(row.card),
           ),
         LaneHealth(attachment: attachment),
@@ -120,12 +129,16 @@ class CardTile extends StatelessWidget {
   const CardTile({
     required this.row,
     required this.commander,
+    required this.ask,
     this.intents = const <CommandIntent>[],
     super.key,
   });
 
   final CardRow row;
   final Commander commander;
+
+  /// Asks this device's platform for a capability.
+  final CapabilityAsk ask;
 
   /// This card's intents, newest first.
   final List<CommandIntent> intents;
@@ -202,6 +215,7 @@ class CardTile extends StatelessWidget {
                 row: row,
                 view: view,
                 commander: commander,
+                ask: ask,
                 intents: intents,
               ),
             ],
@@ -247,12 +261,14 @@ class _Actions extends StatelessWidget {
     required this.row,
     required this.view,
     required this.commander,
+    required this.ask,
     required this.intents,
   });
 
   final CardRow row;
   final CardView view;
   final Commander commander;
+  final CapabilityAsk ask;
   final List<CommandIntent> intents;
 
   @override
@@ -282,15 +298,14 @@ class _Actions extends StatelessWidget {
                   commander: commander,
                   waiting: commandInFlight(intents, commandOf(value)),
                 ),
-              // `pick_source` does not: it is an exchange with this device's
-              // own platform, and capability/2 types it. Rendered disabled
-              // rather than hidden, because hiding it would make the authority's
-              // published affordance invisible — and rendered WITHOUT wiring it
-              // to the old untyped picker, which takes no acquisition key and
-              // would throw away the identity this action exists to carry.
-              CardActionViewPickSource() => const _PendingAction(
-                  label: 'Choose a file',
-                  reason: 'the file picker is not connected yet',
+              // `pick_source` does not: it asks this device's own platform for
+              // a document and then offers it to the authority, under the exact
+              // acquisition the action carries.
+              CardActionViewPickSource(:final PickSourceActionView value) =>
+                _PickSource(
+                  commander: commander,
+                  ask: ask,
+                  acquisition: value.acquisition,
                 ),
             },
         ],
@@ -299,27 +314,72 @@ class _Actions extends StatelessWidget {
   }
 }
 
-/// An affordance the AUTHORITY published that this app cannot yet exercise.
+/// The card's published `pick_source`, exercised.
 ///
-/// Shown disabled with the reason, rather than hidden. Hiding it would make the
-/// published offer invisible and leave a user with no account of why the card
-/// is waiting; wiring it to the old untyped picker would discard the exact
-/// acquisition the action carries, which is the whole reason it carries one.
-class _PendingAction extends StatelessWidget {
-  const _PendingAction({required this.label, required this.reason});
+/// Two exchanges behind one control: this device is asked for a document, and
+/// the document is offered to the acquisition the action names. The authority's
+/// answer is rendered rather than interpreted — this widget decides nothing
+/// about what happens to the card.
+class _PickSource extends StatefulWidget {
+  const _PickSource({
+    required this.commander,
+    required this.ask,
+    required this.acquisition,
+  });
 
-  final String label;
-  final String reason;
+  final Commander commander;
+  final CapabilityAsk ask;
+  final SourceAcquisitionKeyView acquisition;
+
+  @override
+  State<_PickSource> createState() => _PickSourceState();
+}
+
+class _PickSourceState extends State<_PickSource> {
+  bool _busy = false;
+
+  /// What the last attempt answered, in the authority's or the platform's own
+  /// words. Null until one has been made.
+  String? _said;
+
+  Future<void> _choose() async {
+    setState(() {
+      _busy = true;
+      _said = null;
+    });
+    final CapabilityAnswer answer =
+        await widget.commander.offerSource(widget.ask, widget.acquisition);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _said = sourceExchangeLabel(answer);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      enabled: false,
-      label: '$label — $reason',
-      child: ExcludeSemantics(
-        child: OutlinedButton(onPressed: null, child: Text(label)),
-      ),
+    final String? said = _said;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        OutlinedButton(
+          onPressed: _busy ? null : _choose,
+          child: const Text('Choose a file'),
+        ),
+        if (said != null)
+          Padding(
+            padding: const EdgeInsets.only(top: EnvoixSpace.tight),
+            child: Text(
+              said,
+              style: EnvoixType.subtitle.copyWith(
+                color: EnvoixTokens.of(context).muted,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

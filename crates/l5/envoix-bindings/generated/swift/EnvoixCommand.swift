@@ -17,7 +17,7 @@ import Foundation
 
 public enum EnvoixCommand {
 
-public static let commandSchemaId = "envoix/binding/command/5"
+public static let commandSchemaId = "envoix/binding/command/6"
 public static let commandMaxFrameBytes = 1048576
 // Contract rules frozen by schema/command.schema.
 public static let newestAttachmentCommands = true
@@ -163,6 +163,34 @@ public struct CreateView: Equatable {
     }
 }
 
+public enum SourceOfferAnswerView: String, Equatable {
+    case accepted = "accepted"
+    case alreadyAccepted = "already_accepted"
+    case conflict = "conflict"
+    case stale = "stale"
+    case unknownCard = "unknown_card"
+    case notExpected = "not_expected"
+}
+
+public enum SourceOfferRefusalView: String, Equatable {
+    case staleEpoch = "stale_epoch"
+    case nameTooLong = "name_too_long"
+    case runtimeStopped = "runtime_stopped"
+    case interrupted = "interrupted"
+    case storageFault = "storage_fault"
+    case `internal` = "internal"
+}
+
+public enum SourceOfferOutcomeView: Equatable {
+    case answered(SourceOfferAnswerView)
+    case refused(SourceOfferRefusalView)
+}
+
+public struct SourceOfferResultView: Equatable {
+    public let key: SourceAcquisitionKeyView
+    public let outcome: SourceOfferOutcomeView
+}
+
 public enum FrontendIntentView: Equatable {
     case command(SubmitView)
     case create(CreateView)
@@ -234,6 +262,7 @@ public enum CommandBody: Equatable {
     case acceptance(CommandAcceptanceView)
     case completion(CommandCompletionView)
     case createResult(CreateResultView)
+    case sourceOfferResult(SourceOfferResultView)
 }
 
 public struct CommandFrame: Equatable {
@@ -617,6 +646,53 @@ public enum EnvoixCommandCodec {
         return map
     }
 
+    private static func decodeSourceOfferAnswerView(_ value: Any?, _ context: String) throws -> SourceOfferAnswerView {
+        guard let text = value as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        guard let decoded = SourceOfferAnswerView(rawValue: text) else {
+            throw CommandContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeSourceOfferRefusalView(_ value: Any?, _ context: String) throws -> SourceOfferRefusalView {
+        guard let text = value as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        guard let decoded = SourceOfferRefusalView(rawValue: text) else {
+            throw CommandContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeSourceOfferOutcomeView(_ value: Any?, _ context: String) throws -> SourceOfferOutcomeView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "answered":
+            return .answered(try decodeSourceOfferAnswerView(payload(map, "SourceOfferOutcomeView.answered"), "SourceOfferOutcomeView.answered"))
+        case "refused":
+            return .refused(try decodeSourceOfferRefusalView(payload(map, "SourceOfferOutcomeView.refused"), "SourceOfferOutcomeView.refused"))
+        default:
+            throw CommandContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeSourceOfferResultView(_ value: Any?, _ context: String) throws -> SourceOfferResultView {
+        let map = try object(value, context)
+        try knownKeys(map, ["key", "outcome"], context)
+        let key = try decodeSourceAcquisitionKeyView(try field(map, "key", "SourceOfferResultView.key"), "SourceOfferResultView.key")
+        let outcome = try decodeSourceOfferOutcomeView(try field(map, "outcome", "SourceOfferResultView.outcome"), "SourceOfferResultView.outcome")
+        return SourceOfferResultView(
+            key: key,
+            outcome: outcome
+        )
+    }
+
     private static func decodeFrontendIntentView(_ value: Any?, _ context: String) throws -> FrontendIntentView {
         let map = try object(value, context)
         try knownKeys(map, ["kind", "value"], context)
@@ -785,6 +861,8 @@ public enum EnvoixCommandCodec {
             return .completion(try decodeCommandCompletionView(payload(map, "CommandBody.completion"), "CommandBody.completion"))
         case "create_result":
             return .createResult(try decodeCreateResultView(payload(map, "CommandBody.create_result"), "CommandBody.create_result"))
+        case "source_offer_result":
+            return .sourceOfferResult(try decodeSourceOfferResultView(payload(map, "CommandBody.source_offer_result"), "CommandBody.source_offer_result"))
         default:
             throw CommandContractError(kind: .unknownVariant, context: context)
         }

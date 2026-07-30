@@ -17,6 +17,11 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'bindings/envoix_command.dart';
+// The acquisition key is declared by three contracts, because the generator has
+// no cross-schema reference (EH-20). A parity gate proves the three agree
+// field-for-field; they are still three Dart types, so the one this file MEANS
+// is named explicitly rather than left to import order.
+import 'bindings/envoix_command.dart' as cmd;
 import 'bindings/envoix_read.dart';
 
 /// The command a published affordance sends.
@@ -221,6 +226,12 @@ class CommandJournal {
       case final CommandBodyCreateResult _:
         unaddressed += 1;
         return CommandAdmission.unaddressed;
+      // A source offer is answered on its own submission too, and it is
+      // addressed by an ACQUISITION rather than a command identity — this
+      // journal holds neither, so one arriving here is nobody's.
+      case final CommandBodySourceOfferResult _:
+        unaddressed += 1;
+        return CommandAdmission.unaddressed;
       case final CommandBodyAcceptance body:
         return _answer(
           body.value.commandId,
@@ -295,6 +306,28 @@ List<int> submitFrame({
           epoch: epoch,
           commandId: id,
           command: command,
+        ),
+      ),
+    );
+
+/// A document offered to the acquisition a card published.
+///
+/// The key is the ONE identity: no command id, because the acquisition already
+/// is one and a second whose disagreement needed its own policy would be a
+/// second authority. The name is the provider's, unnormalized — the authority
+/// owns normalization and the `name_too_long` refusal, so truncating here would
+/// make this platform's encoder into product policy.
+List<int> sourceOfferFrame({
+  required cmd.SourceAcquisitionKeyView key,
+  required String displayName,
+  required int? reportedSize,
+}) =>
+    _intentFrame(
+      FrontendIntentViewSourceOffer(
+        SourceOfferView(
+          key: key,
+          displayName: displayName,
+          reportedSize: reportedSize,
         ),
       ),
     );

@@ -8,6 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_attempt_api::{AttemptEvent, AttemptEventKind, AttemptSupervisor, EventAdmission};
+use envoix_bindings::command::{
+    CommandBody, CommandFrame, CreateIntentView, CreateView, FrontendIntentView,
+    LocalDirectionView, MintRoomView, SourceAcquisitionKeyView, SourceOfferAnswerView,
+    SourceOfferOutcomeView, SourceOfferView, decode_command_frame, encode_command_frame,
+};
+use envoix_bindings::read::{CardActionView, CardUpdateKindView, ReadBody, decode_read_frame};
 use envoix_host_android::{CardStores, FramePoll, Host, HostStore};
 use envoix_operation_store::{ArtifactKey, OperationStore, PossessionState};
 use envoix_outcomes::{OutcomeCode, Phase};
@@ -359,4 +365,129 @@ fn durable_removal_replays_its_source_grant_release_after_restart() {
         );
         host.shutdown();
     }
+}
+
+/// The acquisition a card PUBLISHED, read off its `pick_source` action.
+fn published_acquisition(
+    host: &Host,
+    token: envoix_host_android::AttachmentToken,
+) -> SourceAcquisitionKeyView {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        match host.poll_frame(token) {
+            FramePoll::Frame(bytes) => {
+                let ReadBody::CardUpdate(update) =
+                    decode_read_frame(&bytes).expect("a read frame").body
+                else {
+                    continue;
+                };
+                let CardUpdateKindView::Snapshot(view) = update.kind else {
+                    continue;
+                };
+                for action in view.allowed_actions {
+                    if let CardActionView::PickSource(pick) = action {
+                        return SourceAcquisitionKeyView {
+                            card: pick.acquisition.card,
+                            generation: pick.acquisition.generation,
+                            request: pick.acquisition.request,
+                        };
+                    }
+                }
+            }
+            FramePoll::Drained => std::thread::sleep(Duration::from_millis(25)),
+            FramePoll::Superseded => panic!("the attachment was superseded"),
+        }
+    }
+    panic!("the card never published a pick_source action");
+}
+
+fn offer_bytes(key: &SourceAcquisitionKeyView, name: &str, size: Option<u64>) -> Vec<u8> {
+    encode_command_frame(&CommandFrame {
+        body: CommandBody::Intent(FrontendIntentView::SourceOffer(SourceOfferView {
+            key: key.clone(),
+            display_name: name.to_owned(),
+            reported_size: size,
+        })),
+    })
+    .expect("the offer encodes")
+}
+
+fn offer_outcome(answer: &[u8]) -> SourceOfferOutcomeView {
+    let CommandBody::SourceOfferResult(result) =
+        decode_command_frame(answer).expect("a command frame").body
+    else {
+        panic!("the authority answered an offer with something else");
+    };
+    result.outcome
+}
+
+/// A picked document reaches the AUTHORITY and moves the card.
+///
+/// This is the seam that was refused: the host decoded a well-formed source
+/// offer and answered `contract breach`, so a frontend that published a
+/// `pick_source` action could never answer it. The whole round trip is here —
+/// the acquisition the card publishes, an offer built from it, the answer, and
+/// the durable record showing the card acquiring.
+#[test]
+fn a_source_offer_reaches_the_authority_and_moves_the_card() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let host = Host::boot(root.path()).expect("the host boots");
+    host.intent(
+        &encode_command_frame(&CommandFrame {
+            body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+                intent: CreateIntentView::MintRoom(MintRoomView {
+                    local_direction: LocalDirectionView::Send,
+                }),
+                request_id: "11".repeat(16),
+            })),
+        })
+        .expect("the create encodes"),
+    )
+    .expect("the authority answers the create");
+
+    // The acquisition the card published, as a frontend reads it off the
+    // `pick_source` action rather than deriving anything.
+    let token = host.open_lane();
+    let acquisition = published_acquisition(&host, token);
+
+    let answer = host
+        .intent(&offer_bytes(&acquisition, "chosen.bin", Some(4096)))
+        .expect("the authority answers the offer");
+    assert_eq!(
+        offer_outcome(&answer),
+        SourceOfferOutcomeView::Answered(SourceOfferAnswerView::Accepted),
+        "a document offered to the acquisition the card published was refused"
+    );
+
+    // The same offer again is an idempotent retry, not a second binding.
+    let repeat = host
+        .intent(&offer_bytes(&acquisition, "chosen.bin", Some(4096)))
+        .expect("the authority answers the repeat");
+    assert_eq!(
+        offer_outcome(&repeat),
+        SourceOfferOutcomeView::Answered(SourceOfferAnswerView::AlreadyAccepted)
+    );
+
+    // The same key with DIFFERENT metadata was never committed, and saying
+    // "already accepted" would tell a frontend its payload had been applied.
+    let conflicting = host
+        .intent(&offer_bytes(&acquisition, "other.bin", Some(4096)))
+        .expect("the authority answers the conflict");
+    assert_eq!(
+        offer_outcome(&conflicting),
+        SourceOfferOutcomeView::Answered(SourceOfferAnswerView::Conflict)
+    );
+
+    // And an acquisition the card never published binds nothing.
+    let mut elsewhere = acquisition.clone();
+    elsewhere.generation = elsewhere.generation.wrapping_add(1);
+    let stale = host
+        .intent(&offer_bytes(&elsewhere, "chosen.bin", Some(4096)))
+        .expect("the authority answers the stale offer");
+    assert_eq!(
+        offer_outcome(&stale),
+        SourceOfferOutcomeView::Answered(SourceOfferAnswerView::Stale)
+    );
+
+    host.shutdown();
 }
