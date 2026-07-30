@@ -13,12 +13,14 @@ use envoix_types::{
     TransferId,
 };
 
-use crate::test_support::{STAGED_NAME, STAGED_TOTAL, give_a_source, offer, settled, staged};
+use crate::test_support::{
+    STAGED_NAME, STAGED_TOTAL, acquired, give_a_source, offer, settled, staged,
+};
 use crate::{
-    CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer, PauseOrigin,
-    ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState, Quiescence,
-    RecordCodecError, RecordDecode, StorageAction, TransferRecord, WorkerKind, decode_record,
-    encode_record,
+    AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
+    PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
+    Quiescence, RecordCodecError, RecordDecode, StorageAction, TransferRecord, WorkerKind,
+    decode_record, encode_record,
 };
 
 #[derive(Default)]
@@ -242,21 +244,24 @@ fn assert_outcome(record: &TransferRecord, code: OutcomeCode) {
 
 /// Every identity exists before ANY world-facing work is authorized.
 ///
-/// A receiver's first work is the attempt; a sender's is the picker. Both are
-/// post-commit, so whichever one goes first can only name identities the record
-/// already holds (`SF02`).
+/// A receiver's first work is the attempt. A sender commissions none at all —
+/// it publishes an acquisition and waits — so what must already exist for it is
+/// the acquisition's own identity, which is minted from the card and generation
+/// the record was just given (`SF02`).
 #[test]
 fn product_mints_all_identity_before_the_first_work() {
     let (sender, effects) = create(Direction::Send);
-    let [ProductEffect::CapabilityDuty { duty, .. }] = effects.as_slice() else {
-        panic!("a sender's first work is the picker, got {effects:?}");
-    };
+    assert!(
+        effects.is_empty(),
+        "a sender commissioned work: {effects:?}"
+    );
     assert_ne!(sender.identity.card.get(), 0);
     assert_ne!(sender.identity.transfer.to_bytes(), [0; 16]);
     assert_ne!(sender.identity.artifact.to_bytes(), [0; 16]);
     assert_ne!(sender.generation.get(), 0);
-    assert_eq!(duty.provenance.card, sender.identity.card);
-    assert_eq!(duty.provenance.generation, sender.generation);
+    let acquisition = sender.current_acquisition();
+    assert_eq!(acquisition.card(), sender.identity.card);
+    assert_eq!(acquisition.generation(), sender.generation);
 
     let (record, effects) = create(Direction::Receive);
     let plan = start_plan(&effects);
@@ -678,10 +683,10 @@ fn a_sourceless_card_re_picks_rather_than_resumes() {
         .unwrap();
     assert_eq!(record.state, ProductState::Preparing);
     assert_eq!(record.generation.get(), before.generation.get() + 1);
-    let [ProductEffect::CapabilityDuty { action, .. }] = effects.as_slice() else {
-        panic!("a re-pick asks for a source, got {effects:?}");
-    };
-    assert_eq!(*action, CapabilityAction::SelectSource);
+    assert!(
+        effects.is_empty(),
+        "asking a person to choose a file is an affordance, not platform work"
+    );
     // And the fresh gate accepts the answer, which the old code never did: it
     // advanced the generation and left the card in `RePickRequired`, so the
     // picker opened and its offer was then refused.
@@ -2257,26 +2262,31 @@ fn product_model_scenario_trace() {
     ));
 }
 
-/// Creating a card that still needs a source ASKS for one, and the ask is a
-/// post-commit effect: the record exists before the picker is ever consulted
-/// (`SF02`). A card whose source is already ready asks for nothing, because
-/// there is nothing to ask for.
+/// Creating a card that needs a document commissions NO platform work.
+///
+/// Asking a person to choose a file is an affordance the card publishes, not a
+/// duty the authority hands the platform. It used to be one, issued the moment a
+/// sender existed — so the adapter was told to bind a document nobody had picked
+/// yet, claimed from an empty registry, and answered `source_unreadable` every
+/// time. The handle duty belongs where there is something to bind: after an
+/// offer is accepted.
 #[test]
-fn a_card_that_needs_a_source_asks_the_platform_for_one() {
+fn creating_a_card_that_needs_a_document_commissions_no_platform_work() {
     let (record, effects) = create(Direction::Send);
     assert_eq!(record.state, ProductState::Preparing);
-    let [ProductEffect::CapabilityDuty { duty, action }] = effects.as_slice() else {
-        panic!("a staged create asks for a source, got {effects:?}");
-    };
-    assert_eq!(*action, CapabilityAction::SelectSource);
-    assert_eq!(duty.kind, DutyKind::SourceHandle);
-    assert_eq!(duty.provenance.card, record.identity.card);
-    assert_eq!(duty.provenance.generation, record.generation);
+    assert!(
+        effects.is_empty(),
+        "a card with no document asked the platform for work, got {effects:?}"
+    );
+    // What it publishes instead is the acquisition an offer must name, and the
+    // authority will check an offer against the SAME derived value.
+    assert_eq!(record.current_acquisition().card(), record.identity.card);
+    assert_eq!(record.current_acquisition().generation(), record.generation);
 
-    // A duty is world-facing, so the commit barrier holds it until the record
-    // is durable — the whole reason the picker cannot be what decides a
-    // transfer exists.
-    let (session, outcome) = crate::CommittedSession::create_without_store(
+    // Accepting an offer is what commissions the handle duty, and it is
+    // post-commit: the acquisition is durable before the platform is asked to
+    // hold what it names.
+    let (mut session, outcome) = crate::CommittedSession::create_without_store(
         NewTransfer {
             direction: Direction::Send,
             participation: crate::RoomParticipation::Minted,
@@ -2287,28 +2297,44 @@ fn a_card_that_needs_a_source_asks_the_platform_for_one() {
     .expect("deterministic identity source");
     assert_eq!(session.record().state, ProductState::Preparing);
     assert!(outcome.released_immediately.is_empty());
-    assert_eq!(outcome.released_after_commit.len(), 1);
+    assert!(outcome.released_after_commit.is_empty());
 
-    // A receiver has nothing to pick, so it is never asked. That is now a
-    // property of its DIRECTION rather than of a source decision a caller
-    // supplied, which is why there is no longer a way to create a sender that
-    // skips the ask.
+    let offered = ProductInput::SourceOffered {
+        offer: offer(session.record(), STAGED_NAME, None),
+    };
+    let bound = session.apply(offered).expect("the offer is accepted");
+    assert!(bound.released_immediately.is_empty());
+    let [ProductEffect::CapabilityDuty { duty, action }] = bound.released_after_commit.as_slice()
+    else {
+        panic!(
+            "an accepted offer commissions the handle duty, got {:?}",
+            bound.released_after_commit
+        );
+    };
+    assert_eq!(*action, CapabilityAction::AcquireSource);
+    assert_eq!(duty.kind, DutyKind::SourceHandle);
+    assert_eq!(duty.provenance.card, session.record().identity.card);
+    assert_eq!(duty.provenance.generation, session.record().generation);
+
+    // A receiver can never take a document, so nothing about one is ever
+    // commissioned for it. That is a property of its DIRECTION now, not of a
+    // source decision a caller supplied.
     let (_, effects) = create(Direction::Receive);
     assert!(
         !effects.iter().any(|effect| matches!(
             effect,
             ProductEffect::CapabilityDuty {
-                action: CapabilityAction::SelectSource,
+                action: CapabilityAction::AcquireSource,
                 ..
             }
         )),
-        "a receiver asked for a source it can never have"
+        "a receiver was commissioned work for a document it can never have"
     );
 }
 
 /// The re-pick command is the recovery `RS04` says the old app stranded users
-/// without. It now actually asks, under a FRESH generation — so the C6 ledger
-/// sees a new duty rather than one it has already discharged.
+/// without. It asks again under a FRESH generation — which mints a fresh
+/// acquisition key, so a late answer under the discharged one cannot bind.
 #[test]
 fn re_picking_a_source_asks_again_under_a_new_generation() {
     let mut record = needs_repick();
@@ -2321,16 +2347,27 @@ fn re_picking_a_source_asks_again_under_a_new_generation() {
         Some(Recovery::RePickSource)
     );
 
+    let before = record.current_acquisition();
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::RePickSource))
         .expect("the re-pick reduces");
-    let [ProductEffect::CapabilityDuty { duty, action }] = effects.as_slice() else {
-        panic!("a re-pick asks for a source, got {effects:?}");
-    };
-    assert_eq!(*action, CapabilityAction::SelectSource);
-    assert_eq!(duty.provenance.generation, record.generation);
-    assert_ne!(duty.provenance.generation, stamp.generation);
+    assert!(effects.is_empty(), "the ask is published, not commissioned");
+    let after = record.current_acquisition();
+    assert_eq!(after.generation(), record.generation);
+    assert_ne!(after.generation(), stamp.generation);
+    assert!(!before.is(&after), "the re-pick reused the discharged key");
     assert_eq!(record.state, ProductState::Preparing);
+
+    // And the discharged key is refused where the fresh one is accepted, which
+    // is what makes a late answer to the old ask inert rather than binding.
+    assert_eq!(
+        record.answer_source_offer(&AcceptedSourceOffer::new(
+            before,
+            OfferedName::from_untrusted(STAGED_NAME).unwrap(),
+            None,
+        )),
+        crate::SourceOfferAnswer::Stale
+    );
 }
 
 /// The two duties one card can raise must never share a provenance: the C6
@@ -2608,4 +2645,99 @@ fn command_ledger_conflicts_and_prunes() {
             .disposition(CommandId::from_bytes(newest), ProductCommand::Resume)
             .is_some()
     );
+}
+
+/// An admitted source answer that names a DIFFERENT acquisition is inert.
+///
+/// The ledger proves a result was admitted once; it does not prove it belongs to
+/// this card's current ask. Without the exact-key guard the reducer would act on
+/// a neighbour's answer — and every other test in this file builds the answer
+/// from the same record it offered, so none of them can catch its removal.
+#[test]
+fn a_source_answer_for_another_acquisition_moves_nothing() {
+    let mut card = create(Direction::Send).0;
+    let offered = ProductInput::SourceOffered {
+        offer: offer(&card, STAGED_NAME, None),
+    };
+    card.reduce(offered).unwrap();
+    let acquiring = card.clone();
+
+    // Another card entirely. Built by moving THIS card's identity rather than
+    // creating a second one, because the deterministic entropy would mint the
+    // same identity twice and the case would pass for the wrong reason.
+    let mut other = card.clone();
+    other.identity.card = RecordId::new(card.identity.card.get() ^ 0x5a5a);
+    let foreign = settled(&other, acquired());
+    assert!(card.reduce(foreign).unwrap().is_empty());
+    assert_eq!(card, acquiring, "another card's answer moved this one");
+
+    // The same card under a superseded generation.
+    let mut stale = card.clone();
+    stale.generation = AttemptGen::new(card.generation.get() + 1);
+    let superseded = settled(&stale, acquired());
+    assert!(card.reduce(superseded).unwrap().is_empty());
+    assert_eq!(card, acquiring, "a superseded generation's answer bound");
+
+    // The same card and generation, a different request.
+    let mut rerequested = card.clone();
+    rerequested.receipt_request = RequestId::from_bytes([0x5a; 16]);
+    let wrong_request = settled(&rerequested, acquired());
+    assert!(card.reduce(wrong_request).unwrap().is_empty());
+    assert_eq!(card, acquiring, "an answer to another request bound");
+
+    // And the card's OWN answer does move it, so the three inertness cases
+    // above are not passing because nothing works.
+    let mine = settled(&card, acquired());
+    card.reduce(mine).unwrap();
+    assert!(matches!(
+        card.source,
+        crate::SourceLifecycle::Staging { .. }
+    ));
+}
+
+/// A card that has just been minted can be cancelled, and restarted afterwards.
+///
+/// It is `Quiescent + Preparing` — a shape that could not occur while every
+/// `Preparing` card claimed a staging worker, so the quiescent cancel arm did
+/// not cover it. The existing preparing-cancel test starts from `Staging` and
+/// cannot catch that arm being narrowed back.
+#[test]
+fn a_minted_send_can_be_cancelled_and_then_asked_again() {
+    let (mut card, _) = create(Direction::Send);
+    assert_eq!(card.quiescence, Quiescence::Quiescent);
+    assert!(
+        card.allowed_commands().contains(&ProductCommand::Cancel),
+        "a minted send cannot be cancelled: {:?}",
+        card.allowed_commands()
+    );
+
+    card.reduce(ProductInput::Command(ProductCommand::Cancel))
+        .unwrap();
+    assert_eq!(card.state, ProductState::Cancelled);
+
+    // Restarting it means asking for a document again — there is no offset to
+    // resume from and nothing to send. Re-pick is offered, and it is the
+    // LIFECYCLE that says so: this card never carried a `RePickSource` recovery
+    // hint, because nothing failed.
+    assert!(
+        card.outcome.as_ref().and_then(|outcome| outcome.recovery) != Some(Recovery::RePickSource)
+    );
+    assert!(
+        card.allowed_commands()
+            .contains(&ProductCommand::RePickSource),
+        "a cancelled send cannot ask for a document again: {:?}",
+        card.allowed_commands()
+    );
+    let generation = card.generation;
+    card.reduce(ProductInput::Command(ProductCommand::RePickSource))
+        .unwrap();
+    assert_eq!(card.state, ProductState::Preparing);
+    assert_ne!(card.generation, generation, "the discharged key was reused");
+
+    // And the fresh ask can actually be answered.
+    let offered = ProductInput::SourceOffered {
+        offer: offer(&card, STAGED_NAME, None),
+    };
+    card.reduce(offered).unwrap();
+    assert!(matches!(card.source, crate::SourceLifecycle::Acquiring(_)));
 }

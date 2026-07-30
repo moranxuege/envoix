@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/8';
+const String readSchemaId = 'envoix/binding/read/9';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -119,7 +119,7 @@ enum DutyKindView {
 
 enum CapabilityActionView {
   postReceipt,
-  selectSource,
+  acquireSource,
 }
 
 enum CommandKindView {
@@ -296,12 +296,180 @@ final class InviteView {
   final QrView? qr;
 }
 
+enum RoomParticipationView {
+  minted,
+  joined,
+}
+
+final class SourceAcquisitionKeyView {
+  const SourceAcquisitionKeyView({
+    required this.card,
+    required this.generation,
+    required this.request,
+  });
+
+  final String card;
+  final int generation;
+  final String request;
+}
+
+enum SourcePromptReasonView {
+  initial,
+  unreadable,
+  permissionLost,
+  storageFault,
+  stagingFailed,
+  internal,
+}
+
+final class AcceptedSourceOfferView {
+  const AcceptedSourceOfferView({
+    required this.acquisition,
+    required this.displayName,
+    required this.reportedSize,
+  });
+
+  final SourceAcquisitionKeyView acquisition;
+  final String displayName;
+  final int? reportedSize;
+}
+
+final class TransferContentView {
+  const TransferContentView({
+    required this.offeredName,
+    required this.total,
+  });
+
+  final String offeredName;
+  final int total;
+}
+
+final class SourceNotRequiredView {
+  const SourceNotRequiredView({
+    required this.peerContent,
+  });
+
+  final TransferContentView? peerContent;
+}
+
+final class SourceSelectableView {
+  const SourceSelectableView({
+    required this.acquisition,
+    required this.reason,
+  });
+
+  final SourceAcquisitionKeyView acquisition;
+  final SourcePromptReasonView reason;
+}
+
+final class SourceRePickRequiredView {
+  const SourceRePickRequiredView({
+    required this.reason,
+    required this.previousOffer,
+  });
+
+  final SourcePromptReasonView reason;
+  final AcceptedSourceOfferView previousOffer;
+}
+
+sealed class SourceSelectionGateView {
+  const SourceSelectionGateView();
+}
+
+final class SourceSelectionGateViewSelectable extends SourceSelectionGateView {
+  const SourceSelectionGateViewSelectable(this.value);
+
+  final SourceSelectableView value;
+}
+
+final class SourceSelectionGateViewRePickRequired extends SourceSelectionGateView {
+  const SourceSelectionGateViewRePickRequired(this.value);
+
+  final SourceRePickRequiredView value;
+}
+
+final class SourceAwaitingSelectionView {
+  const SourceAwaitingSelectionView({
+    required this.selection,
+  });
+
+  final SourceSelectionGateView selection;
+}
+
+final class SourceReadyView {
+  const SourceReadyView({
+    required this.offer,
+    required this.content,
+  });
+
+  final AcceptedSourceOfferView offer;
+  final TransferContentView content;
+}
+
+sealed class SourceLifecycleView {
+  const SourceLifecycleView();
+}
+
+final class SourceLifecycleViewNotRequired extends SourceLifecycleView {
+  const SourceLifecycleViewNotRequired(this.value);
+
+  final SourceNotRequiredView value;
+}
+
+final class SourceLifecycleViewAwaitingSelection extends SourceLifecycleView {
+  const SourceLifecycleViewAwaitingSelection(this.value);
+
+  final SourceAwaitingSelectionView value;
+}
+
+final class SourceLifecycleViewAcquiring extends SourceLifecycleView {
+  const SourceLifecycleViewAcquiring(this.value);
+
+  final AcceptedSourceOfferView value;
+}
+
+final class SourceLifecycleViewStaging extends SourceLifecycleView {
+  const SourceLifecycleViewStaging(this.value);
+
+  final AcceptedSourceOfferView value;
+}
+
+final class SourceLifecycleViewReady extends SourceLifecycleView {
+  const SourceLifecycleViewReady(this.value);
+
+  final SourceReadyView value;
+}
+
+final class PickSourceActionView {
+  const PickSourceActionView({
+    required this.acquisition,
+  });
+
+  final SourceAcquisitionKeyView acquisition;
+}
+
+sealed class CardActionView {
+  const CardActionView();
+}
+
+final class CardActionViewCommand extends CardActionView {
+  const CardActionViewCommand(this.value);
+
+  final CommandKindView value;
+}
+
+final class CardActionViewPickSource extends CardActionView {
+  const CardActionViewPickSource(this.value);
+
+  final PickSourceActionView value;
+}
+
 final class CardView {
   const CardView({
     required this.identity,
+    required this.participation,
     required this.direction,
-    required this.offeredName,
-    required this.total,
+    required this.source,
     required this.state,
     required this.quiescence,
     required this.generation,
@@ -314,9 +482,9 @@ final class CardView {
   });
 
   final IdentityView identity;
+  final RoomParticipationView participation;
   final DirectionView direction;
-  final String offeredName;
-  final int total;
+  final SourceLifecycleView source;
   final ProductStateView state;
   final QuiescenceView quiescence;
   final int generation;
@@ -324,7 +492,7 @@ final class CardView {
   final int bytes;
   final int bytesResumed;
   final OutcomeView? outcome;
-  final List<CommandKindView> allowedActions;
+  final List<CardActionView> allowedActions;
   final InviteView? invite;
 }
 
@@ -978,7 +1146,7 @@ DutyKindView _decodeDutyKindView(Object? value, String context) {
 CapabilityActionView _decodeCapabilityActionView(Object? value, String context) {
   return switch (value) {
     'post_receipt' => CapabilityActionView.postReceipt,
-    'select_source' => CapabilityActionView.selectSource,
+    'acquire_source' => CapabilityActionView.acquireSource,
     String() =>
       throw ReadContractException(ReadErrorKind.unknownVariant, context),
     _ => throw ReadContractException(ReadErrorKind.shape, context),
@@ -1178,14 +1346,199 @@ InviteView _decodeInviteView(Object? value, String context) {
   );
 }
 
+RoomParticipationView _decodeRoomParticipationView(Object? value, String context) {
+  return switch (value) {
+    'minted' => RoomParticipationView.minted,
+    'joined' => RoomParticipationView.joined,
+    String() =>
+      throw ReadContractException(ReadErrorKind.unknownVariant, context),
+    _ => throw ReadContractException(ReadErrorKind.shape, context),
+  };
+}
+
+SourceAcquisitionKeyView _decodeSourceAcquisitionKeyView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'card', 'generation', 'request'}, context);
+  return SourceAcquisitionKeyView(
+    card: _hexFixed(_field(map, 'card', 'SourceAcquisitionKeyView.card'), 16, 'SourceAcquisitionKeyView.card'),
+    generation: _integer(_field(map, 'generation', 'SourceAcquisitionKeyView.generation'), 4294967295, 'SourceAcquisitionKeyView.generation'),
+    request: _hexFixed(_field(map, 'request', 'SourceAcquisitionKeyView.request'), 32, 'SourceAcquisitionKeyView.request'),
+  );
+}
+
+SourcePromptReasonView _decodeSourcePromptReasonView(Object? value, String context) {
+  return switch (value) {
+    'initial' => SourcePromptReasonView.initial,
+    'unreadable' => SourcePromptReasonView.unreadable,
+    'permission_lost' => SourcePromptReasonView.permissionLost,
+    'storage_fault' => SourcePromptReasonView.storageFault,
+    'staging_failed' => SourcePromptReasonView.stagingFailed,
+    'internal' => SourcePromptReasonView.internal,
+    String() =>
+      throw ReadContractException(ReadErrorKind.unknownVariant, context),
+    _ => throw ReadContractException(ReadErrorKind.shape, context),
+  };
+}
+
+AcceptedSourceOfferView _decodeAcceptedSourceOfferView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'acquisition', 'display_name', 'reported_size'}, context);
+  return AcceptedSourceOfferView(
+    acquisition: _decodeSourceAcquisitionKeyView(_field(map, 'acquisition', 'AcceptedSourceOfferView.acquisition'), 'AcceptedSourceOfferView.acquisition'),
+    displayName: _utf8Bounded(_field(map, 'display_name', 'AcceptedSourceOfferView.display_name'), 255, 'AcceptedSourceOfferView.display_name'),
+    reportedSize: switch (_field(map, 'reported_size', 'AcceptedSourceOfferView.reported_size')) {
+      null => null,
+      final present => _integer(present, _u63Max, 'AcceptedSourceOfferView.reported_size'),
+    },
+  );
+}
+
+TransferContentView _decodeTransferContentView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'offered_name', 'total'}, context);
+  return TransferContentView(
+    offeredName: _utf8Bounded(_field(map, 'offered_name', 'TransferContentView.offered_name'), 255, 'TransferContentView.offered_name'),
+    total: _integer(_field(map, 'total', 'TransferContentView.total'), _u63Max, 'TransferContentView.total'),
+  );
+}
+
+SourceNotRequiredView _decodeSourceNotRequiredView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'peer_content'}, context);
+  return SourceNotRequiredView(
+    peerContent: switch (_field(map, 'peer_content', 'SourceNotRequiredView.peer_content')) {
+      null => null,
+      final present => _decodeTransferContentView(present, 'SourceNotRequiredView.peer_content'),
+    },
+  );
+}
+
+SourceSelectableView _decodeSourceSelectableView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'acquisition', 'reason'}, context);
+  return SourceSelectableView(
+    acquisition: _decodeSourceAcquisitionKeyView(_field(map, 'acquisition', 'SourceSelectableView.acquisition'), 'SourceSelectableView.acquisition'),
+    reason: _decodeSourcePromptReasonView(_field(map, 'reason', 'SourceSelectableView.reason'), 'SourceSelectableView.reason'),
+  );
+}
+
+SourceRePickRequiredView _decodeSourceRePickRequiredView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'reason', 'previous_offer'}, context);
+  return SourceRePickRequiredView(
+    reason: _decodeSourcePromptReasonView(_field(map, 'reason', 'SourceRePickRequiredView.reason'), 'SourceRePickRequiredView.reason'),
+    previousOffer: _decodeAcceptedSourceOfferView(_field(map, 'previous_offer', 'SourceRePickRequiredView.previous_offer'), 'SourceRePickRequiredView.previous_offer'),
+  );
+}
+
+SourceSelectionGateView _decodeSourceSelectionGateView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw ReadContractException(ReadErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'selectable':
+      return SourceSelectionGateViewSelectable(
+        _decodeSourceSelectableView(_payload(map, 'SourceSelectionGateView.selectable'), 'SourceSelectionGateView.selectable'),
+      );
+    case 're_pick_required':
+      return SourceSelectionGateViewRePickRequired(
+        _decodeSourceRePickRequiredView(_payload(map, 'SourceSelectionGateView.re_pick_required'), 'SourceSelectionGateView.re_pick_required'),
+      );
+    default:
+      throw ReadContractException(ReadErrorKind.unknownVariant, context);
+  }
+}
+
+SourceAwaitingSelectionView _decodeSourceAwaitingSelectionView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'selection'}, context);
+  return SourceAwaitingSelectionView(
+    selection: _decodeSourceSelectionGateView(_field(map, 'selection', 'SourceAwaitingSelectionView.selection'), 'SourceAwaitingSelectionView.selection'),
+  );
+}
+
+SourceReadyView _decodeSourceReadyView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'offer', 'content'}, context);
+  return SourceReadyView(
+    offer: _decodeAcceptedSourceOfferView(_field(map, 'offer', 'SourceReadyView.offer'), 'SourceReadyView.offer'),
+    content: _decodeTransferContentView(_field(map, 'content', 'SourceReadyView.content'), 'SourceReadyView.content'),
+  );
+}
+
+SourceLifecycleView _decodeSourceLifecycleView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw ReadContractException(ReadErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'not_required':
+      return SourceLifecycleViewNotRequired(
+        _decodeSourceNotRequiredView(_payload(map, 'SourceLifecycleView.not_required'), 'SourceLifecycleView.not_required'),
+      );
+    case 'awaiting_selection':
+      return SourceLifecycleViewAwaitingSelection(
+        _decodeSourceAwaitingSelectionView(_payload(map, 'SourceLifecycleView.awaiting_selection'), 'SourceLifecycleView.awaiting_selection'),
+      );
+    case 'acquiring':
+      return SourceLifecycleViewAcquiring(
+        _decodeAcceptedSourceOfferView(_payload(map, 'SourceLifecycleView.acquiring'), 'SourceLifecycleView.acquiring'),
+      );
+    case 'staging':
+      return SourceLifecycleViewStaging(
+        _decodeAcceptedSourceOfferView(_payload(map, 'SourceLifecycleView.staging'), 'SourceLifecycleView.staging'),
+      );
+    case 'ready':
+      return SourceLifecycleViewReady(
+        _decodeSourceReadyView(_payload(map, 'SourceLifecycleView.ready'), 'SourceLifecycleView.ready'),
+      );
+    default:
+      throw ReadContractException(ReadErrorKind.unknownVariant, context);
+  }
+}
+
+PickSourceActionView _decodePickSourceActionView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'acquisition'}, context);
+  return PickSourceActionView(
+    acquisition: _decodeSourceAcquisitionKeyView(_field(map, 'acquisition', 'PickSourceActionView.acquisition'), 'PickSourceActionView.acquisition'),
+  );
+}
+
+CardActionView _decodeCardActionView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw ReadContractException(ReadErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'command':
+      return CardActionViewCommand(
+        _decodeCommandKindView(_payload(map, 'CardActionView.command'), 'CardActionView.command'),
+      );
+    case 'pick_source':
+      return CardActionViewPickSource(
+        _decodePickSourceActionView(_payload(map, 'CardActionView.pick_source'), 'CardActionView.pick_source'),
+      );
+    default:
+      throw ReadContractException(ReadErrorKind.unknownVariant, context);
+  }
+}
+
 CardView _decodeCardView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'identity', 'direction', 'offered_name', 'total', 'state', 'quiescence', 'generation', 'phase', 'bytes', 'bytes_resumed', 'outcome', 'allowed_actions', 'invite'}, context);
+  _knownKeys(map, const {'identity', 'participation', 'direction', 'source', 'state', 'quiescence', 'generation', 'phase', 'bytes', 'bytes_resumed', 'outcome', 'allowed_actions', 'invite'}, context);
   return CardView(
     identity: _decodeIdentityView(_field(map, 'identity', 'CardView.identity'), 'CardView.identity'),
+    participation: _decodeRoomParticipationView(_field(map, 'participation', 'CardView.participation'), 'CardView.participation'),
     direction: _decodeDirectionView(_field(map, 'direction', 'CardView.direction'), 'CardView.direction'),
-    offeredName: _utf8Bounded(_field(map, 'offered_name', 'CardView.offered_name'), 255, 'CardView.offered_name'),
-    total: _integer(_field(map, 'total', 'CardView.total'), _u63Max, 'CardView.total'),
+    source: _decodeSourceLifecycleView(_field(map, 'source', 'CardView.source'), 'CardView.source'),
     state: _decodeProductStateView(_field(map, 'state', 'CardView.state'), 'CardView.state'),
     quiescence: _decodeQuiescenceView(_field(map, 'quiescence', 'CardView.quiescence'), 'CardView.quiescence'),
     generation: _integer(_field(map, 'generation', 'CardView.generation'), 4294967295, 'CardView.generation'),
@@ -1196,7 +1549,7 @@ CardView _decodeCardView(Object? value, String context) {
       null => null,
       final present => _decodeOutcomeView(present, 'CardView.outcome'),
     },
-    allowedActions: _list(_field(map, 'allowed_actions', 'CardView.allowed_actions'), 5, 'CardView.allowed_actions', _decodeCommandKindView),
+    allowedActions: _list(_field(map, 'allowed_actions', 'CardView.allowed_actions'), 6, 'CardView.allowed_actions', _decodeCardActionView),
     invite: switch (_field(map, 'invite', 'CardView.invite')) {
       null => null,
       final present => _decodeInviteView(present, 'CardView.invite'),

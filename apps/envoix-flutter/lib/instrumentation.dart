@@ -57,7 +57,11 @@ void reportCard(CardRow row) {
     return;
   }
   final String actions = view.allowedActions
-      .map((CommandKindView kind) => commandOf(kind).name)
+      .map((CardActionView action) => switch (action) {
+            CardActionViewCommand(:final CommandKindView value) =>
+              commandOf(value).name,
+            CardActionViewPickSource() => 'pickSource',
+          })
       .join(',');
   _report('envoix-f2a card=${row.card} actions=$actions '
       'state=${stateLabel(view.state)}');

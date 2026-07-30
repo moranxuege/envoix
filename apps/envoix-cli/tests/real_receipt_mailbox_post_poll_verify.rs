@@ -8,9 +8,8 @@ use envoix_attempt_api::{
     OpenResult, RetirementAckResult, RetirementIntent, RetirementRequestResult,
 };
 use envoix_capabilities::{
-    Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult,
-    GenerationUpdate, Registration, SourceAcquisitionKey, SourceReport, SourceRetention,
-    SourceSeekability,
+    Admission, Duty, DutyKind, DutyLedger, DutyReport, DutyResult, GenerationUpdate, Registration,
+    SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
 };
 use envoix_mailbox::{HttpReceiptMailbox, MailboxClientError};
 use envoix_outcomes::{OutcomeCode, Phase};
@@ -109,31 +108,19 @@ fn new_transfer(direction: Direction) -> NewTransfer {
     }
 }
 
-/// The acquisition key a frontend actually has: it arrives on the published
-/// source duty, which is how a real frontend learns which one it is answering.
-fn published_acquisition(outcome: &ApplyOutcome) -> DutyProvenance {
-    outcome
-        .released_after_commit
-        .iter()
-        .find_map(|effect| match effect {
-            ProductEffect::CapabilityDuty { duty, action } => {
-                (*action == CapabilityAction::SelectSource).then_some(duty.provenance)
-            }
-            _ => None,
-        })
-        .expect("a card that needs a source publishes the duty that asks for one")
-}
-
 /// Walks a sending session from "needs a document" to a live attempt, and
 /// returns the outcome that LAUNCHED it. A sender has no shorter route: the
 /// lifecycle is the only source authority, so nothing can declare it ready.
 fn stage_the_source<S: RecordStore>(
     session: &mut CommittedSession<S>,
-    created: &ApplyOutcome,
+    _created: &ApplyOutcome,
     offered_name: &OfferedName,
     total: ByteCount,
 ) -> ApplyOutcome {
-    let provenance = published_acquisition(created);
+    // The acquisition a frontend answers is the one the card PUBLISHES, which
+    // read/9 carries as the `pick_source` action. This is the same derivation
+    // the projection uses and the authority checks an offer against.
+    let provenance = session.record().current_acquisition().provenance();
     session
         .apply(ProductInput::SourceOffered {
             offer: AcceptedSourceOffer::new(

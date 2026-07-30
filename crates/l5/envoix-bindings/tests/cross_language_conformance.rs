@@ -18,15 +18,18 @@ use envoix_bindings::command::{
     RejectionView, SubmitView, decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::read::{
-    AbiSchemaManifestView, BuildManifestView, CardUpdateKindView, CardUpdateView, CardView,
-    ClosedView, CommandKindView, DegradedView, DeploymentManifestView, DiagnosticsStatusView,
-    DirectionView, EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView,
-    InviteView, LagView, LosslessKindView, OutcomeCodeView, OutcomeView, PauseOriginView,
-    PausedView, PhaseView, ProductStateView, ProtocolManifestView, QrView, QuiescenceView,
-    ReadBody, ReadError, ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView,
-    RetirementIntentView, RetiringView, RetryabilityView, RunningView, SessionKeyView,
-    SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView, WorkerKindView,
-    decode_read_frame, encode_read_frame,
+    AbiSchemaManifestView, AcceptedSourceOfferView, BuildManifestView, CardActionView,
+    CardUpdateKindView, CardUpdateView, CardView, ClosedView, CommandKindView, DegradedView,
+    DeploymentManifestView, DiagnosticsStatusView, DirectionView, EvidenceProgressView,
+    EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView, LagView, LosslessKindView,
+    OutcomeCodeView, OutcomeView, PauseOriginView, PausedView, PhaseView, PickSourceActionView,
+    ProductStateView, ProtocolManifestView, QrView, QuiescenceView, ReadBody, ReadError, ReadFrame,
+    RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView,
+    RetryabilityView, RoomParticipationView, RunningView, SessionKeyView, SourceAcquisitionKeyView,
+    SourceAwaitingSelectionView, SourceLifecycleView, SourceNotRequiredView,
+    SourcePromptReasonView, SourceRePickRequiredView, SourceSelectionGateView,
+    SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView, TransferContentView,
+    WorkerKindView, decode_read_frame, encode_read_frame,
 };
 use envoix_bindings::{
     Decl, Direction, SchemaDoc, command_schema_text, emit, parse_schema, read_schema_text,
@@ -697,11 +700,17 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
     let display = "é".repeat(80);
     let widest = CardView {
         identity: identity.clone(),
+        participation: RoomParticipationView::Minted,
         direction: DirectionView::Receive,
-        // Emoji with a skin-tone modifier, RTL text, a combining mark, and a
-        // flag sequence: every UTF-16 shape a native string can hold.
-        offered_name: "👍🏽 مرحبا e\u{301} 🇺🇳.pdf".to_owned(),
-        total: u64::MAX >> 1,
+        // A receiver that has been told what it is receiving, carrying every
+        // UTF-16 shape a native string can hold: emoji with a skin-tone
+        // modifier, RTL text, a combining mark, and a flag sequence.
+        source: SourceLifecycleView::NotRequired(SourceNotRequiredView {
+            peer_content: Some(TransferContentView {
+                offered_name: "👍🏽 مرحبا e\u{301} 🇺🇳.pdf".to_owned(),
+                total: u64::MAX >> 1,
+            }),
+        }),
         state: ProductStateView::Paused(PausedView {
             origin: PauseOriginView::Lost,
         }),
@@ -720,13 +729,22 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
             recovery: Some(RecoveryView::ReconnectPeer),
             display,
         }),
-        // The list at its cap, which is also every command the contract has.
+        // The list at its cap: every command the contract has, plus the one
+        // action that is not a command. No real card offers all six at once —
+        // the bound is the vocabulary, and this vector is the vocabulary.
         allowed_actions: vec![
-            CommandKindView::Pause,
-            CommandKindView::Cancel,
-            CommandKindView::Resume,
-            CommandKindView::Remove,
-            CommandKindView::RePickSource,
+            CardActionView::PickSource(PickSourceActionView {
+                acquisition: SourceAcquisitionKeyView {
+                    card: "00000000000000ab".to_owned(),
+                    generation: u32::MAX,
+                    request: "ffffffffffffffffffffffffffffffff".to_owned(),
+                },
+            }),
+            CardActionView::Command(CommandKindView::Pause),
+            CardActionView::Command(CommandKindView::Cancel),
+            CardActionView::Command(CommandKindView::Resume),
+            CardActionView::Command(CommandKindView::Remove),
+            CardActionView::Command(CommandKindView::RePickSource),
         ],
         invite: Some(InviteView {
             code: Secret::new("0".repeat(MAX_ROOM_CODE_LENGTH)),
@@ -749,9 +767,24 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
     };
     let narrowest = CardView {
         identity,
+        participation: RoomParticipationView::Joined,
         direction: DirectionView::Send,
-        offered_name: String::new(),
-        total: 0,
+        // A sender that has lost the document it accepted: the narrowest gate,
+        // carrying no acquisition key at all because it can accept no offer.
+        source: SourceLifecycleView::AwaitingSelection(SourceAwaitingSelectionView {
+            selection: SourceSelectionGateView::RePickRequired(SourceRePickRequiredView {
+                reason: SourcePromptReasonView::StagingFailed,
+                previous_offer: AcceptedSourceOfferView {
+                    acquisition: SourceAcquisitionKeyView {
+                        card: "00000000000000ab".to_owned(),
+                        generation: 0,
+                        request: "00000000000000000000000000000000".to_owned(),
+                    },
+                    display_name: String::new(),
+                    reported_size: None,
+                },
+            }),
+        }),
         state: ProductStateView::Preparing,
         quiescence: QuiescenceView::Running(RunningView {
             worker: WorkerKindView::Attempt,

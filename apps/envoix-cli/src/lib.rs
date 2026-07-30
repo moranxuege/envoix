@@ -14,10 +14,43 @@ use envoix_bindings::command::{
     decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::read::{
-    CardUpdateKindView, CardView, CommandKindView, EpochGate, GateDecision, LosslessKindView,
-    ReadBody, ReadError, ReadFrame, decode_read_frame,
+    CardActionView, CardUpdateKindView, CardView, CommandKindView, EpochGate, GateDecision,
+    LosslessKindView, ReadBody, ReadError, ReadFrame, SourceLifecycleView, SourceSelectionGateView,
+    decode_read_frame,
 };
 use envoix_types::Secret;
+
+/// Where a card's source is, in one line.
+///
+/// Exhaustive by construction: a new lifecycle state fails this build rather
+/// than rendering as one of the old ones. Nothing here infers — a card that has
+/// no name says so, instead of showing an empty string that could be a real
+/// file called nothing.
+fn source_summary(source: &SourceLifecycleView) -> String {
+    match source {
+        SourceLifecycleView::NotRequired(view) => match &view.peer_content {
+            Some(content) => format!("receiving {:?} ({})", content.offered_name, content.total),
+            None => "receiving (the peer has not said what yet)".to_owned(),
+        },
+        SourceLifecycleView::AwaitingSelection(view) => match &view.selection {
+            SourceSelectionGateView::Selectable(gate) => format!(
+                "needs a document ({:?}, acquisition {})",
+                gate.reason, gate.acquisition.request
+            ),
+            SourceSelectionGateView::RePickRequired(gate) => {
+                format!("needs a NEW document ({:?})", gate.reason)
+            }
+        },
+        SourceLifecycleView::Acquiring(offer) => {
+            format!("acquiring {:?}", offer.display_name)
+        }
+        SourceLifecycleView::Staging(offer) => format!("staging {:?}", offer.display_name),
+        SourceLifecycleView::Ready(view) => format!(
+            "sending {:?} ({})",
+            view.content.offered_name, view.content.total
+        ),
+    }
+}
 
 /// Why an inbound lane frame was not admitted by this attachment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,7 +167,13 @@ impl Frontend {
         command: CommandKindView,
     ) -> Result<Vec<u8>, IntentError> {
         let row = self.cards.get(card).ok_or(IntentError::UnknownCard)?;
-        if !row.view.allowed_actions.contains(&command) {
+        // Only the COMMAND arm: `pick_source` is an action a frontend takes with
+        // its own platform, not one it can spell as a command frame.
+        if !row
+            .view
+            .allowed_actions
+            .contains(&CardActionView::Command(command))
+        {
             return Err(IntentError::NotOffered);
         }
         encode_command_frame(&CommandFrame {
@@ -280,13 +319,12 @@ pub fn render(event: &Ingested) -> String {
                 | CardUpdateKindView::Progress(view)
                 | CardUpdateKindView::State(view)
                 | CardUpdateKindView::Terminal(view) => format!(
-                    "card={} epoch={} direction={:?} name={:?} total={} state={:?} \
+                    "card={} epoch={} direction={:?} source={} state={:?} \
                      quiescence={:?} bytes={} allowed={:?}",
                     update.card,
                     update.epoch,
                     view.direction,
-                    view.offered_name,
-                    view.total,
+                    source_summary(&view.source),
                     view.state,
                     view.quiescence,
                     view.bytes,
@@ -352,8 +390,10 @@ mod tests {
         decode_command_frame, encode_command_frame,
     };
     use envoix_bindings::read::{
-        CardUpdateKindView, CardUpdateView, CardView, CommandKindView, DirectionView, IdentityView,
-        PhaseView, ProductStateView, QuiescenceView, ReadBody, ReadFrame, encode_read_frame,
+        AcceptedSourceOfferView, CardActionView, CardUpdateKindView, CardUpdateView, CardView,
+        CommandKindView, DirectionView, IdentityView, PhaseView, ProductStateView, QuiescenceView,
+        ReadBody, ReadFrame, RoomParticipationView, SourceAcquisitionKeyView, SourceLifecycleView,
+        SourceReadyView, TransferContentView, encode_read_frame,
     };
 
     use super::{
@@ -361,16 +401,33 @@ mod tests {
         create_mint_frame, render,
     };
 
-    fn view(allowed_actions: Vec<CommandKindView>) -> CardView {
+    fn view(commands: Vec<CommandKindView>) -> CardView {
+        let allowed_actions = commands.into_iter().map(CardActionView::Command).collect();
         CardView {
             identity: IdentityView {
                 card: "0000000000000001".to_owned(),
                 transfer: "00000000000000000000000000000002".to_owned(),
                 artifact: "00000000000000000000000000000003".to_owned(),
             },
+            participation: RoomParticipationView::Minted,
             direction: DirectionView::Send,
-            offered_name: "contract.bin".to_owned(),
-            total: 4096,
+            // A sender whose document is staged: the name and total live here
+            // now, where a card that has none simply has a different variant.
+            source: SourceLifecycleView::Ready(SourceReadyView {
+                offer: AcceptedSourceOfferView {
+                    acquisition: SourceAcquisitionKeyView {
+                        card: "0000000000000001".to_owned(),
+                        generation: 0,
+                        request: "00000000000000000000000000000004".to_owned(),
+                    },
+                    display_name: "contract.bin".to_owned(),
+                    reported_size: Some(4096),
+                },
+                content: TransferContentView {
+                    offered_name: "contract.bin".to_owned(),
+                    total: 4096,
+                },
+            }),
             state: ProductStateView::Preparing,
             quiescence: QuiescenceView::Quiescent,
             generation: 0,

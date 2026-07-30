@@ -326,14 +326,36 @@ void backendToFrontend() {
   }
   final card = kind.value;
   expectEq('u32 max generation', card.generation, 4294967295);
-  expectEq('total at u63 max', card.total, 9223372036854775807);
   expectEq('bytes at 2^53', card.bytes, 9007199254740992);
   expectEq('bytes_resumed above 2^53', card.bytesResumed, 9007199254740993);
+  // The name and total live in the source lifecycle now, and this card is a
+  // receiver, so they are what the PEER said it is sending.
+  final source = card.source;
+  if (source is! SourceLifecycleViewNotRequired) {
+    _failures.add('read_card_update_widest is not a receiver');
+    return;
+  }
+  final peer = source.value.peerContent;
+  if (peer == null) {
+    _failures.add('read_card_update_widest lost its peer content');
+    return;
+  }
+  expectEq('total at u63 max', peer.total, 9223372036854775807);
   // Emoji with a skin-tone modifier, RTL text, a decomposed combining
   // mark, and a flag sequence, written escape by escape so the comparison
   // cannot pass through accidental normalization.
-  expectEq('multi-byte name survives', card.offeredName,
+  expectEq('multi-byte name survives', peer.offeredName,
       '\u{1F44D}\u{1F3FD} \u0645\u0631\u062D\u0628\u0627 e\u0301 \u{1F1FA}\u{1F1F3}.pdf');
+  // The action list carries the one action that is not a command, and it
+  // carries the acquisition it names — an action stripped of its key would
+  // tell a frontend to answer an acquisition it cannot identify.
+  final pick = card.allowedActions.first;
+  if (pick is! CardActionViewPickSource) {
+    _failures.add('read_card_update_widest did not publish pick_source first');
+    return;
+  }
+  expectEq('the picker action names its acquisition',
+      pick.value.acquisition.request, 'ffffffffffffffffffffffffffffffff');
   expect('the state union decodes', card.state is ProductStateViewPaused);
   expectEq(
     'the nested pause origin decodes',
@@ -362,7 +384,22 @@ void backendToFrontend() {
     _failures.add('read_card_update_narrowest is not a progress update');
     return;
   }
-  expectEq('an empty string decodes as empty', progress.value.offeredName, '');
+  // A gate that can accept no offer publishes NO acquisition key, and the empty
+  // display name of the offer it lost still decodes as empty rather than absent.
+  final narrowSource = progress.value.source;
+  if (narrowSource is! SourceLifecycleViewAwaitingSelection) {
+    _failures.add('read_card_update_narrowest is not awaiting selection');
+    return;
+  }
+  final gate = narrowSource.value.selection;
+  if (gate is! SourceSelectionGateViewRePickRequired) {
+    _failures.add('read_card_update_narrowest is not re-pick required');
+    return;
+  }
+  expectEq('an empty string decodes as empty',
+      gate.value.previousOffer.displayName, '');
+  expectEq('the lost reason survives', gate.value.reason,
+      SourcePromptReasonView.stagingFailed);
   expectEq('epoch zero decodes', narrowest.value.epoch, 0);
   expectEq('an explicit null optional decodes as absent',
       progress.value.outcome, null);

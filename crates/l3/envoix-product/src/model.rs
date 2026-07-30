@@ -191,10 +191,15 @@ pub enum ProductInput {
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityAction {
     PostReceipt,
-    /// Ask the platform for the send source the user chose. It is minted only
-    /// once the card is durable, so the picker is never the thing that decides
-    /// a transfer exists (`SF02`).
-    SelectSource,
+    /// Take hold of the document that was chosen for this card's acquisition.
+    ///
+    /// Issued when an offer is ACCEPTED, not at creation. It used to be minted
+    /// the moment a sender existed, which asked the platform to bind a document
+    /// nobody had chosen yet — the adapter claimed from an empty registry and
+    /// answered `source_unreadable` every time. Opening the picker is not this:
+    /// that is a frontend affordance, published as the card's `pick_source`
+    /// action, and it happens before there is anything to bind.
+    AcquireSource,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -7,38 +7,38 @@
 # cargo.
 
 [payload]
-build_manifest_sha256 = "8b311dc2d889c5d659044356d408c837f7673104fa89ef315b4337e915a05171"
-sources_sha256 = "f5dcc0917e53ae4c30699d3e447339a53a97c3e8a6029854dc7b3a64411464a9"
+build_manifest_sha256 = "3cff570df79a87deb7283f054e11d11e5aaed78d73fbc84b88484cbc3343512a"
+sources_sha256 = "cf86d57994f78d7171e32f1ff31fd6c6700175387afda53aafaa5b6eaacc67f2"
 
 [[payload.library]]
 build_type = "debug"
 abi = "arm64-v8a"
-sha256 = "9efdc2759f8921326557df6eb996833d10e3bd83a2efea57243c76522572f39c"
+sha256 = "ea7214088585006044a5c1a0265a0e1819c7624cae4ef6a34e451bebbe16fdc1"
 
 [[payload.library]]
 build_type = "debug"
 abi = "x86_64"
-sha256 = "3f8c1c571afa06cf3a983695f5443465722bc41cf387da794851cbac0eb8032f"
+sha256 = "a07c7aad789454743c1091cb6ef1e3bc0f793770d6cb0c76651ecbf6cfd5cfbc"
 
 [[payload.library]]
 build_type = "release"
 abi = "arm64-v8a"
-sha256 = "5beeba943c4aa27383cb14da9097906057ead3664bf137670ebf026a2e9d2fa3"
+sha256 = "1010bf358ad64c455c582e45d60d5c77449c5e1cfc23b4dbf86f7f5f99e37c3c"
 
 [[payload.library]]
 build_type = "release"
 abi = "x86_64"
-sha256 = "1cc71a003cf89668df95fdf8ca2a9d7eee6950ebfd70c49436cb474a7a96591b"
+sha256 = "c70670eea2419fb4be99a0e77f896bbba5858eeeccd8d617b671935ece0093ab"
 
 [[payload.bundled]]
 soname = "libapp.so"
 abi = "arm64-v8a"
-sha256 = "aff236e6e840261d2dc17e27f5917a69dce98d66332f9032381c4b87b8576a52"
+sha256 = "135e8ff6756cb49577750747396db76360ff4ad1187b05ce34130b0ed9842c0b"
 
 [[payload.bundled]]
 soname = "libapp.so"
 abi = "x86_64"
-sha256 = "66326a067eb656b9d05de6a1f3e888fc860cce46ab1ef1d0cdb2946df0ae9fe3"
+sha256 = "d542dee3bca5c980f2fdb38594efa3eea2c24b18ff2994f3e975488e78a00d75"
 
 [[payload.bundled]]
 soname = "libflutter.so"

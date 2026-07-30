@@ -5,12 +5,13 @@ use std::num::NonZeroUsize;
 use envoix_bindings::capability::CAPABILITY_SCHEMA_ID;
 use envoix_bindings::command::COMMAND_SCHEMA_ID;
 use envoix_bindings::read::{
-    AbiSchemaManifestView, CapabilityActionView, CardUpdateKindView, CardView, DirectionView,
-    DutyKindView, EpochGate, EvidenceValueView, GateDecision, LosslessKindView, OutcomeCodeView,
-    OutcomeView, PauseOriginView, PausedView, PhaseView, ProductStateView, QuiescenceView,
-    READ_MAX_FRAME_BYTES, READ_SCHEMA_ID, ReadBody, ReadError, ReadFrame, RecoveryView,
-    RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView,
-    RunningView, SubscribeRejectionView, WorkerKindView, decode_read_frame, encode_read_frame,
+    AbiSchemaManifestView, CapabilityActionView, CardActionView, CardUpdateKindView, CardView,
+    DirectionView, DutyKindView, EpochGate, EvidenceValueView, GateDecision, LosslessKindView,
+    OutcomeCodeView, OutcomeView, PauseOriginView, PausedView, PhaseView, ProductStateView,
+    QuiescenceView, READ_MAX_FRAME_BYTES, READ_SCHEMA_ID, ReadBody, ReadError, ReadFrame,
+    RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView,
+    RetryabilityView, RunningView, SourceLifecycleView, SourceSelectionGateView,
+    SubscribeRejectionView, WorkerKindView, decode_read_frame, encode_read_frame,
 };
 use envoix_bindings::{
     FieldTy, build_manifest_frame, card_update_frame, closed_frame, command_schema_text, emit,
@@ -22,8 +23,10 @@ use envoix_evidence::{
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Retryability, SafeDisplay};
 use envoix_runtime::{
-    CardUpdateKind, Duty, DutyKind, DutyProvenance, LosslessUpdateKind, MAX_BROKER_LENGTH,
-    MAX_INVITE_LINK_LENGTH, MAX_RELAY_LENGTH, MAX_ROOM_CODE_LENGTH, SubscribeError, TransferRecord,
+    AcceptedSourceOffer, CardUpdateKind, Duty, DutyKind, DutyProvenance, LosslessUpdateKind,
+    MAX_BROKER_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_RELAY_LENGTH, MAX_ROOM_CODE_LENGTH, NewTransfer,
+    RoomParticipation, SourceAcquisitionKey, SourceOfferAnswer, SubscribeError,
+    SystemIdentitySource, TransferRecord,
 };
 use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId, TransferId};
 
@@ -489,7 +492,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/9");
+        value["schema"] = serde_json::json!("envoix/binding/read/10");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {
@@ -523,12 +526,26 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Numeric ranges are enforced: u63 overflow, u32 overflow, negatives.
     let overflow = tamper(&base, |value| {
-        value["body"]["value"]["kind"]["value"]["total"] = serde_json::json!(u64::MAX);
+        value["body"]["value"]["kind"]["value"]["bytes"] = serde_json::json!(u64::MAX);
     });
     assert!(matches!(
         decode_read_frame(&overflow),
         Err(ReadError::Range { .. })
     ));
+    // And at NESTED depth: the total now lives inside the source lifecycle, so
+    // a range check applied only to a frame's top-level fields would miss it.
+    let nested_overflow = tamper(&base, |value| {
+        value["body"]["value"]["kind"]["value"]["source"]["value"]["peer_content"]["total"] =
+            serde_json::json!(u64::MAX);
+    });
+    assert!(
+        matches!(
+            decode_read_frame(&nested_overflow),
+            Err(ReadError::Range { .. })
+        ),
+        "nested tamper produced {}",
+        String::from_utf8_lossy(&nested_overflow)
+    );
     let generation_overflow = tamper(&base, |value| {
         value["body"]["value"]["kind"]["value"]["generation"] =
             serde_json::json!(4_294_967_296_u64);
@@ -694,7 +711,7 @@ fn generated_read_schema_roundtrip_and_containment() {
         /// Text this contract mints, so the bound is this contract's call.
         ContractLocal,
     }
-    let classified: [(&str, &str, TextBound); 17] = [
+    let classified: [(&str, &str, TextBound); 18] = [
         (
             "OutcomeView",
             "display",
@@ -710,8 +727,17 @@ fn generated_read_schema_roundtrip_and_containment() {
             "link",
             TextBound::Derived(MAX_INVITE_LINK_LENGTH),
         ),
+        // Both names a card can carry are the SAME L0 type at the same
+        // published maximum: what the provider offered, and what staging or the
+        // peer established. Two fields, one owner, no number this contract
+        // invented about somebody else's data.
         (
-            "CardView",
+            "AcceptedSourceOfferView",
+            "display_name",
+            TextBound::Derived(OfferedName::MAX_BYTES),
+        ),
+        (
+            "TransferContentView",
             "offered_name",
             TextBound::Derived(OfferedName::MAX_BYTES),
         ),
@@ -1162,13 +1188,33 @@ fn the_read_contract_publishes_every_command_a_frontend_can_send() {
         .iter()
         .find(|field| field.name == "allowed_actions")
         .expect("CardView publishes allowed_actions");
+    // The bound admits the whole command vocabulary PLUS `pick_source`, which
+    // is not a command: it is the frontend's exchange with its own platform, so
+    // it deliberately has no `CommandView` counterpart to drift from.
     assert_eq!(
         actions.ty,
         FieldTy::List {
-            element: Box::new(FieldTy::Named("CommandKindView".to_owned())),
-            max_len: 5,
+            element: Box::new(FieldTy::Named("CardActionView".to_owned())),
+            max_len: 6,
         }
     );
+    // And the equality above is held only against the COMMAND arm, so adding a
+    // non-command action can never silently satisfy it.
+    let action_arms: Vec<String> = parse_schema(read_schema_text())
+        .expect("schema parses")
+        .decls
+        .iter()
+        .find_map(|decl| match decl {
+            envoix_bindings::Decl::Union(decl) if decl.name == "CardActionView" => Some(
+                decl.variants
+                    .iter()
+                    .map(|variant| variant.name.clone())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("CardActionView is a union of the read schema");
+    assert_eq!(action_arms, vec!["command", "pick_source"]);
 }
 
 /// Manifest coherence: the projected manifest names EVERY identity this build
@@ -1234,4 +1280,87 @@ fn projected_manifest_names_every_identity() {
     }
     assert_eq!(view.package_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(view.protocol.set_id, BUILD_TRUST_MANIFEST.protocol.set_id);
+}
+
+/// The key a frontend is told to answer with is the key the authority accepts.
+///
+/// `pick_source` exists to hand a frontend one acquisition, and the whole
+/// ownership argument behind `SourceAcquisitionKey` collapses if the published
+/// key and the checked key are two derivations that can drift. They are not:
+/// both call `current_acquisition()`. This proves it end to end rather than by
+/// reading the code — the projected key is fed back as an offer and the
+/// authority accepts it, and a key one field different is refused.
+#[test]
+fn the_published_picker_key_is_the_one_the_authority_accepts() {
+    let (record, _) = TransferRecord::create(
+        NewTransfer {
+            direction: envoix_types::Direction::Send,
+            participation: RoomParticipation::Minted,
+            pairing: None,
+        },
+        &mut SystemIdentitySource,
+    )
+    .expect("a sender is created");
+
+    let ReadBody::CardUpdate(update) = card_update_frame(
+        1,
+        record.identity.card,
+        &CardUpdateKind::Snapshot(record.clone()),
+    )
+    .body
+    else {
+        panic!("a snapshot projects as a card update");
+    };
+    let CardUpdateKindView::Snapshot(view) = update.kind else {
+        panic!("a snapshot projects as a snapshot");
+    };
+
+    // Published in BOTH places a frontend could read it, and they agree.
+    let SourceLifecycleView::AwaitingSelection(awaiting) = &view.source else {
+        panic!("a fresh sender awaits a selection");
+    };
+    let SourceSelectionGateView::Selectable(gate) = &awaiting.selection else {
+        panic!("a fresh sender's gate accepts an offer");
+    };
+    let Some(CardActionView::PickSource(action)) = view.allowed_actions.first() else {
+        panic!("a fresh sender publishes pick_source first");
+    };
+    assert_eq!(action.acquisition, gate.acquisition);
+
+    // And it is the key the authority checks against: an offer built from what
+    // was published is ACCEPTED.
+    let published = &action.acquisition;
+    let key = |request: &str| {
+        SourceAcquisitionKey::of(DutyProvenance {
+            card: RecordId::new(u64::from_str_radix(&published.card, 16).expect("hex card")),
+            generation: AttemptGen::new(published.generation),
+            request: RequestId::from_bytes(
+                u128::from_str_radix(request, 16)
+                    .expect("hex request")
+                    .to_be_bytes(),
+            ),
+        })
+    };
+    let name = OfferedName::from_untrusted("chosen.bin").expect("a bounded name");
+    assert_eq!(
+        record.answer_source_offer(&AcceptedSourceOffer::new(
+            key(&published.request),
+            name.clone(),
+            None
+        )),
+        SourceOfferAnswer::Accepted,
+        "the authority refused the acquisition it published"
+    );
+
+    // A key one field different is a DIFFERENT acquisition, and refused. Without
+    // this the assertion above would also pass if the authority accepted
+    // anything at all.
+    let mut other = published.request.clone();
+    let last = other.pop().expect("a non-empty request");
+    other.push(if last == 'f' { '0' } else { 'f' });
+    assert_eq!(
+        record.answer_source_offer(&AcceptedSourceOffer::new(key(&other), name, None)),
+        SourceOfferAnswer::Stale,
+        "the authority accepted an acquisition it never published"
+    );
 }

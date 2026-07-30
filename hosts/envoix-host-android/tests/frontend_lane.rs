@@ -19,13 +19,12 @@ use envoix_bindings::command::{
 };
 use envoix_bindings::lag_frame;
 use envoix_bindings::read::{
-    CardUpdateKindView, CardUpdateView, CardView, CommandKindView, DiagnosticsStatusView,
-    EvidenceTimelineView, ProductStateView, QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame,
-    decode_read_frame, encode_read_frame,
+    CardActionView, CardUpdateKindView, CardUpdateView, CardView, CommandKindView,
+    DiagnosticsStatusView, EvidenceTimelineView, ProductStateView, QuiescenceView, READ_SCHEMA_ID,
+    ReadBody, ReadFrame, decode_read_frame, encode_read_frame,
 };
 use envoix_host_android::{AttachmentToken, FramePoll, Host};
-use envoix_outcomes::OutcomeCode;
-use envoix_platform_android::{Work, WorkOrder, WorkReport};
+use envoix_platform_android::{Work, WorkOrder};
 use envoix_runtime::LosslessUpdateKind;
 use envoix_types::{RecordId, Secret};
 
@@ -384,7 +383,9 @@ fn flutter_mutating_hot_restart_preserves_cards() {
         restored.state
     );
     assert!(
-        restored.allowed_actions.contains(&CommandKindView::Resume),
+        restored
+            .allowed_actions
+            .contains(&CardActionView::Command(CommandKindView::Resume)),
         "a restored paused card must still be offered resume, got {:?}",
         restored.allowed_actions
     );
@@ -531,38 +532,21 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
     fs::write(work.join("cards.frames"), cards.join("\n")).expect("write the card frames");
     replay("render");
 
-    // The `SourceHandle` duty round-trips: asked (the host dispatched a work
-    // order for it, for THIS card), granted (the service executed it), admitted
-    // exactly once. The order is the duty's whole surface to the platform —
-    // BN4's pump routes duties to the service rather than also publishing them
-    // to observers, so this is where the ask is visible.
-    let order = poll_source_order(&host).expect("the host dispatched the source duty");
-    let provenance = order.provenance;
-    assert_eq!(
-        RecordId::new(provenance.card.value()),
-        card,
-        "the source duty belongs to the card that needs a source"
-    );
-    // And its ANSWER is refused, which is the honest state of this lane rather
-    // than a defect. A source acquisition must state whether the platform's
-    // hold survives a restart and whether the source can be re-read from an
-    // offset; the generated duty contract carries an outcome code and nothing
-    // else, so `completed` cannot say either. The ledger classifies that as
-    // incompatible with the duty's kind and leaves the duty OUTSTANDING, so it
-    // is re-delivered rather than silently discharged on a claim that says
-    // nothing. duty/2 gives this lane the source vocabulary; until it does, a
-    // bare outcome must not be launderable into a source the card believes it
-    // holds.
-    let report = WorkReport::new(provenance.to_provenance(), OutcomeCode::Completed);
-    let encoded = report.encode().expect("the report encodes");
+    // Creating a card that needs a document dispatches NO platform work.
+    //
+    // It used to dispatch a `SourceHandle` order here, and the order was
+    // answerable only by claiming a URI nobody had picked — so the adapter
+    // reported `source_unreadable` for every send this app ever created. The
+    // ask is now the card's published `pick_source` action, carrying the exact
+    // acquisition an offer must name (asserted in the Dart render replay), and
+    // the handle duty is commissioned only once an offer has been accepted.
+    //
+    // Nothing here can accept one yet: the host still refuses a source offer on
+    // the command lane. That refusal is the next step's, and it is stated in
+    // `host.rs` rather than discovered here.
     assert!(
-        !host.report_duty(&encoded),
-        "a bare outcome code cannot discharge a source acquisition"
-    );
-    assert!(
-        !host.report_duty(&encoded),
-        "and it is refused every time — a classification refusal, not a duty \
-         consumed by the first bad answer"
+        poll_source_order(&host).is_none(),
+        "creating a card commissioned platform work for a document nobody chose"
     );
 
     // And the cards are on disk, not in this process: a fresh host over the

@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/8";
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/9";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -196,13 +196,13 @@ impl DutyKindView {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityActionView {
     PostReceipt,
-    SelectSource,
+    AcquireSource,
 }
 
 impl CapabilityActionView {
     pub const ALL: [Self; 2] = [
         Self::PostReceipt,
-        Self::SelectSource,
+        Self::AcquireSource,
     ];
 }
 
@@ -338,12 +338,120 @@ pub struct InviteView {
     pub qr: Option<QrView>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoomParticipationView {
+    Minted,
+    Joined,
+}
+
+impl RoomParticipationView {
+    pub const ALL: [Self; 2] = [
+        Self::Minted,
+        Self::Joined,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceAcquisitionKeyView {
+    pub card: String,
+    pub generation: u32,
+    pub request: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourcePromptReasonView {
+    Initial,
+    Unreadable,
+    PermissionLost,
+    StorageFault,
+    StagingFailed,
+    Internal,
+}
+
+impl SourcePromptReasonView {
+    pub const ALL: [Self; 6] = [
+        Self::Initial,
+        Self::Unreadable,
+        Self::PermissionLost,
+        Self::StorageFault,
+        Self::StagingFailed,
+        Self::Internal,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedSourceOfferView {
+    pub acquisition: SourceAcquisitionKeyView,
+    pub display_name: String,
+    pub reported_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferContentView {
+    pub offered_name: String,
+    pub total: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceNotRequiredView {
+    pub peer_content: Option<TransferContentView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceSelectableView {
+    pub acquisition: SourceAcquisitionKeyView,
+    pub reason: SourcePromptReasonView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRePickRequiredView {
+    pub reason: SourcePromptReasonView,
+    pub previous_offer: AcceptedSourceOfferView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceSelectionGateView {
+    Selectable(SourceSelectableView),
+    RePickRequired(SourceRePickRequiredView),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceAwaitingSelectionView {
+    pub selection: SourceSelectionGateView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceReadyView {
+    pub offer: AcceptedSourceOfferView,
+    pub content: TransferContentView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceLifecycleView {
+    NotRequired(SourceNotRequiredView),
+    AwaitingSelection(SourceAwaitingSelectionView),
+    Acquiring(AcceptedSourceOfferView),
+    Staging(AcceptedSourceOfferView),
+    Ready(SourceReadyView),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PickSourceActionView {
+    pub acquisition: SourceAcquisitionKeyView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CardActionView {
+    Command(CommandKindView),
+    PickSource(PickSourceActionView),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CardView {
     pub identity: IdentityView,
+    pub participation: RoomParticipationView,
     pub direction: DirectionView,
-    pub offered_name: String,
-    pub total: u64,
+    pub source: SourceLifecycleView,
     pub state: ProductStateView,
     pub quiescence: QuiescenceView,
     pub generation: u32,
@@ -351,7 +459,7 @@ pub struct CardView {
     pub bytes: u64,
     pub bytes_resumed: u64,
     pub outcome: Option<OutcomeView>,
-    pub allowed_actions: Vec<CommandKindView>,
+    pub allowed_actions: Vec<CardActionView>,
     pub invite: Option<InviteView>,
 }
 
@@ -983,7 +1091,7 @@ fn decode_capability_action_view_value(value: &Value, context: &'static str) -> 
     let text = value.as_str().ok_or(ReadError::Shape { context })?;
     match text {
         "post_receipt" => Ok(CapabilityActionView::PostReceipt),
-        "select_source" => Ok(CapabilityActionView::SelectSource),
+        "acquire_source" => Ok(CapabilityActionView::AcquireSource),
         _ => Err(ReadError::UnknownVariant { context }),
     }
 }
@@ -991,7 +1099,7 @@ fn decode_capability_action_view_value(value: &Value, context: &'static str) -> 
 fn encode_capability_action_view_value(value: &CapabilityActionView) -> Value {
     Value::from(match value {
         CapabilityActionView::PostReceipt => "post_receipt",
-        CapabilityActionView::SelectSource => "select_source",
+        CapabilityActionView::AcquireSource => "acquire_source",
     })
 }
 
@@ -1364,13 +1472,329 @@ fn encode_invite_view_value(value: &InviteView) -> Result<Value, ReadError> {
     Ok(Value::Object(map))
 }
 
+fn decode_room_participation_view_value(value: &Value, context: &'static str) -> Result<RoomParticipationView, ReadError> {
+    let text = value.as_str().ok_or(ReadError::Shape { context })?;
+    match text {
+        "minted" => Ok(RoomParticipationView::Minted),
+        "joined" => Ok(RoomParticipationView::Joined),
+        _ => Err(ReadError::UnknownVariant { context }),
+    }
+}
+
+fn encode_room_participation_view_value(value: &RoomParticipationView) -> Value {
+    Value::from(match value {
+        RoomParticipationView::Minted => "minted",
+        RoomParticipationView::Joined => "joined",
+    })
+}
+
+fn decode_source_acquisition_key_view_value(value: &Value, context: &'static str) -> Result<SourceAcquisitionKeyView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["card", "generation", "request"], context)?;
+    let card = hex_fixed(field(map, "card", "SourceAcquisitionKeyView.card")?, 16, "SourceAcquisitionKeyView.card")?;
+    let generation = integer_u32(field(map, "generation", "SourceAcquisitionKeyView.generation")?, "SourceAcquisitionKeyView.generation")?;
+    let request = hex_fixed(field(map, "request", "SourceAcquisitionKeyView.request")?, 32, "SourceAcquisitionKeyView.request")?;
+    Ok(SourceAcquisitionKeyView {
+        card,
+        generation,
+        request,
+    })
+}
+
+fn encode_source_acquisition_key_view_value(value: &SourceAcquisitionKeyView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("card".to_owned(), encode_hex_fixed(&value.card, 16, "SourceAcquisitionKeyView.card")?);
+    map.insert("generation".to_owned(), Value::from(value.generation));
+    map.insert("request".to_owned(), encode_hex_fixed(&value.request, 32, "SourceAcquisitionKeyView.request")?);
+    Ok(Value::Object(map))
+}
+
+fn decode_source_prompt_reason_view_value(value: &Value, context: &'static str) -> Result<SourcePromptReasonView, ReadError> {
+    let text = value.as_str().ok_or(ReadError::Shape { context })?;
+    match text {
+        "initial" => Ok(SourcePromptReasonView::Initial),
+        "unreadable" => Ok(SourcePromptReasonView::Unreadable),
+        "permission_lost" => Ok(SourcePromptReasonView::PermissionLost),
+        "storage_fault" => Ok(SourcePromptReasonView::StorageFault),
+        "staging_failed" => Ok(SourcePromptReasonView::StagingFailed),
+        "internal" => Ok(SourcePromptReasonView::Internal),
+        _ => Err(ReadError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_prompt_reason_view_value(value: &SourcePromptReasonView) -> Value {
+    Value::from(match value {
+        SourcePromptReasonView::Initial => "initial",
+        SourcePromptReasonView::Unreadable => "unreadable",
+        SourcePromptReasonView::PermissionLost => "permission_lost",
+        SourcePromptReasonView::StorageFault => "storage_fault",
+        SourcePromptReasonView::StagingFailed => "staging_failed",
+        SourcePromptReasonView::Internal => "internal",
+    })
+}
+
+fn decode_accepted_source_offer_view_value(value: &Value, context: &'static str) -> Result<AcceptedSourceOfferView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["acquisition", "display_name", "reported_size"], context)?;
+    let acquisition = decode_source_acquisition_key_view_value(field(map, "acquisition", "AcceptedSourceOfferView.acquisition")?, "AcceptedSourceOfferView.acquisition")?;
+    let display_name = utf8_bounded(field(map, "display_name", "AcceptedSourceOfferView.display_name")?, 255, "AcceptedSourceOfferView.display_name")?;
+    let reported_size = match field(map, "reported_size", "AcceptedSourceOfferView.reported_size")? {
+        Value::Null => None,
+        present => Some(integer(present, U63_MAX, "AcceptedSourceOfferView.reported_size")?),
+    };
+    Ok(AcceptedSourceOfferView {
+        acquisition,
+        display_name,
+        reported_size,
+    })
+}
+
+fn encode_accepted_source_offer_view_value(value: &AcceptedSourceOfferView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("acquisition".to_owned(), encode_source_acquisition_key_view_value(&value.acquisition)?);
+    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 255, "AcceptedSourceOfferView.display_name")?);
+    map.insert(
+        "reported_size".to_owned(),
+        match &value.reported_size {
+            None => Value::Null,
+            Some(inner) => encode_u63(*inner, "AcceptedSourceOfferView.reported_size")?,
+        },
+    );
+    Ok(Value::Object(map))
+}
+
+fn decode_transfer_content_view_value(value: &Value, context: &'static str) -> Result<TransferContentView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["offered_name", "total"], context)?;
+    let offered_name = utf8_bounded(field(map, "offered_name", "TransferContentView.offered_name")?, 255, "TransferContentView.offered_name")?;
+    let total = integer(field(map, "total", "TransferContentView.total")?, U63_MAX, "TransferContentView.total")?;
+    Ok(TransferContentView {
+        offered_name,
+        total,
+    })
+}
+
+fn encode_transfer_content_view_value(value: &TransferContentView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("offered_name".to_owned(), encode_utf8_bounded(&value.offered_name, 255, "TransferContentView.offered_name")?);
+    map.insert("total".to_owned(), encode_u63(value.total, "TransferContentView.total")?);
+    Ok(Value::Object(map))
+}
+
+fn decode_source_not_required_view_value(value: &Value, context: &'static str) -> Result<SourceNotRequiredView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["peer_content"], context)?;
+    let peer_content = match field(map, "peer_content", "SourceNotRequiredView.peer_content")? {
+        Value::Null => None,
+        present => Some(decode_transfer_content_view_value(present, "SourceNotRequiredView.peer_content")?),
+    };
+    Ok(SourceNotRequiredView {
+        peer_content,
+    })
+}
+
+fn encode_source_not_required_view_value(value: &SourceNotRequiredView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert(
+        "peer_content".to_owned(),
+        match &value.peer_content {
+            None => Value::Null,
+            Some(inner) => encode_transfer_content_view_value(inner)?,
+        },
+    );
+    Ok(Value::Object(map))
+}
+
+fn decode_source_selectable_view_value(value: &Value, context: &'static str) -> Result<SourceSelectableView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["acquisition", "reason"], context)?;
+    let acquisition = decode_source_acquisition_key_view_value(field(map, "acquisition", "SourceSelectableView.acquisition")?, "SourceSelectableView.acquisition")?;
+    let reason = decode_source_prompt_reason_view_value(field(map, "reason", "SourceSelectableView.reason")?, "SourceSelectableView.reason")?;
+    Ok(SourceSelectableView {
+        acquisition,
+        reason,
+    })
+}
+
+fn encode_source_selectable_view_value(value: &SourceSelectableView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("acquisition".to_owned(), encode_source_acquisition_key_view_value(&value.acquisition)?);
+    map.insert("reason".to_owned(), encode_source_prompt_reason_view_value(&value.reason));
+    Ok(Value::Object(map))
+}
+
+fn decode_source_re_pick_required_view_value(value: &Value, context: &'static str) -> Result<SourceRePickRequiredView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["reason", "previous_offer"], context)?;
+    let reason = decode_source_prompt_reason_view_value(field(map, "reason", "SourceRePickRequiredView.reason")?, "SourceRePickRequiredView.reason")?;
+    let previous_offer = decode_accepted_source_offer_view_value(field(map, "previous_offer", "SourceRePickRequiredView.previous_offer")?, "SourceRePickRequiredView.previous_offer")?;
+    Ok(SourceRePickRequiredView {
+        reason,
+        previous_offer,
+    })
+}
+
+fn encode_source_re_pick_required_view_value(value: &SourceRePickRequiredView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("reason".to_owned(), encode_source_prompt_reason_view_value(&value.reason));
+    map.insert("previous_offer".to_owned(), encode_accepted_source_offer_view_value(&value.previous_offer)?);
+    Ok(Value::Object(map))
+}
+
+fn decode_source_selection_gate_view_value(value: &Value, context: &'static str) -> Result<SourceSelectionGateView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(ReadError::Shape { context })?;
+    match kind {
+        "selectable" => Ok(SourceSelectionGateView::Selectable(decode_source_selectable_view_value(payload(map, "SourceSelectionGateView.selectable")?, "SourceSelectionGateView.selectable")?)),
+        "re_pick_required" => Ok(SourceSelectionGateView::RePickRequired(decode_source_re_pick_required_view_value(payload(map, "SourceSelectionGateView.re_pick_required")?, "SourceSelectionGateView.re_pick_required")?)),
+        _ => Err(ReadError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_selection_gate_view_value(value: &SourceSelectionGateView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    match value {
+        SourceSelectionGateView::Selectable(payload) => {
+            map.insert("kind".to_owned(), Value::from("selectable"));
+            map.insert("value".to_owned(), encode_source_selectable_view_value(payload)?);
+        }
+        SourceSelectionGateView::RePickRequired(payload) => {
+            map.insert("kind".to_owned(), Value::from("re_pick_required"));
+            map.insert("value".to_owned(), encode_source_re_pick_required_view_value(payload)?);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+fn decode_source_awaiting_selection_view_value(value: &Value, context: &'static str) -> Result<SourceAwaitingSelectionView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["selection"], context)?;
+    let selection = decode_source_selection_gate_view_value(field(map, "selection", "SourceAwaitingSelectionView.selection")?, "SourceAwaitingSelectionView.selection")?;
+    Ok(SourceAwaitingSelectionView {
+        selection,
+    })
+}
+
+fn encode_source_awaiting_selection_view_value(value: &SourceAwaitingSelectionView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("selection".to_owned(), encode_source_selection_gate_view_value(&value.selection)?);
+    Ok(Value::Object(map))
+}
+
+fn decode_source_ready_view_value(value: &Value, context: &'static str) -> Result<SourceReadyView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["offer", "content"], context)?;
+    let offer = decode_accepted_source_offer_view_value(field(map, "offer", "SourceReadyView.offer")?, "SourceReadyView.offer")?;
+    let content = decode_transfer_content_view_value(field(map, "content", "SourceReadyView.content")?, "SourceReadyView.content")?;
+    Ok(SourceReadyView {
+        offer,
+        content,
+    })
+}
+
+fn encode_source_ready_view_value(value: &SourceReadyView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("offer".to_owned(), encode_accepted_source_offer_view_value(&value.offer)?);
+    map.insert("content".to_owned(), encode_transfer_content_view_value(&value.content)?);
+    Ok(Value::Object(map))
+}
+
+fn decode_source_lifecycle_view_value(value: &Value, context: &'static str) -> Result<SourceLifecycleView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(ReadError::Shape { context })?;
+    match kind {
+        "not_required" => Ok(SourceLifecycleView::NotRequired(decode_source_not_required_view_value(payload(map, "SourceLifecycleView.not_required")?, "SourceLifecycleView.not_required")?)),
+        "awaiting_selection" => Ok(SourceLifecycleView::AwaitingSelection(decode_source_awaiting_selection_view_value(payload(map, "SourceLifecycleView.awaiting_selection")?, "SourceLifecycleView.awaiting_selection")?)),
+        "acquiring" => Ok(SourceLifecycleView::Acquiring(decode_accepted_source_offer_view_value(payload(map, "SourceLifecycleView.acquiring")?, "SourceLifecycleView.acquiring")?)),
+        "staging" => Ok(SourceLifecycleView::Staging(decode_accepted_source_offer_view_value(payload(map, "SourceLifecycleView.staging")?, "SourceLifecycleView.staging")?)),
+        "ready" => Ok(SourceLifecycleView::Ready(decode_source_ready_view_value(payload(map, "SourceLifecycleView.ready")?, "SourceLifecycleView.ready")?)),
+        _ => Err(ReadError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_lifecycle_view_value(value: &SourceLifecycleView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    match value {
+        SourceLifecycleView::NotRequired(payload) => {
+            map.insert("kind".to_owned(), Value::from("not_required"));
+            map.insert("value".to_owned(), encode_source_not_required_view_value(payload)?);
+        }
+        SourceLifecycleView::AwaitingSelection(payload) => {
+            map.insert("kind".to_owned(), Value::from("awaiting_selection"));
+            map.insert("value".to_owned(), encode_source_awaiting_selection_view_value(payload)?);
+        }
+        SourceLifecycleView::Acquiring(payload) => {
+            map.insert("kind".to_owned(), Value::from("acquiring"));
+            map.insert("value".to_owned(), encode_accepted_source_offer_view_value(payload)?);
+        }
+        SourceLifecycleView::Staging(payload) => {
+            map.insert("kind".to_owned(), Value::from("staging"));
+            map.insert("value".to_owned(), encode_accepted_source_offer_view_value(payload)?);
+        }
+        SourceLifecycleView::Ready(payload) => {
+            map.insert("kind".to_owned(), Value::from("ready"));
+            map.insert("value".to_owned(), encode_source_ready_view_value(payload)?);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+fn decode_pick_source_action_view_value(value: &Value, context: &'static str) -> Result<PickSourceActionView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["acquisition"], context)?;
+    let acquisition = decode_source_acquisition_key_view_value(field(map, "acquisition", "PickSourceActionView.acquisition")?, "PickSourceActionView.acquisition")?;
+    Ok(PickSourceActionView {
+        acquisition,
+    })
+}
+
+fn encode_pick_source_action_view_value(value: &PickSourceActionView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("acquisition".to_owned(), encode_source_acquisition_key_view_value(&value.acquisition)?);
+    Ok(Value::Object(map))
+}
+
+fn decode_card_action_view_value(value: &Value, context: &'static str) -> Result<CardActionView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(ReadError::Shape { context })?;
+    match kind {
+        "command" => Ok(CardActionView::Command(decode_command_kind_view_value(payload(map, "CardActionView.command")?, "CardActionView.command")?)),
+        "pick_source" => Ok(CardActionView::PickSource(decode_pick_source_action_view_value(payload(map, "CardActionView.pick_source")?, "CardActionView.pick_source")?)),
+        _ => Err(ReadError::UnknownVariant { context }),
+    }
+}
+
+fn encode_card_action_view_value(value: &CardActionView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    match value {
+        CardActionView::Command(payload) => {
+            map.insert("kind".to_owned(), Value::from("command"));
+            map.insert("value".to_owned(), encode_command_kind_view_value(payload));
+        }
+        CardActionView::PickSource(payload) => {
+            map.insert("kind".to_owned(), Value::from("pick_source"));
+            map.insert("value".to_owned(), encode_pick_source_action_view_value(payload)?);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
 fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"], context)?;
+    known_keys(map, &["identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"], context)?;
     let identity = decode_identity_view_value(field(map, "identity", "CardView.identity")?, "CardView.identity")?;
+    let participation = decode_room_participation_view_value(field(map, "participation", "CardView.participation")?, "CardView.participation")?;
     let direction = decode_direction_view_value(field(map, "direction", "CardView.direction")?, "CardView.direction")?;
-    let offered_name = utf8_bounded(field(map, "offered_name", "CardView.offered_name")?, 255, "CardView.offered_name")?;
-    let total = integer(field(map, "total", "CardView.total")?, U63_MAX, "CardView.total")?;
+    let source = decode_source_lifecycle_view_value(field(map, "source", "CardView.source")?, "CardView.source")?;
     let state = decode_product_state_view_value(field(map, "state", "CardView.state")?, "CardView.state")?;
     let quiescence = decode_quiescence_view_value(field(map, "quiescence", "CardView.quiescence")?, "CardView.quiescence")?;
     let generation = integer_u32(field(map, "generation", "CardView.generation")?, "CardView.generation")?;
@@ -1383,12 +1807,12 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
     };
     let allowed_actions = {
         let items = field(map, "allowed_actions", "CardView.allowed_actions")?.as_array().ok_or(ReadError::Shape { context: "CardView.allowed_actions" })?;
-        if items.len() > 5 {
+        if items.len() > 6 {
             return Err(ReadError::Bound { context: "CardView.allowed_actions" });
         }
         let mut collected = Vec::with_capacity(items.len());
         for item in items {
-            collected.push(decode_command_kind_view_value(item, "CardView.allowed_actions")?);
+            collected.push(decode_card_action_view_value(item, "CardView.allowed_actions")?);
         }
         collected
     };
@@ -1398,9 +1822,9 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
     };
     Ok(CardView {
         identity,
+        participation,
         direction,
-        offered_name,
-        total,
+        source,
         state,
         quiescence,
         generation,
@@ -1416,9 +1840,9 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
 fn encode_card_view_value(value: &CardView) -> Result<Value, ReadError> {
     let mut map = Map::new();
     map.insert("identity".to_owned(), encode_identity_view_value(&value.identity)?);
+    map.insert("participation".to_owned(), encode_room_participation_view_value(&value.participation));
     map.insert("direction".to_owned(), encode_direction_view_value(&value.direction));
-    map.insert("offered_name".to_owned(), encode_utf8_bounded(&value.offered_name, 255, "CardView.offered_name")?);
-    map.insert("total".to_owned(), encode_u63(value.total, "CardView.total")?);
+    map.insert("source".to_owned(), encode_source_lifecycle_view_value(&value.source)?);
     map.insert("state".to_owned(), encode_product_state_view_value(&value.state)?);
     map.insert("quiescence".to_owned(), encode_quiescence_view_value(&value.quiescence)?);
     map.insert("generation".to_owned(), Value::from(value.generation));
@@ -1433,12 +1857,12 @@ fn encode_card_view_value(value: &CardView) -> Result<Value, ReadError> {
         },
     );
     map.insert("allowed_actions".to_owned(), {
-        if value.allowed_actions.len() > 5 {
+        if value.allowed_actions.len() > 6 {
             return Err(ReadError::Bound { context: "CardView.allowed_actions" });
         }
         let mut items = Vec::with_capacity(value.allowed_actions.len());
         for item in &value.allowed_actions {
-            items.push(encode_command_kind_view_value(item));
+            items.push(encode_card_action_view_value(item)?);
         }
         Value::Array(items)
     });

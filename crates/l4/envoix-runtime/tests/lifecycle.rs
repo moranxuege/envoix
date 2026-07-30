@@ -20,10 +20,10 @@ use envoix_evidence::EvidenceRecord;
 use envoix_operation_store::OperationStore;
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_product::{
-    AcceptedSourceOffer, ApplyOutcome, CapabilityAction, CommitError, CommittedSession,
-    ContentHash, IdentityError, IdentitySource, NewTransfer, ProductCommand, ProductEffect,
-    ProductInput, ProductState, Quiescence, RecordDecode, RecordStore, StagedContent,
-    TransferContent, TransferRecord, decode_record,
+    AcceptedSourceOffer, ApplyOutcome, CommitError, CommittedSession, ContentHash, IdentityError,
+    IdentitySource, NewTransfer, ProductCommand, ProductInput, ProductState, Quiescence,
+    RecordDecode, RecordStore, SourceLifecycle, StagedContent, TransferContent, TransferRecord,
+    decode_record,
 };
 use envoix_runtime::{
     AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, CommandCompletion,
@@ -289,24 +289,6 @@ fn new_transfer(direction: Direction) -> NewTransfer {
     }
 }
 
-/// The acquisition key a frontend actually has.
-///
-/// Outside the product crate the expected key is not derivable — it arrives on
-/// the published source duty, which is exactly how a real frontend learns which
-/// acquisition it is answering.
-fn published_acquisition(outcome: &envoix_product::ApplyOutcome) -> DutyProvenance {
-    outcome
-        .released_after_commit
-        .iter()
-        .find_map(|effect| match effect {
-            ProductEffect::CapabilityDuty { duty, action } => {
-                (*action == CapabilityAction::SelectSource).then_some(duty.provenance)
-            }
-            _ => None,
-        })
-        .expect("a card that needs a source publishes the duty that asks for one")
-}
-
 /// The platform's answer, admitted through a real ledger — the only way to
 /// obtain an `AdmittedSourceResult`.
 fn source_settled(provenance: DutyProvenance, report: SourceReport) -> ProductInput {
@@ -330,8 +312,14 @@ fn source_settled(provenance: DutyProvenance, report: SourceReport) -> ProductIn
 
 /// Walks a sending session from "needs a document" to a live attempt, and
 /// returns the outcome that LAUNCHED it — which is what these tests assert on.
-fn stage_the_source(session: &mut Session, created: &envoix_product::ApplyOutcome) -> ApplyOutcome {
-    let provenance = published_acquisition(created);
+fn stage_the_source(
+    session: &mut Session,
+    _created: &envoix_product::ApplyOutcome,
+) -> ApplyOutcome {
+    // The acquisition a frontend answers is the one the card PUBLISHES, and
+    // read/9 carries it as the `pick_source` action. `current_acquisition()` is
+    // the same derivation the projection uses and the authority checks against.
+    let provenance = session.record().current_acquisition().provenance();
     session
         .apply(ProductInput::SourceOffered {
             offer: AcceptedSourceOffer::new(
@@ -929,22 +917,32 @@ async fn an_outstanding_source_duty_is_replayed_to_every_attachment() {
                 .unwrap()
                 .unwrap()
         };
-        assert!(matches!(
-            next().await.kind,
-            CardUpdateKind::Snapshot(record) if record.state == ProductState::Preparing
-        ));
-        let update = next().await;
-        let CardUpdateKind::CapabilityDuty { duty, action } = update.kind else {
+        // The ask travels in the SNAPSHOT, not as a duty. Every attachment is
+        // told it in full — the lifecycle plus the exact acquisition an offer
+        // must name — because the snapshot is current truth rather than a
+        // replay of events this attachment missed.
+        let CardUpdateKind::Snapshot(record) = next().await.kind else {
+            panic!("attachment {attachment} did not open with a snapshot");
+        };
+        assert_eq!(record.state, ProductState::Preparing);
+        let SourceLifecycle::AwaitingSelection(gate) = &record.source else {
             panic!("attachment {attachment} was not told the card needs a source");
         };
-        assert_eq!(action, CapabilityAction::SelectSource);
-        assert_eq!(duty.kind, DutyKind::SourceHandle);
-        assert_eq!(duty.provenance.card, card);
+        assert!(gate.accepts_an_offer());
+        let acquisition = record.current_acquisition();
+        assert_eq!(acquisition.card(), card);
         assert_eq!(
-            duty.provenance.generation,
+            acquisition.generation(),
             durable_state(root, card).generation
         );
     }
+
+    // The duty that IS raised — taking hold of a document once one has been
+    // chosen — cannot be driven from here yet: the host refuses a source offer
+    // on the command lane (`host.rs`), so nothing can move this card to
+    // `Acquiring` through the runtime. That commissioning is covered at the
+    // product level by
+    // `creating_a_card_that_needs_a_document_commissions_no_platform_work`.
 
     // The other direction — a card whose source IS ready — raises no such duty
     // in the first place, so an attachment to one is never told to pick a file.

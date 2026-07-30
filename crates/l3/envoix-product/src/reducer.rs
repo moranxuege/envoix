@@ -107,13 +107,19 @@ impl TransferRecord {
             receipt_request,
             command_ledger: crate::CommandLedger::default(),
         };
-        // Both are post-commit effects, so the card is durable before either
-        // the first attempt starts or the platform is asked for a source
-        // (`SF02`): identity comes before work, including the picker.
+        // A post-commit effect, so the card is durable before the first attempt
+        // starts (`SF02`): identity comes before work.
+        //
+        // A card that needs a document raises NO effect here. Asking a person
+        // to choose one is not platform work the authority commissions — it is
+        // an affordance the card publishes, and read/9 carries it as the
+        // `pick_source` action with the acquisition key this record derives.
+        // Issuing the handle duty here instead asked the platform to bind a
+        // document that did not exist yet.
         let effects = if record.source_is_ready() {
             vec![record.start_attempt(false)]
         } else {
-            vec![record.select_source()]
+            Vec::new()
         };
         Ok((record, effects))
     }
@@ -136,6 +142,21 @@ impl TransferRecord {
         self.source
             .content()
             .map_or(ByteCount::new(0), TransferContent::total)
+    }
+
+    /// The acquisition the platform is currently being asked to hold, if any.
+    ///
+    /// Returns the OFFER, not a boolean: a caller deciding whether an
+    /// outstanding acquisition duty is still live has to compare provenances,
+    /// and "this card is acquiring something" cannot answer that.
+    pub const fn acquiring_offer(&self) -> Option<&AcceptedSourceOffer> {
+        match &self.source {
+            SourceLifecycle::Acquiring(offer) => Some(offer),
+            SourceLifecycle::NotRequired { .. }
+            | SourceLifecycle::AwaitingSelection(_)
+            | SourceLifecycle::Staging { .. }
+            | SourceLifecycle::Ready { .. } => None,
+        }
     }
 
     /// Whether an attempt may start: the source is established, or none was
@@ -412,25 +433,37 @@ impl TransferRecord {
         &mut self,
         offer: AcceptedSourceOffer,
     ) -> Result<Vec<ProductEffect>, IdentityError> {
-        if self.answer_source_offer(&offer) == SourceOfferAnswer::Accepted {
-            self.source = SourceLifecycle::Acquiring(offer);
+        if self.answer_source_offer(&offer) != SourceOfferAnswer::Accepted {
+            return Ok(Vec::new());
         }
-        Ok(Vec::new())
+        self.source = SourceLifecycle::Acquiring(offer);
+        // NOW there is something to bind, so now the duty is issued. It is
+        // post-commit, so the acquisition is durable before the platform is
+        // asked to hold what it names — a crash between the two re-issues the
+        // same duty under the same key rather than binding a document to a card
+        // that does not remember accepting it.
+        Ok(vec![self.acquire_source()])
+    }
+
+    /// The acquisition an offer must name right now.
+    ///
+    /// DERIVED rather than stored a second time: it is this card, this
+    /// generation, and the source request this record already mints for its
+    /// duty. One place it can be wrong — and the same value the read projection
+    /// publishes as the `pick_source` action, so what a frontend is told to
+    /// answer with is what the authority will accept, by construction.
+    pub fn current_acquisition(&self) -> SourceAcquisitionKey {
+        SourceAcquisitionKey::of(DutyProvenance {
+            card: self.identity.card,
+            generation: self.generation,
+            request: self.source_request(),
+        })
     }
 
     /// What the authority would answer this offer, given the acquisition it is
     /// currently asking for.
-    ///
-    /// The expected key is DERIVED here rather than stored a second time: it is
-    /// this card, this generation, and the source request this record already
-    /// mints for its duty, so there is one place it can be wrong.
     pub fn answer_source_offer(&self, offer: &AcceptedSourceOffer) -> SourceOfferAnswer {
-        let expected = SourceAcquisitionKey::of(DutyProvenance {
-            card: self.identity.card,
-            generation: self.generation,
-            request: self.source_request(),
-        });
-        self.source.answer_offer(&expected, offer)
+        self.source.answer_offer(&self.current_acquisition(), offer)
     }
 
     /// Applies the platform's answer about the acquisition it was asked for.
@@ -528,11 +561,11 @@ impl TransferRecord {
         self.phase = Phase::Preparing;
         self.clear_progress();
         self.outcome = None;
-        // RS04's missing half: the command that says "the source needs
-        // re-picking" now actually asks for one. The generation moved, so this
-        // is a fresh duty provenance rather than a re-presentation of the one
-        // the failed attempt already discharged.
-        Ok(vec![self.select_source()])
+        // No effect. The generation moved, so the card's derived acquisition key
+        // is fresh, and the `pick_source` action the next projection publishes
+        // carries it — which is RS04's missing half. A duty here would ask the
+        // platform to bind a document the user has not chosen yet.
+        Ok(Vec::new())
     }
 
     fn on_restore(&mut self) -> Vec<ProductEffect> {
@@ -637,18 +670,25 @@ impl TransferRecord {
                 };
                 vec![self.start_attempt(false)]
             }
-            // Still waiting to be given a document. Republish the ask under the
-            // SAME key rather than failing the card: nothing went wrong, the
-            // process simply died before anyone chose. The old code failed it,
-            // because a stored boolean could not tell "no source yet" from "the
-            // source is gone".
+            // Still waiting to be given a document, and that is not a failure:
+            // nothing went wrong, the process simply died before anyone chose.
+            // The old code failed the card here, because a stored boolean could
+            // not tell "no source yet" from "the source is gone". No effect —
+            // the ask is republished by the projection, and a restore must
+            // never auto-open a picker.
             ProductState::Preparing
                 if matches!(
                     &self.source,
                     SourceLifecycle::AwaitingSelection(gate) if gate.accepts_an_offer()
                 ) =>
             {
-                vec![self.select_source()]
+                Vec::new()
+            }
+            // The acquisition was outstanding when the process died. Re-issue
+            // the SAME duty under the SAME key: it is idempotent by provenance,
+            // so this recovers a lost dispatch without inventing a result.
+            ProductState::Preparing if matches!(self.source, SourceLifecycle::Acquiring(_)) => {
+                vec![self.acquire_source()]
             }
             // A document was held and the process died holding it. The grant and
             // the staging worker died with it, and neither can be proven from
@@ -1250,10 +1290,10 @@ impl TransferRecord {
         }
     }
 
-    fn select_source(&self) -> ProductEffect {
+    fn acquire_source(&self) -> ProductEffect {
         ProductEffect::CapabilityDuty {
             duty: self.source_duty(),
-            action: CapabilityAction::SelectSource,
+            action: CapabilityAction::AcquireSource,
         }
     }
 

@@ -68,7 +68,7 @@ void main(List<String> arguments) {
     final CardView view = row.view!;
     equal(
       'the authority offers what a card with a live attempt offers',
-      view.allowedActions.map(commandOf).map(commandLabel).join(','),
+      view.allowedActions.map(actionLabel).join(','),
       'Pause,Cancel,Remove',
     );
 
@@ -163,7 +163,7 @@ void main(List<String> arguments) {
       'Paused by you');
   equal(
     'and the offer the authority now makes',
-    row.view!.allowedActions.map(commandOf).map(commandLabel).join(','),
+    row.view!.allowedActions.map(actionLabel).join(','),
     'Resume,Cancel,Remove',
   );
   check('a fresh epoch', row.epoch > attachment.cards.single.epoch);

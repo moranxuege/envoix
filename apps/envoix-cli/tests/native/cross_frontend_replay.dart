@@ -52,7 +52,11 @@ void main(List<String> arguments) {
   if (mode == 'command') {
     final Attachment attachment = attach('opening.frames');
     final CardRow row = attachment.cards.single;
-    if (!row.view!.allowedActions.contains(CommandKindView.cancel)) {
+    // Matched, not `contains`: the generated unions are sealed classes without
+    // value equality, so identity comparison would silently never match.
+    if (!row.view!.allowedActions.any((CardActionView action) =>
+        action is CardActionViewCommand &&
+        action.value == CommandKindView.cancel)) {
       throw StateError('the authority did not offer cancel');
     }
     final CommandIntent intent =
@@ -105,22 +109,54 @@ void main(List<String> arguments) {
   final List<String> witness = <String>[
     'created=$created',
     'direction=${directionToken(beforeView.direction)}',
-    'name=${beforeView.offeredName}',
-    'total=${beforeView.total}',
+    'source=${sourceToken(beforeView.source)}',
     'before_state=${stateToken(beforeView.state)}',
-    'before_allowed=${beforeView.allowedActions.map(commandToken).join(',')}',
+    'before_allowed=${beforeView.allowedActions.map(actionToken).join(',')}',
     'invite=${beforeView.invite != null}',
     'acceptance=$acceptance',
     'completion=$completion',
     'after_state=${stateToken(after.view!.state)}',
     'after_quiescence=${quiescenceToken(after.view!.quiescence)}',
-    'after_allowed=${after.view!.allowedActions.map(commandToken).join(',')}',
+    'after_allowed=${after.view!.allowedActions.map(actionToken).join(',')}',
     'card_count=${fresh.cards.length}',
     'epoch_advanced=${after.epoch > beforeEpoch}',
     'fresh_commands=${fresh.commands.forCard(after.card).length}',
   ];
   File('${work.path}/witness.txt').writeAsStringSync('${witness.join('\n')}\n');
 }
+
+/// One published action as a stable token, matching the Rust anchor exactly.
+///
+/// `pick_source` keeps its acquisition in SHAPE rather than by value: the two
+/// witnesses drive two different cards, so comparing the key itself would only
+/// prove they are different runs. Dropping it would witness nothing about an
+/// action whose whole point is naming one.
+String actionToken(CardActionView action) => switch (action) {
+      CardActionViewCommand(:final value) => commandToken(value),
+      CardActionViewPickSource(:final value) =>
+        RegExp(r'^[0-9a-f]{32}$').hasMatch(value.acquisition.request)
+            ? 'pick_source@<32hex>'
+            : 'pick_source@malformed(${value.acquisition.request})',
+    };
+
+/// Where a card's source is, as one stable token.
+String sourceToken(SourceLifecycleView source) => switch (source) {
+      SourceLifecycleViewNotRequired(:final value) => value.peerContent == null
+          ? 'not_required:none'
+          : 'not_required:${value.peerContent!.offeredName}:${value.peerContent!.total}',
+      SourceLifecycleViewAwaitingSelection(:final value) =>
+        switch (value.selection) {
+          SourceSelectionGateViewSelectable(value: final gate) =>
+            'selectable:${gate.reason.name.toLowerCase()}',
+          SourceSelectionGateViewRePickRequired(value: final gate) =>
+            're_pick_required:${gate.reason.name.toLowerCase()}',
+        },
+      SourceLifecycleViewAcquiring(:final value) =>
+        'acquiring:${value.displayName}',
+      SourceLifecycleViewStaging(:final value) => 'staging:${value.displayName}',
+      SourceLifecycleViewReady(:final value) =>
+        'ready:${value.content.offeredName}:${value.content.total}',
+    };
 
 String directionToken(DirectionView direction) => switch (direction) {
       DirectionView.send => 'send',

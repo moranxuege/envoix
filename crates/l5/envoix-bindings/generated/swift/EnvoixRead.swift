@@ -10,7 +10,7 @@ import Foundation
 
 public enum EnvoixRead {
 
-public static let readSchemaId = "envoix/binding/read/8"
+public static let readSchemaId = "envoix/binding/read/9"
 public static let readMaxFrameBytes = 1048576
 private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -119,7 +119,7 @@ public enum DutyKindView: String, Equatable {
 
 public enum CapabilityActionView: String, Equatable {
     case postReceipt = "post_receipt"
-    case selectSource = "select_source"
+    case acquireSource = "acquire_source"
 }
 
 public enum CommandKindView: String, Equatable {
@@ -207,11 +207,87 @@ public struct InviteView: Equatable {
     public let qr: QrView?
 }
 
-public struct CardView: Equatable {
-    public let identity: IdentityView
-    public let direction: DirectionView
+public enum RoomParticipationView: String, Equatable {
+    case minted = "minted"
+    case joined = "joined"
+}
+
+public struct SourceAcquisitionKeyView: Equatable {
+    public let card: String
+    public let generation: Int64
+    public let request: String
+}
+
+public enum SourcePromptReasonView: String, Equatable {
+    case initial = "initial"
+    case unreadable = "unreadable"
+    case permissionLost = "permission_lost"
+    case storageFault = "storage_fault"
+    case stagingFailed = "staging_failed"
+    case `internal` = "internal"
+}
+
+public struct AcceptedSourceOfferView: Equatable {
+    public let acquisition: SourceAcquisitionKeyView
+    public let displayName: String
+    public let reportedSize: Int64?
+}
+
+public struct TransferContentView: Equatable {
     public let offeredName: String
     public let total: Int64
+}
+
+public struct SourceNotRequiredView: Equatable {
+    public let peerContent: TransferContentView?
+}
+
+public struct SourceSelectableView: Equatable {
+    public let acquisition: SourceAcquisitionKeyView
+    public let reason: SourcePromptReasonView
+}
+
+public struct SourceRePickRequiredView: Equatable {
+    public let reason: SourcePromptReasonView
+    public let previousOffer: AcceptedSourceOfferView
+}
+
+public enum SourceSelectionGateView: Equatable {
+    case selectable(SourceSelectableView)
+    case rePickRequired(SourceRePickRequiredView)
+}
+
+public struct SourceAwaitingSelectionView: Equatable {
+    public let selection: SourceSelectionGateView
+}
+
+public struct SourceReadyView: Equatable {
+    public let offer: AcceptedSourceOfferView
+    public let content: TransferContentView
+}
+
+public enum SourceLifecycleView: Equatable {
+    case notRequired(SourceNotRequiredView)
+    case awaitingSelection(SourceAwaitingSelectionView)
+    case acquiring(AcceptedSourceOfferView)
+    case staging(AcceptedSourceOfferView)
+    case ready(SourceReadyView)
+}
+
+public struct PickSourceActionView: Equatable {
+    public let acquisition: SourceAcquisitionKeyView
+}
+
+public enum CardActionView: Equatable {
+    case command(CommandKindView)
+    case pickSource(PickSourceActionView)
+}
+
+public struct CardView: Equatable {
+    public let identity: IdentityView
+    public let participation: RoomParticipationView
+    public let direction: DirectionView
+    public let source: SourceLifecycleView
     public let state: ProductStateView
     public let quiescence: QuiescenceView
     public let generation: Int64
@@ -219,7 +295,7 @@ public struct CardView: Equatable {
     public let bytes: Int64
     public let bytesResumed: Int64
     public let outcome: OutcomeView?
-    public let allowedActions: [CommandKindView]
+    public let allowedActions: [CardActionView]
     public let invite: InviteView?
 }
 
@@ -847,13 +923,194 @@ public enum EnvoixReadCodec {
         )
     }
 
+    private static func decodeRoomParticipationView(_ value: Any?, _ context: String) throws -> RoomParticipationView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = RoomParticipationView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeSourceAcquisitionKeyView(_ value: Any?, _ context: String) throws -> SourceAcquisitionKeyView {
+        let map = try object(value, context)
+        try knownKeys(map, ["card", "generation", "request"], context)
+        let card = try hexFixed(try field(map, "card", "SourceAcquisitionKeyView.card"), 16, "SourceAcquisitionKeyView.card")
+        let generation = try integer(try field(map, "generation", "SourceAcquisitionKeyView.generation"), 4294967295, "SourceAcquisitionKeyView.generation")
+        let request = try hexFixed(try field(map, "request", "SourceAcquisitionKeyView.request"), 32, "SourceAcquisitionKeyView.request")
+        return SourceAcquisitionKeyView(
+            card: card,
+            generation: generation,
+            request: request
+        )
+    }
+
+    private static func decodeSourcePromptReasonView(_ value: Any?, _ context: String) throws -> SourcePromptReasonView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = SourcePromptReasonView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeAcceptedSourceOfferView(_ value: Any?, _ context: String) throws -> AcceptedSourceOfferView {
+        let map = try object(value, context)
+        try knownKeys(map, ["acquisition", "display_name", "reported_size"], context)
+        let acquisition = try decodeSourceAcquisitionKeyView(try field(map, "acquisition", "AcceptedSourceOfferView.acquisition"), "AcceptedSourceOfferView.acquisition")
+        let displayName = try utf8Bounded(try field(map, "display_name", "AcceptedSourceOfferView.display_name"), 255, "AcceptedSourceOfferView.display_name")
+        let reportedSize: Int64?
+        if let present = try field(map, "reported_size", "AcceptedSourceOfferView.reported_size") {
+            reportedSize = try integer(present, u63Max, "AcceptedSourceOfferView.reported_size")
+        } else {
+            reportedSize = nil
+        }
+        return AcceptedSourceOfferView(
+            acquisition: acquisition,
+            displayName: displayName,
+            reportedSize: reportedSize
+        )
+    }
+
+    private static func decodeTransferContentView(_ value: Any?, _ context: String) throws -> TransferContentView {
+        let map = try object(value, context)
+        try knownKeys(map, ["offered_name", "total"], context)
+        let offeredName = try utf8Bounded(try field(map, "offered_name", "TransferContentView.offered_name"), 255, "TransferContentView.offered_name")
+        let total = try integer(try field(map, "total", "TransferContentView.total"), u63Max, "TransferContentView.total")
+        return TransferContentView(
+            offeredName: offeredName,
+            total: total
+        )
+    }
+
+    private static func decodeSourceNotRequiredView(_ value: Any?, _ context: String) throws -> SourceNotRequiredView {
+        let map = try object(value, context)
+        try knownKeys(map, ["peer_content"], context)
+        let peerContent: TransferContentView?
+        if let present = try field(map, "peer_content", "SourceNotRequiredView.peer_content") {
+            peerContent = try decodeTransferContentView(present, "SourceNotRequiredView.peer_content")
+        } else {
+            peerContent = nil
+        }
+        return SourceNotRequiredView(
+            peerContent: peerContent
+        )
+    }
+
+    private static func decodeSourceSelectableView(_ value: Any?, _ context: String) throws -> SourceSelectableView {
+        let map = try object(value, context)
+        try knownKeys(map, ["acquisition", "reason"], context)
+        let acquisition = try decodeSourceAcquisitionKeyView(try field(map, "acquisition", "SourceSelectableView.acquisition"), "SourceSelectableView.acquisition")
+        let reason = try decodeSourcePromptReasonView(try field(map, "reason", "SourceSelectableView.reason"), "SourceSelectableView.reason")
+        return SourceSelectableView(
+            acquisition: acquisition,
+            reason: reason
+        )
+    }
+
+    private static func decodeSourceRePickRequiredView(_ value: Any?, _ context: String) throws -> SourceRePickRequiredView {
+        let map = try object(value, context)
+        try knownKeys(map, ["reason", "previous_offer"], context)
+        let reason = try decodeSourcePromptReasonView(try field(map, "reason", "SourceRePickRequiredView.reason"), "SourceRePickRequiredView.reason")
+        let previousOffer = try decodeAcceptedSourceOfferView(try field(map, "previous_offer", "SourceRePickRequiredView.previous_offer"), "SourceRePickRequiredView.previous_offer")
+        return SourceRePickRequiredView(
+            reason: reason,
+            previousOffer: previousOffer
+        )
+    }
+
+    private static func decodeSourceSelectionGateView(_ value: Any?, _ context: String) throws -> SourceSelectionGateView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "selectable":
+            return .selectable(try decodeSourceSelectableView(payload(map, "SourceSelectionGateView.selectable"), "SourceSelectionGateView.selectable"))
+        case "re_pick_required":
+            return .rePickRequired(try decodeSourceRePickRequiredView(payload(map, "SourceSelectionGateView.re_pick_required"), "SourceSelectionGateView.re_pick_required"))
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeSourceAwaitingSelectionView(_ value: Any?, _ context: String) throws -> SourceAwaitingSelectionView {
+        let map = try object(value, context)
+        try knownKeys(map, ["selection"], context)
+        let selection = try decodeSourceSelectionGateView(try field(map, "selection", "SourceAwaitingSelectionView.selection"), "SourceAwaitingSelectionView.selection")
+        return SourceAwaitingSelectionView(
+            selection: selection
+        )
+    }
+
+    private static func decodeSourceReadyView(_ value: Any?, _ context: String) throws -> SourceReadyView {
+        let map = try object(value, context)
+        try knownKeys(map, ["offer", "content"], context)
+        let offer = try decodeAcceptedSourceOfferView(try field(map, "offer", "SourceReadyView.offer"), "SourceReadyView.offer")
+        let content = try decodeTransferContentView(try field(map, "content", "SourceReadyView.content"), "SourceReadyView.content")
+        return SourceReadyView(
+            offer: offer,
+            content: content
+        )
+    }
+
+    private static func decodeSourceLifecycleView(_ value: Any?, _ context: String) throws -> SourceLifecycleView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "not_required":
+            return .notRequired(try decodeSourceNotRequiredView(payload(map, "SourceLifecycleView.not_required"), "SourceLifecycleView.not_required"))
+        case "awaiting_selection":
+            return .awaitingSelection(try decodeSourceAwaitingSelectionView(payload(map, "SourceLifecycleView.awaiting_selection"), "SourceLifecycleView.awaiting_selection"))
+        case "acquiring":
+            return .acquiring(try decodeAcceptedSourceOfferView(payload(map, "SourceLifecycleView.acquiring"), "SourceLifecycleView.acquiring"))
+        case "staging":
+            return .staging(try decodeAcceptedSourceOfferView(payload(map, "SourceLifecycleView.staging"), "SourceLifecycleView.staging"))
+        case "ready":
+            return .ready(try decodeSourceReadyView(payload(map, "SourceLifecycleView.ready"), "SourceLifecycleView.ready"))
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodePickSourceActionView(_ value: Any?, _ context: String) throws -> PickSourceActionView {
+        let map = try object(value, context)
+        try knownKeys(map, ["acquisition"], context)
+        let acquisition = try decodeSourceAcquisitionKeyView(try field(map, "acquisition", "PickSourceActionView.acquisition"), "PickSourceActionView.acquisition")
+        return PickSourceActionView(
+            acquisition: acquisition
+        )
+    }
+
+    private static func decodeCardActionView(_ value: Any?, _ context: String) throws -> CardActionView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "command":
+            return .command(try decodeCommandKindView(payload(map, "CardActionView.command"), "CardActionView.command"))
+        case "pick_source":
+            return .pickSource(try decodePickSourceActionView(payload(map, "CardActionView.pick_source"), "CardActionView.pick_source"))
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
     private static func decodeCardView(_ value: Any?, _ context: String) throws -> CardView {
         let map = try object(value, context)
-        try knownKeys(map, ["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"], context)
+        try knownKeys(map, ["identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"], context)
         let identity = try decodeIdentityView(try field(map, "identity", "CardView.identity"), "CardView.identity")
+        let participation = try decodeRoomParticipationView(try field(map, "participation", "CardView.participation"), "CardView.participation")
         let direction = try decodeDirectionView(try field(map, "direction", "CardView.direction"), "CardView.direction")
-        let offeredName = try utf8Bounded(try field(map, "offered_name", "CardView.offered_name"), 255, "CardView.offered_name")
-        let total = try integer(try field(map, "total", "CardView.total"), u63Max, "CardView.total")
+        let source = try decodeSourceLifecycleView(try field(map, "source", "CardView.source"), "CardView.source")
         let state = try decodeProductStateView(try field(map, "state", "CardView.state"), "CardView.state")
         let quiescence = try decodeQuiescenceView(try field(map, "quiescence", "CardView.quiescence"), "CardView.quiescence")
         let generation = try integer(try field(map, "generation", "CardView.generation"), 4294967295, "CardView.generation")
@@ -866,7 +1123,7 @@ public enum EnvoixReadCodec {
         } else {
             outcome = nil
         }
-        let allowedActions = try decodeList(try field(map, "allowed_actions", "CardView.allowed_actions"), 5, "CardView.allowed_actions", decodeCommandKindView)
+        let allowedActions = try decodeList(try field(map, "allowed_actions", "CardView.allowed_actions"), 6, "CardView.allowed_actions", decodeCardActionView)
         let invite: InviteView?
         if let present = try field(map, "invite", "CardView.invite") {
             invite = try decodeInviteView(present, "CardView.invite")
@@ -875,9 +1132,9 @@ public enum EnvoixReadCodec {
         }
         return CardView(
             identity: identity,
+            participation: participation,
             direction: direction,
-            offeredName: offeredName,
-            total: total,
+            source: source,
             state: state,
             quiescence: quiescence,
             generation: generation,

@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/8"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/9"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -111,7 +111,7 @@ enum class DutyKindView {
 
 enum class CapabilityActionView {
     POST_RECEIPT,
-    SELECT_SOURCE,
+    ACQUIRE_SOURCE,
 }
 
 enum class CommandKindView {
@@ -199,11 +199,87 @@ data class InviteView(
     val qr: QrView?,
 )
 
-data class CardView(
-    val identity: IdentityView,
-    val direction: DirectionView,
+enum class RoomParticipationView {
+    MINTED,
+    JOINED,
+}
+
+data class SourceAcquisitionKeyView(
+    val card: String,
+    val generation: Long,
+    val request: String,
+)
+
+enum class SourcePromptReasonView {
+    INITIAL,
+    UNREADABLE,
+    PERMISSION_LOST,
+    STORAGE_FAULT,
+    STAGING_FAILED,
+    INTERNAL,
+}
+
+data class AcceptedSourceOfferView(
+    val acquisition: SourceAcquisitionKeyView,
+    val displayName: String,
+    val reportedSize: Long?,
+)
+
+data class TransferContentView(
     val offeredName: String,
     val total: Long,
+)
+
+data class SourceNotRequiredView(
+    val peerContent: TransferContentView?,
+)
+
+data class SourceSelectableView(
+    val acquisition: SourceAcquisitionKeyView,
+    val reason: SourcePromptReasonView,
+)
+
+data class SourceRePickRequiredView(
+    val reason: SourcePromptReasonView,
+    val previousOffer: AcceptedSourceOfferView,
+)
+
+sealed interface SourceSelectionGateView {
+    data class Selectable(val value: SourceSelectableView) : SourceSelectionGateView
+    data class RePickRequired(val value: SourceRePickRequiredView) : SourceSelectionGateView
+}
+
+data class SourceAwaitingSelectionView(
+    val selection: SourceSelectionGateView,
+)
+
+data class SourceReadyView(
+    val offer: AcceptedSourceOfferView,
+    val content: TransferContentView,
+)
+
+sealed interface SourceLifecycleView {
+    data class NotRequired(val value: SourceNotRequiredView) : SourceLifecycleView
+    data class AwaitingSelection(val value: SourceAwaitingSelectionView) : SourceLifecycleView
+    data class Acquiring(val value: AcceptedSourceOfferView) : SourceLifecycleView
+    data class Staging(val value: AcceptedSourceOfferView) : SourceLifecycleView
+    data class Ready(val value: SourceReadyView) : SourceLifecycleView
+}
+
+data class PickSourceActionView(
+    val acquisition: SourceAcquisitionKeyView,
+)
+
+sealed interface CardActionView {
+    data class Command(val value: CommandKindView) : CardActionView
+    data class PickSource(val value: PickSourceActionView) : CardActionView
+}
+
+data class CardView(
+    val identity: IdentityView,
+    val participation: RoomParticipationView,
+    val direction: DirectionView,
+    val source: SourceLifecycleView,
     val state: ProductStateView,
     val quiescence: QuiescenceView,
     val generation: Long,
@@ -211,7 +287,7 @@ data class CardView(
     val bytes: Long,
     val bytesResumed: Long,
     val outcome: OutcomeView?,
-    val allowedActions: List<CommandKindView>,
+    val allowedActions: List<CardActionView>,
     val invite: InviteView?,
 )
 
@@ -639,7 +715,7 @@ object EnvoixReadCodec {
 
     private fun decodeCapabilityActionView(value: Any?, context: String): CapabilityActionView = when (value) {
         "post_receipt" -> CapabilityActionView.POST_RECEIPT
-        "select_source" -> CapabilityActionView.SELECT_SOURCE
+        "acquire_source" -> CapabilityActionView.ACQUIRE_SOURCE
         is String -> throw ReadContractException(ReadErrorKind.UNKNOWN_VARIANT, context)
         else -> throw ReadContractException(ReadErrorKind.SHAPE, context)
     }
@@ -818,14 +894,169 @@ object EnvoixReadCodec {
         )
     }
 
+    private fun decodeRoomParticipationView(value: Any?, context: String): RoomParticipationView = when (value) {
+        "minted" -> RoomParticipationView.MINTED
+        "joined" -> RoomParticipationView.JOINED
+        is String -> throw ReadContractException(ReadErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw ReadContractException(ReadErrorKind.SHAPE, context)
+    }
+
+    private fun decodeSourceAcquisitionKeyView(value: Any?, context: String): SourceAcquisitionKeyView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("card", "generation", "request"), context)
+        return SourceAcquisitionKeyView(
+            card = hexFixed(field(map, "card", "SourceAcquisitionKeyView.card"), 16, "SourceAcquisitionKeyView.card"),
+            generation = integer(field(map, "generation", "SourceAcquisitionKeyView.generation"), 4294967295, "SourceAcquisitionKeyView.generation"),
+            request = hexFixed(field(map, "request", "SourceAcquisitionKeyView.request"), 32, "SourceAcquisitionKeyView.request"),
+        )
+    }
+
+    private fun decodeSourcePromptReasonView(value: Any?, context: String): SourcePromptReasonView = when (value) {
+        "initial" -> SourcePromptReasonView.INITIAL
+        "unreadable" -> SourcePromptReasonView.UNREADABLE
+        "permission_lost" -> SourcePromptReasonView.PERMISSION_LOST
+        "storage_fault" -> SourcePromptReasonView.STORAGE_FAULT
+        "staging_failed" -> SourcePromptReasonView.STAGING_FAILED
+        "internal" -> SourcePromptReasonView.INTERNAL
+        is String -> throw ReadContractException(ReadErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw ReadContractException(ReadErrorKind.SHAPE, context)
+    }
+
+    private fun decodeAcceptedSourceOfferView(value: Any?, context: String): AcceptedSourceOfferView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("acquisition", "display_name", "reported_size"), context)
+        return AcceptedSourceOfferView(
+            acquisition = decodeSourceAcquisitionKeyView(field(map, "acquisition", "AcceptedSourceOfferView.acquisition"), "AcceptedSourceOfferView.acquisition"),
+            displayName = utf8Bounded(field(map, "display_name", "AcceptedSourceOfferView.display_name"), 255, "AcceptedSourceOfferView.display_name"),
+            reportedSize = field(map, "reported_size", "AcceptedSourceOfferView.reported_size")?.let { integer(it, Long.MAX_VALUE, "AcceptedSourceOfferView.reported_size") },
+        )
+    }
+
+    private fun decodeTransferContentView(value: Any?, context: String): TransferContentView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("offered_name", "total"), context)
+        return TransferContentView(
+            offeredName = utf8Bounded(field(map, "offered_name", "TransferContentView.offered_name"), 255, "TransferContentView.offered_name"),
+            total = integer(field(map, "total", "TransferContentView.total"), Long.MAX_VALUE, "TransferContentView.total"),
+        )
+    }
+
+    private fun decodeSourceNotRequiredView(value: Any?, context: String): SourceNotRequiredView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("peer_content"), context)
+        return SourceNotRequiredView(
+            peerContent = field(map, "peer_content", "SourceNotRequiredView.peer_content")?.let { decodeTransferContentView(it, "SourceNotRequiredView.peer_content") },
+        )
+    }
+
+    private fun decodeSourceSelectableView(value: Any?, context: String): SourceSelectableView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("acquisition", "reason"), context)
+        return SourceSelectableView(
+            acquisition = decodeSourceAcquisitionKeyView(field(map, "acquisition", "SourceSelectableView.acquisition"), "SourceSelectableView.acquisition"),
+            reason = decodeSourcePromptReasonView(field(map, "reason", "SourceSelectableView.reason"), "SourceSelectableView.reason"),
+        )
+    }
+
+    private fun decodeSourceRePickRequiredView(value: Any?, context: String): SourceRePickRequiredView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("reason", "previous_offer"), context)
+        return SourceRePickRequiredView(
+            reason = decodeSourcePromptReasonView(field(map, "reason", "SourceRePickRequiredView.reason"), "SourceRePickRequiredView.reason"),
+            previousOffer = decodeAcceptedSourceOfferView(field(map, "previous_offer", "SourceRePickRequiredView.previous_offer"), "SourceRePickRequiredView.previous_offer"),
+        )
+    }
+
+    private fun decodeSourceSelectionGateView(value: Any?, context: String): SourceSelectionGateView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw ReadContractException(ReadErrorKind.SHAPE, context)
+        return when (kind) {
+            "selectable" -> SourceSelectionGateView.Selectable(
+                decodeSourceSelectableView(payload(map, "SourceSelectionGateView.selectable"), "SourceSelectionGateView.selectable"),
+            )
+            "re_pick_required" -> SourceSelectionGateView.RePickRequired(
+                decodeSourceRePickRequiredView(payload(map, "SourceSelectionGateView.re_pick_required"), "SourceSelectionGateView.re_pick_required"),
+            )
+            else -> throw ReadContractException(ReadErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun decodeSourceAwaitingSelectionView(value: Any?, context: String): SourceAwaitingSelectionView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("selection"), context)
+        return SourceAwaitingSelectionView(
+            selection = decodeSourceSelectionGateView(field(map, "selection", "SourceAwaitingSelectionView.selection"), "SourceAwaitingSelectionView.selection"),
+        )
+    }
+
+    private fun decodeSourceReadyView(value: Any?, context: String): SourceReadyView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("offer", "content"), context)
+        return SourceReadyView(
+            offer = decodeAcceptedSourceOfferView(field(map, "offer", "SourceReadyView.offer"), "SourceReadyView.offer"),
+            content = decodeTransferContentView(field(map, "content", "SourceReadyView.content"), "SourceReadyView.content"),
+        )
+    }
+
+    private fun decodeSourceLifecycleView(value: Any?, context: String): SourceLifecycleView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw ReadContractException(ReadErrorKind.SHAPE, context)
+        return when (kind) {
+            "not_required" -> SourceLifecycleView.NotRequired(
+                decodeSourceNotRequiredView(payload(map, "SourceLifecycleView.not_required"), "SourceLifecycleView.not_required"),
+            )
+            "awaiting_selection" -> SourceLifecycleView.AwaitingSelection(
+                decodeSourceAwaitingSelectionView(payload(map, "SourceLifecycleView.awaiting_selection"), "SourceLifecycleView.awaiting_selection"),
+            )
+            "acquiring" -> SourceLifecycleView.Acquiring(
+                decodeAcceptedSourceOfferView(payload(map, "SourceLifecycleView.acquiring"), "SourceLifecycleView.acquiring"),
+            )
+            "staging" -> SourceLifecycleView.Staging(
+                decodeAcceptedSourceOfferView(payload(map, "SourceLifecycleView.staging"), "SourceLifecycleView.staging"),
+            )
+            "ready" -> SourceLifecycleView.Ready(
+                decodeSourceReadyView(payload(map, "SourceLifecycleView.ready"), "SourceLifecycleView.ready"),
+            )
+            else -> throw ReadContractException(ReadErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun decodePickSourceActionView(value: Any?, context: String): PickSourceActionView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("acquisition"), context)
+        return PickSourceActionView(
+            acquisition = decodeSourceAcquisitionKeyView(field(map, "acquisition", "PickSourceActionView.acquisition"), "PickSourceActionView.acquisition"),
+        )
+    }
+
+    private fun decodeCardActionView(value: Any?, context: String): CardActionView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw ReadContractException(ReadErrorKind.SHAPE, context)
+        return when (kind) {
+            "command" -> CardActionView.Command(
+                decodeCommandKindView(payload(map, "CardActionView.command"), "CardActionView.command"),
+            )
+            "pick_source" -> CardActionView.PickSource(
+                decodePickSourceActionView(payload(map, "CardActionView.pick_source"), "CardActionView.pick_source"),
+            )
+            else -> throw ReadContractException(ReadErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
     private fun decodeCardView(value: Any?, context: String): CardView {
         val map = obj(value, context)
-        knownKeys(map, setOf("identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"), context)
+        knownKeys(map, setOf("identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"), context)
         return CardView(
             identity = decodeIdentityView(field(map, "identity", "CardView.identity"), "CardView.identity"),
+            participation = decodeRoomParticipationView(field(map, "participation", "CardView.participation"), "CardView.participation"),
             direction = decodeDirectionView(field(map, "direction", "CardView.direction"), "CardView.direction"),
-            offeredName = utf8Bounded(field(map, "offered_name", "CardView.offered_name"), 255, "CardView.offered_name"),
-            total = integer(field(map, "total", "CardView.total"), Long.MAX_VALUE, "CardView.total"),
+            source = decodeSourceLifecycleView(field(map, "source", "CardView.source"), "CardView.source"),
             state = decodeProductStateView(field(map, "state", "CardView.state"), "CardView.state"),
             quiescence = decodeQuiescenceView(field(map, "quiescence", "CardView.quiescence"), "CardView.quiescence"),
             generation = integer(field(map, "generation", "CardView.generation"), 4294967295, "CardView.generation"),
@@ -833,7 +1064,7 @@ object EnvoixReadCodec {
             bytes = integer(field(map, "bytes", "CardView.bytes"), Long.MAX_VALUE, "CardView.bytes"),
             bytesResumed = integer(field(map, "bytes_resumed", "CardView.bytes_resumed"), Long.MAX_VALUE, "CardView.bytes_resumed"),
             outcome = field(map, "outcome", "CardView.outcome")?.let { decodeOutcomeView(it, "CardView.outcome") },
-            allowedActions = decodeList(field(map, "allowed_actions", "CardView.allowed_actions"), 5, "CardView.allowed_actions", ::decodeCommandKindView),
+            allowedActions = decodeList(field(map, "allowed_actions", "CardView.allowed_actions"), 6, "CardView.allowed_actions", ::decodeCardActionView),
             invite = field(map, "invite", "CardView.invite")?.let { decodeInviteView(it, "CardView.invite") },
         )
     }

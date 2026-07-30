@@ -280,13 +280,23 @@ fun backendToFrontend(command: Map<String, String>, read: Map<String, String>) {
     expectEq("read epoch at u63 max", update.epoch, Long.MAX_VALUE)
     val card = (update.kind as CardUpdateKindView.Snapshot).value
     expectEq("u32 max generation", card.generation, 4294967295L)
-    expectEq("total at u63 max", card.total, Long.MAX_VALUE)
     expectEq("bytes at 2^53", card.bytes, 9007199254740992L)
     expectEq("bytes_resumed above 2^53", card.bytesResumed, 9007199254740993L)
+    // The name and total live in the source lifecycle now, and this card is a
+    // receiver, so they are what the PEER said it is sending.
+    val peer = (card.source as SourceLifecycleView.NotRequired).value.peerContent!!
+    expectEq("total at u63 max", peer.total, Long.MAX_VALUE)
     expectEq(
         "multi-byte name survives",
-        card.offeredName,
+        peer.offeredName,
         "\uD83D\uDC4D\uD83C\uDFFD \u0645\u0631\u062D\u0628\u0627 e\u0301 \uD83C\uDDFA\uD83C\uDDF3.pdf",
+    )
+    // The one action that is not a command, carrying the acquisition it names.
+    val pick = card.allowedActions.first() as CardActionView.PickSource
+    expectEq(
+        "the picker action names its acquisition",
+        pick.value.acquisition.request,
+        "ffffffffffffffffffffffffffffffff",
     )
     expectEq(
         "the nested pause origin decodes",
@@ -303,7 +313,13 @@ fun backendToFrontend(command: Map<String, String>, read: Map<String, String>) {
 
     val narrowest = EnvoixReadCodec.decode(read["read_card_update_narrowest"]!!).body
     val progress = ((narrowest as ReadBody.CardUpdate).value.kind as CardUpdateKindView.Progress).value
-    expectEq("an empty string decodes as empty", progress.offeredName, "")
+    // A gate that can accept no offer publishes NO acquisition key; the empty
+    // display name of the offer it lost still decodes as empty, not absent.
+    val gate =
+        (progress.source as SourceLifecycleView.AwaitingSelection).value.selection
+            as SourceSelectionGateView.RePickRequired
+    expectEq("an empty string decodes as empty", gate.value.previousOffer.displayName, "")
+    expectEq("the lost reason survives", gate.value.reason, SourcePromptReasonView.STAGING_FAILED)
     expectEq("an explicit null optional decodes as absent", progress.outcome, null)
 
     val empty = (EnvoixReadCodec.decode(read["read_evidence_empty"]!!).body as ReadBody.Evidence).value

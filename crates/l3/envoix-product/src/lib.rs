@@ -37,7 +37,7 @@ pub use record::{
 };
 // Retention is the PLATFORM's answer, so it is defined with the duty that
 // reports it and re-exported here beside the lifecycle that stores it.
-pub use envoix_capabilities::SourceRetention;
+pub use envoix_capabilities::{SourceAcquisitionKey, SourceRetention};
 // `StagedContent` cannot be built without one, so a caller that can see the
 // type but not its digest could not construct what this crate's own input
 // requires.

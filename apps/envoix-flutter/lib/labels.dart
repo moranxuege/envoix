@@ -131,7 +131,63 @@ String dutyKindLabel(DutyKindView kind) => switch (kind) {
 
 String capabilityActionLabel(CapabilityActionView action) => switch (action) {
       CapabilityActionView.postReceipt => 'post the receipt',
-      CapabilityActionView.selectSource => 'open the file you chose',
+      CapabilityActionView.acquireSource => 'take hold of the file you chose',
+    };
+
+/// What this card is transferring, once anything knows. Null when nothing does
+/// — a minted send before a document is chosen, or a joined receive before the
+/// peer's header arrives. Null is the honest answer; an empty name and a zero
+/// would be indistinguishable from a real file called nothing with no bytes.
+TransferContentView? contentOf(CardView view) => switch (view.source) {
+      SourceLifecycleViewNotRequired(:final value) => value.peerContent,
+      SourceLifecycleViewAwaitingSelection() => null,
+      SourceLifecycleViewAcquiring() => null,
+      SourceLifecycleViewStaging() => null,
+      SourceLifecycleViewReady(:final value) => value.content,
+    };
+
+/// The name to show, or null when this card has none yet. `Acquiring` and
+/// `Staging` show the provider's normalized claim — the best that is true of
+/// them — while `Ready` shows what staging established.
+String? displayNameOf(CardView view) => switch (view.source) {
+      SourceLifecycleViewNotRequired(:final value) =>
+        value.peerContent?.offeredName,
+      SourceLifecycleViewAwaitingSelection() => null,
+      SourceLifecycleViewAcquiring(:final value) => value.displayName,
+      SourceLifecycleViewStaging(:final value) => value.displayName,
+      SourceLifecycleViewReady(:final value) => value.content.offeredName,
+    };
+
+/// What the card is waiting for, in one sentence a person can act on.
+String sourceLabel(SourceLifecycleView source) => switch (source) {
+      SourceLifecycleViewNotRequired(:final value) => value.peerContent == null
+          ? 'Waiting for the sender to say what they are sending'
+          : 'Receiving ${value.peerContent!.offeredName}',
+      SourceLifecycleViewAwaitingSelection(:final value) =>
+        switch (value.selection) {
+          SourceSelectionGateViewSelectable(value: final gate) =>
+            switch (gate.reason) {
+              SourcePromptReasonView.initial => 'Choose a file to send',
+              _ => 'Choose a file to send — ${promptReasonLabel(gate.reason)}',
+            },
+          SourceSelectionGateViewRePickRequired(value: final gate) =>
+            'Choose another file — ${promptReasonLabel(gate.reason)}',
+        },
+      SourceLifecycleViewAcquiring(:final value) =>
+        'Opening ${value.displayName}',
+      SourceLifecycleViewStaging(:final value) => 'Reading ${value.displayName}',
+      SourceLifecycleViewReady(:final value) =>
+        'Sending ${value.content.offeredName}',
+    };
+
+/// Why the authority is asking for a file. Its words, not this app's guess.
+String promptReasonLabel(SourcePromptReasonView reason) => switch (reason) {
+      SourcePromptReasonView.initial => 'nothing chosen yet',
+      SourcePromptReasonView.unreadable => 'that file could not be read',
+      SourcePromptReasonView.permissionLost => 'access to that file was lost',
+      SourcePromptReasonView.storageFault => 'storage refused',
+      SourcePromptReasonView.stagingFailed => 'reading it through failed',
+      SourcePromptReasonView.internal => 'the platform could not say why',
     };
 
 /// Why the authority would not create a card. Every one of these is ITS answer:
@@ -229,6 +285,18 @@ String rejectionLabel(FrameRejection kind) => switch (kind) {
 
 /// What one command asks for. The button says this, and so does the account of
 /// what happened to it.
+/// One published action, in the words a person reads on the control.
+///
+/// `pick_source` is not a command, so it has no `CommandView` to route through
+/// — which is the point of the union: an action a frontend takes with its own
+/// platform and one it sends to the authority cannot be confused for each
+/// other, even in a label.
+String actionLabel(CardActionView action) => switch (action) {
+      CardActionViewCommand(:final CommandKindView value) =>
+        commandLabel(commandOf(value)),
+      CardActionViewPickSource() => 'Choose a file',
+    };
+
 String commandLabel(CommandView command) => switch (command) {
       CommandView.pause => 'Pause',
       CommandView.cancel => 'Cancel',
@@ -333,10 +401,11 @@ String intentLabel(CommandIntent intent) {
 /// How far the transfer has got, or null when the total makes that unanswerable.
 /// Two authoritative numbers presented together; nothing here is a status.
 double? progressOf(CardView view) {
-  if (view.total == 0) {
+  final int? total = contentOf(view)?.total;
+  if (total == null || total == 0) {
     return null;
   }
-  return view.bytes.clamp(0, view.total) / view.total;
+  return view.bytes.clamp(0, total) / total;
 }
 
 /// The same fraction as whole percent, for screen readers.

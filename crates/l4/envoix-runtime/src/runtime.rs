@@ -60,15 +60,16 @@ struct CardProjection {
 /// the projection can prune it (a reattach must never re-deliver a completed
 /// duty). Exhaustive over `CapabilityAction`, so a new duty kind must add a
 /// discharge rule here.
-fn duty_discharged(action: CapabilityAction, record: &TransferRecord) -> bool {
+fn duty_discharged(duty: Duty, action: CapabilityAction, record: &TransferRecord) -> bool {
     match action {
         CapabilityAction::PostReceipt => record.facts.proof_delivered,
-        // A granted source is not a staged one: the duty stays outstanding
-        // until the card's source really is ready, which the lifecycle answers
-        // directly. It used to be read from a boolean stored beside the
-        // lifecycle, so a card could prune its picker duty while its own source
-        // state still said it was waiting to be given a document.
-        CapabilityAction::SelectSource => record.source_is_ready(),
+        // Outstanding only while the card is acquiring THIS acquisition. The
+        // state alone is not enough: a card acquiring K2 would retain a stale
+        // duty for K1 and re-deliver it on every reattach, asking the platform
+        // to bind a document for an acquisition that has been discharged.
+        CapabilityAction::AcquireSource => record
+            .acquiring_offer()
+            .is_none_or(|offer| offer.key().provenance() != duty.provenance),
     }
 }
 
@@ -156,7 +157,7 @@ impl Shared {
             // reattach re-delivers only genuinely-outstanding duties.
             projection
                 .outstanding_duties
-                .retain(|(_, action)| !duty_discharged(*action, &record));
+                .retain(|(duty, action)| !duty_discharged(*duty, *action, &record));
             projection
                 .subscribers
                 .retain(SubscriptionPublisher::is_attached);

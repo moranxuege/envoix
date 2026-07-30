@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/8"
+id = "envoix/binding/read/9"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -104,7 +104,13 @@ variants = [
 [[decl]]
 kind = "enum"
 name = "CapabilityActionView"
-variants = ["post_receipt", "select_source"]
+# `acquire_source` is the HANDLE acquisition — take hold of the document that
+# was already chosen — and it is issued when an offer is accepted. It was named
+# `select_source` and issued at creation, which asked the platform to bind a
+# document nobody had picked yet; the adapter claimed from an empty registry and
+# answered `source_unreadable` every time. Opening the picker is not a duty at
+# all: it is the `pick_source` card action.
+variants = ["post_receipt", "acquire_source"]
 
 # Which commands the authority will currently admit for a card. This is the
 # product reducer's own `TransferRecord::allowed_commands`, PUBLISHED rather
@@ -265,14 +271,189 @@ fields = [
   { name = "qr", type = "option(QrView)" },
 ]
 
+
+# ---- where a card's send source is ----
+#
+# Record v5's `SourceLifecycle`, published as itself. It replaces the top-level
+# `offered_name`/`total` this contract used to carry, and that is the point: a
+# card that has not been given a document had NO name and NO size, so those
+# fields published an invented empty string and a zero that reads as a real
+# length. A frontend then had to guess which zero meant "empty file" and which
+# meant "nothing chosen yet". Here the difference is a variant.
+#
+# It also removes the last reason a frontend would infer source need from
+# direction, product state, phase or failure text. The lifecycle says what is
+# true, and `allowed_actions` says what may be done about it.
+
+[[decl]]
+kind = "enum"
+name = "RoomParticipationView"
+variants = ["minted", "joined"]
+
+# Which acquisition a picked document belongs to. All three fields, always: a
+# value that matches the card but not the generation, or the generation but not
+# the request, is a DIFFERENT acquisition and answering it would bind a document
+# to a request it was never chosen for.
+[[decl]]
+kind = "struct"
+name = "SourceAcquisitionKeyView"
+fields = [
+  { name = "card", type = "hex16" },
+  { name = "generation", type = "u32" },
+  { name = "request", type = "hex32" },
+]
+
+# Why the authority is asking. Carried so a frontend can say something true
+# without inferring it, and so a repeat is distinguishable from a first ask.
+# `staging_failed` is deliberately apart from the acquisition failures: it says
+# the platform DID hold the document and reading it through failed, which is a
+# different sentence to show a user.
+[[decl]]
+kind = "enum"
+name = "SourcePromptReasonView"
+variants = [
+  "initial",
+  "unreadable",
+  "permission_lost",
+  "storage_fault",
+  "staging_failed",
+  "internal",
+]
+
+# A document the user chose, as the authority normalized it. `reported_size` is
+# what the PROVIDER claimed and is advisory only — it is optional because a
+# provider may not know, and `0` is a real empty-file report that stays distinct
+# from absent. It never becomes the transfer's total.
+[[decl]]
+kind = "struct"
+name = "AcceptedSourceOfferView"
+fields = [
+  { name = "acquisition", type = "SourceAcquisitionKeyView" },
+  { name = "display_name", type = "str(255)" },
+  { name = "reported_size", type = "option(u63)" },
+]
+
+# What a card is transferring, once anything knows: a sender learns it from
+# staging, which counted the bytes; a receiver from the peer's header.
+[[decl]]
+kind = "struct"
+name = "TransferContentView"
+fields = [
+  { name = "offered_name", type = "str(255)" },
+  { name = "total", type = "u63" },
+]
+
+# A receiver. It has no source and can never acquire one, and `peer_content` is
+# absent until the peer's header is admitted — honest, because a card joined
+# from an invite knows nothing about the file until the sender says so.
+[[decl]]
+kind = "struct"
+name = "SourceNotRequiredView"
+fields = [
+  { name = "peer_content", type = "option(TransferContentView)" },
+]
+
+# The authority is asking, and this is the exact key an offer must name.
+[[decl]]
+kind = "struct"
+name = "SourceSelectableView"
+fields = [
+  { name = "acquisition", type = "SourceAcquisitionKeyView" },
+  { name = "reason", type = "SourcePromptReasonView" },
+]
+
+# This generation accepted a document and then lost it. It publishes NO
+# acquisition key, because it can accept no offer: only `re_pick_source`
+# advances the generation and mints a key that can. The offer it did accept is
+# retained so a frontend retrying across a process death is told the truth about
+# its own payload rather than "stale".
+[[decl]]
+kind = "struct"
+name = "SourceRePickRequiredView"
+fields = [
+  { name = "reason", type = "SourcePromptReasonView" },
+  { name = "previous_offer", type = "AcceptedSourceOfferView" },
+]
+
+[[decl]]
+kind = "union"
+name = "SourceSelectionGateView"
+variants = [
+  { name = "selectable", payload = "SourceSelectableView" },
+  { name = "re_pick_required", payload = "SourceRePickRequiredView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "SourceAwaitingSelectionView"
+fields = [
+  { name = "selection", type = "SourceSelectionGateView" },
+]
+
+# The content is established and the source can be sent. `content` is
+# authoritative — staging counted it — unlike the offer's `reported_size`
+# beside it, which is still only what the provider claimed. Both are published
+# because a frontend showing "4.0 MB" should be able to say which number that
+# is. The staging digest is NOT here: it is the sender's own verification
+# evidence and no frontend has asked for it.
+[[decl]]
+kind = "struct"
+name = "SourceReadyView"
+fields = [
+  { name = "offer", type = "AcceptedSourceOfferView" },
+  { name = "content", type = "TransferContentView" },
+]
+
+# `acquiring` and `staging` carry the accepted offer and nothing more, which is
+# exactly what is true of them: the platform is being asked to hold a document,
+# or is being read through, and the only facts that exist are the provider's
+# normalized name and its advisory size.
+[[decl]]
+kind = "union"
+name = "SourceLifecycleView"
+variants = [
+  { name = "not_required", payload = "SourceNotRequiredView" },
+  { name = "awaiting_selection", payload = "SourceAwaitingSelectionView" },
+  { name = "acquiring", payload = "AcceptedSourceOfferView" },
+  { name = "staging", payload = "AcceptedSourceOfferView" },
+  { name = "ready", payload = "SourceReadyView" },
+]
+
+# Open a document picker for THIS acquisition.
+#
+# Not a command and not a duty. A command mutates a card through the authority;
+# a duty is work the authority commissions from the platform and ledgers the
+# answer to. This is neither: it is the frontend and its own platform adapter
+# exchanging a document, and cancelling it produces no result the authority
+# needs to hear about. The key travels with the action so the offer that comes
+# back can only name the acquisition that was asked for.
+[[decl]]
+kind = "struct"
+name = "PickSourceActionView"
+fields = [
+  { name = "acquisition", type = "SourceAcquisitionKeyView" },
+]
+
+# What a frontend may do to this card right now, whether or not it goes through
+# the command lane. Published rather than derived, for the same reason
+# `allowed_actions` always was: a frontend that computed legality from state
+# would be owning transfer truth (R0).
+[[decl]]
+kind = "union"
+name = "CardActionView"
+variants = [
+  { name = "command", payload = "CommandKindView" },
+  { name = "pick_source", payload = "PickSourceActionView" },
+]
+
 [[decl]]
 kind = "struct"
 name = "CardView"
 fields = [
   { name = "identity", type = "IdentityView" },
+  { name = "participation", type = "RoomParticipationView" },
   { name = "direction", type = "DirectionView" },
-  { name = "offered_name", type = "str(255)" },
-  { name = "total", type = "u63" },
+  { name = "source", type = "SourceLifecycleView" },
   { name = "state", type = "ProductStateView" },
   { name = "quiescence", type = "QuiescenceView" },
   { name = "generation", type = "u32" },
@@ -280,7 +461,13 @@ fields = [
   { name = "bytes", type = "u63" },
   { name = "bytes_resumed", type = "u63" },
   { name = "outcome", type = "option(OutcomeView)" },
-  { name = "allowed_actions", type = "list(CommandKindView, 5)" },
+  # Six: the five commands, plus `pick_source`. They are never all offered at
+  # once — a card awaiting a document offers no Pause — but the bound is the
+  # vocabulary, not a prediction about which of it is live.
+  { name = "allowed_actions", type = "list(CardActionView, 6)" },
+  # Only a MINTED card publishes an invite. A joined card adopted the secret it
+  # was given, and republishing it as though it minted the room is how a joiner
+  # would hand out a password it does not own.
   { name = "invite", type = "option(InviteView)" },
 ]
 

@@ -144,8 +144,10 @@ class CardTile extends StatelessWidget {
           children: <Widget>[
             Text(
               // The offered name is the user's; the card id, when that is all
-              // there is, is the machine's.
-              view?.offeredName ?? row.card,
+              // there is, is the machine's. A card with no document yet has no
+              // name — it says what it is waiting for instead of showing an
+              // invented blank.
+              view == null ? row.card : (displayNameOf(view) ?? row.card),
               style: view == null
                   ? EnvoixType.monoValue.copyWith(color: tokens.text)
                   : EnvoixType.title.copyWith(color: tokens.text),
@@ -156,6 +158,10 @@ class CardTile extends StatelessWidget {
                 value: '${directionLabel(view.direction)}'
                     ' · ${stateLabel(view.state)}',
               ),
+              // The authority's own sentence about the source. It is rendered,
+              // never inferred: this app does not decide from direction or
+              // state that a file is needed.
+              _Fact(label: 'Source', value: sourceLabel(view.source)),
               Padding(
                 padding: const EdgeInsets.symmetric(
                   vertical: EnvoixSpace.tight,
@@ -178,7 +184,10 @@ class CardTile extends StatelessWidget {
               // is set in the monospace the counts want.
               Text(
                 <String>[
-                  '${view.bytes}/${view.total} bytes',
+                  if (contentOf(view) case final TransferContentView content)
+                    '${view.bytes}/${content.total} bytes'
+                  else
+                    '${view.bytes} bytes so far',
                   if (view.bytesResumed > 0)
                     'resumed from ${view.bytesResumed}',
                   phaseLabel(view.phase),
@@ -264,14 +273,52 @@ class _Actions extends StatelessWidget {
         spacing: EnvoixSpace.tight,
         runSpacing: EnvoixSpace.tight,
         children: <Widget>[
-          for (final CommandKindView kind in view.allowedActions)
-            _Action(
-              row: row,
-              command: commandOf(kind),
-              commander: commander,
-              waiting: commandInFlight(intents, commandOf(kind)),
-            ),
+          for (final CardActionView action in view.allowedActions)
+            switch (action) {
+              // A command goes to the authority through the command lane.
+              CardActionViewCommand(:final CommandKindView value) => _Action(
+                  row: row,
+                  command: commandOf(value),
+                  commander: commander,
+                  waiting: commandInFlight(intents, commandOf(value)),
+                ),
+              // `pick_source` does not: it is an exchange with this device's
+              // own platform, and capability/2 types it. Rendered disabled
+              // rather than hidden, because hiding it would make the authority's
+              // published affordance invisible — and rendered WITHOUT wiring it
+              // to the old untyped picker, which takes no acquisition key and
+              // would throw away the identity this action exists to carry.
+              CardActionViewPickSource() => const _PendingAction(
+                  label: 'Choose a file',
+                  reason: 'the file picker is not connected yet',
+                ),
+            },
         ],
+      ),
+    );
+  }
+}
+
+/// An affordance the AUTHORITY published that this app cannot yet exercise.
+///
+/// Shown disabled with the reason, rather than hidden. Hiding it would make the
+/// published offer invisible and leave a user with no account of why the card
+/// is waiting; wiring it to the old untyped picker would discard the exact
+/// acquisition the action carries, which is the whole reason it carries one.
+class _PendingAction extends StatelessWidget {
+  const _PendingAction({required this.label, required this.reason});
+
+  final String label;
+  final String reason;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      enabled: false,
+      label: '$label — $reason',
+      child: ExcludeSemantics(
+        child: OutlinedButton(onPressed: null, child: Text(label)),
       ),
     );
   }

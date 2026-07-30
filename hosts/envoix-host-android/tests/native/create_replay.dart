@@ -159,7 +159,23 @@ void main(List<String> arguments) {
   // provider claimed. Empty, not a placeholder word — 'unnamed' was an invented
   // name that read like a real one, and read/9 replaces this field with the
   // source lifecycle, where "no name yet" is representable.
-  equal('with no document yet', sending.offeredName, '');
+  // Nameless as a VARIANT now, not as an empty string: the card publishes that
+  // it is waiting to be given a document, and the acquisition an offer must
+  // name travels with it.
+  final SourceLifecycleView sendingSource = sending.source;
+  if (sendingSource is! SourceLifecycleViewAwaitingSelection) {
+    _failures.add('a minted send is not awaiting a selection');
+    return;
+  }
+  final SourceSelectionGateView gate = sendingSource.value.selection;
+  if (gate is! SourceSelectionGateViewSelectable) {
+    _failures.add('a minted send cannot accept an offer');
+    return;
+  }
+  equal('with no document yet', gate.value.reason,
+      SourcePromptReasonView.initial);
+  check('and it publishes the acquisition an offer must name',
+      RegExp(r'^[0-9a-f]{32}$').hasMatch(gate.value.acquisition.request));
   final InviteView? published = sending.invite;
   check('the send publishes an invite to share', published != null);
   check(

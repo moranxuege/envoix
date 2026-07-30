@@ -14,24 +14,29 @@ use envoix_evidence::{
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_runtime::{
-    CapabilityAction, CardUpdateKind, Duty, DutyKind, LosslessUpdateKind, MAX_ROOM_CODE_LENGTH,
-    PairingChannel, PauseOrigin, ProductCommand, ProductState, QrMatrix, Quiescence,
-    RetirementIntent, SubscribeError, TransferRecord, WorkerKind,
+    AcceptedSourceOffer, CapabilityAction, CardUpdateKind, Duty, DutyKind, LosslessUpdateKind,
+    MAX_ROOM_CODE_LENGTH, PairingChannel, PauseOrigin, ProductCommand, ProductState, QrMatrix,
+    Quiescence, RetirementIntent, RoomParticipation, SelectionGate, SourceAcquisitionKey,
+    SourceLifecycle, SourcePromptReason, SubscribeError, TransferContent, TransferRecord,
+    WorkerKind,
 };
 use envoix_types::{Direction, OfferedName, RecordId, Secret};
 
 use crate::capability::CAPABILITY_SCHEMA_ID;
 use crate::command::COMMAND_SCHEMA_ID;
 use crate::read::{
-    AbiSchemaManifestView, BuildManifestView, CapabilityActionView, CardUpdateKindView,
-    CardUpdateView, CardView, ClosedView, CommandKindView, DegradedView, DeploymentManifestView,
-    DiagnosticsStatusView, DirectionView, DutyFrameView, DutyKindView, DutyProvenanceView,
-    DutyView, EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView,
-    InviteView, LagView, LosslessKindView, OutcomeView, PausedView, PhaseView, ProductStateView,
-    ProtocolManifestView, QrView, QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame,
-    RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView,
-    RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView, SubscribeRejectionView,
-    TimelineEntryView, WorkerKindView,
+    AbiSchemaManifestView, AcceptedSourceOfferView, BuildManifestView, CapabilityActionView,
+    CardActionView, CardUpdateKindView, CardUpdateView, CardView, ClosedView, CommandKindView,
+    DegradedView, DeploymentManifestView, DiagnosticsStatusView, DirectionView, DutyFrameView,
+    DutyKindView, DutyProvenanceView, DutyView, EvidenceProgressView, EvidenceTimelineView,
+    EvidenceValueView, IdentityView, InviteView, LagView, LosslessKindView, OutcomeView,
+    PausedView, PhaseView, PickSourceActionView, ProductStateView, ProtocolManifestView, QrView,
+    QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame, RecoveryView, RedactedIdKindView,
+    RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView, RoomParticipationView,
+    RunningView, SessionKeyView, SourceAcquisitionKeyView, SourceAwaitingSelectionView,
+    SourceLifecycleView, SourceNotRequiredView, SourcePromptReasonView, SourceRePickRequiredView,
+    SourceReadyView, SourceSelectableView, SourceSelectionGateView, SubscribeRejectedView,
+    SubscribeRejectionView, TimelineEntryView, TransferContentView, WorkerKindView,
 };
 
 /// The codec bound on safe-display text and on offered names: L0 owns both
@@ -186,26 +191,20 @@ fn card_view(record: &TransferRecord) -> CardView {
             transfer: record.identity.transfer.to_string(),
             artifact: record.identity.artifact.to_string(),
         },
+        participation: match record.participation {
+            RoomParticipation::Minted => RoomParticipationView::Minted,
+            RoomParticipation::Joined => RoomParticipationView::Joined,
+        },
         direction: match record.direction {
             Direction::Send => DirectionView::Send,
             Direction::Receive => DirectionView::Receive,
         },
-        // Both DERIVED from the source lifecycle rather than read from record
-        // fields that could disagree with it. A minted send between create and
-        // offer has neither.
-        //
-        // The empty name is THIS projection's fallback, not a fact the record
-        // holds: read/8's `CardView` requires a string, and a card that has not
-        // been given a document has no name to put there. Read/9 replaces both
-        // fields with the lifecycle itself, at which point "no name yet" is
-        // representable and this invention goes away. It deliberately does not
-        // live on `TransferRecord`, where it would be the authority pretending
-        // to know something it does not.
-        offered_name: truncate_utf8(
-            record.source.display_name().map_or("", OfferedName::as_str),
-            MAX_NAME_BYTES,
-        ),
-        total: u63(record.total().get()),
+        // The lifecycle itself, replacing the top-level name and total that
+        // used to be projected beside it. Those two fields could only ever be
+        // published as an invented empty string and a zero for a card that had
+        // not been given a document, and a frontend could not tell that zero
+        // from a real empty file. Here the difference is a variant.
+        source: source_lifecycle_view(record),
         state: state_view(record.state),
         quiescence: quiescence_view(record.quiescence),
         generation: record.generation.get(),
@@ -216,11 +215,10 @@ fn card_view(record: &TransferRecord) -> CardView {
         // Legality is the reducer's, not the observer's: this publishes
         // `allowed_commands` verbatim so a frontend renders the authority's
         // answer instead of re-deriving one from the state beside it (R0).
-        allowed_actions: record
-            .allowed_commands()
-            .into_iter()
-            .map(command_kind_view)
-            .collect(),
+        // `pick_source` joins it from the same source of truth — the lifecycle
+        // — rather than being something a frontend infers from direction or
+        // state.
+        allowed_actions: card_actions(record),
         // The card's frozen channel, rendered by the invite grammar that owns
         // it — and ONLY for a card that minted its room.
         //
@@ -283,6 +281,125 @@ fn qr_view(matrix: &QrMatrix) -> QrView {
             },
         )),
     }
+}
+
+/// Where this card's send source is, as the frontend renders it.
+///
+/// Total over the lifecycle by construction, so a new source state cannot be
+/// published as a plausible-looking old one. Every payload carries only facts
+/// that state actually holds: `acquiring` and `staging` have the provider's
+/// normalized name and its advisory size and nothing more, because nothing more
+/// is true of them yet.
+fn source_lifecycle_view(record: &TransferRecord) -> SourceLifecycleView {
+    match &record.source {
+        SourceLifecycle::NotRequired { peer_content, .. } => {
+            SourceLifecycleView::NotRequired(SourceNotRequiredView {
+                peer_content: peer_content.as_ref().map(transfer_content_view),
+            })
+        }
+        SourceLifecycle::AwaitingSelection(gate) => {
+            SourceLifecycleView::AwaitingSelection(SourceAwaitingSelectionView {
+                selection: match gate {
+                    // The key is published HERE and nowhere else derived: it is
+                    // the same `current_acquisition()` the authority will check
+                    // an offer against, so a frontend answering what it was told
+                    // cannot answer the wrong acquisition.
+                    SelectionGate::Selectable { reason, .. } => {
+                        SourceSelectionGateView::Selectable(SourceSelectableView {
+                            acquisition: acquisition_view(record.current_acquisition()),
+                            reason: prompt_reason_view(*reason),
+                        })
+                    }
+                    // No key: this gate accepts no offer at all, and publishing
+                    // one would invite a frontend to answer with it.
+                    SelectionGate::RePickRequired {
+                        reason,
+                        previous_offer,
+                        ..
+                    } => SourceSelectionGateView::RePickRequired(SourceRePickRequiredView {
+                        reason: prompt_reason_view(*reason),
+                        previous_offer: accepted_offer_view(previous_offer),
+                    }),
+                },
+            })
+        }
+        SourceLifecycle::Acquiring(offer) => {
+            SourceLifecycleView::Acquiring(accepted_offer_view(offer))
+        }
+        SourceLifecycle::Staging { offer, .. } => {
+            SourceLifecycleView::Staging(accepted_offer_view(offer))
+        }
+        SourceLifecycle::Ready { offer, content, .. } => {
+            SourceLifecycleView::Ready(SourceReadyView {
+                offer: accepted_offer_view(offer),
+                content: transfer_content_view(content.content()),
+            })
+        }
+    }
+}
+
+fn acquisition_view(key: SourceAcquisitionKey) -> SourceAcquisitionKeyView {
+    SourceAcquisitionKeyView {
+        card: hex16(key.card().get()),
+        generation: key.generation().get(),
+        request: key.request().to_string(),
+    }
+}
+
+fn accepted_offer_view(offer: &AcceptedSourceOffer) -> AcceptedSourceOfferView {
+    AcceptedSourceOfferView {
+        acquisition: acquisition_view(*offer.key()),
+        display_name: truncate_utf8(offer.display_name().as_str(), MAX_NAME_BYTES),
+        reported_size: offer.reported_size().map(|size| u63(size.get())),
+    }
+}
+
+fn transfer_content_view(content: &TransferContent) -> TransferContentView {
+    TransferContentView {
+        offered_name: truncate_utf8(content.name().as_str(), MAX_NAME_BYTES),
+        total: u63(content.total().get()),
+    }
+}
+
+const fn prompt_reason_view(reason: SourcePromptReason) -> SourcePromptReasonView {
+    match reason {
+        SourcePromptReason::Initial => SourcePromptReasonView::Initial,
+        SourcePromptReason::Unreadable => SourcePromptReasonView::Unreadable,
+        SourcePromptReason::PermissionLost => SourcePromptReasonView::PermissionLost,
+        SourcePromptReason::StorageFault => SourcePromptReasonView::StorageFault,
+        SourcePromptReason::StagingFailed => SourcePromptReasonView::StagingFailed,
+        SourcePromptReason::Internal => SourcePromptReasonView::Internal,
+    }
+}
+
+/// Everything a frontend may do to this card, command or not.
+///
+/// `pick_source` comes first because it is the one constructive thing a card
+/// waiting for a document can do, and the published order is the order a
+/// frontend draws. It appears for exactly one lifecycle state — a gate that can
+/// still accept an offer — so a card that is acquiring, staging, ready, or that
+/// has lost its source and needs `re_pick_source` instead never offers it.
+fn card_actions(record: &TransferRecord) -> Vec<CardActionView> {
+    let pick = match &record.source {
+        SourceLifecycle::AwaitingSelection(gate) if gate.accepts_an_offer() => {
+            Some(CardActionView::PickSource(PickSourceActionView {
+                acquisition: acquisition_view(record.current_acquisition()),
+            }))
+        }
+        SourceLifecycle::NotRequired { .. }
+        | SourceLifecycle::AwaitingSelection(_)
+        | SourceLifecycle::Acquiring(_)
+        | SourceLifecycle::Staging { .. }
+        | SourceLifecycle::Ready { .. } => None,
+    };
+    pick.into_iter()
+        .chain(
+            record
+                .allowed_commands()
+                .into_iter()
+                .map(|command| CardActionView::Command(command_kind_view(command))),
+        )
+        .collect()
 }
 
 const fn command_kind_view(command: ProductCommand) -> CommandKindView {
@@ -421,7 +538,7 @@ fn duty_view(duty: Duty) -> DutyView {
 fn action_view(action: CapabilityAction) -> CapabilityActionView {
     match action {
         CapabilityAction::PostReceipt => CapabilityActionView::PostReceipt,
-        CapabilityAction::SelectSource => CapabilityActionView::SelectSource,
+        CapabilityAction::AcquireSource => CapabilityActionView::AcquireSource,
     }
 }
 

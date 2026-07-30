@@ -19,8 +19,9 @@ use envoix_bindings::command::{
     AcceptanceView, CommandBody, CompletionView, CreateOutcomeView, DispositionView, PauseCauseView,
 };
 use envoix_bindings::read::{
-    CardUpdateKindView, CardView, CommandKindView, DirectionView, PauseOriginView,
-    ProductStateView, QuiescenceView, ReadBody, decode_read_frame,
+    CardActionView, CardUpdateKindView, CardView, CommandKindView, DirectionView, PauseOriginView,
+    ProductStateView, QuiescenceView, ReadBody, SourceLifecycleView, SourceSelectionGateView,
+    decode_read_frame,
 };
 use envoix_cli::{Frontend, Ingested};
 use envoix_host_android::{AttachmentToken, FramePoll, Host};
@@ -66,16 +67,19 @@ fn anchor(witness: &str) {
 
     assert_eq!(fact("created"), "true", "the send was created");
     assert_eq!(fact("direction"), "send");
-    // Zero, and that is the point: a minted send is born with no document. The
-    // total arrives from staging, which counts the bytes, rather than from a
-    // frontend repeating what a provider claimed.
-    assert_eq!(fact("total"), "0");
+    // A minted send is born with no document, and read/9 lets it SAY that
+    // rather than publish an empty name and a zero a frontend cannot tell from
+    // a real empty file. `initial` is the reason: nothing has failed, this card
+    // has simply never been given one.
+    assert_eq!(fact("source"), "selectable:initial");
     // A fresh send is not yet running, so pause and resume are not on offer and
     // the authority says so itself — this is the legality table F2a made the
-    // reducer DERIVE, and the value nobody may re-derive in a frontend.
+    // reducer DERIVE, and the value nobody may re-derive in a frontend. The
+    // picker leads it: the one constructive thing this card can do is be given
+    // a document, and the action carries the acquisition an offer must name.
     assert_eq!(
         fact("before_allowed"),
-        "cancel,remove",
+        "pick_source@<32hex>,cancel,remove",
         "the authority's opening offer for a fresh send"
     );
     assert_eq!(fact("acceptance"), "accepted");
@@ -97,7 +101,7 @@ fn anchor(witness: &str) {
     // affordance.
     assert_eq!(
         fact("after_allowed"),
-        "re_pick_source,remove",
+        "pick_source@<32hex>,re_pick_source,remove",
         "a cancelled card keeps its record: it can be restarted or removed"
     );
     assert_eq!(
@@ -134,10 +138,10 @@ fn drive_cli(work: &Path) -> String {
         .intent(&create)
         .expect("the authority answers the CLI create");
     let opening = drain_until(&host, token, |frames| {
-        frames
-            .iter()
-            .filter_map(card_view)
-            .any(|view| view.allowed_actions.contains(&CommandKindView::Cancel))
+        frames.iter().filter_map(card_view).any(|view| {
+            view.allowed_actions
+                .contains(&CardActionView::Command(CommandKindView::Cancel))
+        })
     });
     let card = created_card_through_cli(&created);
 
@@ -198,10 +202,10 @@ fn drive_flutter(work: &Path) -> String {
         .expect("the authority answers the Flutter create");
     fs::write(work.join("create.result"), &created).expect("write the create answer");
     let opening = drain_until(&host, token, |frames| {
-        frames
-            .iter()
-            .filter_map(card_view)
-            .any(|view| view.allowed_actions.contains(&CommandKindView::Cancel))
+        frames.iter().filter_map(card_view).any(|view| {
+            view.allowed_actions
+                .contains(&CardActionView::Command(CommandKindView::Cancel))
+        })
     });
     fs::write(work.join("opening.frames"), frame_lines(&opening))
         .expect("write Flutter opening frames");
@@ -326,16 +330,14 @@ fn witness_text(
     [
         format!("created={created}"),
         format!("direction={}", direction_token(before.direction)),
-        format!("name={}", before.offered_name),
-        format!("total={}", before.total),
+        format!("source={}", source_token(&before.source)),
         format!("before_state={}", state_token(&before.state)),
         format!(
             "before_allowed={}",
             before
                 .allowed_actions
                 .iter()
-                .copied()
-                .map(command_token)
+                .map(action_token)
                 .collect::<Vec<_>>()
                 .join(",")
         ),
@@ -349,8 +351,7 @@ fn witness_text(
             after
                 .allowed_actions
                 .iter()
-                .copied()
-                .map(command_token)
+                .map(action_token)
                 .collect::<Vec<_>>()
                 .join(",")
         ),
@@ -513,6 +514,56 @@ fn command_token(command: CommandKindView) -> &'static str {
         CommandKindView::Resume => "resume",
         CommandKindView::Remove => "remove",
         CommandKindView::RePickSource => "re_pick_source",
+    }
+}
+
+/// One published action as a stable token.
+///
+/// `pick_source` keeps its acquisition, in SHAPE: the two witnesses drive two
+/// different cards, so the key's value cannot agree across them and comparing it
+/// would only prove they are different runs. Dropping the key entirely would
+/// anchor nothing about an action whose whole point is naming one, so the token
+/// says a well-formed key is present. Its identity — that the published key is
+/// the one the authority will accept — is proven where a single record is in
+/// hand, by `the_published_picker_key_is_the_one_the_authority_accepts`.
+fn action_token(action: &CardActionView) -> String {
+    match action {
+        CardActionView::Command(command) => command_token(*command).to_owned(),
+        CardActionView::PickSource(pick) => {
+            let key = &pick.acquisition.request;
+            let well_formed = key.len() == 32
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            if well_formed {
+                "pick_source@<32hex>".to_owned()
+            } else {
+                format!("pick_source@malformed({key})")
+            }
+        }
+    }
+}
+
+/// Where a card's source is, as one stable token.
+fn source_token(source: &SourceLifecycleView) -> String {
+    match source {
+        SourceLifecycleView::NotRequired(view) => match &view.peer_content {
+            Some(content) => format!("not_required:{}:{}", content.offered_name, content.total),
+            None => "not_required:none".to_owned(),
+        },
+        SourceLifecycleView::AwaitingSelection(view) => match &view.selection {
+            SourceSelectionGateView::Selectable(gate) => {
+                format!("selectable:{:?}", gate.reason).to_lowercase()
+            }
+            SourceSelectionGateView::RePickRequired(gate) => {
+                format!("re_pick_required:{:?}", gate.reason).to_lowercase()
+            }
+        },
+        SourceLifecycleView::Acquiring(offer) => format!("acquiring:{}", offer.display_name),
+        SourceLifecycleView::Staging(offer) => format!("staging:{}", offer.display_name),
+        SourceLifecycleView::Ready(view) => {
+            format!("ready:{}:{}", view.content.offered_name, view.content.total)
+        }
     }
 }
 

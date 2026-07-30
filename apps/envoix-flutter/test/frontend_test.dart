@@ -17,7 +17,12 @@ import 'dart:math' as math;
 
 import 'package:envoix/attachment.dart';
 import 'package:envoix/bindings/envoix_capability.dart';
-import 'package:envoix/bindings/envoix_command.dart';
+// Both contracts declare `SourceAcquisitionKeyView`: the generator has no
+// cross-schema reference, so the acquisition key is spelled once per schema
+// that carries it (EH-20). They are structurally identical by gate, not by
+// type, so this file names the READ one and hides the command's.
+import 'package:envoix/bindings/envoix_command.dart'
+    hide SourceAcquisitionKeyView;
 import 'package:envoix/bindings/envoix_read.dart';
 import 'package:envoix/capability.dart';
 import 'package:envoix/commands.dart';
@@ -58,17 +63,35 @@ CardView cardView({
     CommandKindView.cancel,
     CommandKindView.remove,
   ],
+  SourceLifecycleView? source,
 }) =>
     CardView(
-      allowedActions: allowedActions,
+      allowedActions: allowedActions
+          .map(CardActionViewCommand.new)
+          .toList(growable: false),
       identity: IdentityView(
         card: card,
         transfer: 'ab' * 16,
         artifact: 'cd' * 16,
       ),
+      participation: RoomParticipationView.minted,
       direction: direction,
-      offeredName: name,
-      total: total,
+      // The name and total live in the lifecycle now. A sender that has staged
+      // its document is the default here because that is the card these tests
+      // are mostly about; a card with none passes its own `source`.
+      source: source ??
+          SourceLifecycleViewReady(SourceReadyView(
+            offer: AcceptedSourceOfferView(
+              acquisition: SourceAcquisitionKeyView(
+                card: card,
+                generation: 1,
+                request: 'ef' * 16,
+              ),
+              displayName: name,
+              reportedSize: total,
+            ),
+            content: TransferContentView(offeredName: name, total: total),
+          )),
       state: state,
       quiescence: quiescence,
       generation: 1,
@@ -2388,11 +2411,13 @@ void main() {
 
     test('the source duty is rendered as an observation, not a task', () {
       // The read contract can carry it, so the words for it exist. Nothing in
-      // this app acts on a duty; it says the host asked for one.
+      // this app acts on a duty; it says the host asked for one. The words
+      // changed with the duty: it is taking hold of a document ALREADY chosen,
+      // never opening the picker — that is the card's `pick_source` action.
       expect(dutyKindLabel(DutyKindView.sourceHandle), 'open the source');
       expect(
-        capabilityActionLabel(CapabilityActionView.selectSource),
-        'open the file you chose',
+        capabilityActionLabel(CapabilityActionView.acquireSource),
+        'take hold of the file you chose',
       );
     });
 

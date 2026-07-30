@@ -49,9 +49,17 @@ void main(List<String> arguments) {
   equal('cards surfaced', attached.cards.length, 1);
   final CardRow row = attached.cards.single;
   equal('card id', row.card, card);
-  // Both absent for a minted send: the document arrives after the card does.
-  equal('offered name', row.view?.offeredName, offeredName);
-  equal('total bytes', row.view?.total, total);
+  // Both absent: this card is a receiver and the peer has not said what it is
+  // sending yet, so the lifecycle carries no content at all. The lane's job is
+  // to bring that absence across as an absence.
+  final CardView? view = row.view;
+  final SourceLifecycleView? source = view?.source;
+  check('the card needs no source of its own',
+      source is SourceLifecycleViewNotRequired);
+  final TransferContentView? content =
+      (source as SourceLifecycleViewNotRequired?)?.value.peerContent;
+  equal('offered name', content?.offeredName ?? '', offeredName);
+  equal('total bytes', content?.total ?? 0, total);
   equal('stream status', row.status, StreamStatus.live);
   check('epoch is the host\'s, not zero', row.epoch > 0);
   for (final FrameRejection kind in FrameRejection.values) {
