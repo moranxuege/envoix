@@ -13,8 +13,7 @@ use envoix_attempt_api::AttemptPlan;
 use envoix_operation_store::OperationStore;
 use envoix_product::{
     CommitError, CommittedSession, IdentityError, IdentitySource, LedgerHit, NewTransfer,
-    ProductCommand, ProductState, RecordDecode, RecordStore, SourceDecision, TransferRecord,
-    decode_record,
+    ProductCommand, ProductState, RecordDecode, RecordStore, TransferRecord, decode_record,
 };
 use envoix_runtime::{
     AttemptExecution, AttemptExecutor, CommandCompletion, CommandRejected, CommandVerdict, Runtime,
@@ -22,7 +21,7 @@ use envoix_runtime::{
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
-use envoix_types::{ByteCount, CommandId, Direction, OfferedName, RecordId};
+use envoix_types::{CommandId, Direction, RecordId};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -226,11 +225,11 @@ fn create_card(
 ) {
     CommittedSession::create(
         NewTransfer {
-            direction: Direction::Send,
+            // A RECEIVER: these are command-contract tests, and a receiving
+            // card is the one that reaches a live attempt at creation. A sender
+            // must be given a document first, which is a different subject.
+            direction: Direction::Receive,
             participation: envoix_product::RoomParticipation::Minted,
-            offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
-            total: ByteCount::new(1024),
-            source: SourceDecision::Ready,
             pairing: None,
         },
         &mut FixedIdentity { next: seed },

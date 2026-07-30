@@ -31,6 +31,15 @@ pub enum Admission {
     Stale,
     Duplicate,
     Unknown,
+    /// The result named an outstanding duty and answered in the wrong
+    /// vocabulary for its kind — a source duty reporting a bare outcome, or a
+    /// non-source duty reporting an acquisition.
+    ///
+    /// Distinct from `Unknown` on purpose. `Unknown` says the ledger has no
+    /// such duty; this says it has one and the adapter answered a different
+    /// question. Collapsing them would hide a real adapter defect inside the
+    /// routing noise that is expected and ignorable.
+    Incompatible,
 }
 
 /// Reference implementation of duty registration and result admission.
@@ -117,14 +126,22 @@ impl DutyLedger {
             return Admission::Duplicate;
         }
 
-        let Some(duty) = self.outstanding.remove(&provenance) else {
+        let Some(duty) = self.outstanding.get(&provenance).copied() else {
             return Admission::Unknown;
         };
+        // Checked BEFORE the duty is discharged: an adapter that answered the
+        // wrong question has not done the work, and consuming the duty would
+        // lose it silently. It stays outstanding so a correct report can still
+        // arrive, or a retirement can clear it.
+        if !result.report.answers(duty.kind) {
+            return Admission::Incompatible;
+        }
+        self.outstanding.remove(&provenance);
         self.discharged.insert(provenance);
 
         Admission::Fresh(AdmittedDutyResult {
             duty,
-            outcome: result.outcome,
+            report: result.report,
         })
     }
 

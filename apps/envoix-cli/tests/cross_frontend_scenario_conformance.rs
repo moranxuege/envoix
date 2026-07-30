@@ -86,15 +86,18 @@ fn anchor(witness: &str) {
     );
     assert_eq!(fact("after_state"), "cancelled");
     assert_eq!(fact("after_quiescence"), "quiescent");
-    // Resume IS offered on a cancelled card, and deliberately: `on_resume`
-    // distinguishes `Cancelled => false` from the `_ => return` that refuses,
-    // so the flag means "start fresh" rather than "resume from offset". That is
-    // the cancel-keeps/remove-deletes design — the record survives so the
-    // transfer can be started again. Anchored because it is a product decision
-    // a reader would otherwise mistake for a leaked affordance.
+    // A restart IS offered on a cancelled card, and deliberately: that is the
+    // cancel-keeps/remove-deletes design — the record survives so the transfer
+    // can be started again. The verb is `re_pick_source` rather than `resume`
+    // because this card is a SENDER that was cancelled before anyone chose a
+    // document: there is no offset to resume from and no source to send, so
+    // "start again" can only mean "ask me for a file". A `resume` here would be
+    // an affordance that moved the card nowhere. Anchored because it is a
+    // product decision a reader would otherwise mistake for a leaked
+    // affordance.
     assert_eq!(
         fact("after_allowed"),
-        "resume,remove",
+        "re_pick_source,remove",
         "a cancelled card keeps its record: it can be restarted or removed"
     );
     assert_eq!(

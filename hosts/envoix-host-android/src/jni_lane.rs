@@ -196,28 +196,19 @@ mod e2e {
 
     use super::with_host;
 
-    /// `E2eBridge.createForE2e(name, totalBytes): Long` — gives the packaged
-    /// instrumentation real durable state. Returns 0 on failure (a real
-    /// RecordId is never zero).
+    /// `E2eBridge.createForE2e(): Long` — gives the packaged instrumentation
+    /// real durable state. Returns 0 on failure (a real RecordId is never
+    /// zero).
+    ///
+    /// It takes no name or size any more: a card has neither until a document
+    /// is chosen for it, so instrumentation that supplied them was stating
+    /// facts the record cannot hold.
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_app_envoix_host_E2eBridge_createForE2e(
-        mut env: JNIEnv<'_>,
+        _env: JNIEnv<'_>,
         _class: JClass<'_>,
-        name: JString<'_>,
-        total_bytes: jlong,
     ) -> jlong {
-        let Ok(name) = env.get_string(&name) else {
-            return 0;
-        };
-        let name: String = name.into();
-        let Ok(total) = u64::try_from(total_bytes) else {
-            return 0;
-        };
-        with_host(|host| {
-            host.create_for_e2e(&name, total)
-                .map_or(0, |card| card.get() as jlong)
-        })
-        .unwrap_or(0)
+        with_host(|host| host.create_for_e2e().map_or(0, |card| card.get() as jlong)).unwrap_or(0)
     }
 
     /// `E2eBridge.liveCards(): String` — one debug report, in two sections

@@ -3,7 +3,8 @@ use envoix_attempt_api::{
     RetirementIntent,
 };
 use envoix_capabilities::{
-    AdmittedDutyResult, Duty, DutyKind, DutyProvenance, SourceAcquisitionKey,
+    AdmittedDutyResult, AdmittedSourceResult, Duty, DutyKind, DutyProvenance, SourceAcquisitionKey,
+    SourceReport,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_types::{ArtifactId, ByteCount, Direction, RequestId, TransferId};
@@ -12,8 +13,8 @@ use crate::identity::next_generation;
 use crate::{
     AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
     PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
-    Quiescence, SourceDecision, SourceLifecycle, SourceOfferAnswer, StorageAction, TransferRecord,
-    WorkerKind,
+    Quiescence, SelectionGate, SourceLifecycle, SourceOfferAnswer, StagedContent, StagingPlan,
+    StorageAction, TransferContent, TransferRecord, WorkerKind,
 };
 
 /// The domain tag that separates a card's source-duty request identity from its
@@ -60,58 +61,47 @@ impl TransferRecord {
             envoix_types::RequestId,
         ),
     ) -> Result<(Self, Vec<ProductEffect>), IdentityError> {
-        let (state, quiescence, phase, facts, source_recoverable, outcome) = match transfer.source {
-            SourceDecision::Ready => (
+        // A pure function of direction: a receiver needs no source, a sender is
+        // born asking for one. The two states that would contradict the card's
+        // own direction are unreachable from here.
+        let source = SourceLifecycle::initial(transfer.direction);
+        // And so is everything else about the card's opening position. The
+        // caller used to state it — a name, a total, and a `SourceDecision`
+        // that could claim a source was ready for a card holding none — which
+        // is how a created record could contradict its own lifecycle on the
+        // very first commit.
+        let (state, quiescence, phase) = if source.requires_a_source() {
+            (
+                ProductState::Preparing,
+                // Quiescent, not `Running { Staging }`: nothing is working
+                // while the card waits for a person to choose a document. The
+                // old value claimed a staging worker that did not exist, which
+                // is why re-pick and resume had to test around it.
+                Quiescence::Quiescent,
+                Phase::Preparing,
+            )
+        } else {
+            (
                 ProductState::Connecting,
                 Quiescence::Running {
                     worker: WorkerKind::Attempt,
                 },
                 Phase::Pairing,
-                Facts {
-                    source_ready: true,
-                    ..Facts::default()
-                },
-                true,
-                None,
-            ),
-            SourceDecision::Stage { recoverable } => (
-                ProductState::Preparing,
-                Quiescence::Running {
-                    worker: WorkerKind::Staging,
-                },
-                Phase::Preparing,
-                Facts::default(),
-                recoverable,
-                None,
-            ),
-            SourceDecision::NeedsRepick => (
-                ProductState::Failed,
-                Quiescence::Quiescent,
-                Phase::Preparing,
-                Facts::default(),
-                false,
-                Some(source_failure(false, Phase::Preparing)),
-            ),
+            )
         };
         let record = Self {
             identity,
             direction: transfer.direction,
-            // A pure function of direction: a receiver needs no source, a
-            // sender is born asking for one. The two states that would
-            // contradict the card's own direction are unreachable from here.
-            source: SourceLifecycle::initial(transfer.direction),
+            source,
             participation: transfer.participation,
-            offered_name: transfer.offered_name,
-            total: transfer.total,
             state,
             quiescence,
             generation,
             phase,
             bytes: ByteCount::new(0),
             bytes_resumed: ByteCount::new(0),
-            outcome,
-            facts,
-            source_recoverable,
+            outcome: None,
+            facts: Facts::default(),
             pairing: transfer.pairing,
             create_request_id: None,
             receipt_request,
@@ -120,10 +110,10 @@ impl TransferRecord {
         // Both are post-commit effects, so the card is durable before either
         // the first attempt starts or the platform is asked for a source
         // (`SF02`): identity comes before work, including the picker.
-        let effects = match (record.facts.source_ready, record.state) {
-            (true, _) => vec![record.start_attempt(false)],
-            (false, ProductState::Preparing) => vec![record.select_source()],
-            (false, _) => Vec::new(),
+        let effects = if record.source_is_ready() {
+            vec![record.start_attempt(false)]
+        } else {
+            vec![record.select_source()]
         };
         Ok((record, effects))
     }
@@ -132,6 +122,32 @@ impl TransferRecord {
         AttemptStamp {
             card: self.identity.card,
             generation: self.generation,
+        }
+    }
+
+    /// The authoritative byte count, or zero when nothing has established one.
+    ///
+    /// Derived from the lifecycle rather than stored beside it: a stored copy
+    /// is a second authority that can disagree, which is what the top-level
+    /// field was. Zero means "not yet known" and is why every comparison here
+    /// guards on it — a provider's claimed size is deliberately NOT promoted
+    /// into this, so an unstaged card has no total at all.
+    pub fn total(&self) -> ByteCount {
+        self.source
+            .content()
+            .map_or(ByteCount::new(0), TransferContent::total)
+    }
+
+    /// Whether an attempt may start: the source is established, or none was
+    /// ever needed. The single readiness authority, replacing the stored
+    /// `Facts.source_ready` that could disagree with the lifecycle beside it.
+    pub const fn source_is_ready(&self) -> bool {
+        match &self.source {
+            SourceLifecycle::NotRequired { .. } => true,
+            SourceLifecycle::AwaitingSelection(_)
+            | SourceLifecycle::Acquiring(_)
+            | SourceLifecycle::Staging { .. } => false,
+            SourceLifecycle::Ready { .. } => true,
         }
     }
 
@@ -183,10 +199,13 @@ impl TransferRecord {
             ProductInput::Command(command) => self.on_command(command)?,
             ProductInput::Restore => self.on_restore(),
             ProductInput::SourceOffered { offer } => self.on_source_offered(offer)?,
+            ProductInput::SourceSettled(result) => self.on_source_settled(&result),
             ProductInput::StageProgress { stamp, transferred } => {
                 self.on_stage_progress(stamp, transferred)
             }
-            ProductInput::StageComplete { stamp, total } => self.on_stage_complete(stamp, total),
+            ProductInput::StageComplete { stamp, content } => {
+                self.on_stage_complete(stamp, content)
+            }
             ProductInput::StageFailed { stamp } => self.on_stage_failed(stamp),
             ProductInput::Advertised { stamp } => self.on_advertised(stamp),
             ProductInput::VerificationStarted { stamp } => self.on_verification_started(stamp),
@@ -256,10 +275,16 @@ impl TransferRecord {
             } if self.state == ProductState::Preparing => {
                 vec![ProductEffect::RetireStaging { stamp }]
             }
+            // `Preparing` joins this arm because it is now REACHABLE while
+            // quiescent: a card waiting for a person to choose a document has
+            // no worker at all. Before the lifecycle became the source
+            // authority, every `Preparing` card claimed a staging worker, so
+            // this combination could not occur and the arm did not cover it —
+            // which would have left a freshly minted send impossible to cancel.
             Quiescence::Quiescent
                 if matches!(
                     self.state,
-                    ProductState::Paused(_) | ProductState::Unconfirmed
+                    ProductState::Paused(_) | ProductState::Unconfirmed | ProductState::Preparing
                 ) =>
             {
                 self.exit_effects()
@@ -270,6 +295,18 @@ impl TransferRecord {
         };
         self.state = ProductState::Cancelled;
         self.outcome = Some(outcome_for(OutcomeCode::Cancelled, self.phase));
+        // An unfinished acquisition is ABANDONED with the card, not kept. The
+        // grant and the staging worker are being torn down, and nothing was
+        // ever established from them — so the card returns to asking, and a
+        // later re-pick has a gate that can actually accept an answer. Holding
+        // `Acquiring`/`Staging` here would leave a cancelled card whose only
+        // remaining command is Remove.
+        if matches!(
+            self.source,
+            SourceLifecycle::Acquiring(_) | SourceLifecycle::Staging { .. }
+        ) {
+            self.source = SourceLifecycle::AwaitingSelection(SelectionGate::initial());
+        }
         match self.quiescence {
             Quiescence::Running { worker } => {
                 self.quiescence = Quiescence::Retiring {
@@ -303,29 +340,25 @@ impl TransferRecord {
             ProductState::Cancelled => false,
             _ => return Ok(Vec::new()),
         };
+        // Resume restarts an ATTEMPT, and an attempt needs a source. A card
+        // that has none is not resumable at all: advancing the generation would
+        // discharge the acquisition key it is waiting on, so the picker's answer
+        // would arrive stale and the card would wait forever. `RePickSource` is
+        // the command that moves it, and `allowed_commands` offers exactly that
+        // because it asks these handlers rather than declaring a policy beside
+        // them.
+        if !self.source_is_ready() {
+            return Ok(Vec::new());
+        }
         let mut effects = self.exit_effects();
         self.generation = next_generation(self.generation)?;
         self.outcome = None;
-        if self.facts.source_ready {
-            self.state = ProductState::Connecting;
-            self.quiescence = Quiescence::Running {
-                worker: WorkerKind::Attempt,
-            };
-            self.phase = Phase::Pairing;
-            effects.push(self.start_attempt(resume));
-        } else if self.source_recoverable {
-            self.state = ProductState::Preparing;
-            self.quiescence = Quiescence::Running {
-                worker: WorkerKind::Staging,
-            };
-            self.phase = Phase::Preparing;
-            self.clear_progress();
-        } else {
-            self.state = ProductState::Failed;
-            self.quiescence = Quiescence::Quiescent;
-            self.phase = Phase::Preparing;
-            self.outcome = Some(source_failure(false, Phase::Preparing));
-        }
+        self.state = ProductState::Connecting;
+        self.quiescence = Quiescence::Running {
+            worker: WorkerKind::Attempt,
+        };
+        self.phase = Phase::Pairing;
+        effects.push(self.start_attempt(resume));
         Ok(effects)
     }
 
@@ -400,23 +433,101 @@ impl TransferRecord {
         self.source.answer_offer(&expected, offer)
     }
 
+    /// Applies the platform's answer about the acquisition it was asked for.
+    ///
+    /// Only `Acquiring` moves. Every other lifecycle state is inert, and that
+    /// is not laziness: a duty result is an asynchronous, at-least-once
+    /// observation, so a late arrival after a re-pick or a completed staging is
+    /// NORMAL. Turning it into a failure would let the loser of a race
+    /// overwrite the winner — the opposite of the synchronous source offer,
+    /// which must always answer because a frontend is holding a resource.
+    fn on_source_settled(&mut self, result: &AdmittedSourceResult) -> Vec<ProductEffect> {
+        let SourceLifecycle::Acquiring(offer) = &self.source else {
+            return Vec::new();
+        };
+        // The whole key, never the card: a result naming this card under a
+        // superseded generation answers an acquisition that no longer exists.
+        if !offer.key().is(&result.acquisition()) {
+            return Vec::new();
+        }
+        let offer = offer.clone();
+        match result.report() {
+            SourceReport::Acquired {
+                retention,
+                seekability,
+            } => {
+                self.source = SourceLifecycle::staging(
+                    offer,
+                    retention,
+                    StagingPlan::for_source(retention, seekability),
+                );
+                // The staging worker owns the card from here. Nothing starts it
+                // yet — the executor is Step 4 — so this states which worker
+                // the card is waiting on, exactly as creation used to.
+                self.quiescence = Quiescence::Running {
+                    worker: WorkerKind::Staging,
+                };
+            }
+            SourceReport::Failed(failure) => {
+                // The generation is NOT advanced here. Only `RePickSource`
+                // advances it, and it must, because a fresh key is what stops a
+                // late answer under the discharged key resurrecting this card.
+                self.source = SourceLifecycle::lost(offer, failure);
+                self.quiescence = Quiescence::Quiescent;
+                self.state = ProductState::Failed;
+                self.outcome = Some(source_failure(Phase::Preparing));
+            }
+        }
+        Vec::new()
+    }
+
+    /// Asks for a document again, under a fresh acquisition.
+    ///
+    /// The guard reads the LIFECYCLE, not the outcome's recovery hint. The hint
+    /// was a second authority for "does this card need a document?", and it
+    /// disagreed with the lifecycle in both directions: a card cancelled before
+    /// anyone chose carried no hint and could never be restarted, while the
+    /// hint could outlive the state that produced it.
+    ///
+    /// `Preparing` is excluded because that IS the state with an ask already
+    /// outstanding — re-asking would discharge the key the picker is currently
+    /// answering.
     fn on_repick_source(&mut self) -> Result<Vec<ProductEffect>, IdentityError> {
-        if self.state != ProductState::Failed
-            || !self.quiescence.is_quiescent()
-            || self.outcome.as_ref().and_then(|outcome| outcome.recovery)
-                != Some(Recovery::RePickSource)
+        if !self.quiescence.is_quiescent()
+            || !self.source.requires_a_source()
+            || self.source_is_ready()
+            || self.state == ProductState::Preparing
         {
             return Ok(Vec::new());
         }
-        self.generation = next_generation(self.generation)?;
-        self.state = ProductState::Preparing;
-        self.quiescence = Quiescence::Running {
-            worker: WorkerKind::Staging,
+        // The gate is what makes the card selectable again, and the reason it
+        // failed for is carried across so the next ask can say why it is being
+        // made. Without this the card stayed in `RePickRequired` under a fresh
+        // generation: the picker was opened and its answer was then refused,
+        // because a lost gate accepts no offer at all.
+        let gate = match &self.source {
+            // Already selectable — a card that was cancelled before anyone
+            // chose. Nothing failed, so the next ask is still the first one.
+            SourceLifecycle::AwaitingSelection(gate) if gate.accepts_an_offer() => gate.clone(),
+            SourceLifecycle::AwaitingSelection(gate) => {
+                SelectionGate::selectable_again(gate.reason())
+                    .expect("a gate that cannot accept an offer failed for a reason")
+            }
+            // Unreachable: the guard above required a source this card lacks,
+            // and `on_cancel` releases an unfinished acquisition.
+            SourceLifecycle::NotRequired { .. }
+            | SourceLifecycle::Acquiring(_)
+            | SourceLifecycle::Staging { .. }
+            | SourceLifecycle::Ready { .. } => return Ok(Vec::new()),
         };
+        self.generation = next_generation(self.generation)?;
+        self.source = SourceLifecycle::AwaitingSelection(gate);
+        self.state = ProductState::Preparing;
+        // Nothing is working while the picker is open.
+        self.quiescence = Quiescence::Quiescent;
         self.phase = Phase::Preparing;
         self.clear_progress();
         self.outcome = None;
-        self.source_recoverable = true;
         // RS04's missing half: the command that says "the source needs
         // re-picking" now actually asks for one. The generation moved, so this
         // is a fresh duty provenance rather than a re-presentation of the one
@@ -517,7 +628,7 @@ impl TransferRecord {
                 self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Restoring));
                 Vec::new()
             }
-            ProductState::Preparing if self.facts.source_ready => {
+            ProductState::Preparing if self.source_is_ready() => {
                 self.clear_progress();
                 self.state = ProductState::Connecting;
                 self.phase = Phase::Pairing;
@@ -526,10 +637,26 @@ impl TransferRecord {
                 };
                 vec![self.start_attempt(false)]
             }
+            // Still waiting to be given a document. Republish the ask under the
+            // SAME key rather than failing the card: nothing went wrong, the
+            // process simply died before anyone chose. The old code failed it,
+            // because a stored boolean could not tell "no source yet" from "the
+            // source is gone".
+            ProductState::Preparing
+                if matches!(
+                    &self.source,
+                    SourceLifecycle::AwaitingSelection(gate) if gate.accepts_an_offer()
+                ) =>
+            {
+                vec![self.select_source()]
+            }
+            // A document was held and the process died holding it. The grant and
+            // the staging worker died with it, and neither can be proven from
+            // the record alone, so the card asks for a document again.
             ProductState::Preparing => {
                 self.state = ProductState::Failed;
                 self.phase = Phase::Restoring;
-                self.outcome = Some(source_failure(self.source_recoverable, Phase::Restoring));
+                self.outcome = Some(source_failure(Phase::Restoring));
                 Vec::new()
             }
             ProductState::Unconfirmed => vec![ProductEffect::StartMailboxPoll {
@@ -551,7 +678,7 @@ impl TransferRecord {
                     worker: WorkerKind::Staging,
                 })
             || transferred.get() < self.bytes.get()
-            || (self.total.get() != 0 && transferred.get() > self.total.get())
+            || (self.total().get() != 0 && transferred.get() > self.total().get())
         {
             return Vec::new();
         }
@@ -559,7 +686,11 @@ impl TransferRecord {
         Vec::new()
     }
 
-    fn on_stage_complete(&mut self, stamp: AttemptStamp, total: ByteCount) -> Vec<ProductEffect> {
+    fn on_stage_complete(
+        &mut self,
+        stamp: AttemptStamp,
+        content: StagedContent,
+    ) -> Vec<ProductEffect> {
         if !self.is_current(stamp)
             || self.state != ProductState::Preparing
             || self.quiescence
@@ -569,13 +700,34 @@ impl TransferRecord {
         {
             return Vec::new();
         }
-        self.facts.source_ready = true;
-        self.total = total;
-        // The completion total is authoritative for the staged artifact, so the
-        // staged byte count IS that total — clamp progress to it. Otherwise an
-        // over-reported earlier `StageProgress` could leave `bytes > total`, a
-        // state the record codec rejects (the reducer must never author a record
-        // its own codec refuses).
+        // Only a card that WAS staging can finish staging. Before the lifecycle
+        // was the authority this arm did not exist, and completion could
+        // manufacture a ready source for a card that had never held a document.
+        let SourceLifecycle::Staging {
+            offer,
+            acquired_retention,
+            plan,
+        } = self.source.clone()
+        else {
+            return Vec::new();
+        };
+        // Staging counted the bytes and can say which ones; that is what makes
+        // the card's content authoritative, so it is recorded where the
+        // lifecycle keeps it and nowhere else.
+        let total = content.total();
+        // Contradictory evidence, not something to clamp into `Ready`: durable
+        // progress above the final total means the two observations cannot both
+        // be true, and a record whose own invariants cannot explain it must not
+        // be authored. Staging failed instead.
+        if self.bytes.get() > total.get() {
+            return self.fail_staging(stamp);
+        }
+        self.source = SourceLifecycle::Ready {
+            offer,
+            acquired_retention,
+            backing: plan.backing(),
+            content,
+        };
         self.bytes = total;
         self.outcome = None;
         self.request_staging_retirement(RetirementIntent::Finalize);
@@ -592,8 +744,21 @@ impl TransferRecord {
         {
             return Vec::new();
         }
+        self.fail_staging(stamp)
+    }
+
+    /// The card held a document and staging could not read it through.
+    ///
+    /// The lifecycle goes back to awaiting a selection under a reason no
+    /// acquisition can produce, so the card is re-pickable and says why. The
+    /// generation does not move here — `RePickSource` owns that, and moving it
+    /// early would discharge the key before anything asked for a new document.
+    fn fail_staging(&mut self, stamp: AttemptStamp) -> Vec<ProductEffect> {
+        if let SourceLifecycle::Staging { offer, .. } = self.source.clone() {
+            self.source = SourceLifecycle::staging_failed(offer);
+        }
         self.state = ProductState::Failed;
-        self.outcome = Some(source_failure(self.source_recoverable, Phase::Preparing));
+        self.outcome = Some(source_failure(Phase::Preparing));
         self.request_staging_retirement(RetirementIntent::Finalize);
         vec![ProductEffect::RetireStaging { stamp }]
     }
@@ -692,7 +857,7 @@ impl TransferRecord {
         // a protocol violation on resume.
         if self.state != ProductState::Transferring
             || transferred.get() < self.bytes.get()
-            || (self.total.get() != 0 && transferred.get() > self.total.get())
+            || (self.total().get() != 0 && transferred.get() > self.total().get())
         {
             return Vec::new();
         }
@@ -777,7 +942,8 @@ impl TransferRecord {
     }
 
     fn on_receipt_posted(&mut self, result: AdmittedDutyResult) -> Vec<ProductEffect> {
-        if result.duty() == self.receipt_duty() && result.outcome() == OutcomeCode::Completed {
+        if result.duty() == self.receipt_duty() && result.outcome() == Some(OutcomeCode::Completed)
+        {
             self.facts.proof_delivered = true;
         }
         Vec::new()
@@ -936,7 +1102,7 @@ impl TransferRecord {
                 vec![self.discard_partial()]
             }
             RetirementIntent::Finalize
-                if self.state == ProductState::Preparing && self.facts.source_ready =>
+                if self.state == ProductState::Preparing && self.source_is_ready() =>
             {
                 self.clear_progress();
                 self.state = ProductState::Connecting;
@@ -1011,7 +1177,7 @@ impl TransferRecord {
 
     fn complete(&mut self) {
         self.state = ProductState::Completed;
-        self.bytes = self.total;
+        self.bytes = self.total();
         self.outcome = Some(outcome_for(OutcomeCode::Completed, self.phase));
     }
 
@@ -1150,24 +1316,21 @@ impl TransferRecord {
     }
 }
 
-fn source_failure(recoverable: bool, phase: Phase) -> Outcome {
-    if recoverable {
-        Outcome::new(
-            OutcomeCode::SourceUnreadable,
-            phase,
-            Retryability::Retryable,
-            SafeDisplay::new("Source is temporarily unavailable"),
-        )
-        .with_recovery(Recovery::RetryLater)
-    } else {
-        Outcome::new(
-            OutcomeCode::SourceUnreadable,
-            phase,
-            Retryability::NeedsUser,
-            SafeDisplay::new("Source must be selected again"),
-        )
-        .with_recovery(Recovery::RePickSource)
-    }
+/// The one outcome a source failure can have.
+///
+/// It used to have two, chosen by a stored `source_recoverable` boolean. Once
+/// readiness is derived from the lifecycle the retry-without-the-user arm is
+/// unreachable, and it was never honest anyway: every source failure leaves the
+/// card in `RePickRequired`, which by construction cannot accept an offer under
+/// the discharged key. A card that said "retry later" had no retry that worked.
+fn source_failure(phase: Phase) -> Outcome {
+    Outcome::new(
+        OutcomeCode::SourceUnreadable,
+        phase,
+        Retryability::NeedsUser,
+        SafeDisplay::new("Source must be selected again"),
+    )
+    .with_recovery(Recovery::RePickSource)
 }
 
 fn outcome_for(code: OutcomeCode, phase: Phase) -> Outcome {

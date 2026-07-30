@@ -67,7 +67,7 @@ void main(List<String> arguments) {
     equal('card id', row.card, card);
     final CardView view = row.view!;
     equal(
-      'the authority offers what a live send offers',
+      'the authority offers what a card with a live attempt offers',
       view.allowedActions.map(commandOf).map(commandLabel).join(','),
       'Pause,Cancel,Remove',
     );

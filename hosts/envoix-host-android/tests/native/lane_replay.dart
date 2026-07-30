@@ -49,6 +49,7 @@ void main(List<String> arguments) {
   equal('cards surfaced', attached.cards.length, 1);
   final CardRow row = attached.cards.single;
   equal('card id', row.card, card);
+  // Both absent for a minted send: the document arrives after the card does.
   equal('offered name', row.view?.offeredName, offeredName);
   equal('total bytes', row.view?.total, total);
   equal('stream status', row.status, StreamStatus.live);

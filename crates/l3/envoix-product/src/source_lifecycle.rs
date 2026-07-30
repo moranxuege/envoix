@@ -21,7 +21,9 @@
 //! becoming live values is the record decoder converting through a DTO rather
 //! than deserializing these types directly; that lands with record v5.
 
-use envoix_capabilities::SourceAcquisitionKey;
+use envoix_capabilities::{
+    SourceAcquisitionFailure, SourceAcquisitionKey, SourceRetention, SourceSeekability,
+};
 use envoix_protocol::ContentHash;
 use envoix_types::{ByteCount, Direction, OfferedName};
 
@@ -56,27 +58,20 @@ impl SourcePromptReason {
     }
 }
 
-/// How long the PLATFORM's hold on the document lasts, exactly as the source
-/// duty reported it.
-///
-/// The reason `duty/2` exists. A source duty used to answer `completed`, which
-/// said nothing about surviving a restart — so a card could believe it owned a
-/// document it would lose.
-///
-/// **Never rewritten.** An earlier version of this model promoted `Process` to
-/// `Persisted` once bytes were copied, which quietly changed the meaning of an
-/// admitted duty result: an exact replay of the original
-/// `source_acquired(Process)` would then look like a conflict with state that
-/// had moved underneath it. What owns the bytes now is [`SourceBacking`], a
-/// different question with a different answer.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceRetention {
-    /// Readable in THIS platform process only. Honest and usable: the transfer
-    /// can proceed now, and a restart returns the card to awaiting selection.
-    Process,
-    /// The platform can reopen this after a restart.
-    Persisted,
+impl From<SourceAcquisitionFailure> for SourcePromptReason {
+    /// Every way acquisition can fail maps to a reason a user can be shown.
+    ///
+    /// Total in this direction and NOT in the other: `Initial` and
+    /// `StagingFailed` have no acquisition failure to come from, which is the
+    /// asymmetry that keeps an adapter from authoring either.
+    fn from(failure: SourceAcquisitionFailure) -> Self {
+        match failure {
+            SourceAcquisitionFailure::Unreadable => Self::Unreadable,
+            SourceAcquisitionFailure::PermissionLost => Self::PermissionLost,
+            SourceAcquisitionFailure::StorageFault => Self::StorageFault,
+            SourceAcquisitionFailure::Internal => Self::Internal,
+        }
+    }
 }
 
 /// A document the user chose, bound to exactly one acquisition.
@@ -150,6 +145,35 @@ pub enum StagingPlan {
     /// Copy into an app-private artifact, because the grant would not survive a
     /// restart or the source cannot seek.
     CopyToOwnedArtifact,
+}
+
+impl StagingPlan {
+    /// The plan for a source the platform will serve under these terms.
+    ///
+    /// Streaming is the default and the copy is the exception: copying every
+    /// send would double disk for a multi-gigabyte file on a phone. The two
+    /// facts that force a copy are the two resume depends on — a grant that a
+    /// restart would lose, and a source that cannot be re-read from an offset.
+    /// Both come from the platform's own answer, so this is a total function of
+    /// what was reported rather than a policy that has to guess.
+    pub const fn for_source(retention: SourceRetention, seekability: SourceSeekability) -> Self {
+        match (retention, seekability) {
+            (SourceRetention::Persisted, SourceSeekability::Seekable) => Self::ProviderStream,
+            (SourceRetention::Persisted, SourceSeekability::SequentialOnly)
+            | (SourceRetention::Process, SourceSeekability::Seekable)
+            | (SourceRetention::Process, SourceSeekability::SequentialOnly) => {
+                Self::CopyToOwnedArtifact
+            }
+        }
+    }
+
+    /// What owns the bytes once staging under this plan has finished.
+    pub const fn backing(self) -> SourceBacking {
+        match self {
+            Self::ProviderStream => SourceBacking::PersistedProvider,
+            Self::CopyToOwnedArtifact => SourceBacking::OwnedArtifact,
+        }
+    }
 }
 
 /// What owns the bytes once staging has finished.
@@ -379,6 +403,45 @@ impl SourceLifecycle {
         !matches!(self, Self::NotRequired { .. })
     }
 
+    /// The platform holds the document; establish what it contains.
+    pub const fn staging(
+        offer: AcceptedSourceOffer,
+        acquired_retention: SourceRetention,
+        plan: StagingPlan,
+    ) -> Self {
+        Self::Staging {
+            offer,
+            acquired_retention,
+            plan,
+        }
+    }
+
+    /// Staging held the document and could not read it through.
+    ///
+    /// A distinct entry point from [`Self::lost`] because the reason is one no
+    /// acquisition failure can produce: acquisition SUCCEEDED here and reading
+    /// did not, and a frontend telling a user which happened needs them apart.
+    pub fn staging_failed(offer: AcceptedSourceOffer) -> Self {
+        Self::AwaitingSelection(SelectionGate::RePickRequired {
+            reason: SourcePromptReason::StagingFailed,
+            previous_offer: offer,
+        })
+    }
+
+    /// The acquisition failed, so this generation has lost the document it
+    /// accepted and only a re-pick reopens the card.
+    ///
+    /// Total, unlike [`SelectionGate::lost`]: an ACQUISITION failure is always
+    /// a failure reason, so there is no `None` arm here for a caller to unwrap
+    /// or explain. That is the whole reason the platform's failure vocabulary
+    /// is a separate, smaller type.
+    pub fn lost(offer: AcceptedSourceOffer, failure: SourceAcquisitionFailure) -> Self {
+        Self::AwaitingSelection(SelectionGate::RePickRequired {
+            reason: failure.into(),
+            previous_offer: offer,
+        })
+    }
+
     /// The acquisition this state is bound to, if any. Inputs match against the
     /// WHOLE key; "the card matches" is not the question.
     pub const fn key(&self) -> Option<&SourceAcquisitionKey> {
@@ -394,6 +457,36 @@ impl SourceLifecycle {
     /// qualifies — a held URI is not a source that can be sent.
     pub const fn is_ready(&self) -> bool {
         matches!(self, Self::Ready { .. })
+    }
+
+    /// What this card is transferring, once anything knows.
+    ///
+    /// One place, derived rather than stored beside the lifecycle: a sender
+    /// learns it from staging, a receiver from the peer's header, and both used
+    /// to be copied into top-level record fields that could then disagree with
+    /// the lifecycle. `None` is honest — a minted send between create and offer
+    /// genuinely has no document.
+    pub const fn content(&self) -> Option<&TransferContent> {
+        match self {
+            Self::NotRequired { peer_content } => peer_content.as_ref(),
+            // Chosen but not yet read: the provider's claimed name is the best
+            // that is true, and it has no counted total.
+            Self::AwaitingSelection(_) | Self::Acquiring(_) | Self::Staging { .. } => None,
+            Self::Ready { content, .. } => Some(content.content()),
+        }
+    }
+
+    /// The name to show, including the provisional one a chosen-but-unstaged
+    /// document has. Deliberately separate from [`content`]: this may be the
+    /// provider's claim, which is not authoritative and must never become a
+    /// total.
+    pub fn display_name(&self) -> Option<&OfferedName> {
+        match self {
+            Self::NotRequired { peer_content } => peer_content.as_ref().map(TransferContent::name),
+            Self::AwaitingSelection(_) => None,
+            Self::Acquiring(offer) | Self::Staging { offer, .. } => Some(offer.display_name()),
+            Self::Ready { content, .. } => Some(content.name()),
+        }
     }
 
     /// Whether direction and source state agree. True by construction above; a

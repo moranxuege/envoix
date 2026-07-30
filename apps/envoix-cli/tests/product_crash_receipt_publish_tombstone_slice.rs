@@ -8,7 +8,11 @@ use envoix_attempt_api::{
     EventAdmission, OpenResult, ResumeIntent, RetirementAckResult, RetirementIntent,
     RetirementRequestResult,
 };
-use envoix_capabilities::{Admission, Duty, DutyKind, DutyResult, GenerationUpdate, Registration};
+use envoix_capabilities::{
+    Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult,
+    GenerationUpdate, Registration, SourceAcquisitionKey, SourceReport, SourceRetention,
+    SourceSeekability,
+};
 use envoix_invite::RoomCode;
 use envoix_operation_store::{
     ArtifactKey, DestructiveOperation, OperationStore, OutboxStatus, PossessionState, StoreError,
@@ -19,9 +23,10 @@ use envoix_pairing::{
     WIRE_HEADER_LEN, initiator_start, responder_respond,
 };
 use envoix_product::{
-    ApplyOutcome, CommitError, CommitStatus, CommittedSession, IdentityError, IdentitySource,
-    NewTransfer, ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence,
-    RecordDecode, RecordStore, SourceDecision, StorageAction, TransferRecord, decode_record,
+    AcceptedSourceOffer, ApplyOutcome, CapabilityAction, CommitError, CommitStatus,
+    CommittedSession, ContentHash, IdentityError, IdentitySource, NewTransfer, ProductCommand,
+    ProductEffect, ProductInput, ProductState, Quiescence, RecordDecode, RecordStore,
+    StagedContent, StorageAction, TransferContent, TransferRecord, decode_record,
 };
 use envoix_rendezvous::{ClientConfig, ControlLimits, Role};
 use envoix_rendezvous_iroh::{
@@ -351,15 +356,87 @@ fn server_config(root: &Path) -> ServerConfig {
     config
 }
 
-fn new_transfer(direction: Direction, offered_name: OfferedName, total: ByteCount) -> NewTransfer {
+/// A card as a frontend states it. No name, total or source decision crosses
+/// here any more: the authority derives the opening source state from the
+/// direction, and the name and total arrive with the document.
+fn new_transfer(direction: Direction) -> NewTransfer {
     NewTransfer {
         direction,
         participation: envoix_product::RoomParticipation::Minted,
-        offered_name,
-        total,
-        source: SourceDecision::Ready,
         pairing: None,
     }
+}
+
+/// The acquisition key a frontend actually has: it arrives on the published
+/// source duty, which is how a real frontend learns which one it is answering.
+fn published_acquisition(outcome: &ApplyOutcome) -> DutyProvenance {
+    outcome
+        .released_after_commit
+        .iter()
+        .find_map(|effect| match effect {
+            ProductEffect::CapabilityDuty { duty, action } => {
+                (*action == CapabilityAction::SelectSource).then_some(duty.provenance)
+            }
+            _ => None,
+        })
+        .expect("a card that needs a source publishes the duty that asks for one")
+}
+
+/// Walks a sending session from "needs a document" to a live attempt, and
+/// returns the outcome that LAUNCHED it. A sender has no shorter route: the
+/// lifecycle is the only source authority, so nothing can declare it ready.
+fn stage_the_source<S: RecordStore>(
+    session: &mut CommittedSession<S>,
+    created: &ApplyOutcome,
+    offered_name: &OfferedName,
+    total: ByteCount,
+) -> ApplyOutcome {
+    let provenance = published_acquisition(created);
+    session
+        .apply(ProductInput::SourceOffered {
+            offer: AcceptedSourceOffer::new(
+                SourceAcquisitionKey::of(provenance),
+                offered_name.clone(),
+                Some(total),
+            ),
+        })
+        .unwrap();
+    let mut ledger = DutyLedger::new();
+    ledger.advance_generation(provenance.card, provenance.generation);
+    assert_eq!(
+        ledger.register(Duty {
+            provenance,
+            kind: DutyKind::SourceHandle,
+        }),
+        Registration::Registered
+    );
+    let Admission::Fresh(admitted) = ledger.admit(DutyResult {
+        provenance,
+        report: DutyReport::Source(SourceReport::Acquired {
+            retention: SourceRetention::Persisted,
+            seekability: SourceSeekability::Seekable,
+        }),
+    }) else {
+        panic!("an outstanding source duty admits its first result");
+    };
+    session
+        .apply(ProductInput::SourceSettled(
+            admitted.into_source().expect("a source answer"),
+        ))
+        .unwrap();
+    let stamp = session.record().stamp();
+    session
+        .apply(ProductInput::StageComplete {
+            stamp,
+            content: StagedContent::new(
+                TransferContent::new(offered_name.clone(), total),
+                ContentHash::from_bytes([7; 32]),
+            ),
+        })
+        .unwrap();
+    session
+        .apply(ProductInput::StagingRetired { stamp })
+        .unwrap()
 }
 
 fn start_plan(outcome: &ApplyOutcome) -> AttemptPlan {
@@ -423,7 +500,7 @@ impl FakeCourier {
         self.posts += 1;
         DutyResult {
             provenance: duty.provenance,
-            outcome: OutcomeCode::Completed,
+            report: DutyReport::Outcome(OutcomeCode::Completed),
         }
     }
 }
@@ -444,8 +521,8 @@ async fn product_crash_receipt_publish_tombstone_slice() {
     let total = ByteCount::new(TOTAL_BYTES);
 
     // Create the sender first: it alone mints the shared transfer/artifact pair.
-    let (sender, sender_created) = CommittedSession::create(
-        new_transfer(Direction::Send, offered_name.clone(), total),
+    let (mut sender, sender_created) = CommittedSession::create(
+        new_transfer(Direction::Send),
         &mut FixedBytes::new(0x10),
         ProductOperationStore::deferred(&durable_root),
         NonZeroUsize::MIN,
@@ -455,9 +532,10 @@ async fn product_crash_receipt_publish_tombstone_slice() {
         sender_created.commit,
         CommitStatus::Committed { attempts: 1 }
     );
+    // Then give it a document: the lifecycle is the only source authority, so
+    // this is the only way a sender reaches the wire.
+    let sender_created = stage_the_source(&mut sender, &sender_created, &offered_name, total);
     let sender_plan = start_plan(&sender_created);
-    assert_eq!(sender.store().accepted_writes, 1);
-    assert_eq!(sender.store().committed_writes, 1);
     assert_eq!(
         sender.store().operation().record_id(),
         sender.record().identity.card
@@ -466,8 +544,8 @@ async fn product_crash_receipt_publish_tombstone_slice() {
     let sender_offer = (
         sender.record().identity.transfer,
         sender.record().identity.artifact,
-        sender.record().offered_name.clone(),
-        sender.record().total,
+        offered_name.clone(),
+        sender.record().total(),
     );
     let descriptor = DescriptorPayload::new(serde_json::to_vec(&sender_offer).unwrap()).unwrap();
     let authenticated_offer =
@@ -476,9 +554,14 @@ async fn product_crash_receipt_publish_tombstone_slice() {
     assert_eq!(authenticated_offer, sender_offer);
 
     // Adoption occurs only after the real C3 descriptor opened successfully.
-    let (transfer_id, artifact_id, received_name, received_total) = authenticated_offer;
+    // The name and total the peer authenticated belong in the receiver's
+    // `NotRequired { peer_content }`, and nothing admits a peer header into it
+    // yet — that producer arrives with the receive-side header work. They are
+    // asserted equal to the sender's above, which is what this slice can prove
+    // today; binding them to the record is not silently skipped, it is unbuilt.
+    let (transfer_id, artifact_id, _received_name, _received_total) = authenticated_offer;
     let (mut receiver, receiver_created) = CommittedSession::create_with_identity(
-        new_transfer(Direction::Receive, received_name, received_total),
+        new_transfer(Direction::Receive),
         transfer_id,
         artifact_id,
         &mut FixedBytes::new(0x90),

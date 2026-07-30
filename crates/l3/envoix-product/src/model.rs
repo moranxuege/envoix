@@ -1,13 +1,14 @@
 use envoix_attempt_api::{
     AdmittedAttemptEvent, AttemptPlan, AttemptStamp, RetirementAck, RetirementIntent,
 };
-use envoix_capabilities::{AdmittedDutyResult, Duty};
+use envoix_capabilities::{AdmittedDutyResult, AdmittedSourceResult, Duty};
 use envoix_outcomes::{Outcome, Phase};
-use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RequestId};
+use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, RequestId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceptedSourceOffer, PairingChannel, ProductIdentity, RoomParticipation, SourceLifecycle,
+    StagedContent,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -83,30 +84,25 @@ impl Quiescence {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceDecision {
-    Ready,
-    Stage { recoverable: bool },
-    NeedsRepick,
-}
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Facts {
-    pub source_ready: bool,
     pub complete_sent: bool,
     pub proof_delivered: bool,
     pub receipt_mismatch: bool,
     pub remove_requested: bool,
 }
 
+/// What a frontend states to create a card.
+///
+/// Carries NO source metadata. A document is chosen after the card is durable,
+/// under an acquisition key the authority mints — so a name, a total, and a
+/// caller's guess at whether the source was ready have nothing to say here.
+/// Their absence is what makes `SourceLifecycle` the only source authority
+/// rather than the newest of three.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewTransfer {
     pub direction: Direction,
-    pub offered_name: OfferedName,
-    pub total: ByteCount,
-    pub source: SourceDecision,
     /// Whether this endpoint minted the room or joined one. Carried from the
     /// create intent because only the intent knows: a mint states its own
     /// direction, a join derives the opposite from an invite only Rust reads.
@@ -139,13 +135,24 @@ pub enum ProductInput {
     SourceOffered {
         offer: AcceptedSourceOffer,
     },
+    /// The platform's admitted answer about the acquisition it was asked for.
+    ///
+    /// The edge that was missing: the source duty was issued and dispatched,
+    /// and nothing carried its result back, so no card could leave `Acquiring`.
+    /// Taking an [`AdmittedSourceResult`] rather than a key and a report is
+    /// what stops an unadmitted platform claim reaching the reducer.
+    SourceSettled(AdmittedSourceResult),
     StageProgress {
         stamp: AttemptStamp,
         transferred: ByteCount,
     },
+    /// Staging read the source through and can say what it contains.
+    ///
+    /// Carries the digest, not just the length: `Ready` is unconstructible
+    /// without one, so the reducer cannot invent a hash that verifies nothing.
     StageComplete {
         stamp: AttemptStamp,
-        total: ByteCount,
+        content: StagedContent,
     },
     StageFailed {
         stamp: AttemptStamp,
@@ -316,8 +323,6 @@ impl CommandLedger {
 pub struct TransferRecord {
     pub identity: ProductIdentity,
     pub direction: Direction,
-    pub offered_name: OfferedName,
-    pub total: ByteCount,
     pub state: ProductState,
     pub quiescence: Quiescence,
     pub generation: AttemptGen,
@@ -326,7 +331,6 @@ pub struct TransferRecord {
     pub bytes_resumed: ByteCount,
     pub outcome: Option<Outcome>,
     pub facts: Facts,
-    pub source_recoverable: bool,
     /// Where this card's SEND source is in its acquisition, or that it needs
     /// none. Record v5's addition, and the reason v4 is not readable: a v4
     /// record has no honest value for this. A receiver decoded as

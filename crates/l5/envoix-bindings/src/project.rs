@@ -190,8 +190,22 @@ fn card_view(record: &TransferRecord) -> CardView {
             Direction::Send => DirectionView::Send,
             Direction::Receive => DirectionView::Receive,
         },
-        offered_name: truncate_utf8(record.offered_name.as_str(), MAX_NAME_BYTES),
-        total: u63(record.total.get()),
+        // Both DERIVED from the source lifecycle rather than read from record
+        // fields that could disagree with it. A minted send between create and
+        // offer has neither.
+        //
+        // The empty name is THIS projection's fallback, not a fact the record
+        // holds: read/8's `CardView` requires a string, and a card that has not
+        // been given a document has no name to put there. Read/9 replaces both
+        // fields with the lifecycle itself, at which point "no name yet" is
+        // representable and this invention goes away. It deliberately does not
+        // live on `TransferRecord`, where it would be the authority pretending
+        // to know something it does not.
+        offered_name: truncate_utf8(
+            record.source.display_name().map_or("", OfferedName::as_str),
+            MAX_NAME_BYTES,
+        ),
+        total: u63(record.total().get()),
         state: state_view(record.state),
         quiescence: quiescence_view(record.quiescence),
         generation: record.generation.get(),

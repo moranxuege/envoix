@@ -8,7 +8,9 @@ use envoix_attempt_api::{
     OpenResult, RetirementAckResult, RetirementIntent, RetirementRequestResult,
 };
 use envoix_capabilities::{
-    Admission, Duty, DutyKind, DutyLedger, DutyResult, GenerationUpdate, Registration,
+    Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult,
+    GenerationUpdate, Registration, SourceAcquisitionKey, SourceReport, SourceRetention,
+    SourceSeekability,
 };
 use envoix_mailbox::{HttpReceiptMailbox, MailboxClientError};
 use envoix_outcomes::{OutcomeCode, Phase};
@@ -16,8 +18,9 @@ use envoix_pairing::{
     EntropyError, EntropySource, Paired, PairingCode, initiator_start, responder_respond,
 };
 use envoix_product::{
-    ApplyOutcome, CapabilityAction, CommitError, CommittedSession, IdentityError, IdentitySource,
-    NewTransfer, ProductEffect, ProductInput, ProductState, RecordStore, SourceDecision,
+    AcceptedSourceOffer, ApplyOutcome, CapabilityAction, CommitError, CommittedSession,
+    IdentityError, IdentitySource, NewTransfer, ProductEffect, ProductInput, ProductState,
+    RecordStore, StagedContent, TransferContent,
 };
 use envoix_protocol::mailbox::{
     MailboxProtocolError, ReceiptPayload, SealedReceipt, open_receipt, receipt_slot, seal_receipt,
@@ -95,15 +98,87 @@ fn server_config(root: &Path) -> ServerConfig {
     config
 }
 
-fn new_transfer(direction: Direction, offered_name: OfferedName, total: ByteCount) -> NewTransfer {
+/// A card as a frontend states it. No name, total or source decision crosses
+/// here any more: the authority derives the opening source state from the
+/// direction, and the name and total arrive with the document.
+fn new_transfer(direction: Direction) -> NewTransfer {
     NewTransfer {
         direction,
         participation: envoix_product::RoomParticipation::Minted,
-        offered_name,
-        total,
-        source: SourceDecision::Ready,
         pairing: None,
     }
+}
+
+/// The acquisition key a frontend actually has: it arrives on the published
+/// source duty, which is how a real frontend learns which one it is answering.
+fn published_acquisition(outcome: &ApplyOutcome) -> DutyProvenance {
+    outcome
+        .released_after_commit
+        .iter()
+        .find_map(|effect| match effect {
+            ProductEffect::CapabilityDuty { duty, action } => {
+                (*action == CapabilityAction::SelectSource).then_some(duty.provenance)
+            }
+            _ => None,
+        })
+        .expect("a card that needs a source publishes the duty that asks for one")
+}
+
+/// Walks a sending session from "needs a document" to a live attempt, and
+/// returns the outcome that LAUNCHED it. A sender has no shorter route: the
+/// lifecycle is the only source authority, so nothing can declare it ready.
+fn stage_the_source<S: RecordStore>(
+    session: &mut CommittedSession<S>,
+    created: &ApplyOutcome,
+    offered_name: &OfferedName,
+    total: ByteCount,
+) -> ApplyOutcome {
+    let provenance = published_acquisition(created);
+    session
+        .apply(ProductInput::SourceOffered {
+            offer: AcceptedSourceOffer::new(
+                SourceAcquisitionKey::of(provenance),
+                offered_name.clone(),
+                Some(total),
+            ),
+        })
+        .unwrap();
+    let mut ledger = DutyLedger::new();
+    ledger.advance_generation(provenance.card, provenance.generation);
+    assert_eq!(
+        ledger.register(Duty {
+            provenance,
+            kind: DutyKind::SourceHandle,
+        }),
+        Registration::Registered
+    );
+    let Admission::Fresh(admitted) = ledger.admit(DutyResult {
+        provenance,
+        report: DutyReport::Source(SourceReport::Acquired {
+            retention: SourceRetention::Persisted,
+            seekability: SourceSeekability::Seekable,
+        }),
+    }) else {
+        panic!("an outstanding source duty admits its first result");
+    };
+    session
+        .apply(ProductInput::SourceSettled(
+            admitted.into_source().expect("a source answer"),
+        ))
+        .unwrap();
+    let stamp = session.record().stamp();
+    session
+        .apply(ProductInput::StageComplete {
+            stamp,
+            content: StagedContent::new(
+                TransferContent::new(offered_name.clone(), total),
+                ContentHash::from_bytes([7; 32]),
+            ),
+        })
+        .unwrap();
+    session
+        .apply(ProductInput::StagingRetired { stamp })
+        .unwrap()
 }
 
 fn start_plan(outcome: &ApplyOutcome) -> AttemptPlan {
@@ -215,17 +290,19 @@ async fn real_receipt_mailbox_post_poll_verify() {
     let total = ByteCount::new(12_345);
 
     let (mut sender, sender_created) = CommittedSession::create(
-        new_transfer(Direction::Send, offered_name.clone(), total),
+        new_transfer(Direction::Send),
         &mut FixedBytes::new(0x10),
         MemoryRecordStore,
         NonZeroUsize::MIN,
     )
     .unwrap();
+    // The sender reaches the wire only through a real acquisition.
+    let sender_created = stage_the_source(&mut sender, &sender_created, &offered_name, total);
     let sender_plan = start_plan(&sender_created);
     let transfer_id = sender.record().identity.transfer;
     let artifact_id = sender.record().identity.artifact;
     let (mut receiver, receiver_created) = CommittedSession::create_with_identity(
-        new_transfer(Direction::Receive, offered_name, total),
+        new_transfer(Direction::Receive),
         transfer_id,
         artifact_id,
         &mut FixedBytes::new(0x70),
@@ -421,7 +498,7 @@ async fn real_receipt_mailbox_post_poll_verify() {
     assert_eq!(ledger.register(duty), Registration::Registered);
     let admitted = match ledger.admit(DutyResult {
         provenance: duty.provenance,
-        outcome: OutcomeCode::Completed,
+        report: DutyReport::Outcome(OutcomeCode::Completed),
     }) {
         Admission::Fresh(admitted) => admitted,
         admission => panic!("posted receipt result was not admitted: {admission:?}"),

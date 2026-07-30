@@ -2,8 +2,8 @@ use envoix_outcomes::OutcomeCode;
 use envoix_types::{AttemptGen, RecordId, RequestId};
 
 use crate::{
-    Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyResult, GenerationUpdate,
-    Registration, SourceAcquisitionKey,
+    Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult,
+    GenerationUpdate, Registration, SourceAcquisitionKey,
 };
 
 fn provenance(card: u64, generation: u32, request: u128) -> DutyProvenance {
@@ -24,7 +24,7 @@ fn duty(card: u64, generation: u32, request: u128, kind: DutyKind) -> Duty {
 fn result(duty: Duty, outcome: OutcomeCode) -> DutyResult {
     DutyResult {
         provenance: duty.provenance,
-        outcome,
+        report: DutyReport::Outcome(outcome),
     }
 }
 
@@ -47,14 +47,14 @@ fn stale_or_duplicate_duty_rejected() {
         panic!("first matching result must be fresh");
     };
     assert_eq!(admitted.duty(), publish);
-    assert_eq!(admitted.outcome(), OutcomeCode::Completed);
+    assert_eq!(admitted.outcome(), Some(OutcomeCode::Completed));
     assert_eq!(ledger.admit(publish_result), Admission::Duplicate);
 
     let Admission::Fresh(admitted) = ledger.admit(result(notify, OutcomeCode::Completed)) else {
         panic!("independent request must remain fresh");
     };
     assert_eq!(admitted.duty(), notify);
-    assert_eq!(admitted.outcome(), OutcomeCode::Completed);
+    assert_eq!(admitted.outcome(), Some(OutcomeCode::Completed));
 
     let pending = duty(7, 1, 3, DutyKind::Courier);
     assert_eq!(ledger.register(pending), Registration::Registered);
@@ -70,13 +70,13 @@ fn stale_or_duplicate_duty_rejected() {
 
     let never_registered = DutyResult {
         provenance: provenance(7, 1, 99),
-        outcome: OutcomeCode::Completed,
+        report: DutyReport::Outcome(OutcomeCode::Completed),
     };
     assert_eq!(ledger.admit(never_registered), Admission::Stale);
 
     let unknown_current = DutyResult {
         provenance: provenance(7, 2, 100),
-        outcome: OutcomeCode::Completed,
+        report: DutyReport::Outcome(OutcomeCode::Completed),
     };
     assert_eq!(ledger.admit(unknown_current), Admission::Unknown);
 }
@@ -150,11 +150,11 @@ fn mismatched_or_future_provenance_is_unknown() {
 
     let wrong_card = DutyResult {
         provenance: provenance(9, 2, 5),
-        outcome: OutcomeCode::Completed,
+        report: DutyReport::Outcome(OutcomeCode::Completed),
     };
     let future = DutyResult {
         provenance: provenance(8, 3, 5),
-        outcome: OutcomeCode::Completed,
+        report: DutyReport::Outcome(OutcomeCode::Completed),
     };
     assert_eq!(ledger.admit(wrong_card), Admission::Unknown);
     assert_eq!(ledger.admit(future), Admission::Unknown);

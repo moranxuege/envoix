@@ -173,17 +173,18 @@ fn validate_record(record: &TransferRecord) -> Result<(), RecordCodecError> {
             RecordInvariant::ZeroGeneration,
         ));
     }
-    if record.total.get() != 0 && record.bytes.get() > record.total.get() {
+    if record.total().get() != 0 && record.bytes.get() > record.total().get() {
         return Err(RecordCodecError::InvalidRecord(
             RecordInvariant::ProgressExceedsTotal,
         ));
     }
     // A `Preparing` card with a ready source is normally invalid — EXCEPT the
-    // staging-retirement handoff window: `StageComplete` sets `source_ready` and
-    // moves the worker to `Retiring(Staging, Finalize)` but stays `Preparing`
-    // until `StagingRetired` launches the first attempt. That durable intermediate
-    // state must round-trip; any OTHER `Preparing + source_ready` is still invalid.
-    if record.facts.source_ready
+    // staging-retirement handoff window: `StageComplete` promotes the lifecycle
+    // to `Ready` and moves the worker to `Retiring(Staging, Finalize)` but stays
+    // `Preparing` until `StagingRetired` launches the first attempt. That durable
+    // intermediate state must round-trip; any OTHER ready-and-preparing card is
+    // still invalid.
+    if record.source_is_ready()
         && record.state == ProductState::Preparing
         && !matches!(
             record.quiescence,

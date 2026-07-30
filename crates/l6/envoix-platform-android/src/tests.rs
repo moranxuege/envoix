@@ -1,6 +1,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use envoix_capabilities::{Admission, Duty, DutyKind, DutyLedger, DutyProvenance, Registration};
+use envoix_capabilities::{
+    Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyReport, Registration,
+};
 use envoix_outcomes::OutcomeCode;
 use envoix_types::{AttemptGen, RecordId, RequestId};
 
@@ -83,6 +85,21 @@ fn platform_duty_crash_matrix() {
         // is still outstanding, the replayed report admits exactly once.
         let report = WorkReport::new(duty.provenance, OutcomeCode::Completed);
         let lost_then_replayed = WorkReport::decode(&report.encode().unwrap()).unwrap();
+        if kind == DutyKind::SourceHandle {
+            // Except this one, and not because the crash matrix does not cover
+            // it. A source acquisition must state retention and seekability,
+            // and this lane carries an outcome code and nothing else — so the
+            // ledger refuses the answer as incompatible with the duty's kind
+            // and leaves the duty OUTSTANDING. Refused every time, never
+            // consumed: a bare `completed` cannot become a source the card
+            // believes it holds. duty/2 gives this lane the source vocabulary.
+            assert_eq!(
+                ledger.admit(lost_then_replayed.to_result()),
+                Admission::Incompatible
+            );
+            assert_eq!(ledger.admit(report.to_result()), Admission::Incompatible);
+            continue;
+        }
         assert!(matches!(
             ledger.admit(lost_then_replayed.to_result()),
             Admission::Fresh(_)
@@ -433,7 +450,11 @@ fn pin_source_pick_crash_windows(provenance: DutyProvenance) {
         let report = WorkReport::new(provenance, outcome);
         let decoded = WorkReport::decode(&report.encode().unwrap()).unwrap();
         assert_eq!(decoded, report);
-        assert_eq!(decoded.to_result().outcome, outcome);
+        assert_eq!(
+            decoded.to_result().report,
+            DutyReport::Outcome(outcome),
+            "this lane still carries an outcome code and nothing more"
+        );
     }
 }
 

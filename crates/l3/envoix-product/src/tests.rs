@@ -3,19 +3,22 @@ use envoix_attempt_api::{
     OpenResult, ResumeIntent, RetirementAck, RetirementAckResult, RetirementIntent,
 };
 use envoix_capabilities::{
-    Admission, DutyKind, DutyLedger, DutyProvenance, DutyResult, GenerationUpdate, Registration,
+    Admission, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult, GenerationUpdate,
+    Registration, SourceAcquisitionFailure, SourceReport, SourceRetention, SourceSeekability,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
+use envoix_protocol::ContentHash;
 use envoix_types::{
     ArtifactId, AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId, RequestId,
     TransferId,
 };
 
+use crate::test_support::{STAGED_NAME, STAGED_TOTAL, give_a_source, offer, settled, staged};
 use crate::{
     CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer, PauseOrigin,
     ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState, Quiescence,
-    RecordCodecError, RecordDecode, SourceDecision, StorageAction, TransferRecord, WorkerKind,
-    decode_record, encode_record, resolve_source,
+    RecordCodecError, RecordDecode, StorageAction, TransferRecord, WorkerKind, decode_record,
+    encode_record,
 };
 
 #[derive(Default)]
@@ -41,14 +44,11 @@ impl IdentitySource for UnavailableEntropy {
     }
 }
 
-fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<ProductEffect>) {
+fn create(direction: Direction) -> (TransferRecord, Vec<ProductEffect>) {
     TransferRecord::create(
         NewTransfer {
             direction,
             participation: crate::RoomParticipation::Minted,
-            offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
-            total: ByteCount::new(100),
-            source,
             pairing: None,
         },
         &mut DeterministicEntropy::default(),
@@ -56,12 +56,56 @@ fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<
     .expect("deterministic identity source")
 }
 
-fn ready(direction: Direction) -> TransferRecord {
-    create(direction, SourceDecision::Ready).0
+/// A sending card that has been given a document and is staging it.
+fn staging(direction: Direction) -> TransferRecord {
+    let (mut record, _) = create(direction);
+    give_a_source(&mut record);
+    record
 }
 
-fn preparing(direction: Direction, recoverable: bool) -> TransferRecord {
-    create(direction, SourceDecision::Stage { recoverable }).0
+/// A sending card whose acquisition failed, so only a re-pick reopens it.
+fn needs_repick() -> TransferRecord {
+    let (mut record, _) = create(Direction::Send);
+    let offered = ProductInput::SourceOffered {
+        offer: offer(&record, STAGED_NAME, None),
+    };
+    record.reduce(offered).unwrap();
+    let settlement = settled(
+        &record,
+        SourceReport::Failed(SourceAcquisitionFailure::Unreadable),
+    );
+    record.reduce(settlement).unwrap();
+    record
+}
+
+/// A card whose source is established, reached the way the product reaches one.
+///
+/// A receiver needs none and is ready at creation. A sender is walked through
+/// the whole acquisition — the picker answers, the platform acquires, staging
+/// reports what it read, and the staging worker retires — because there is no
+/// longer a shortcut that declares a source ready without one.
+fn ready(direction: Direction) -> TransferRecord {
+    launched(direction).0
+}
+
+/// As [`ready`], and also the effects that launched the first attempt — for
+/// the tests that assert on the plan itself.
+fn launched(direction: Direction) -> (TransferRecord, Vec<ProductEffect>) {
+    if direction == Direction::Receive {
+        return create(direction);
+    }
+    let mut record = staging(direction);
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            content: staged(STAGED_NAME, STAGED_TOTAL),
+        })
+        .unwrap();
+    let effects = record
+        .reduce(ProductInput::StagingRetired { stamp })
+        .unwrap();
+    (record, effects)
 }
 
 fn event(record: &TransferRecord, kind: AttemptEventKind) -> ProductInput {
@@ -106,7 +150,7 @@ fn admitted_duty_result(
     assert_eq!(ledger.register(duty), Registration::Registered);
     match ledger.admit(DutyResult {
         provenance,
-        outcome,
+        report: DutyReport::Outcome(outcome),
     }) {
         Admission::Fresh(result) => result,
         other => panic!("registered duty result was not admitted: {other:?}"),
@@ -196,9 +240,25 @@ fn assert_outcome(record: &TransferRecord, code: OutcomeCode) {
     );
 }
 
+/// Every identity exists before ANY world-facing work is authorized.
+///
+/// A receiver's first work is the attempt; a sender's is the picker. Both are
+/// post-commit, so whichever one goes first can only name identities the record
+/// already holds (`SF02`).
 #[test]
-fn product_mints_all_identity_before_the_first_attempt() {
-    let (record, effects) = create(Direction::Send, SourceDecision::Ready);
+fn product_mints_all_identity_before_the_first_work() {
+    let (sender, effects) = create(Direction::Send);
+    let [ProductEffect::CapabilityDuty { duty, .. }] = effects.as_slice() else {
+        panic!("a sender's first work is the picker, got {effects:?}");
+    };
+    assert_ne!(sender.identity.card.get(), 0);
+    assert_ne!(sender.identity.transfer.to_bytes(), [0; 16]);
+    assert_ne!(sender.identity.artifact.to_bytes(), [0; 16]);
+    assert_ne!(sender.generation.get(), 0);
+    assert_eq!(duty.provenance.card, sender.identity.card);
+    assert_eq!(duty.provenance.generation, sender.generation);
+
+    let (record, effects) = create(Direction::Receive);
     let plan = start_plan(&effects);
     assert_ne!(record.identity.card.get(), 0);
     assert_ne!(record.identity.transfer.to_bytes(), [0; 16]);
@@ -213,9 +273,6 @@ fn product_mints_all_identity_before_the_first_attempt() {
         NewTransfer {
             direction: Direction::Send,
             participation: crate::RoomParticipation::Minted,
-            offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
-            total: ByteCount::new(1),
-            source: SourceDecision::Ready,
             pairing: None,
         },
         &mut UnavailableEntropy,
@@ -232,9 +289,6 @@ fn receiver_adopts_authenticated_transfer_identity_and_mints_local_identity() {
         NewTransfer {
             direction: Direction::Receive,
             participation: crate::RoomParticipation::Minted,
-            offered_name: OfferedName::from_untrusted("authenticated.zip").unwrap(),
-            total: ByteCount::new(321),
-            source: SourceDecision::Ready,
             pairing: None,
         },
         transfer,
@@ -253,18 +307,30 @@ fn receiver_adopts_authenticated_transfer_identity_and_mints_local_identity() {
     assert_eq!(plan.artifact, artifact);
 }
 
+/// The policy that replaced `resolve_source`: it reads what the PLATFORM
+/// answered instead of what a caller decided, and it is total over both facts.
 #[test]
-fn source_precedence_is_owned_by_product_policy() {
-    assert_eq!(resolve_source(true, None), SourceDecision::Ready);
+fn a_send_streams_unless_the_platform_forces_a_copy() {
+    use crate::StagingPlan;
     assert_eq!(
-        resolve_source(false, Some(true)),
-        SourceDecision::Stage { recoverable: true }
+        StagingPlan::for_source(SourceRetention::Persisted, SourceSeekability::Seekable),
+        StagingPlan::ProviderStream,
+        "the default: no copy, so a multi-gigabyte send does not double disk"
     );
-    assert_eq!(
-        resolve_source(false, Some(false)),
-        SourceDecision::Stage { recoverable: false }
-    );
-    assert_eq!(resolve_source(false, None), SourceDecision::NeedsRepick);
+    for (retention, seekability) in [
+        (
+            SourceRetention::Persisted,
+            SourceSeekability::SequentialOnly,
+        ),
+        (SourceRetention::Process, SourceSeekability::Seekable),
+        (SourceRetention::Process, SourceSeekability::SequentialOnly),
+    ] {
+        assert_eq!(
+            StagingPlan::for_source(retention, seekability),
+            StagingPlan::CopyToOwnedArtifact,
+            "a grant a restart loses, or a source resume cannot re-read, must be copied"
+        );
+    }
 }
 
 #[test]
@@ -295,7 +361,7 @@ fn receive_happy_path_posts_receipt() {
         .unwrap();
 
     assert_eq!(record.state, ProductState::Completed);
-    assert_eq!(record.bytes, record.total);
+    assert_eq!(record.bytes, record.total());
     // The receipt duty is DEFERRED behind the attempt's retirement (committed
     // effects + quiescence): the terminal only asks the attempt to finalize.
     assert!(matches!(
@@ -360,7 +426,7 @@ fn storage_failed_ends_active_states_and_spares_terminal_ones() {
 
 #[test]
 fn stage_complete_launches_the_first_attempt_fresh() {
-    let mut record = preparing(Direction::Send, true);
+    let mut record = staging(Direction::Send);
     let stamp = record.stamp();
     record
         .reduce(ProductInput::StageProgress {
@@ -374,13 +440,13 @@ fn stage_complete_launches_the_first_attempt_fresh() {
     let effects = record
         .reduce(ProductInput::StageComplete {
             stamp,
-            total: ByteCount::new(80),
+            content: staged(STAGED_NAME, 80),
         })
         .unwrap();
     assert_eq!(record.state, ProductState::Preparing);
-    assert!(record.facts.source_ready);
+    assert!(record.source_is_ready());
     assert_eq!(
-        record.total,
+        record.total(),
         ByteCount::new(80),
         "the staged artifact is the authoritative source length"
     );
@@ -397,7 +463,7 @@ fn stage_complete_launches_the_first_attempt_fresh() {
 
 #[test]
 fn stage_progress_only_moves_the_bar_in_preparing() {
-    let mut record = preparing(Direction::Send, true);
+    let mut record = staging(Direction::Send);
     let stamp = record.stamp();
     record
         .reduce(ProductInput::StageProgress {
@@ -418,9 +484,15 @@ fn stage_progress_only_moves_the_bar_in_preparing() {
     assert_eq!(transferring.bytes, ByteCount::new(40));
 }
 
+/// Staging failure always needs the user, and says which failure it was.
+///
+/// There used to be a second, "retryable" flavour selected by a stored
+/// `source_recoverable` boolean. It was unreachable truth: the card lands in
+/// `RePickRequired`, which cannot accept an offer under the discharged key, so
+/// "retry later" named a retry that could not work.
 #[test]
 fn stage_failed_fails_with_typed_source_recovery() {
-    let mut recoverable = preparing(Direction::Send, true);
+    let mut recoverable = staging(Direction::Send);
     let stamp = recoverable.stamp();
     recoverable
         .reduce(ProductInput::StageFailed { stamp })
@@ -432,10 +504,17 @@ fn stage_failed_fails_with_typed_source_recovery() {
             .outcome
             .as_ref()
             .and_then(|outcome| outcome.recovery),
-        Some(Recovery::RetryLater)
+        Some(Recovery::RePickSource)
     );
+    // And the lifecycle says acquisition succeeded while READING failed, which
+    // no acquisition failure can claim.
+    let crate::SourceLifecycle::AwaitingSelection(gate) = &recoverable.source else {
+        panic!("a failed staging returns the card to awaiting selection");
+    };
+    assert_eq!(gate.reason(), crate::SourcePromptReason::StagingFailed);
+    assert!(!gate.accepts_an_offer());
 
-    let mut needs_repick = preparing(Direction::Send, false);
+    let mut needs_repick = needs_repick();
     let stamp = needs_repick.stamp();
     needs_repick
         .reduce(ProductInput::StageFailed { stamp })
@@ -451,7 +530,7 @@ fn stage_failed_fails_with_typed_source_recovery() {
 
 #[test]
 fn cancel_during_preparing_retires_the_worker_before_discarding() {
-    let mut record = preparing(Direction::Send, true);
+    let mut record = staging(Direction::Send);
     let stamp = record.stamp();
     // A Preparing cancel asks the staging WORKER to retire; the destructive
     // discard is deferred until the worker confirms it stopped — otherwise a
@@ -489,7 +568,7 @@ fn cancel_during_preparing_retires_the_worker_before_discarding() {
 
 #[test]
 fn pause_during_preparing_is_a_noop() {
-    let mut record = preparing(Direction::Send, true);
+    let mut record = staging(Direction::Send);
     assert!(
         record
             .reduce(ProductInput::Command(ProductCommand::Pause))
@@ -508,7 +587,7 @@ fn stage_inputs_off_preparing_are_dropped() {
         record
             .reduce(ProductInput::StageComplete {
                 stamp,
-                total: ByteCount::new(100),
+                content: staged(STAGED_NAME, 100),
             })
             .unwrap()
             .is_empty()
@@ -518,29 +597,30 @@ fn stage_inputs_off_preparing_are_dropped() {
 
 #[test]
 fn stale_generation_staging_inputs_are_rejected_after_retry() {
-    let mut record = preparing(Direction::Send, true);
+    let mut record = staging(Direction::Send);
     let first = record.stamp();
     record
-        .reduce(ProductInput::Command(ProductCommand::Cancel))
+        .reduce(ProductInput::StageFailed { stamp: first })
         .unwrap();
     // The staging worker retires before the card can re-stage under a new gen.
     record
         .reduce(ProductInput::StagingRetired { stamp: first })
         .unwrap();
-    assert!(
-        record
-            .reduce(ProductInput::Command(ProductCommand::Resume))
-            .unwrap()
-            .is_empty()
-    );
+    // Re-pick is what advances the generation for a sourceless card, so the
+    // acquisition key the stale worker answers to is discharged with it.
+    record
+        .reduce(ProductInput::Command(ProductCommand::RePickSource))
+        .unwrap();
     assert_eq!(record.state, ProductState::Preparing);
     assert_ne!(record.stamp(), first);
+    // A fresh document under the fresh key: the card is staging again.
+    give_a_source(&mut record);
 
     let snapshot = record.clone();
     for input in [
         ProductInput::StageComplete {
             stamp: first,
-            total: ByteCount::new(100),
+            content: staged(STAGED_NAME, 100),
         },
         ProductInput::StageFailed { stamp: first },
         ProductInput::StageProgress {
@@ -556,7 +636,7 @@ fn stale_generation_staging_inputs_are_rejected_after_retry() {
     let staged = record
         .reduce(ProductInput::StageComplete {
             stamp,
-            total: ByteCount::new(100),
+            content: staged(STAGED_NAME, 100),
         })
         .unwrap();
     assert_eq!(staged, vec![ProductEffect::RetireStaging { stamp }]);
@@ -567,38 +647,70 @@ fn stale_generation_staging_inputs_are_rejected_after_retry() {
     assert_eq!(start_plan(&launched).resume, ResumeIntent::Fresh);
 }
 
+/// A card with no source does not RESUME — it re-picks.
+///
+/// Resume restarts an attempt, and advancing the generation for one would
+/// discharge the acquisition key the card is waiting on, so the picker's answer
+/// would arrive stale and the card would wait forever. The old code took that
+/// branch and parked in `Preparing` with no effect at all, which is the same
+/// hang wearing a different state.
 #[test]
-fn resume_from_failed_staging_re_stages_not_the_wire() {
-    let mut record = preparing(Direction::Send, true);
+fn a_sourceless_card_re_picks_rather_than_resumes() {
+    let mut record = staging(Direction::Send);
     let stamp = record.stamp();
     record.reduce(ProductInput::StageFailed { stamp }).unwrap();
     // The staging worker must retire before the failed card is at rest.
     record
         .reduce(ProductInput::StagingRetired { stamp })
         .unwrap();
+    let before = record.clone();
+
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
-    assert_eq!(record.state, ProductState::Preparing);
+    assert_eq!(record, before, "resume moved a card that has no source");
     assert!(effects.is_empty());
+    assert!(!record.allowed_commands().contains(&ProductCommand::Resume));
+
+    // Re-pick is the command that does move it, and it asks again.
+    let effects = record
+        .reduce(ProductInput::Command(ProductCommand::RePickSource))
+        .unwrap();
+    assert_eq!(record.state, ProductState::Preparing);
+    assert_eq!(record.generation.get(), before.generation.get() + 1);
+    let [ProductEffect::CapabilityDuty { action, .. }] = effects.as_slice() else {
+        panic!("a re-pick asks for a source, got {effects:?}");
+    };
+    assert_eq!(*action, CapabilityAction::SelectSource);
+    // And the fresh gate accepts the answer, which the old code never did: it
+    // advanced the generation and left the card in `RePickRequired`, so the
+    // picker opened and its offer was then refused.
+    let offered = ProductInput::SourceOffered {
+        offer: offer(&record, STAGED_NAME, None),
+    };
+    record.reduce(offered).unwrap();
+    assert!(matches!(
+        record.source,
+        crate::SourceLifecycle::Acquiring(_)
+    ));
 }
 
 #[test]
 fn resume_after_completed_staging_goes_to_the_wire() {
-    let mut record = preparing(Direction::Send, true);
+    let mut record = staging(Direction::Send);
     let stamp = record.stamp();
     // Staging completes and its worker retires: the attempt goes to the wire.
     record
         .reduce(ProductInput::StageComplete {
             stamp,
-            total: ByteCount::new(100),
+            content: staged(STAGED_NAME, 100),
         })
         .unwrap();
     record
         .reduce(ProductInput::StagingRetired { stamp })
         .unwrap();
     assert_eq!(record.state, ProductState::Connecting);
-    assert!(record.facts.source_ready);
+    assert!(record.source_is_ready());
     // Pausing then resuming stays on the wire (the source is ready); it does
     // NOT drop back to re-staging.
     record
@@ -1055,7 +1167,7 @@ fn receipt_verified_completion_survives_cancelled_retirement_ack() {
 
     assert_eq!(record.state, ProductState::Completed);
     assert_eq!(record.quiescence, crate::Quiescence::Quiescent);
-    assert_eq!(record.bytes, record.total);
+    assert_eq!(record.bytes, record.total());
     assert!(!effects.iter().any(|effect| matches!(
         effect,
         ProductEffect::StorageIntent {
@@ -1189,7 +1301,7 @@ fn completed_short_path_uses_product_owned_identity_and_total() {
         ))
         .unwrap();
     assert_eq!(record.identity, identity);
-    assert_eq!(record.bytes, record.total);
+    assert_eq!(record.bytes, record.total());
 }
 
 #[test]
@@ -1280,7 +1392,7 @@ fn restore_derives_state_from_durable_facts() {
     assert_eq!(active.state, ProductState::Paused(PauseOrigin::Lost));
     assert_eq!(active.quiescence, crate::Quiescence::Quiescent);
 
-    let mut preparing = preparing(Direction::Send, false);
+    let mut preparing = needs_repick();
     preparing.reduce(ProductInput::Restore).unwrap();
     assert_eq!(preparing.state, ProductState::Failed);
     assert_eq!(preparing.quiescence, crate::Quiescence::Quiescent);
@@ -1345,16 +1457,16 @@ fn staging_handoff_state_round_trips_through_the_codec() {
     // Retiring(Staging, Finalize)` until `StagingRetired`. The commit barrier must
     // persist that durable handoff, so it MUST encode/decode — but ANY other
     // `Preparing + source_ready` is still invalid.
-    let mut record = preparing(Direction::Send, true);
+    let mut record = staging(Direction::Send);
     let stamp = record.stamp();
     record
         .reduce(ProductInput::StageComplete {
             stamp,
-            total: ByteCount::new(90),
+            content: staged(STAGED_NAME, 90),
         })
         .unwrap();
     assert_eq!(record.state, ProductState::Preparing);
-    assert!(record.facts.source_ready);
+    assert!(record.source_is_ready());
     assert!(matches!(
         record.quiescence,
         crate::Quiescence::Retiring {
@@ -1387,12 +1499,17 @@ fn staging_handoff_state_round_trips_through_the_codec() {
     assert!(encode_record(&cancel_handoff).is_err());
 }
 
+/// Progress above the final total is CONTRADICTORY, not something to clamp.
+///
+/// The old reducer silently clamped it into `Ready`, which authored a record
+/// whose own history could not explain it: staging had reported more durable
+/// bytes than the file it says it finished reading. Both observations came from
+/// the same worker and they cannot both be true, so the honest answer is that
+/// staging failed — and the card asks for a document again rather than sending
+/// one whose length nobody can account for.
 #[test]
-fn stage_complete_clamps_progress_to_the_authoritative_total() {
-    // A completion total smaller than an over-reported prior StageProgress must
-    // not leave bytes > total — a state the record codec rejects. The reducer
-    // must never author a record its own codec refuses.
-    let mut record = preparing(Direction::Send, true);
+fn stage_complete_refuses_a_total_below_the_progress_it_already_reported() {
+    let mut record = staging(Direction::Send);
     let stamp = record.stamp();
     record
         .reduce(ProductInput::StageProgress {
@@ -1400,22 +1517,44 @@ fn stage_complete_clamps_progress_to_the_authoritative_total() {
             transferred: ByteCount::new(80),
         })
         .unwrap();
-    record
+    let effects = record
         .reduce(ProductInput::StageComplete {
             stamp,
-            total: ByteCount::new(50),
+            content: staged(STAGED_NAME, 50),
         })
         .unwrap();
-    assert_eq!(record.total, ByteCount::new(50));
+
+    assert_eq!(record.state, ProductState::Failed);
+    assert!(!record.source_is_ready(), "a contradiction cannot be Ready");
+    assert_eq!(effects, vec![ProductEffect::RetireStaging { stamp }]);
     assert_eq!(
-        record.bytes,
-        ByteCount::new(50),
-        "progress is clamped to the authoritative completion total"
+        record.outcome.as_ref().and_then(|outcome| outcome.recovery),
+        Some(Recovery::RePickSource)
     );
     assert!(
         encode_record(&record).is_ok(),
         "the reduced staging record must be encodable by its own codec"
     );
+
+    // An equal total is not contradictory: staging read exactly what it
+    // reported, which is the ordinary end of a stream it had already counted.
+    let mut exact = staging(Direction::Send);
+    let stamp = exact.stamp();
+    exact
+        .reduce(ProductInput::StageProgress {
+            stamp,
+            transferred: ByteCount::new(80),
+        })
+        .unwrap();
+    exact
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            content: staged(STAGED_NAME, 80),
+        })
+        .unwrap();
+    assert!(exact.source_is_ready());
+    assert_eq!(exact.total(), ByteCount::new(80));
+    assert_eq!(exact.bytes, ByteCount::new(80));
 }
 
 #[test]
@@ -1543,7 +1682,7 @@ fn legal_commands_come_only_from_product_state() {
         ]
     );
 
-    let mut needs_repick = preparing(Direction::Send, false);
+    let mut needs_repick = needs_repick();
     let stamp = needs_repick.stamp();
     needs_repick
         .reduce(ProductInput::StageFailed { stamp })
@@ -1572,7 +1711,7 @@ fn legal_commands_come_only_from_product_state() {
 /// authority makes, on records built by real reductions.
 #[test]
 fn the_offer_at_each_resting_state_is_pinned() {
-    let mut needs_repick = preparing(Direction::Send, false);
+    let mut needs_repick = needs_repick();
     let repick_stamp = needs_repick.stamp();
     needs_repick
         .reduce(ProductInput::StageFailed {
@@ -1634,7 +1773,7 @@ fn the_offer_at_each_resting_state_is_pinned() {
         ),
         (
             "preparing",
-            preparing(Direction::Send, true),
+            staging(Direction::Send),
             vec![ProductCommand::Cancel, ProductCommand::Remove],
         ),
         (
@@ -1773,27 +1912,41 @@ fn every_published_command_moves_the_card_and_the_rest_are_inert() {
     }
 
     let base = ready(Direction::Send);
+    let held = offer(&base, STAGED_NAME, Some(STAGED_TOTAL));
+    let lifecycles = [
+        crate::SourceLifecycle::initial(Direction::Receive),
+        crate::SourceLifecycle::initial(Direction::Send),
+        crate::SourceLifecycle::lost(held.clone(), SourceAcquisitionFailure::Unreadable),
+        crate::SourceLifecycle::staging_failed(held.clone()),
+        crate::SourceLifecycle::Acquiring(held.clone()),
+        crate::SourceLifecycle::staging(
+            held.clone(),
+            SourceRetention::Persisted,
+            crate::StagingPlan::ProviderStream,
+        ),
+        base.source.clone(),
+    ];
     let mut swept = 0usize;
     let mut offered = [0usize; 5];
     let mut withheld = [0usize; 5];
     for state in states {
         for quiescence in quiescences {
-            // All five facts, so a fact that starts gating a command tomorrow is
-            // already inside the sweep.
-            for bits in 0..32u8 {
-                for source_recoverable in [false, true] {
+            // Every fact, so one that starts gating a command tomorrow is
+            // already inside the sweep — and every source lifecycle, which is
+            // where the two booleans this replaced used to live.
+            for bits in 0..16u8 {
+                for source in &lifecycles {
                     for outcome in &outcomes {
                         let mut record = base.clone();
                         record.state = state;
                         record.quiescence = quiescence;
                         record.facts = Facts {
-                            source_ready: bits & 1 != 0,
-                            complete_sent: bits & 2 != 0,
-                            proof_delivered: bits & 4 != 0,
-                            receipt_mismatch: bits & 8 != 0,
-                            remove_requested: bits & 16 != 0,
+                            complete_sent: bits & 1 != 0,
+                            proof_delivered: bits & 2 != 0,
+                            receipt_mismatch: bits & 4 != 0,
+                            remove_requested: bits & 8 != 0,
                         };
-                        record.source_recoverable = source_recoverable;
+                        record.source = source.clone();
                         record.outcome = outcome.clone();
                         swept += 1;
 
@@ -1836,7 +1989,11 @@ fn every_published_command_moves_the_card_and_the_rest_are_inert() {
     // Vacuity: a sweep that never offers a command, or never withholds one,
     // satisfies that command's half of the biconditional while proving nothing
     // about it. Every command must appear on both sides.
-    assert_eq!(swept, 97_344, "the constructible space changed shape");
+    // 11 states x 6 quiescences x 16 fact combinations x 7 lifecycles x 23
+    // outcomes. It grew when the two source booleans became the lifecycle:
+    // seven real source states replaced four boolean combinations, three of
+    // which could never happen.
+    assert_eq!(swept, 170_352, "the constructible space changed shape");
     for (slot, command) in commands.into_iter().enumerate() {
         assert!(offered[slot] > 0, "{command:?} is never offered");
         assert!(withheld[slot] > 0, "{command:?} is never withheld");
@@ -1995,7 +2152,7 @@ fn random_interleavings_hold_invariants() {
             };
             record.reduce(input).unwrap();
             assert!(
-                record.total.get() == 0 || record.bytes.get() <= record.total.get(),
+                record.total().get() == 0 || record.bytes.get() <= record.total().get(),
                 "bytes exceed total: {record:?}"
             );
         }
@@ -2004,8 +2161,10 @@ fn random_interleavings_hold_invariants() {
 
 #[test]
 fn product_model_scenario_trace() {
-    let (mut send, create_effects) = create(Direction::Send, SourceDecision::Ready);
-    assert_eq!(start_plan(&create_effects).resume, ResumeIntent::Fresh);
+    // The trace starts where a sender actually reaches the wire: after a
+    // document has been chosen, acquired and staged.
+    let (mut send, launch_effects) = launched(Direction::Send);
+    assert_eq!(start_plan(&launch_effects).resume, ResumeIntent::Fresh);
     send.reduce(event(&send, AttemptEventKind::Phase(Phase::Transferring)))
         .unwrap();
     send.reduce(event(
@@ -2104,10 +2263,7 @@ fn product_model_scenario_trace() {
 /// there is nothing to ask for.
 #[test]
 fn a_card_that_needs_a_source_asks_the_platform_for_one() {
-    let (record, effects) = create(
-        Direction::Send,
-        SourceDecision::Stage { recoverable: false },
-    );
+    let (record, effects) = create(Direction::Send);
     assert_eq!(record.state, ProductState::Preparing);
     let [ProductEffect::CapabilityDuty { duty, action }] = effects.as_slice() else {
         panic!("a staged create asks for a source, got {effects:?}");
@@ -2124,9 +2280,6 @@ fn a_card_that_needs_a_source_asks_the_platform_for_one() {
         NewTransfer {
             direction: Direction::Send,
             participation: crate::RoomParticipation::Minted,
-            offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
-            total: ByteCount::new(100),
-            source: SourceDecision::Stage { recoverable: false },
             pairing: None,
         },
         &mut DeterministicEntropy::default(),
@@ -2136,21 +2289,21 @@ fn a_card_that_needs_a_source_asks_the_platform_for_one() {
     assert!(outcome.released_immediately.is_empty());
     assert_eq!(outcome.released_after_commit.len(), 1);
 
-    // A ready source has nothing to pick, and a card created needing a re-pick
-    // is already failed — asking would be asking on behalf of a dead card.
-    for source in [SourceDecision::Ready, SourceDecision::NeedsRepick] {
-        let (_, effects) = create(Direction::Send, source);
-        assert!(
-            !effects.iter().any(|effect| matches!(
-                effect,
-                ProductEffect::CapabilityDuty {
-                    action: CapabilityAction::SelectSource,
-                    ..
-                }
-            )),
-            "{source:?} asked for a source it does not need"
-        );
-    }
+    // A receiver has nothing to pick, so it is never asked. That is now a
+    // property of its DIRECTION rather than of a source decision a caller
+    // supplied, which is why there is no longer a way to create a sender that
+    // skips the ask.
+    let (_, effects) = create(Direction::Receive);
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            ProductEffect::CapabilityDuty {
+                action: CapabilityAction::SelectSource,
+                ..
+            }
+        )),
+        "a receiver asked for a source it can never have"
+    );
 }
 
 /// The re-pick command is the recovery `RS04` says the old app stranded users
@@ -2158,7 +2311,7 @@ fn a_card_that_needs_a_source_asks_the_platform_for_one() {
 /// sees a new duty rather than one it has already discharged.
 #[test]
 fn re_picking_a_source_asks_again_under_a_new_generation() {
-    let mut record = preparing(Direction::Send, false);
+    let mut record = needs_repick();
     let stamp = record.stamp();
     let _ = record.reduce(ProductInput::StageFailed { stamp });
     let _ = record.reduce(ProductInput::StagingRetired { stamp });
@@ -2216,9 +2369,6 @@ fn a_cards_channel_survives_the_record_and_re_encodes_to_its_invite() {
         NewTransfer {
             direction: Direction::Send,
             participation: crate::RoomParticipation::Minted,
-            offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
-            total: ByteCount::new(100),
-            source: SourceDecision::Stage { recoverable: false },
             pairing: Some(Box::new(crate::PairingChannel::from_invite(&invite))),
         },
         &mut DeterministicEntropy::default(),
@@ -2248,10 +2398,31 @@ fn fixture_record() -> TransferRecord {
             artifact: ArtifactId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]),
         },
         direction: Direction::Send,
-        source: crate::SourceLifecycle::initial(Direction::Send),
+        // A staged send: the name and total live in the lifecycle now, which is
+        // the point — one authority for what the card is transferring.
+        source: crate::SourceLifecycle::Ready {
+            offer: crate::AcceptedSourceOffer::new(
+                envoix_capabilities::SourceAcquisitionKey::of(
+                    envoix_capabilities::DutyProvenance {
+                        card: RecordId::new(1),
+                        generation: AttemptGen::new(7),
+                        request: RequestId::from_bytes([4; 16]),
+                    },
+                ),
+                OfferedName::from_untrusted("a.txt").unwrap(),
+                Some(ByteCount::new(10)),
+            ),
+            acquired_retention: crate::SourceRetention::Persisted,
+            backing: crate::SourceBacking::PersistedProvider,
+            content: crate::StagedContent::new(
+                crate::TransferContent::new(
+                    OfferedName::from_untrusted("a.txt").unwrap(),
+                    ByteCount::new(10),
+                ),
+                ContentHash::from_bytes([5; 32]),
+            ),
+        },
         participation: crate::RoomParticipation::Minted,
-        offered_name: OfferedName::from_untrusted("a.txt").unwrap(),
-        total: ByteCount::new(10),
         state: ProductState::Paused(PauseOrigin::Local),
         quiescence: crate::Quiescence::Quiescent,
         generation: AttemptGen::new(7),
@@ -2260,13 +2431,11 @@ fn fixture_record() -> TransferRecord {
         bytes_resumed: ByteCount::new(2),
         outcome: None,
         facts: crate::Facts {
-            source_ready: true,
             complete_sent: false,
             proof_delivered: false,
             receipt_mismatch: false,
             remove_requested: false,
         },
-        source_recoverable: true,
         pairing: None,
         create_request_id: None,
         receipt_request: RequestId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]),
@@ -2286,7 +2455,7 @@ fn product_record_roundtrips() {
 
 #[test]
 fn product_record_v5_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"source":{"awaiting_selection":{"gate":{"selectable":{"reason":"initial"}}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"04040404040404040404040404040404"},"display_name":"a.txt","reported_size":10},"acquired_retention":"persisted","backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");

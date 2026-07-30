@@ -12,13 +12,18 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use envoix_attempt_api::{AttemptEventKind, AttemptPlan, RetirementIntent};
+use envoix_capabilities::{
+    Admission, Duty, DutyLedger, DutyProvenance, DutyReport, DutyResult, Registration,
+    SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
+};
 use envoix_evidence::EvidenceRecord;
 use envoix_operation_store::OperationStore;
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_product::{
-    CapabilityAction, CommitError, CommittedSession, IdentityError, IdentitySource, NewTransfer,
-    ProductCommand, ProductState, Quiescence, RecordDecode, RecordStore, SourceDecision,
-    TransferRecord, decode_record,
+    AcceptedSourceOffer, ApplyOutcome, CapabilityAction, CommitError, CommittedSession,
+    ContentHash, IdentityError, IdentitySource, NewTransfer, ProductCommand, ProductEffect,
+    ProductInput, ProductState, Quiescence, RecordDecode, RecordStore, StagedContent,
+    TransferContent, TransferRecord, decode_record,
 };
 use envoix_runtime::{
     AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, CommandCompletion,
@@ -274,39 +279,121 @@ fn config(max_live: usize) -> RuntimeConfig {
 
 type Session = CommittedSession<OpStoreRecords>;
 
+/// A card as a frontend states it. No name, total or source decision crosses
+/// here: the authority derives the opening source state from the direction.
+fn new_transfer(direction: Direction) -> NewTransfer {
+    NewTransfer {
+        direction,
+        participation: envoix_product::RoomParticipation::Minted,
+        pairing: None,
+    }
+}
+
+/// The acquisition key a frontend actually has.
+///
+/// Outside the product crate the expected key is not derivable — it arrives on
+/// the published source duty, which is exactly how a real frontend learns which
+/// acquisition it is answering.
+fn published_acquisition(outcome: &envoix_product::ApplyOutcome) -> DutyProvenance {
+    outcome
+        .released_after_commit
+        .iter()
+        .find_map(|effect| match effect {
+            ProductEffect::CapabilityDuty { duty, action } => {
+                (*action == CapabilityAction::SelectSource).then_some(duty.provenance)
+            }
+            _ => None,
+        })
+        .expect("a card that needs a source publishes the duty that asks for one")
+}
+
+/// The platform's answer, admitted through a real ledger — the only way to
+/// obtain an `AdmittedSourceResult`.
+fn source_settled(provenance: DutyProvenance, report: SourceReport) -> ProductInput {
+    let mut ledger = DutyLedger::new();
+    ledger.advance_generation(provenance.card, provenance.generation);
+    assert_eq!(
+        ledger.register(Duty {
+            provenance,
+            kind: DutyKind::SourceHandle,
+        }),
+        Registration::Registered
+    );
+    let Admission::Fresh(admitted) = ledger.admit(DutyResult {
+        provenance,
+        report: DutyReport::Source(report),
+    }) else {
+        panic!("an outstanding source duty admits its first result");
+    };
+    ProductInput::SourceSettled(admitted.into_source().expect("a source answer"))
+}
+
+/// Walks a sending session from "needs a document" to a live attempt, and
+/// returns the outcome that LAUNCHED it — which is what these tests assert on.
+fn stage_the_source(session: &mut Session, created: &envoix_product::ApplyOutcome) -> ApplyOutcome {
+    let provenance = published_acquisition(created);
+    session
+        .apply(ProductInput::SourceOffered {
+            offer: AcceptedSourceOffer::new(
+                SourceAcquisitionKey::of(provenance),
+                OfferedName::from_untrusted("payload.bin").unwrap(),
+                Some(ByteCount::new(1024)),
+            ),
+        })
+        .unwrap();
+    session
+        .apply(source_settled(
+            provenance,
+            SourceReport::Acquired {
+                retention: SourceRetention::Persisted,
+                seekability: SourceSeekability::Seekable,
+            },
+        ))
+        .unwrap();
+    let stamp = session.record().stamp();
+    session
+        .apply(ProductInput::StageComplete {
+            stamp,
+            content: StagedContent::new(
+                TransferContent::new(
+                    OfferedName::from_untrusted("payload.bin").unwrap(),
+                    ByteCount::new(1024),
+                ),
+                ContentHash::from_bytes([7; 32]),
+            ),
+        })
+        .unwrap();
+    session
+        .apply(ProductInput::StagingRetired { stamp })
+        .unwrap()
+}
+
+/// A session whose source is established. A receiver needs none; a sender is
+/// walked through the whole acquisition, because there is no longer any other
+/// way for one to reach the wire.
 fn create_session(
     root: &Path,
     direction: Direction,
     seed: u8,
 ) -> (Session, envoix_product::ApplyOutcome) {
-    let transfer = NewTransfer {
-        direction,
-        participation: envoix_product::RoomParticipation::Minted,
-        offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
-        total: ByteCount::new(1024),
-        source: SourceDecision::Ready,
-        pairing: None,
-    };
-    CommittedSession::create(
-        transfer,
+    let (mut session, created) = CommittedSession::create(
+        new_transfer(direction),
         &mut FixedIdentity::new(seed),
         OpStoreRecords::deferred(root),
         NonZeroUsize::new(3).unwrap(),
     )
-    .unwrap()
+    .unwrap();
+    if direction == Direction::Receive {
+        return (session, created);
+    }
+    let launched = stage_the_source(&mut session, &created);
+    (session, launched)
 }
 
-fn create_staged_session(root: &Path, seed: u8) -> (Session, envoix_product::ApplyOutcome) {
-    let transfer = NewTransfer {
-        direction: Direction::Send,
-        participation: envoix_product::RoomParticipation::Minted,
-        offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
-        total: ByteCount::new(1024),
-        source: SourceDecision::Stage { recoverable: false },
-        pairing: None,
-    };
+/// A sender that has been created and is still waiting to be given a document.
+fn create_awaiting_session(root: &Path, seed: u8) -> (Session, envoix_product::ApplyOutcome) {
     CommittedSession::create(
-        transfer,
+        new_transfer(Direction::Send),
         &mut FixedIdentity::new(seed),
         OpStoreRecords::deferred(root),
         NonZeroUsize::new(3).unwrap(),
@@ -823,7 +910,7 @@ async fn an_outstanding_source_duty_is_replayed_to_every_attachment() {
         OpStoreProvider { root: root.into() },
         ScriptedExecutor::new(Script::RunUntilStop),
     );
-    let (session, initial) = create_staged_session(root, 0x2b);
+    let (session, initial) = create_awaiting_session(root, 0x2b);
     let card = session.record().identity.card;
     assert_eq!(session.record().state, ProductState::Preparing);
     runtime.admit(session, initial).unwrap();

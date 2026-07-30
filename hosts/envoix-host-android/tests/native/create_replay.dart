@@ -156,8 +156,10 @@ void main(List<String> arguments) {
   equal('preparing its source', stateLabel(sending.state), 'Preparing');
   // Nameless on purpose: a minted send carries no document, and the name
   // arrives with the source rather than from a frontend repeating what a
-  // provider claimed.
-  equal('with no document yet', sending.offeredName, 'unnamed');
+  // provider claimed. Empty, not a placeholder word — 'unnamed' was an invented
+  // name that read like a real one, and read/9 replaces this field with the
+  // source lifecycle, where "no name yet" is representable.
+  equal('with no document yet', sending.offeredName, '');
   final InviteView? published = sending.invite;
   check('the send publishes an invite to share', published != null);
   check(

@@ -29,7 +29,7 @@ use envoix_runtime::{
     SubscribeError, TransferRecord, TryRecvError,
 };
 use envoix_storage_local::LocalStorage;
-use envoix_types::{ByteCount, CommandId, Direction, OfferedName, RecordId};
+use envoix_types::{CommandId, Direction, RecordId};
 
 use crate::create;
 use crate::executor::PreparedIrohExecutor;
@@ -681,14 +681,15 @@ impl Host {
     /// Debug/e2e-only: creates one durable card so packaged process-death
     /// instrumentation has real state to kill and restore. Never part of the
     /// frontend contract (creation arrives with the F-phase flows).
-    pub fn create_for_e2e(&self, name: &str, total: u64) -> Result<RecordId, IdentityError> {
+    pub fn create_for_e2e(&self) -> Result<RecordId, IdentityError> {
         let transfer = NewTransfer {
-            direction: Direction::Send,
+            // A RECEIVER, because this instrumentation wants a card with a live
+            // attempt to kill and restore — and receiving is now the only way
+            // to have one at creation. A sender must be given a document first,
+            // so it would sit at rest and prove less about durability than the
+            // card this used to make.
+            direction: Direction::Receive,
             participation: envoix_product::RoomParticipation::Minted,
-            offered_name: OfferedName::from_untrusted(name)
-                .expect("e2e instrumentation supplies a bounded name"),
-            total: ByteCount::new(total),
-            source: envoix_product::SourceDecision::Ready,
             pairing: None,
         };
         let store = HostStore::deferred(self.stores.clone());
@@ -986,9 +987,7 @@ mod tests {
     fn a_superseded_subscription_never_overwrites_the_cards_commander() {
         let root = tempfile::tempdir().expect("tempdir");
         let host = Host::boot(root.path()).expect("the host boots");
-        let card = host
-            .create_for_e2e("r5-card.bin", 1024)
-            .expect("a durable card is created");
+        let card = host.create_for_e2e().expect("a durable card is created");
 
         let attachment = host.open_lane();
         let taken = host

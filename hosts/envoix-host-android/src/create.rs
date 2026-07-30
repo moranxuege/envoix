@@ -13,8 +13,8 @@ use envoix_invite::{
     EntropyError, EntropySource, Invite, InviteError, RecognizedInvalid, Role, generate_room_code,
     route_invite,
 };
-use envoix_product::{NewTransfer, PairingChannel, RoomParticipation, SourceDecision};
-use envoix_types::{ByteCount, Direction, OfferedName};
+use envoix_product::{NewTransfer, PairingChannel, RoomParticipation};
+use envoix_types::Direction;
 
 /// Longer than the invite grammar's own input bound, so the refusal for an
 /// over-long paste is the GRAMMAR's rather than the encoder's. The command
@@ -75,18 +75,10 @@ fn plan_mint(direction: Direction) -> Result<NewTransfer, CreateRefusalView> {
     Ok(NewTransfer {
         direction,
         participation: RoomParticipation::Minted,
-        // Unknown until a source is acquired and staged (sender) or the peer
-        // states it (receiver). The authority's own fallback rather than an
-        // invented name — which is what a joined card has always carried.
-        offered_name: OfferedName::from_untrusted("").expect("the fallback name is bounded"),
-        total: ByteCount::new(0),
-        source: match direction {
-            // A minting sender needs source work, and it is not recoverable:
-            // this build holds a granted source only in process memory, so a
-            // process death really does mean re-picking.
-            Direction::Send => SourceDecision::Stage { recoverable: false },
-            Direction::Receive => SourceDecision::Ready,
-        },
+        // No name, no total and no source decision cross here any more. The
+        // authority derives the card's opening source state from its direction
+        // alone, so this can no longer state a source fact that the lifecycle
+        // then contradicts.
         pairing: Some(Box::new(PairingChannel::from_invite(&invite))),
     })
 }
@@ -106,15 +98,6 @@ fn plan_join(text: &str) -> Result<NewTransfer, CreateRefusalView> {
         // Adopted, not minted — so this card must never republish the invite
         // it was given.
         participation: RoomParticipation::Joined,
-        // The offered name is the sender's to state; until the peer does, the
-        // record carries the authority's own fallback rather than an invented
-        // name.
-        offered_name: OfferedName::from_untrusted("").expect("the fallback name is bounded"),
-        total: ByteCount::new(0),
-        source: match direction {
-            Direction::Send => SourceDecision::Stage { recoverable: false },
-            Direction::Receive => SourceDecision::Ready,
-        },
         pairing: Some(Box::new(PairingChannel::from_invite(&invite))),
     })
 }
@@ -178,17 +161,14 @@ mod tests {
     /// exactly as a minting sender does.
     #[test]
     fn the_invite_chooses_the_joiners_side() {
+        // The direction is now the WHOLE source answer: the authority derives
+        // the card's opening source state from it, so a plan that named one
+        // separately could contradict it.
         let sending = join(&invite_text(Role::Send)).expect("a send invite is joinable");
         assert_eq!(sending.direction, Direction::Receive);
-        assert_eq!(sending.source, SourceDecision::Ready);
 
         let receiving = join(&invite_text(Role::Receive)).expect("a receive invite is joinable");
         assert_eq!(receiving.direction, Direction::Send);
-        assert_eq!(
-            receiving.source,
-            SourceDecision::Stage { recoverable: false },
-            "a joining sender still has to acquire a document"
-        );
     }
 
     /// Every family the invite grammar can answer with reaches the frontend as
@@ -249,9 +229,6 @@ mod tests {
         };
         let first = plan_send();
         assert_eq!(first.direction, Direction::Send);
-        assert_eq!(first.source, SourceDecision::Stage { recoverable: false });
-        // Born nameless: the name arrives with the source, not with the card.
-        assert_eq!(first.offered_name.as_str(), "unnamed");
         let channel = first.pairing.expect("a send publishes a channel");
         assert_eq!(channel.role(), Role::Send);
 
@@ -309,7 +286,6 @@ mod tests {
         })
         .expect("a receiving mint plans");
         assert_eq!(planned.direction, Direction::Receive);
-        assert_eq!(planned.source, SourceDecision::Ready);
         // The invite declares OUR role, so a joiner takes the sending side.
         let channel = planned.pairing.expect("a mint publishes a channel");
         assert_eq!(channel.role(), Role::Receive);

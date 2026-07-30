@@ -72,8 +72,7 @@ class DutyExecutor(
      * runs, so this duty is an acknowledgement rather than a transition. The
      * count is accepted and unused: what it would change is already true.
      */
-    override fun assertForeground(activeTransfers: Long): OutcomeCodeView =
-        OutcomeCodeView.COMPLETED
+    override fun assertForeground(activeTransfers: Long): OutcomeCodeView = OutcomeCodeView.COMPLETED
 
     /**
      * The receipt courier. No platform carrier exists yet (F2/F3 wire the real

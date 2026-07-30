@@ -2,7 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use envoix_capabilities::{
-    Admission, Duty, DutyKind, DutyProvenance, DutyResult, GenerationUpdate, Registration,
+    Admission, Duty, DutyKind, DutyProvenance, DutyReport, DutyResult, GenerationUpdate,
+    Registration,
 };
 use envoix_outcomes::OutcomeCode;
 use envoix_storage_api::{
@@ -166,19 +167,19 @@ fn durable_receipt_duty_survives_restart() {
             generation: AttemptGen::new(3),
             request: RequestId::from_bytes([9; 16]),
         },
-        outcome: OutcomeCode::Completed,
+        report: DutyReport::Outcome(OutcomeCode::Completed),
     };
     assert_eq!(reopened.admit_duty(stale).unwrap(), Admission::Stale);
 
     let correct = DutyResult {
         provenance: duty.provenance,
-        outcome: OutcomeCode::Completed,
+        report: DutyReport::Outcome(OutcomeCode::Completed),
     };
     let Admission::Fresh(admitted) = reopened.admit_duty(correct).unwrap() else {
         panic!("current outstanding result should be admitted");
     };
     assert_eq!(admitted.duty(), duty);
-    assert_eq!(admitted.outcome(), OutcomeCode::Completed);
+    assert_eq!(admitted.outcome(), Some(OutcomeCode::Completed));
     assert_eq!(reopened.admit_duty(correct).unwrap(), Admission::Duplicate);
     drop(reopened);
 

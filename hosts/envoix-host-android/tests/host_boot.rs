@@ -14,11 +14,11 @@ use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_platform_android::{Work, WorkOrder, WorkReport};
 use envoix_product::{
     CommittedSession, NewTransfer, ProductCommand, ProductEffect, ProductInput, ProductState,
-    SourceDecision, SystemIdentitySource,
+    SystemIdentitySource,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
-use envoix_types::{ByteCount, Direction, OfferedName, RecordId};
+use envoix_types::{Direction, OfferedName, RecordId};
 
 fn open_store(root: &std::path::Path, card: RecordId) -> OperationStore<LocalStorage> {
     let storage = LocalStorage::open(root).expect("storage opens");
@@ -38,9 +38,7 @@ fn boot_restores_cards_and_drains_the_outbox() {
     // (the crash window the drainer owns).
     let card = {
         let host = Host::boot(root.path()).expect("first boot");
-        let card = host
-            .create_for_e2e("crash-victim.bin", 4096)
-            .expect("card creation commits");
+        let card = host.create_for_e2e().expect("card creation commits");
         host.shutdown();
         card
     };
@@ -237,9 +235,6 @@ fn commit_completed_receiver(root: &std::path::Path) -> RecordId {
     let transfer = NewTransfer {
         direction: Direction::Receive,
         participation: envoix_product::RoomParticipation::Minted,
-        offered_name: OfferedName::from_untrusted("receipt.bin").unwrap(),
-        total: ByteCount::new(64),
-        source: SourceDecision::Ready,
         pairing: None,
     };
     let (mut session, outcome) = CommittedSession::create(
@@ -297,7 +292,7 @@ fn created_card_survives_reboot_and_reattaches() {
     let root = tempfile::tempdir().expect("tempdir");
     let card = {
         let host = Host::boot(root.path()).expect("first boot");
-        let card = host.create_for_e2e("keeper.bin", 1024).expect("creates");
+        let card = host.create_for_e2e().expect("creates");
         host.shutdown();
         card
     };
@@ -332,11 +327,9 @@ fn durable_removal_replays_its_source_grant_release_after_restart() {
     let transfer = NewTransfer {
         direction: Direction::Send,
         participation: envoix_product::RoomParticipation::Minted,
-        offered_name: OfferedName::from_untrusted("owned.bin").unwrap(),
-        total: ByteCount::new(1),
-        // Quiescent immediately, so Remove can commit its tombstone without a
+        // A freshly created sender is quiescent — it is waiting for a person to
+        // choose a document — so Remove can commit its tombstone without a
         // worker acknowledgement obscuring what this test owns.
-        source: SourceDecision::NeedsRepick,
         pairing: None,
     };
     let (mut session, _) = CommittedSession::create(

@@ -4,12 +4,12 @@ use envoix_attempt_api::{
     RetirementRequestResult,
 };
 use envoix_outcomes::{OutcomeCode, Phase};
-use envoix_types::{AttemptGen, ByteCount, Direction, OfferedName};
+use envoix_types::{AttemptGen, ByteCount, Direction};
 
+use crate::test_support::{STAGED_NAME, STAGED_TOTAL, give_a_source, staged};
 use crate::{
     CapabilityAction, IdentityError, IdentitySource, NewTransfer, ProductCommand, ProductEffect,
-    ProductInput, ProductState, Quiescence, SourceDecision, StorageAction, TransferRecord,
-    WorkerKind,
+    ProductInput, ProductState, Quiescence, StorageAction, TransferRecord, WorkerKind,
 };
 
 #[derive(Default)]
@@ -27,19 +27,38 @@ impl IdentitySource for DeterministicEntropy {
     }
 }
 
-fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<ProductEffect>) {
+fn create(direction: Direction) -> (TransferRecord, Vec<ProductEffect>) {
     TransferRecord::create(
         NewTransfer {
             direction,
             participation: crate::RoomParticipation::Minted,
-            offered_name: OfferedName::from_untrusted("quiescence.bin").unwrap(),
-            total: ByteCount::new(100),
-            source,
             pairing: None,
         },
         &mut DeterministicEntropy::default(),
     )
     .expect("deterministic identity source")
+}
+
+/// A card whose source is established, walked through the real acquisition.
+/// A receiver needs none; a sender is given a document, the platform acquires
+/// it, staging reports what it read, and the staging worker retires.
+fn ready(direction: Direction) -> (TransferRecord, Vec<ProductEffect>) {
+    let (mut record, effects) = create(direction);
+    if direction == Direction::Receive {
+        return (record, effects);
+    }
+    give_a_source(&mut record);
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            content: staged(STAGED_NAME, STAGED_TOTAL),
+        })
+        .unwrap();
+    let launched = record
+        .reduce(ProductInput::StagingRetired { stamp })
+        .unwrap();
+    (record, launched)
 }
 
 fn open(record: &TransferRecord, effects: &[ProductEffect]) -> (AttemptSupervisor, AttemptPlan) {
@@ -88,7 +107,7 @@ fn transfer(
     AttemptPlan,
     Vec<ProductEffect>,
 ) {
-    let (mut record, create_effects) = create(direction, SourceDecision::Ready);
+    let (mut record, create_effects) = ready(direction);
     let (supervisor, plan) = open(&record, &create_effects);
     assert!(
         observe(
@@ -207,7 +226,7 @@ fn pause_cancel_finalize_linearization() {
         .unwrap();
     assert_eq!(completed.state, ProductState::Completed);
     assert_eq!(completed.quiescence, Quiescence::Quiescent);
-    assert_eq!(completed.bytes, completed.total);
+    assert_eq!(completed.bytes, completed.total());
     assert!(!has_discard(&completed_tail));
     assert!(matches!(
         completed_tail.as_slice(),
@@ -322,7 +341,8 @@ fn pause_cancel_finalize_linearization() {
 
 #[test]
 fn preparing_cancel_no_truncated_send() {
-    let (mut record, _) = create(Direction::Send, SourceDecision::Stage { recoverable: true });
+    let (mut record, _) = create(Direction::Send);
+    give_a_source(&mut record);
     let stamp = record.stamp();
     record
         .reduce(ProductInput::StageProgress {
@@ -380,12 +400,13 @@ fn preparing_cancel_no_truncated_send() {
 
 #[test]
 fn completed_staging_launches_only_after_the_worker_retires() {
-    let (mut record, _) = create(Direction::Send, SourceDecision::Stage { recoverable: true });
+    let (mut record, _) = create(Direction::Send);
+    give_a_source(&mut record);
     let stamp = record.stamp();
     let completion = record
         .reduce(ProductInput::StageComplete {
             stamp,
-            total: ByteCount::new(90),
+            content: staged(STAGED_NAME, 90),
         })
         .unwrap();
     assert_eq!(record.state, ProductState::Preparing);
@@ -414,7 +435,8 @@ fn completed_staging_launches_only_after_the_worker_retires() {
 
 #[test]
 fn retirement_proofs_are_worker_and_generation_scoped() {
-    let (mut staging, _) = create(Direction::Send, SourceDecision::Stage { recoverable: true });
+    let (mut staging, _) = create(Direction::Send);
+    give_a_source(&mut staging);
     let staging_stamp = staging.stamp();
     staging
         .reduce(ProductInput::Command(ProductCommand::Cancel))

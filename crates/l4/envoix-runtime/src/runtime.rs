@@ -64,9 +64,11 @@ fn duty_discharged(action: CapabilityAction, record: &TransferRecord) -> bool {
     match action {
         CapabilityAction::PostReceipt => record.facts.proof_delivered,
         // A granted source is not a staged one: the duty stays outstanding
-        // until the card's source really is ready, which is the fact the
-        // reducer sets when staging completes.
-        CapabilityAction::SelectSource => record.facts.source_ready,
+        // until the card's source really is ready, which the lifecycle answers
+        // directly. It used to be read from a boolean stored beside the
+        // lifecycle, so a card could prune its picker duty while its own source
+        // state still said it was waiting to be given a document.
+        CapabilityAction::SelectSource => record.source_is_ready(),
     }
 }
 
@@ -130,7 +132,7 @@ impl Shared {
         };
         let evidence = match kind {
             RecordUpdateKind::Progress => {
-                EvidenceValue::progress(EvidenceProgress::new(record.bytes, record.total))
+                EvidenceValue::progress(EvidenceProgress::new(record.bytes, record.total()))
             }
             RecordUpdateKind::State => EvidenceValue::phase(record.phase),
             RecordUpdateKind::Terminal => record.outcome.as_ref().map_or_else(

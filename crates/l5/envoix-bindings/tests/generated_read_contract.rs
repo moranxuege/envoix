@@ -220,11 +220,15 @@ fn record(
         },
         "direction": "receive",
         // A receiver needs no source, and record v5 makes that explicit rather
-        // than leaving it to be inferred from the direction.
-        "source": { "not_required": { "peer_content": null } },
+        // than leaving it to be inferred from the direction. What it IS
+        // receiving lives here too, as the peer stated it — the top-level name
+        // and total that used to duplicate this are gone.
+        "source": {
+            "not_required": {
+                "peer_content": { "name": "quarterly-report.pdf", "total": 4096 },
+            },
+        },
         "participation": "minted",
-        "offered_name": "quarterly-report.pdf",
-        "total": 4096,
         "state": state,
         "quiescence": quiescence,
         "generation": 7,
@@ -233,13 +237,11 @@ fn record(
         "bytes_resumed": 1024,
         "outcome": outcome,
         "facts": {
-            "source_ready": true,
             "complete_sent": false,
             "proof_delivered": false,
             "receipt_mismatch": false,
             "remove_requested": false,
         },
-        "source_recoverable": true,
         "receipt_request": "202122232425262728292a2b2c2d2e2f",
     }))
     .expect("fabricate an authority record")

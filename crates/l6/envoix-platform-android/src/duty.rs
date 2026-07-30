@@ -16,7 +16,7 @@ use envoix_bindings::duty::{
     ForegroundWorkView, LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView,
     OutcomeCodeView, PublicationWorkView, WorkView, decode_duty_frame, encode_duty_frame,
 };
-use envoix_capabilities::{Duty, DutyKind, DutyProvenance, DutyResult};
+use envoix_capabilities::{Duty, DutyKind, DutyProvenance, DutyReport, DutyResult};
 use envoix_outcomes::OutcomeCode;
 use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId};
 
@@ -455,7 +455,14 @@ impl WorkReport {
     pub fn to_result(self) -> DutyResult {
         DutyResult {
             provenance: self.provenance.to_provenance(),
-            outcome: self.outcome,
+            // The generated duty contract carries an outcome code and nothing
+            // else, so a `SourceHandle` report arriving on this lane is refused
+            // by the ledger as `Incompatible` rather than acted on. That is the
+            // intended answer until duty/2 gives this lane the source
+            // vocabulary: an acquisition must state retention and seekability,
+            // and an adapter must not be able to launder a bare `completed`
+            // into a source the card then believes it holds.
+            report: DutyReport::Outcome(self.outcome),
         }
     }
 

@@ -34,9 +34,13 @@ use envoix_types::{RecordId, Secret};
 /// toolchain is missing proves nothing about the frontend.
 const SKIP_DART: &str = "ENVOIX_FLUTTER_SKIP_DART";
 
-/// The one card this test and the on-device instrumentation both create.
-const OFFERED_NAME: &str = "f1b-card.bin";
-const TOTAL_BYTES: u64 = 4096;
+/// What the one card this test and the on-device instrumentation both create
+/// publishes for its name and total: nothing. It is a receiver, and a receiver
+/// learns what it is receiving from the peer's header — which nothing admits
+/// yet. The lane's job here is to carry that absence faithfully rather than to
+/// invent something that reads like a file.
+const OFFERED_NAME: &str = "";
+const TOTAL_BYTES: u64 = 0;
 
 /// How long a drain waits for the frame it asserts about. A satisfied drain
 /// returns at once, so this only bounds a FAILING one — generous on purpose,
@@ -53,9 +57,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 fn flutter_attaches_and_decodes_live_frames() {
     let root = tempfile::tempdir().expect("tempdir");
     let host = Host::boot(root.path()).expect("the host boots");
-    let card = host
-        .create_for_e2e(OFFERED_NAME, TOTAL_BYTES)
-        .expect("a durable card is created");
+    let card = host.create_for_e2e().expect("a durable card is created");
 
     // Opening the lane IS the attachment: it discards whatever the previous
     // one never drained and restarts every known card at a new epoch.
@@ -158,8 +160,7 @@ fn flutter_attaches_and_decodes_live_frames() {
 fn a_superseded_attachment_cannot_consume_a_frame() {
     let root = tempfile::tempdir().expect("tempdir");
     let host = Host::boot(root.path()).expect("the host boots");
-    host.create_for_e2e(OFFERED_NAME, TOTAL_BYTES)
-        .expect("a durable card is created");
+    host.create_for_e2e().expect("a durable card is created");
 
     let replaced = host.open_lane();
     let current = host.open_lane();
@@ -203,9 +204,7 @@ fn a_superseded_attachment_cannot_consume_a_frame() {
 fn a_fresh_attachment_is_told_the_diagnostics_it_missed() {
     let root = tempfile::tempdir().expect("tempdir");
     let host = Host::boot(root.path()).expect("the host boots");
-    let card = host
-        .create_for_e2e(OFFERED_NAME, TOTAL_BYTES)
-        .expect("a durable card is created");
+    let card = host.create_for_e2e().expect("a durable card is created");
 
     let mut seen = Vec::new();
     for _ in 0..2 {
@@ -250,9 +249,7 @@ fn a_fresh_attachment_is_told_the_diagnostics_it_missed() {
 fn flutter_mutating_hot_restart_preserves_cards() {
     let root = tempfile::tempdir().expect("tempdir");
     let host = Host::boot(root.path()).expect("the host boots");
-    let card = host
-        .create_for_e2e(OFFERED_NAME, TOTAL_BYTES)
-        .expect("a durable card is created");
+    let card = host.create_for_e2e().expect("a durable card is created");
     let hex = format!("{:016x}", card.get());
 
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("command-lane");
@@ -546,12 +543,26 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
         card,
         "the source duty belongs to the card that needs a source"
     );
+    // And its ANSWER is refused, which is the honest state of this lane rather
+    // than a defect. A source acquisition must state whether the platform's
+    // hold survives a restart and whether the source can be re-read from an
+    // offset; the generated duty contract carries an outcome code and nothing
+    // else, so `completed` cannot say either. The ledger classifies that as
+    // incompatible with the duty's kind and leaves the duty OUTSTANDING, so it
+    // is re-delivered rather than silently discharged on a claim that says
+    // nothing. duty/2 gives this lane the source vocabulary; until it does, a
+    // bare outcome must not be launderable into a source the card believes it
+    // holds.
     let report = WorkReport::new(provenance.to_provenance(), OutcomeCode::Completed);
     let encoded = report.encode().expect("the report encodes");
-    assert!(host.report_duty(&encoded), "the first report is admitted");
     assert!(
         !host.report_duty(&encoded),
-        "a replayed report is admitted once, never twice"
+        "a bare outcome code cannot discharge a source acquisition"
+    );
+    assert!(
+        !host.report_duty(&encoded),
+        "and it is refused every time — a classification refusal, not a duty \
+         consumed by the first bad answer"
     );
 
     // And the cards are on disk, not in this process: a fresh host over the

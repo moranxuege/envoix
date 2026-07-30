@@ -19,11 +19,8 @@ object E2eBridge {
         packageName: String,
     ): Boolean {
         when (intent.action) {
-            "$packageName.action.e2e-create" -> {
-                val name = intent.getStringExtra("name") ?: "e2e.bin"
-                val total = intent.getLongExtra("total", 1024L)
-                Log.i(TAG, "created=%016x".format(createForE2e(name, total)))
-            }
+            "$packageName.action.e2e-create" ->
+                Log.i(TAG, "created=%016x".format(createForE2e()))
 
             "$packageName.action.e2e-probe" ->
                 Log.i(TAG, "restored=${liveCards().substringBefore(DURABLE_SEPARATOR)}")
@@ -38,10 +35,7 @@ object E2eBridge {
     }
 
     /** Creates one durable card, returning its id (0 = failure). */
-    private external fun createForE2e(
-        name: String,
-        totalBytes: Long,
-    ): Long
+    private external fun createForE2e(): Long
 
     /**
      * The restored card ids, then `;durable=` and each card's latest committed

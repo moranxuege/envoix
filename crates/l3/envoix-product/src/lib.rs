@@ -8,7 +8,6 @@ mod model;
 mod pairing;
 mod participation;
 mod reducer;
-mod source;
 mod source_lifecycle;
 
 pub mod record;
@@ -27,8 +26,8 @@ pub use envoix_invite::{
 pub use identity::{IdentityError, IdentitySource, ProductIdentity, SystemIdentitySource};
 pub use model::{
     AppliedCommand, CapabilityAction, CommandLedger, Facts, LedgerHit, NewTransfer, PauseOrigin,
-    ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, SourceDecision,
-    StorageAction, TransferRecord, WorkerKind,
+    ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, StorageAction,
+    TransferRecord, WorkerKind,
 };
 pub use pairing::PairingChannel;
 pub use participation::RoomParticipation;
@@ -36,15 +35,23 @@ pub use record::{
     OLDEST_READABLE_RECORD_VERSION, PRODUCT_RECORD_VERSION, RecordCodecError, RecordDecode,
     decode_record, encode_record,
 };
-pub use source::resolve_source;
+// Retention is the PLATFORM's answer, so it is defined with the duty that
+// reports it and re-exported here beside the lifecycle that stores it.
+pub use envoix_capabilities::SourceRetention;
+// `StagedContent` cannot be built without one, so a caller that can see the
+// type but not its digest could not construct what this crate's own input
+// requires.
+pub use envoix_protocol::ContentHash;
 pub use source_lifecycle::{
     AcceptedSourceOffer, SelectionGate, SourceBacking, SourceLifecycle, SourceOfferAnswer,
-    SourcePromptReason, SourceRetention, StagedContent, StagingPlan, TransferContent,
+    SourcePromptReason, StagedContent, StagingPlan, TransferContent,
 };
 
 #[cfg(test)]
 mod commit_tests;
 #[cfg(test)]
 mod quiescence_tests;
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;

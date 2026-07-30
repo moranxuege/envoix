@@ -8,10 +8,11 @@ use envoix_attempt_api::{
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_types::{ArtifactId, ByteCount, Direction, OfferedName, TransferId};
 
+use crate::test_support::{STAGED_NAME, STAGED_TOTAL, acquired, offer, settled, staged};
 use crate::{
     CapabilityAction, CommitError, CommitFailure, CommitStatus, CommittedSession, IdentityError,
     IdentitySource, NewTransfer, ProductCommand, ProductEffect, ProductInput, ProductState,
-    RecordDecode, RecordStore, SourceDecision, StorageAction, decode_record,
+    RecordDecode, RecordStore, StorageAction, decode_record,
 };
 
 #[derive(Default)]
@@ -120,26 +121,47 @@ fn attempts(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("test attempt bound is nonzero")
 }
 
+/// A card as a frontend states it: a direction, how it joined the room, and
+/// nothing about a document. A sender still needs one; the difference is that
+/// the authority now decides that from the direction rather than believing a
+/// caller's `SourceDecision`.
 fn transfer(direction: Direction) -> NewTransfer {
     NewTransfer {
         direction,
         participation: crate::RoomParticipation::Minted,
-        offered_name: OfferedName::from_untrusted("barrier.bin").unwrap(),
-        total: ByteCount::new(100),
-        source: SourceDecision::Ready,
         pairing: None,
     }
 }
 
-fn staged_transfer(direction: Direction) -> NewTransfer {
-    NewTransfer {
-        direction,
-        participation: crate::RoomParticipation::Minted,
-        offered_name: OfferedName::from_untrusted("barrier.bin").unwrap(),
-        total: ByteCount::new(100),
-        source: SourceDecision::Stage { recoverable: true },
-        pairing: None,
-    }
+/// A card that starts an ATTEMPT as soon as it is created. That is now a
+/// property of RECEIVING: a sender must be given a document first, so it opens
+/// in `Preparing` instead. The barrier tests that use this are about commit
+/// ordering and release timing, not about which way the bytes go.
+fn attempting() -> NewTransfer {
+    transfer(Direction::Receive)
+}
+
+/// Walks a sending session all the way to a live attempt through the real
+/// acquisition: the picker answers, the platform acquires, staging reports what
+/// it read, and the staging worker retires. There is no shorter route now, and
+/// the tests that need a SENDER on the wire have to take it.
+fn stage_the_source(session: &mut CommittedSession<MemoryStore>) {
+    let offered = ProductInput::SourceOffered {
+        offer: offer(session.record(), STAGED_NAME, None),
+    };
+    session.apply(offered).unwrap();
+    let settlement = settled(session.record(), acquired());
+    session.apply(settlement).unwrap();
+    let stamp = session.record().stamp();
+    session
+        .apply(ProductInput::StageComplete {
+            stamp,
+            content: staged(STAGED_NAME, STAGED_TOTAL),
+        })
+        .unwrap();
+    session
+        .apply(ProductInput::StagingRetired { stamp })
+        .unwrap();
 }
 
 #[test]
@@ -149,7 +171,7 @@ fn staging_completes_through_the_commit_barrier() {
     // codec previously rejected the handoff, forcing a spurious `StorageFault`
     // and never reaching `StartAttempt`.
     let (mut session, create_outcome) = CommittedSession::create(
-        staged_transfer(Direction::Send),
+        transfer(Direction::Send),
         &mut DeterministicEntropy::default(),
         MemoryStore::default(),
         attempts(1),
@@ -157,11 +179,20 @@ fn staging_completes_through_the_commit_barrier() {
     .unwrap();
     assert!(create_outcome.commit.authorizing_commit_succeeded());
 
+    // The card is given a document and the platform acquires it, each through
+    // the same barrier — a sender cannot stage bytes it was never handed.
+    let offered = ProductInput::SourceOffered {
+        offer: offer(session.record(), STAGED_NAME, None),
+    };
+    session.apply(offered).unwrap();
+    let settlement = settled(session.record(), acquired());
+    session.apply(settlement).unwrap();
+
     let stamp = session.record().stamp();
     let staged = session
         .apply(ProductInput::StageComplete {
             stamp,
-            total: ByteCount::new(90),
+            content: staged(STAGED_NAME, 90),
         })
         .unwrap();
     assert!(
@@ -170,7 +201,7 @@ fn staging_completes_through_the_commit_barrier() {
         staged.commit
     );
     assert_eq!(session.record().state, ProductState::Preparing);
-    assert!(session.record().facts.source_ready);
+    assert!(session.record().source_is_ready());
 
     // `StagingRetired` then launches the first attempt through the barrier.
     let launched = session
@@ -415,7 +446,7 @@ fn restore_replay_survives_a_failed_authorizing_commit() {
 #[test]
 fn failed_revision_dispatches_no_effect() {
     let (failed, outcome) = CommittedSession::create(
-        transfer(Direction::Send),
+        attempting(),
         &mut DeterministicEntropy::default(),
         AlwaysFailStore::default(),
         attempts(2),
@@ -449,7 +480,7 @@ fn failed_revision_dispatches_no_effect() {
     );
 
     let (healthy, outcome) = CommittedSession::create(
-        transfer(Direction::Send),
+        attempting(),
         &mut DeterministicEntropy::default(),
         MemoryStore::default(),
         attempts(2),
@@ -472,7 +503,7 @@ fn failed_revision_dispatches_no_effect() {
 #[test]
 fn immediate_retirement_does_not_wait_for_a_writable_store() {
     let (mut session, _) = CommittedSession::create(
-        transfer(Direction::Send),
+        attempting(),
         &mut DeterministicEntropy::default(),
         MemoryStore::default(),
         attempts(2),
@@ -512,6 +543,8 @@ fn immediate_retirement_does_not_wait_for_a_writable_store() {
 
 #[test]
 fn timer_bookkeeping_releases_and_is_unwound_on_escalation() {
+    // A SENDER: the mailbox poll below is the sender's confirm-wait, so this
+    // one cannot borrow a receiver's shortcut to the wire.
     let (mut session, _) = CommittedSession::create(
         transfer(Direction::Send),
         &mut DeterministicEntropy::default(),
@@ -519,6 +552,7 @@ fn timer_bookkeeping_releases_and_is_unwound_on_escalation() {
         attempts(1),
     )
     .unwrap();
+    stage_the_source(&mut session);
     session
         .apply(admitted_event(
             session.record(),
@@ -600,7 +634,7 @@ fn never_committed_mixed_batch_drops_destructive_storage_intent() {
 #[test]
 fn consumed_retirement_ack_survives_a_failed_authorizing_commit() {
     let (mut session, created) = CommittedSession::create(
-        transfer(Direction::Send),
+        attempting(),
         &mut DeterministicEntropy::default(),
         FailThenStore {
             failures_remaining: 0,
@@ -725,7 +759,7 @@ fn uncommitted_completion_rolls_back_before_visible_storage_failure() {
 #[test]
 fn uncommitted_remove_cannot_fence_off_storage_failure() {
     let (mut session, _) = CommittedSession::create(
-        transfer(Direction::Send),
+        attempting(),
         &mut DeterministicEntropy::default(),
         MemoryStore::default(),
         attempts(1),
@@ -805,11 +839,9 @@ fn receipt_duty_releases_only_after_completed_record_commits() {
 
 #[test]
 fn no_store_makes_the_barrier_vacuous() {
-    let (session, outcome) = CommittedSession::create_without_store(
-        transfer(Direction::Send),
-        &mut DeterministicEntropy::default(),
-    )
-    .unwrap();
+    let (session, outcome) =
+        CommittedSession::create_without_store(attempting(), &mut DeterministicEntropy::default())
+            .unwrap();
 
     assert_eq!(session.record().state, ProductState::Connecting);
     assert_eq!(outcome.commit, CommitStatus::Vacuous);
@@ -822,7 +854,7 @@ fn no_store_makes_the_barrier_vacuous() {
 #[test]
 fn ambiguous_retry_is_idempotent_and_releases_once() {
     let (session, outcome) = CommittedSession::create(
-        transfer(Direction::Send),
+        attempting(),
         &mut DeterministicEntropy::default(),
         AmbiguousFirstWriteStore::default(),
         attempts(2),
@@ -849,7 +881,7 @@ fn ambiguous_retry_is_idempotent_and_releases_once() {
 #[test]
 fn create_time_commit_failure_does_not_retire_an_unopened_attempt() {
     let (session, outcome) = CommittedSession::create(
-        transfer(Direction::Send),
+        attempting(),
         &mut DeterministicEntropy::default(),
         FailThenStore {
             failures_remaining: 2,
@@ -926,7 +958,7 @@ fn ignored_input_does_not_write_or_release_again() {
 #[test]
 fn an_offer_for_the_asked_acquisition_binds_the_document() {
     let (mut session, _) = CommittedSession::create(
-        staged_transfer(Direction::Send),
+        transfer(Direction::Send),
         &mut DeterministicEntropy::default(),
         MemoryStore::default(),
         attempts(1),
@@ -963,7 +995,7 @@ fn an_offer_for_the_asked_acquisition_binds_the_document() {
 #[test]
 fn an_offer_for_another_acquisition_leaves_the_record_alone() {
     let (mut session, _) = CommittedSession::create(
-        staged_transfer(Direction::Send),
+        transfer(Direction::Send),
         &mut DeterministicEntropy::default(),
         MemoryStore::default(),
         attempts(1),
