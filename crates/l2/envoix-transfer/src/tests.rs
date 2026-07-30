@@ -263,6 +263,11 @@ fn failure<T>(result: Result<T, MachineFailure>) -> MachineFailure {
 ///
 /// The bytes are still on the wire when this fires. That is the accepted cost of
 /// reading the source twice: the network is wasted, the transfer is not wrong.
+///
+/// The error is `SourceChanged`, not the peer-facing `IntegrityMismatch`: this
+/// is our own document moving under us, and the only thing that resolves it is
+/// the person choosing a source again — which is what `SourceUnreadable` and its
+/// `RePickSource` recovery say, and what `Internal` said nothing about.
 #[test]
 fn a_source_that_changed_under_the_sender_cannot_complete() {
     let id = transfer_id(31);
@@ -279,7 +284,7 @@ fn a_source_that_changed_under_the_sender_cannot_complete() {
 
     assert_eq!(
         failure(sender.next_frame(&mut source)).error(),
-        TransferError::IntegrityMismatch,
+        TransferError::SourceChanged,
         "a swapped document completed as if it were the staged one"
     );
 

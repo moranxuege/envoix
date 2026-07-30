@@ -1120,6 +1120,26 @@ impl TransferRecord {
                 self.state = ProductState::Paused(PauseOrigin::Lost);
                 self.outcome = Some(outcome_for(code, self.phase));
             }
+            // The attempt could not send from the source the record vouches for
+            // — it changed under the sender, or it stopped being readable. The
+            // LIFECYCLE has to move, not just the state: `source_failure` offers
+            // `RePickSource`, and `RePickSource` is refused while the source is
+            // still `Ready`, so failing without invalidating it advertises a
+            // recovery the command guard then denies.
+            //
+            // Only a send has a source to invalidate. A receive that reports this
+            // is describing the peer's problem, and there is nothing here to
+            // re-pick.
+            OutcomeCode::SourceUnreadable if self.direction == Direction::Send => {
+                if let SourceLifecycle::Acquiring(offer)
+                | SourceLifecycle::Staging { offer, .. }
+                | SourceLifecycle::Ready { offer, .. } = self.source.clone()
+                {
+                    self.source = SourceLifecycle::staging_failed(offer);
+                }
+                self.state = ProductState::Failed;
+                self.outcome = Some(source_failure(self.phase));
+            }
             _ => {
                 self.state = ProductState::Failed;
                 self.outcome = Some(outcome_for(code, self.phase));

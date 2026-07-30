@@ -382,7 +382,7 @@ impl SenderSending {
             // rather than only at the moment staging ran.
             if file_hash != self.request.content_hash {
                 return Err(MachineFailure::from_engine_error(
-                    TransferError::IntegrityMismatch,
+                    TransferError::SourceChanged,
                     self.request.transfer_id,
                 ));
             }

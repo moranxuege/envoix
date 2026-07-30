@@ -2713,6 +2713,62 @@ fn a_source_answer_for_another_acquisition_moves_nothing() {
     ));
 }
 
+/// A send that failed on its source can actually re-pick.
+///
+/// `source_failure` offers `Recovery::RePickSource`, and `RePickSource` is
+/// refused while the lifecycle is still `Ready`. So a terminal that failed the
+/// card without invalidating the source advertised a recovery the command guard
+/// then denied — the user is told to choose again by the only affordance that
+/// will not let them.
+#[test]
+fn a_source_failure_mid_send_leaves_the_card_able_to_pick_again() {
+    let (mut card, _) = create(Direction::Send);
+    give_a_source(&mut card);
+    let stamp = card.stamp();
+    card.reduce(ProductInput::StageComplete {
+        stamp,
+        content: staged(STAGED_NAME, STAGED_TOTAL),
+        possession: SourcePossession::Streamed,
+    })
+    .unwrap();
+    card.reduce(ProductInput::StagingRetired { stamp }).unwrap();
+    assert!(card.source.is_ready());
+
+    // Retiring the stager starts the attempt, which then cannot send from that
+    // source — it changed under the sender, or stopped being readable.
+    assert_ne!(
+        card.state,
+        ProductState::Preparing,
+        "a ready send never left preparing"
+    );
+    card.reduce(event(
+        &card.clone(),
+        AttemptEventKind::Terminal(OutcomeCode::SourceUnreadable),
+    ))
+    .unwrap();
+
+    assert_eq!(card.state, ProductState::Failed);
+    assert!(
+        !card.source.is_ready(),
+        "the source the attempt could not send from is still ready: {:?}",
+        card.source
+    );
+    assert_eq!(
+        card.outcome.as_ref().and_then(|outcome| outcome.recovery),
+        Some(Recovery::RePickSource)
+    );
+
+    // Commands are offered only once the retirement the terminal requested has
+    // been acknowledged, so the affordance is checked at rest.
+    card.quiescence = Quiescence::Quiescent;
+    assert!(
+        card.allowed_commands()
+            .contains(&ProductCommand::RePickSource),
+        "the offered recovery is not an allowed command: {:?}",
+        card.allowed_commands()
+    );
+}
+
 /// The SAME admitted answer, delivered twice, moves the card once.
 ///
 /// This is what makes delivery from the ledger to the card safe to repeat, and

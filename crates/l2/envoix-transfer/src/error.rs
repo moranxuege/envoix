@@ -161,8 +161,20 @@ impl fmt::Display for ProtocolViolation {
 pub enum TransferError {
     Protocol(ProtocolViolation),
     IntegrityMismatch,
+    /// The source read back different bytes than staging established.
+    ///
+    /// Distinct from [`Self::IntegrityMismatch`], which is about the PEER: that
+    /// one says the bytes that arrived are not the bytes that were declared, and
+    /// its recovery is not the user's. This one says the document under our own
+    /// sender changed after it was staged, and the only thing that resolves it
+    /// is the person choosing a source again. Sharing an arm gave a replaced
+    /// file an `Internal` outcome and no recovery at all.
+    SourceChanged,
     Storage(StorageFault),
-    UnexpectedSourceEnd { offset: u64, expected: u64 },
+    UnexpectedSourceEnd {
+        offset: u64,
+        expected: u64,
+    },
     Timeout,
     Cancelled,
     Paused,
@@ -177,7 +189,7 @@ impl TransferError {
                 OutcomeCode::SourceUnreadable
             }
             Self::Storage(_) => OutcomeCode::StorageFault,
-            Self::UnexpectedSourceEnd { .. } => OutcomeCode::SourceUnreadable,
+            Self::UnexpectedSourceEnd { .. } | Self::SourceChanged => OutcomeCode::SourceUnreadable,
             Self::Timeout => OutcomeCode::Timeout,
             Self::Cancelled => OutcomeCode::Cancelled,
             Self::Paused => OutcomeCode::Paused,
@@ -196,6 +208,7 @@ impl fmt::Display for TransferError {
         match self {
             Self::Protocol(violation) => violation.fmt(formatter),
             Self::IntegrityMismatch => formatter.write_str("transfer integrity mismatch"),
+            Self::SourceChanged => formatter.write_str("source changed after it was staged"),
             Self::Storage(fault) => fault.fmt(formatter),
             Self::UnexpectedSourceEnd { offset, expected } => write!(
                 formatter,
@@ -247,9 +260,13 @@ impl MachineFailure {
     pub(crate) const fn from_engine_error(error: TransferError, transfer_id: TransferId) -> Self {
         let reason = match error {
             TransferError::IntegrityMismatch => ProtocolReason::IntegrityMismatch,
-            TransferError::Storage(_) | TransferError::UnexpectedSourceEnd { .. } => {
-                ProtocolReason::StorageFault
-            }
+            // The PEER is told our local storage side went wrong, which is all
+            // it can act on: that our document changed under us is our fact, not
+            // a wire concept, and the abort vocabulary is deliberately not
+            // widened for it.
+            TransferError::Storage(_)
+            | TransferError::UnexpectedSourceEnd { .. }
+            | TransferError::SourceChanged => ProtocolReason::StorageFault,
             TransferError::Protocol(_) => ProtocolReason::ProtocolViolation,
             TransferError::Cancelled => ProtocolReason::Cancelled,
             TransferError::Paused => ProtocolReason::Paused,
