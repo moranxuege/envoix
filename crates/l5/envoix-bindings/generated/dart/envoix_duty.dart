@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String dutySchemaId = 'envoix/binding/duty/1';
+const String dutySchemaId = 'envoix/binding/duty/2';
 const int dutyMaxFrameBytes = 4096;
 const int _u63Max = 9223372036854775807;
 
@@ -169,14 +169,81 @@ final class DutyOrderView {
   final WorkView work;
 }
 
+enum SourceRetentionView {
+  process,
+  persisted,
+}
+
+enum SourceSeekabilityView {
+  seekable,
+  sequentialOnly,
+}
+
+final class SourceAcquiredView {
+  const SourceAcquiredView({
+    required this.retention,
+    required this.seekability,
+  });
+
+  final SourceRetentionView retention;
+  final SourceSeekabilityView seekability;
+}
+
+enum SourceFailureView {
+  unreadable,
+  permissionLost,
+  storageFault,
+  internal,
+}
+
+final class SourceFailedView {
+  const SourceFailedView({
+    required this.reason,
+  });
+
+  final SourceFailureView reason;
+}
+
+sealed class SourceReportView {
+  const SourceReportView();
+}
+
+final class SourceReportViewAcquired extends SourceReportView {
+  const SourceReportViewAcquired(this.value);
+
+  final SourceAcquiredView value;
+}
+
+final class SourceReportViewFailed extends SourceReportView {
+  const SourceReportViewFailed(this.value);
+
+  final SourceFailedView value;
+}
+
+sealed class DutyAnswerView {
+  const DutyAnswerView();
+}
+
+final class DutyAnswerViewOutcome extends DutyAnswerView {
+  const DutyAnswerViewOutcome(this.value);
+
+  final OutcomeCodeView value;
+}
+
+final class DutyAnswerViewSource extends DutyAnswerView {
+  const DutyAnswerViewSource(this.value);
+
+  final SourceReportView value;
+}
+
 final class DutyReportView {
   const DutyReportView({
     required this.provenance,
-    required this.outcome,
+    required this.answer,
   });
 
   final DutyProvenanceView provenance;
-  final OutcomeCodeView outcome;
+  final DutyAnswerView answer;
 }
 
 sealed class DutyBody {
@@ -510,18 +577,171 @@ DutyOrderView _decodeDutyOrderView(Object? value, String context) {
   );
 }
 
+SourceRetentionView _decodeSourceRetentionView(Object? value, String context) {
+  return switch (value) {
+    'process' => SourceRetentionView.process,
+    'persisted' => SourceRetentionView.persisted,
+    String() =>
+      throw DutyContractException(DutyErrorKind.unknownVariant, context),
+    _ => throw DutyContractException(DutyErrorKind.shape, context),
+  };
+}
+
+String _encodeSourceRetentionView(SourceRetentionView value) {
+  return switch (value) {
+    SourceRetentionView.process => 'process',
+    SourceRetentionView.persisted => 'persisted',
+  };
+}
+
+SourceSeekabilityView _decodeSourceSeekabilityView(Object? value, String context) {
+  return switch (value) {
+    'seekable' => SourceSeekabilityView.seekable,
+    'sequential_only' => SourceSeekabilityView.sequentialOnly,
+    String() =>
+      throw DutyContractException(DutyErrorKind.unknownVariant, context),
+    _ => throw DutyContractException(DutyErrorKind.shape, context),
+  };
+}
+
+String _encodeSourceSeekabilityView(SourceSeekabilityView value) {
+  return switch (value) {
+    SourceSeekabilityView.seekable => 'seekable',
+    SourceSeekabilityView.sequentialOnly => 'sequential_only',
+  };
+}
+
+SourceAcquiredView _decodeSourceAcquiredView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'retention', 'seekability'}, context);
+  return SourceAcquiredView(
+    retention: _decodeSourceRetentionView(_field(map, 'retention', 'SourceAcquiredView.retention'), 'SourceAcquiredView.retention'),
+    seekability: _decodeSourceSeekabilityView(_field(map, 'seekability', 'SourceAcquiredView.seekability'), 'SourceAcquiredView.seekability'),
+  );
+}
+
+Map<String, Object?> _encodeSourceAcquiredView(SourceAcquiredView value) {
+  return <String, Object?>{
+    'retention': _encodeSourceRetentionView(value.retention),
+    'seekability': _encodeSourceSeekabilityView(value.seekability),
+  };
+}
+
+SourceFailureView _decodeSourceFailureView(Object? value, String context) {
+  return switch (value) {
+    'unreadable' => SourceFailureView.unreadable,
+    'permission_lost' => SourceFailureView.permissionLost,
+    'storage_fault' => SourceFailureView.storageFault,
+    'internal' => SourceFailureView.internal,
+    String() =>
+      throw DutyContractException(DutyErrorKind.unknownVariant, context),
+    _ => throw DutyContractException(DutyErrorKind.shape, context),
+  };
+}
+
+String _encodeSourceFailureView(SourceFailureView value) {
+  return switch (value) {
+    SourceFailureView.unreadable => 'unreadable',
+    SourceFailureView.permissionLost => 'permission_lost',
+    SourceFailureView.storageFault => 'storage_fault',
+    SourceFailureView.internal => 'internal',
+  };
+}
+
+SourceFailedView _decodeSourceFailedView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'reason'}, context);
+  return SourceFailedView(
+    reason: _decodeSourceFailureView(_field(map, 'reason', 'SourceFailedView.reason'), 'SourceFailedView.reason'),
+  );
+}
+
+Map<String, Object?> _encodeSourceFailedView(SourceFailedView value) {
+  return <String, Object?>{
+    'reason': _encodeSourceFailureView(value.reason),
+  };
+}
+
+SourceReportView _decodeSourceReportView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw DutyContractException(DutyErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'acquired':
+      return SourceReportViewAcquired(
+        _decodeSourceAcquiredView(_payload(map, 'SourceReportView.acquired'), 'SourceReportView.acquired'),
+      );
+    case 'failed':
+      return SourceReportViewFailed(
+        _decodeSourceFailedView(_payload(map, 'SourceReportView.failed'), 'SourceReportView.failed'),
+      );
+    default:
+      throw DutyContractException(DutyErrorKind.unknownVariant, context);
+  }
+}
+
+Map<String, Object?> _encodeSourceReportView(SourceReportView value) {
+  return switch (value) {
+    SourceReportViewAcquired(value: final payload) => <String, Object?>{
+        'kind': 'acquired',
+        'value': _encodeSourceAcquiredView(payload),
+      },
+    SourceReportViewFailed(value: final payload) => <String, Object?>{
+        'kind': 'failed',
+        'value': _encodeSourceFailedView(payload),
+      },
+  };
+}
+
+DutyAnswerView _decodeDutyAnswerView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw DutyContractException(DutyErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'outcome':
+      return DutyAnswerViewOutcome(
+        _decodeOutcomeCodeView(_payload(map, 'DutyAnswerView.outcome'), 'DutyAnswerView.outcome'),
+      );
+    case 'source':
+      return DutyAnswerViewSource(
+        _decodeSourceReportView(_payload(map, 'DutyAnswerView.source'), 'DutyAnswerView.source'),
+      );
+    default:
+      throw DutyContractException(DutyErrorKind.unknownVariant, context);
+  }
+}
+
+Map<String, Object?> _encodeDutyAnswerView(DutyAnswerView value) {
+  return switch (value) {
+    DutyAnswerViewOutcome(value: final payload) => <String, Object?>{
+        'kind': 'outcome',
+        'value': _encodeOutcomeCodeView(payload),
+      },
+    DutyAnswerViewSource(value: final payload) => <String, Object?>{
+        'kind': 'source',
+        'value': _encodeSourceReportView(payload),
+      },
+  };
+}
+
 DutyReportView _decodeDutyReportView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'provenance', 'outcome'}, context);
+  _knownKeys(map, const {'provenance', 'answer'}, context);
   return DutyReportView(
     provenance: _decodeDutyProvenanceView(_field(map, 'provenance', 'DutyReportView.provenance'), 'DutyReportView.provenance'),
-    outcome: _decodeOutcomeCodeView(_field(map, 'outcome', 'DutyReportView.outcome'), 'DutyReportView.outcome'),
+    answer: _decodeDutyAnswerView(_field(map, 'answer', 'DutyReportView.answer'), 'DutyReportView.answer'),
   );
 }
 
 Map<String, Object?> _encodeDutyReportView(DutyReportView value) {
   return <String, Object?>{
-    'outcome': _encodeOutcomeCodeView(value.outcome),
+    'answer': _encodeDutyAnswerView(value.answer),
     'provenance': _encodeDutyProvenanceView(value.provenance),
   };
 }

@@ -19,9 +19,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use envoix_bindings::duty::{
-    DutyBody, DutyFrame, DutyOrderView, DutyProvenanceView, ForegroundWorkView, LockDirectiveView,
-    LockWorkView, NoticeView, NotificationWorkView, OutcomeCodeView, PublicationWorkView, WorkView,
-    decode_duty_frame, encode_duty_frame,
+    DutyAnswerView, DutyBody, DutyFrame, DutyOrderView, DutyProvenanceView, ForegroundWorkView,
+    LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView, OutcomeCodeView,
+    PublicationWorkView, SourceAcquiredView, SourceReportView, SourceRetentionView,
+    SourceSeekabilityView, WorkView, decode_duty_frame, encode_duty_frame,
 };
 
 /// Skips the replay. Named in the failure message on purpose: a gate that
@@ -127,49 +128,49 @@ fn order(work: WorkView) -> String {
 }
 
 /// Every arm, and what the router must have delivered for it.
-fn vectors() -> Vec<(String, &'static str, Option<OutcomeCodeView>)> {
+fn vectors() -> Vec<(String, &'static str, Option<DutyAnswerView>)> {
     vec![
         (
             order(WorkView::Notification(NotificationWorkView {
                 notice: NoticeView::TransferComplete,
             })),
             "effects=[notice=TRANSFER_COMPLETE card=00112233445566aa]",
-            Some(OutcomeCodeView::Completed),
+            Some(DutyAnswerView::Outcome(OutcomeCodeView::Completed)),
         ),
         (
             order(WorkView::Notification(NotificationWorkView {
                 notice: NoticeView::ActionNeeded,
             })),
             "effects=[notice=ACTION_NEEDED card=00112233445566aa]",
-            Some(OutcomeCodeView::Completed),
+            Some(DutyAnswerView::Outcome(OutcomeCodeView::Completed)),
         ),
         (
             order(WorkView::Notification(NotificationWorkView {
                 notice: NoticeView::TransferFailed,
             })),
             "effects=[notice=TRANSFER_FAILED card=00112233445566aa]",
-            Some(OutcomeCodeView::Completed),
+            Some(DutyAnswerView::Outcome(OutcomeCodeView::Completed)),
         ),
         (
             order(WorkView::Lock(LockWorkView {
                 directive: LockDirectiveView::Hold,
             })),
             "effects=[lock=HOLD]",
-            Some(OutcomeCodeView::Completed),
+            Some(DutyAnswerView::Outcome(OutcomeCodeView::Completed)),
         ),
         (
             order(WorkView::Lock(LockWorkView {
                 directive: LockDirectiveView::Release,
             })),
             "effects=[lock=RELEASE]",
-            Some(OutcomeCodeView::Completed),
+            Some(DutyAnswerView::Outcome(OutcomeCodeView::Completed)),
         ),
         (
             order(WorkView::Foreground(ForegroundWorkView {
                 active_transfers: 4_294_967_295,
             })),
             "effects=[foreground=4294967295]",
-            Some(OutcomeCodeView::Completed),
+            Some(DutyAnswerView::Outcome(OutcomeCodeView::Completed)),
         ),
         (
             order(WorkView::Publication(PublicationWorkView {
@@ -179,17 +180,26 @@ fn vectors() -> Vec<(String, &'static str, Option<OutcomeCodeView>)> {
             })),
             "effects=[publish staged=artifacts/one name=report.pdf \
              total=9223372036854775807]",
-            Some(OutcomeCodeView::Completed),
+            Some(DutyAnswerView::Outcome(OutcomeCodeView::Completed)),
         ),
         (
             order(WorkView::Courier),
             "effects=[courier]",
-            Some(OutcomeCodeView::Internal),
+            Some(DutyAnswerView::Outcome(OutcomeCodeView::Internal)),
         ),
         (
             order(WorkView::SourceHandle),
             "effects=[source card=00112233445566aa gen=9]",
-            Some(OutcomeCodeView::Completed),
+            // The one kind that does not answer an outcome. Before duty/2 this
+            // vector expected `completed`, which said the platform had done
+            // something without saying whether its hold survives a restart or
+            // the source can seek — the two facts the authority reads.
+            Some(DutyAnswerView::Source(SourceReportView::Acquired(
+                SourceAcquiredView {
+                    retention: SourceRetentionView::Persisted,
+                    seekability: SourceSeekabilityView::Seekable,
+                },
+            ))),
         ),
         // The three the vocabulary carries and this platform does not execute.
         // Outstanding means the duty is re-delivered, so a router that reported
@@ -310,6 +320,6 @@ fn the_shipped_router_replays_authority_encoded_orders() {
             provenance(),
             "vector {index} reported a provenance the ledger would refuse"
         );
-        assert_eq!(returned.outcome, *expected, "vector {index} outcome");
+        assert_eq!(returned.answer, *expected, "vector {index} answer");
     }
 }

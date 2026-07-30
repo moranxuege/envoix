@@ -44,7 +44,7 @@
 # contract. Artifact bytes and source handles cannot be spelled here at all —
 # which is why a duty report can carry an outcome and never a file.
 
-id = "envoix/binding/duty/1"
+id = "envoix/binding/duty/2"
 root = "DutyFrame"
 direction = "bidirectional"
 
@@ -184,14 +184,96 @@ fields = [
   { name = "work", type = "WorkView" },
 ]
 
-# The executor's entire answer: no handle, no path, no payload. Its provenance
-# is still untrusted — the ledger admits it, or does not.
+# How long the PLATFORM's hold on a document lasts, exactly as it reports it.
+#
+# Never rewritten by anything downstream. Promoting `process` to `persisted`
+# once bytes were copied would quietly change the meaning of an admitted result,
+# so an exact replay of the original answer would look like a conflict with
+# state that had moved underneath it.
+[[decl]]
+kind = "enum"
+name = "SourceRetentionView"
+variants = ["process", "persisted"]
+
+# Whether the provider will serve the same bytes again from an offset.
+#
+# INDEPENDENT of retention, and carried separately for the reason the
+# retention/backing split exists: a grant that survives a restart says nothing
+# about whether the stream rewinds, and a source that rewinds says nothing about
+# whether the grant outlives the process. These two facts together are what
+# decide whether a send streams from the provider or must copy first, and a
+# single word for both is what made an earlier model unable to explain its own
+# restore behaviour.
+[[decl]]
+kind = "enum"
+name = "SourceSeekabilityView"
+variants = ["seekable", "sequential_only"]
+
+[[decl]]
+kind = "struct"
+name = "SourceAcquiredView"
+fields = [
+  { name = "retention", type = "SourceRetentionView" },
+  { name = "seekability", type = "SourceSeekabilityView" },
+]
+
+# Why an acquisition failed, in the vocabulary the PLATFORM can speak.
+#
+# Deliberately smaller than the product's prompt reasons. An acquisition cannot
+# answer `initial` — it was asked — and it cannot answer `staging_failed`,
+# because staging had not started. Both are product conclusions, and leaving
+# them unrepresentable here is what stops an adapter authoring one.
+[[decl]]
+kind = "enum"
+name = "SourceFailureView"
+variants = ["unreadable", "permission_lost", "storage_fault", "internal"]
+
+[[decl]]
+kind = "struct"
+name = "SourceFailedView"
+fields = [{ name = "reason", type = "SourceFailureView" }]
+
+# What a `source_handle` duty answers, and the reason this contract has a
+# version 2.
+#
+# An `OutcomeCodeView` cannot carry this. `completed` says the platform did
+# something; it does not say whether the hold survives a restart or whether the
+# source can be re-read from an offset — and those are exactly the two facts
+# that decide whether the send streams or copies. A source duty that answered
+# only an outcome forced the product to invent the missing ones, and every value
+# it could invent is wrong for some real provider.
+[[decl]]
+kind = "union"
+name = "SourceReportView"
+variants = [
+  { name = "acquired", payload = "SourceAcquiredView" },
+  { name = "failed", payload = "SourceFailedView" },
+]
+
+# What a duty answered, in the vocabulary its own kind can speak.
+#
+# Source acquisition is the one kind whose answer is not an outcome code. Every
+# other kind answers an outcome and nothing more. The pairing is enforced where
+# the result is admitted, so a matched kind and answer is a fact downstream code
+# may rely on rather than re-check — and BOTH directions are refusals: a source
+# duty answering a bare outcome is the missing-facts defect, and a notification
+# answering `source_acquired` is an adapter reporting on work it never did.
+[[decl]]
+kind = "union"
+name = "DutyAnswerView"
+variants = [
+  { name = "outcome", payload = "OutcomeCodeView" },
+  { name = "source", payload = "SourceReportView" },
+]
+
+# The executor's entire answer: no handle, no path. Its provenance is still
+# untrusted — the ledger admits it, or does not.
 [[decl]]
 kind = "struct"
 name = "DutyReportView"
 fields = [
   { name = "provenance", type = "DutyProvenanceView" },
-  { name = "outcome", type = "OutcomeCodeView" },
+  { name = "answer", type = "DutyAnswerView" },
 ]
 
 [[decl]]

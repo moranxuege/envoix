@@ -4,6 +4,7 @@ use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptStamp, AttemptSupervisor, EventAdmission,
     RetirementAckResult,
 };
+use envoix_capabilities::AdmittedSourceResult;
 use envoix_product::{
     AcceptedSourceOffer, ApplyOutcome, CommandApplied, CommittedSession, IdentityError, LedgerHit,
     ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, RecordStore,
@@ -46,6 +47,12 @@ pub(crate) enum CardMessage {
         offer: Box<AcceptedSourceOffer>,
         answer: oneshot::Sender<Result<SourceOfferAnswer, CommandRejected>>,
     },
+    /// The platform's admitted answer about an acquisition this card asked for.
+    ///
+    /// Internal, not frontend-originated: it carries an `AdmittedSourceResult`,
+    /// which only a `DutyLedger` can mint, so there is no epoch gate and no
+    /// commander check — the authority commissioned this work itself.
+    SourceSettled(Box<AdmittedSourceResult>),
     Shutdown(oneshot::Sender<()>),
     Signal {
         stamp: AttemptStamp,
@@ -192,6 +199,10 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 answer,
             } => {
                 self.on_source_offer(epoch, *offer, answer);
+                false
+            }
+            CardMessage::SourceSettled(result) => {
+                let _ = self.apply(ProductInput::SourceSettled(*result));
                 false
             }
             CardMessage::Shutdown(reply) => {

@@ -14,6 +14,12 @@ import com.envoix.bindings.duty.LockDirectiveView
 import com.envoix.bindings.duty.NoticeView
 import com.envoix.bindings.duty.OutcomeCodeView
 import com.envoix.bindings.duty.PublicationWorkView
+import com.envoix.bindings.duty.SourceAcquiredView
+import com.envoix.bindings.duty.SourceFailedView
+import com.envoix.bindings.duty.SourceFailureView
+import com.envoix.bindings.duty.SourceReportView
+import com.envoix.bindings.duty.SourceRetentionView
+import com.envoix.bindings.duty.SourceSeekabilityView
 import java.io.File
 
 /**
@@ -93,24 +99,41 @@ class DutyExecutor(
      * a process death lost it, or nothing was ever chosen — reports the honest
      * `source_unreadable`, which is the outcome that means "re-pick".
      */
-    override fun bindSource(provenance: DutyProvenanceView): OutcomeCodeView {
+    override fun bindSource(provenance: DutyProvenanceView): SourceReportView {
         // The WHOLE provenance, never the card alone: the duty is issued for one
         // acquisition, and claiming by card would hand generation 2 the document
         // that generation 1 was given.
-        val source =
-            SourcePicks.claim(
-                context,
-                SourceAcquisitionKeyView(
-                    card = provenance.card,
-                    generation = provenance.generation,
-                    request = provenance.request,
-                ),
-            ) ?: return OutcomeCodeView.SOURCE_UNREADABLE
-        return if (SourcePicks.readable(context, source)) {
-            OutcomeCodeView.COMPLETED
-        } else {
-            OutcomeCodeView.SOURCE_UNREADABLE
-        }
+        val acquisition =
+            SourceAcquisitionKeyView(
+                card = provenance.card,
+                generation = provenance.generation,
+                request = provenance.request,
+            )
+        val claimed =
+            SourcePicks.claim(context, acquisition)
+                ?: return SourceReportView.Failed(SourceFailedView(SourceFailureView.UNREADABLE))
+        // Retention is what the CLAIM actually took, not what the pick asked
+        // for: `claim` writes durable ownership only when Android really
+        // retained the permission, so a provider that granted only this process
+        // is reported as such rather than promoted.
+        val retention =
+            if (SourcePicks.isPersisted(context, claimed)) {
+                SourceRetentionView.PERSISTED
+            } else {
+                SourceRetentionView.PROCESS
+            }
+        val seekability =
+            when (SourcePicks.probeSeekable(context, claimed)) {
+                null ->
+                    return SourceReportView.Failed(
+                        SourceFailedView(SourceFailureView.UNREADABLE),
+                    )
+                true -> SourceSeekabilityView.SEEKABLE
+                false -> SourceSeekabilityView.SEQUENTIAL_ONLY
+            }
+        return SourceReportView.Acquired(
+            SourceAcquiredView(retention = retention, seekability = seekability),
+        )
     }
 
     override fun holdLock(directive: LockDirectiveView): OutcomeCodeView {

@@ -11,6 +11,10 @@ import com.envoix.bindings.duty.DutyProvenanceView
 import com.envoix.bindings.duty.LockDirectiveView
 import com.envoix.bindings.duty.NoticeView
 import com.envoix.bindings.duty.OutcomeCodeView
+import com.envoix.bindings.duty.SourceAcquiredView
+import com.envoix.bindings.duty.SourceReportView
+import com.envoix.bindings.duty.SourceRetentionView
+import com.envoix.bindings.duty.SourceSeekabilityView
 import com.envoix.bindings.duty.PublicationWorkView
 import java.io.File
 
@@ -49,9 +53,17 @@ class RecordingEffects : DutyEffects {
         return OutcomeCodeView.INTERNAL
     }
 
-    override fun bindSource(provenance: DutyProvenanceView): OutcomeCodeView {
+    override fun bindSource(provenance: DutyProvenanceView): SourceReportView {
         seen += "source card=${provenance.card} gen=${provenance.generation}"
-        return OutcomeCodeView.COMPLETED
+        // The acquisition answer this lane could not carry before duty/2. Both
+        // facts, because both are what the authority's stream-versus-copy
+        // decision reads.
+        return SourceReportView.Acquired(
+            SourceAcquiredView(
+                retention = SourceRetentionView.PERSISTED,
+                seekability = SourceSeekabilityView.SEEKABLE,
+            ),
+        )
     }
 }
 

@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-pub const DUTY_SCHEMA_ID: &str = "envoix/binding/duty/1";
+pub const DUTY_SCHEMA_ID: &str = "envoix/binding/duty/2";
 pub const DUTY_MAX_FRAME_BYTES: usize = 4096;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -131,10 +131,76 @@ pub struct DutyOrderView {
     pub work: WorkView,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceRetentionView {
+    Process,
+    Persisted,
+}
+
+impl SourceRetentionView {
+    pub const ALL: [Self; 2] = [
+        Self::Process,
+        Self::Persisted,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceSeekabilityView {
+    Seekable,
+    SequentialOnly,
+}
+
+impl SourceSeekabilityView {
+    pub const ALL: [Self; 2] = [
+        Self::Seekable,
+        Self::SequentialOnly,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceAcquiredView {
+    pub retention: SourceRetentionView,
+    pub seekability: SourceSeekabilityView,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceFailureView {
+    Unreadable,
+    PermissionLost,
+    StorageFault,
+    Internal,
+}
+
+impl SourceFailureView {
+    pub const ALL: [Self; 4] = [
+        Self::Unreadable,
+        Self::PermissionLost,
+        Self::StorageFault,
+        Self::Internal,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFailedView {
+    pub reason: SourceFailureView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceReportView {
+    Acquired(SourceAcquiredView),
+    Failed(SourceFailedView),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DutyAnswerView {
+    Outcome(OutcomeCodeView),
+    Source(SourceReportView),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DutyReportView {
     pub provenance: DutyProvenanceView,
-    pub outcome: OutcomeCodeView,
+    pub answer: DutyAnswerView,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -570,21 +636,162 @@ fn encode_duty_order_view_value(value: &DutyOrderView) -> Result<Value, DutyErro
     Ok(Value::Object(map))
 }
 
+fn decode_source_retention_view_value(value: &Value, context: &'static str) -> Result<SourceRetentionView, DutyError> {
+    let text = value.as_str().ok_or(DutyError::Shape { context })?;
+    match text {
+        "process" => Ok(SourceRetentionView::Process),
+        "persisted" => Ok(SourceRetentionView::Persisted),
+        _ => Err(DutyError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_retention_view_value(value: &SourceRetentionView) -> Value {
+    Value::from(match value {
+        SourceRetentionView::Process => "process",
+        SourceRetentionView::Persisted => "persisted",
+    })
+}
+
+fn decode_source_seekability_view_value(value: &Value, context: &'static str) -> Result<SourceSeekabilityView, DutyError> {
+    let text = value.as_str().ok_or(DutyError::Shape { context })?;
+    match text {
+        "seekable" => Ok(SourceSeekabilityView::Seekable),
+        "sequential_only" => Ok(SourceSeekabilityView::SequentialOnly),
+        _ => Err(DutyError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_seekability_view_value(value: &SourceSeekabilityView) -> Value {
+    Value::from(match value {
+        SourceSeekabilityView::Seekable => "seekable",
+        SourceSeekabilityView::SequentialOnly => "sequential_only",
+    })
+}
+
+fn decode_source_acquired_view_value(value: &Value, context: &'static str) -> Result<SourceAcquiredView, DutyError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["retention", "seekability"], context)?;
+    let retention = decode_source_retention_view_value(field(map, "retention", "SourceAcquiredView.retention")?, "SourceAcquiredView.retention")?;
+    let seekability = decode_source_seekability_view_value(field(map, "seekability", "SourceAcquiredView.seekability")?, "SourceAcquiredView.seekability")?;
+    Ok(SourceAcquiredView {
+        retention,
+        seekability,
+    })
+}
+
+fn encode_source_acquired_view_value(value: &SourceAcquiredView) -> Result<Value, DutyError> {
+    let mut map = Map::new();
+    map.insert("retention".to_owned(), encode_source_retention_view_value(&value.retention));
+    map.insert("seekability".to_owned(), encode_source_seekability_view_value(&value.seekability));
+    Ok(Value::Object(map))
+}
+
+fn decode_source_failure_view_value(value: &Value, context: &'static str) -> Result<SourceFailureView, DutyError> {
+    let text = value.as_str().ok_or(DutyError::Shape { context })?;
+    match text {
+        "unreadable" => Ok(SourceFailureView::Unreadable),
+        "permission_lost" => Ok(SourceFailureView::PermissionLost),
+        "storage_fault" => Ok(SourceFailureView::StorageFault),
+        "internal" => Ok(SourceFailureView::Internal),
+        _ => Err(DutyError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_failure_view_value(value: &SourceFailureView) -> Value {
+    Value::from(match value {
+        SourceFailureView::Unreadable => "unreadable",
+        SourceFailureView::PermissionLost => "permission_lost",
+        SourceFailureView::StorageFault => "storage_fault",
+        SourceFailureView::Internal => "internal",
+    })
+}
+
+fn decode_source_failed_view_value(value: &Value, context: &'static str) -> Result<SourceFailedView, DutyError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["reason"], context)?;
+    let reason = decode_source_failure_view_value(field(map, "reason", "SourceFailedView.reason")?, "SourceFailedView.reason")?;
+    Ok(SourceFailedView {
+        reason,
+    })
+}
+
+fn encode_source_failed_view_value(value: &SourceFailedView) -> Result<Value, DutyError> {
+    let mut map = Map::new();
+    map.insert("reason".to_owned(), encode_source_failure_view_value(&value.reason));
+    Ok(Value::Object(map))
+}
+
+fn decode_source_report_view_value(value: &Value, context: &'static str) -> Result<SourceReportView, DutyError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(DutyError::Shape { context })?;
+    match kind {
+        "acquired" => Ok(SourceReportView::Acquired(decode_source_acquired_view_value(payload(map, "SourceReportView.acquired")?, "SourceReportView.acquired")?)),
+        "failed" => Ok(SourceReportView::Failed(decode_source_failed_view_value(payload(map, "SourceReportView.failed")?, "SourceReportView.failed")?)),
+        _ => Err(DutyError::UnknownVariant { context }),
+    }
+}
+
+fn encode_source_report_view_value(value: &SourceReportView) -> Result<Value, DutyError> {
+    let mut map = Map::new();
+    match value {
+        SourceReportView::Acquired(payload) => {
+            map.insert("kind".to_owned(), Value::from("acquired"));
+            map.insert("value".to_owned(), encode_source_acquired_view_value(payload)?);
+        }
+        SourceReportView::Failed(payload) => {
+            map.insert("kind".to_owned(), Value::from("failed"));
+            map.insert("value".to_owned(), encode_source_failed_view_value(payload)?);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+fn decode_duty_answer_view_value(value: &Value, context: &'static str) -> Result<DutyAnswerView, DutyError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(DutyError::Shape { context })?;
+    match kind {
+        "outcome" => Ok(DutyAnswerView::Outcome(decode_outcome_code_view_value(payload(map, "DutyAnswerView.outcome")?, "DutyAnswerView.outcome")?)),
+        "source" => Ok(DutyAnswerView::Source(decode_source_report_view_value(payload(map, "DutyAnswerView.source")?, "DutyAnswerView.source")?)),
+        _ => Err(DutyError::UnknownVariant { context }),
+    }
+}
+
+fn encode_duty_answer_view_value(value: &DutyAnswerView) -> Result<Value, DutyError> {
+    let mut map = Map::new();
+    match value {
+        DutyAnswerView::Outcome(payload) => {
+            map.insert("kind".to_owned(), Value::from("outcome"));
+            map.insert("value".to_owned(), encode_outcome_code_view_value(payload));
+        }
+        DutyAnswerView::Source(payload) => {
+            map.insert("kind".to_owned(), Value::from("source"));
+            map.insert("value".to_owned(), encode_source_report_view_value(payload)?);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
 fn decode_duty_report_view_value(value: &Value, context: &'static str) -> Result<DutyReportView, DutyError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["provenance", "outcome"], context)?;
+    known_keys(map, &["provenance", "answer"], context)?;
     let provenance = decode_duty_provenance_view_value(field(map, "provenance", "DutyReportView.provenance")?, "DutyReportView.provenance")?;
-    let outcome = decode_outcome_code_view_value(field(map, "outcome", "DutyReportView.outcome")?, "DutyReportView.outcome")?;
+    let answer = decode_duty_answer_view_value(field(map, "answer", "DutyReportView.answer")?, "DutyReportView.answer")?;
     Ok(DutyReportView {
         provenance,
-        outcome,
+        answer,
     })
 }
 
 fn encode_duty_report_view_value(value: &DutyReportView) -> Result<Value, DutyError> {
     let mut map = Map::new();
     map.insert("provenance".to_owned(), encode_duty_provenance_view_value(&value.provenance)?);
-    map.insert("outcome".to_owned(), encode_outcome_code_view_value(&value.outcome));
+    map.insert("answer".to_owned(), encode_duty_answer_view_value(&value.answer)?);
     Ok(Value::Object(map))
 }
 

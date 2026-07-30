@@ -14,13 +14,14 @@ use envoix_bindings::command::{
     SourceOfferOutcomeView, SourceOfferView, decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::read::{CardActionView, CardUpdateKindView, ReadBody, decode_read_frame};
+use envoix_capabilities::{SourceReport, SourceRetention, SourceSeekability};
 use envoix_host_android::{CardStores, FramePoll, Host, HostStore};
 use envoix_operation_store::{ArtifactKey, OperationStore, PossessionState};
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_platform_android::{Work, WorkOrder, WorkReport};
 use envoix_product::{
     CommittedSession, NewTransfer, ProductCommand, ProductEffect, ProductInput, ProductState,
-    SystemIdentitySource,
+    SourceLifecycle, StagingPlan, SystemIdentitySource, TransferRecord,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -490,4 +491,89 @@ fn a_source_offer_reaches_the_authority_and_moves_the_card() {
     );
 
     host.shutdown();
+}
+
+/// The platform's answer moves the card out of `Acquiring`.
+///
+/// The edge that had no producer at all: the duty lane could carry an outcome
+/// code and nothing else, so the ledger refused every source report as
+/// `Incompatible` and a card stopped at `Acquiring` forever. duty/2 gives the
+/// lane the vocabulary; this drives the whole round trip through the SHIPPED
+/// codec — the order the host dispatched, the report the executor would encode,
+/// the ledger, and the reducer.
+#[test]
+fn an_admitted_acquisition_moves_the_card_out_of_acquiring() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let host = Host::boot(root.path()).expect("the host boots");
+    host.intent(
+        &encode_command_frame(&CommandFrame {
+            body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+                intent: CreateIntentView::MintRoom(MintRoomView {
+                    local_direction: LocalDirectionView::Send,
+                }),
+                request_id: "22".repeat(16),
+            })),
+        })
+        .expect("the create encodes"),
+    )
+    .expect("the authority answers the create");
+
+    let token = host.open_lane();
+    let acquisition = published_acquisition(&host, token);
+    host.intent(&offer_bytes(&acquisition, "chosen.bin", Some(4096)))
+        .expect("the authority answers the offer");
+
+    // Accepting the offer commissions the handle duty. The order is what the
+    // service executor would receive.
+    let order = poll_work(&host).expect("an accepted offer dispatches the handle duty");
+    let order = WorkOrder::decode(&order).expect("the order decodes");
+    assert_eq!(order.work, Work::SourceHandle);
+
+    // The answer an executor gives once it has taken hold: both facts, because
+    // both are what the stream-versus-copy decision reads.
+    let report = WorkReport::source(
+        order.provenance.to_provenance(),
+        SourceReport::Acquired {
+            retention: SourceRetention::Persisted,
+            seekability: SourceSeekability::Seekable,
+        },
+    );
+    assert!(
+        host.report_duty(&report.encode().expect("the report encodes")),
+        "a typed acquisition was not admitted"
+    );
+
+    // And the card moved. Streaming, because the platform promised a persisted
+    // grant on a seekable source — the one product of the four that needs no
+    // copy.
+    let card = order.provenance.to_provenance().card;
+    let record = wait_for_staging(root.path(), card);
+    let SourceLifecycle::Staging { plan, .. } = &record.source else {
+        panic!("the card did not reach staging: {:?}", record.source);
+    };
+    assert_eq!(*plan, StagingPlan::ProviderStream);
+
+    host.shutdown();
+}
+
+/// The durable record, once the card has left `Acquiring`. Bounded: a card that
+/// never moves must FAIL this rather than park it. Read from the STORE, so what
+/// is asserted is what a fresh process would find.
+fn wait_for_staging(root: &std::path::Path, card: RecordId) -> TransferRecord {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        let operation = open_store(root, card);
+        if let Some(bytes) = operation.latest_record() {
+            let envoix_product::RecordDecode::Loaded(record) =
+                envoix_product::decode_record(bytes).expect("the durable record decodes")
+            else {
+                panic!("this build wrote a record it cannot read");
+            };
+            if !matches!(record.source, SourceLifecycle::Acquiring(_)) {
+                return *record;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("the card never left Acquiring");
 }

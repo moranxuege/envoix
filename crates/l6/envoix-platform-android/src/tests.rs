@@ -946,26 +946,41 @@ fn emitted_kinds_are_supported_and_supported_kinds_are_in_the_vocabulary() {
         .split_once("\n    }")
         .expect("the function body ends")
         .0;
-    for required in ["SourcePicks.claim(", "SourcePicks.readable("] {
+    // Every fact it reports is ASKED FOR, not assumed. Retention is what the
+    // claim actually retained rather than what the pick requested, and
+    // seekability is probed — a source reported seekable that is not would make
+    // every resume silently restart from zero.
+    for required in [
+        "SourcePicks.claim(",
+        "SourcePicks.isPersisted(",
+        "SourcePicks.probeSeekable(",
+    ] {
         assert!(
             bind.contains(required),
             "bindSource never reaches {required}: it reports without asking"
         );
     }
     // Both ways of not holding a readable source — no pick at all, and a pick
-    // whose grant has gone — answer `source_unreadable`, and exactly one path
-    // answers `completed`. Counting rather than matching a shape, so reformatting
-    // the arm is free while collapsing a failure into success is not.
+    // that will not open — answer a typed FAILURE, and exactly one path answers
+    // an acquisition. Counting rather than matching a shape, so reformatting an
+    // arm is free while collapsing a failure into success is not.
     assert_eq!(
-        bind.matches("OutcomeCodeView.SOURCE_UNREADABLE").count(),
+        bind.matches("SourceReportView.Failed(").count(),
         2,
-        "bindSource has {} unreadable answers, not two: {bind}",
-        bind.matches("OutcomeCodeView.SOURCE_UNREADABLE").count()
+        "bindSource has {} failure answers, not two: {bind}",
+        bind.matches("SourceReportView.Failed(").count()
     );
     assert_eq!(
-        bind.matches("OutcomeCodeView.COMPLETED").count(),
+        bind.matches("SourceReportView.Acquired(").count(),
         1,
-        "bindSource claims success on more than the one path that earns it"
+        "bindSource claims an acquisition on more than the one path that earns it"
+    );
+    // And it cannot answer an outcome at all. A `completed` here is the defect
+    // duty/2 exists to remove: it says the platform did something without
+    // saying whether the hold survives a restart or the source can seek.
+    assert!(
+        !bind.contains("OutcomeCodeView"),
+        "bindSource answers an outcome code, which cannot carry an acquisition"
     );
 
     // What the host pump can dispatch is a subset of what Kotlin executes,

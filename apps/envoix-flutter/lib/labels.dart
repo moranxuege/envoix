@@ -14,7 +14,6 @@ library;
 
 import 'attachment.dart';
 import 'bindings/envoix_capability.dart';
-import 'bindings/envoix_capability.dart';
 import 'bindings/envoix_command.dart';
 // The vocabulary, not the channel: this file is read by the headless replays.
 import 'capability_answer.dart';

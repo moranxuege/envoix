@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use envoix_attempt_api::AttemptStamp;
-use envoix_capabilities::Duty;
+use envoix_capabilities::{AdmittedSourceResult, Duty};
 use envoix_evidence::{EvidenceProgress, EvidenceRecord, EvidenceSink, EvidenceValue};
 use envoix_product::{
     AcceptedSourceOffer, ApplyOutcome, CapabilityAction, CommittedSession, LedgerHit,
@@ -518,6 +518,34 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
             }
         }
         Err(CommandRejected::Interrupted)
+    }
+
+    /// Delivers the platform's admitted answer about an acquisition.
+    ///
+    /// No epoch gate and no commander check: an `AdmittedSourceResult` can only
+    /// be minted by a `DutyLedger`, for a duty the authority itself
+    /// commissioned. A frontend cannot build one, so there is no attachment to
+    /// hold responsible for it.
+    ///
+    /// A hibernated card is RESTORED to receive it. The card commissioned this
+    /// duty and is waiting on its answer, so dropping the answer because the
+    /// card went to sleep would strand it in `Acquiring` forever — and a card
+    /// awaiting an acquisition is quiescent, which is exactly the shape that
+    /// hibernates. A stale answer is not a reason to withhold delivery either:
+    /// the reducer is inert unless the result names the acquisition the card is
+    /// currently asking for, so waking a card that has moved on costs a restore
+    /// and changes nothing.
+    ///
+    /// One round, not three. Unlike a command there is no caller waiting on a
+    /// verdict — the duty ledger has already admitted this exactly once, and a
+    /// lost race means the answer is re-delivered by the adapter's own replay.
+    pub fn deliver_source_result(&self, result: AdmittedSourceResult) -> bool {
+        let card = result.acquisition().card();
+        let message = CardMessage::SourceSettled(Box::new(result));
+        match self.inbox(card) {
+            Some(inbox) => inbox.try_send(message).is_ok(),
+            None => self.restore_with_message(card, message).is_ok(),
+        }
     }
 
     /// Restores a hibernated card with `message` already queued on its fresh

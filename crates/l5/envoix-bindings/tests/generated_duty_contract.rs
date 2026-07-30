@@ -3,9 +3,10 @@
 //! independently decide a JSON shape.
 
 use envoix_bindings::duty::{
-    DUTY_MAX_FRAME_BYTES, DutyBody, DutyFrame, DutyOrderView, DutyProvenanceView, DutyReportView,
-    LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView, OutcomeCodeView, WorkView,
-    decode_duty_frame, encode_duty_frame,
+    DUTY_MAX_FRAME_BYTES, DutyAnswerView, DutyBody, DutyFrame, DutyOrderView, DutyProvenanceView,
+    DutyReportView, LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView,
+    OutcomeCodeView, SourceAcquiredView, SourceFailedView, SourceFailureView, SourceReportView,
+    SourceRetentionView, SourceSeekabilityView, WorkView, decode_duty_frame, encode_duty_frame,
 };
 use envoix_bindings::{Decl, FieldTy, emit};
 
@@ -144,16 +145,40 @@ fn every_work_arm_round_trips() {
 /// Decoding one is not admitting it — the C6 ledger owns that, and this only
 /// proves the claim is well formed.
 #[test]
-fn a_report_carries_an_outcome_and_nothing_else() {
-    for outcome in [
-        OutcomeCodeView::Completed,
-        OutcomeCodeView::SourceUnreadable,
-        OutcomeCodeView::Internal,
-    ] {
+fn a_report_carries_an_answer_and_nothing_else() {
+    let mut answers = vec![
+        DutyAnswerView::Outcome(OutcomeCodeView::Completed),
+        DutyAnswerView::Outcome(OutcomeCodeView::SourceUnreadable),
+        DutyAnswerView::Outcome(OutcomeCodeView::Internal),
+    ];
+    // Every acquisition answer, because the four products of retention and
+    // seekability are what decide stream-versus-copy — a pair that could not
+    // cross would silently become the other pair's decision.
+    for retention in [SourceRetentionView::Process, SourceRetentionView::Persisted] {
+        for seekability in [
+            SourceSeekabilityView::Seekable,
+            SourceSeekabilityView::SequentialOnly,
+        ] {
+            answers.push(DutyAnswerView::Source(SourceReportView::Acquired(
+                SourceAcquiredView {
+                    retention,
+                    seekability,
+                },
+            )));
+        }
+    }
+    for reason in SourceFailureView::ALL {
+        answers.push(DutyAnswerView::Source(SourceReportView::Failed(
+            SourceFailedView { reason },
+        )));
+    }
+    // Vacuity: three outcomes, four acquisitions, four failures.
+    assert_eq!(answers.len(), 11);
+    for answer in answers {
         let frame = DutyFrame {
             body: DutyBody::Report(DutyReportView {
                 provenance: provenance(),
-                outcome,
+                answer,
             }),
         };
         let encoded = encode_duty_frame(&frame).expect("a report encodes");

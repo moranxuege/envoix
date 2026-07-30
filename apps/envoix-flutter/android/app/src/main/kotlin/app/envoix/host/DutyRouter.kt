@@ -1,5 +1,6 @@
 package app.envoix.host
 
+import com.envoix.bindings.duty.DutyAnswerView
 import com.envoix.bindings.duty.DutyBody
 import com.envoix.bindings.duty.DutyOrderView
 import com.envoix.bindings.duty.DutyProvenanceView
@@ -9,6 +10,7 @@ import com.envoix.bindings.duty.LockDirectiveView
 import com.envoix.bindings.duty.NoticeView
 import com.envoix.bindings.duty.OutcomeCodeView
 import com.envoix.bindings.duty.PublicationWorkView
+import com.envoix.bindings.duty.SourceReportView
 import com.envoix.bindings.duty.WorkView
 
 /**
@@ -43,7 +45,17 @@ interface DutyEffects {
 
     fun carryReceipt(): OutcomeCodeView
 
-    fun bindSource(provenance: DutyProvenanceView): OutcomeCodeView
+    /**
+     * Takes hold of the document chosen for this acquisition and reports what
+     * the platform will promise about it.
+     *
+     * NOT an outcome code. `completed` cannot say whether the hold survives a
+     * restart or whether the source can be re-read from an offset, and those two
+     * facts are what decide whether the send streams from the provider or must
+     * copy first. An acquisition that answered only an outcome forced the
+     * authority to invent them.
+     */
+    fun bindSource(provenance: DutyProvenanceView): SourceReportView
 }
 
 /**
@@ -64,23 +76,32 @@ object DutyRouter {
                 ?: return null
         // A report is a well-formed frame this side issues, never receives.
         val issued = (frame.body as? DutyBody.Order)?.value ?: return null
-        val outcome = outcomeFor(issued, effects) ?: return null
+        val answer = answerFor(issued, effects) ?: return null
         return EnvoixDutyCodec
-            .encode(DutyReportView(provenance = issued.provenance, outcome = outcome))
+            .encode(DutyReportView(provenance = issued.provenance, answer = answer))
             .toByteArray(Charsets.UTF_8)
     }
 
-    private fun outcomeFor(
+    /**
+     * The answer in the vocabulary this duty's kind speaks. The source handle is
+     * the one kind that does not answer an outcome; the `when` is over the
+     * generated sealed union with no `else`, so a new kind cannot silently
+     * inherit the wrong one.
+     */
+    private fun answerFor(
         issued: DutyOrderView,
         effects: DutyEffects,
-    ): OutcomeCodeView? =
+    ): DutyAnswerView? =
         when (val work = issued.work) {
-            is WorkView.Notification -> effects.postNotice(issued.provenance, work.value.notice)
-            is WorkView.Lock -> effects.holdLock(work.value.directive)
-            is WorkView.Foreground -> effects.assertForeground(work.value.activeTransfers)
-            is WorkView.Publication -> effects.publish(work.value, issued.provenance)
-            WorkView.Courier -> effects.carryReceipt()
-            WorkView.SourceHandle -> effects.bindSource(issued.provenance)
+            is WorkView.Notification ->
+                DutyAnswerView.Outcome(effects.postNotice(issued.provenance, work.value.notice))
+            is WorkView.Lock -> DutyAnswerView.Outcome(effects.holdLock(work.value.directive))
+            is WorkView.Foreground ->
+                DutyAnswerView.Outcome(effects.assertForeground(work.value.activeTransfers))
+            is WorkView.Publication ->
+                effects.publish(work.value, issued.provenance)?.let(DutyAnswerView::Outcome)
+            WorkView.Courier -> DutyAnswerView.Outcome(effects.carryReceipt())
+            WorkView.SourceHandle -> DutyAnswerView.Source(effects.bindSource(issued.provenance))
             // Shapes the vocabulary carries that this platform does not execute.
             // Outstanding is the honest answer, not a fabricated failure.
             WorkView.Grant, WorkView.Staging, WorkView.OpenShare -> null

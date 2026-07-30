@@ -714,16 +714,33 @@ impl Host {
             return false;
         };
         let result = report.to_result();
-        let mut state = self.shared.lock();
-        match state.ledger.admit(result) {
-            Admission::Fresh(admitted) => {
-                state.adapter.settle(admitted.duty().provenance);
-                // Feeding the admitted result back into the product reducer
-                // (ProductInput::ReceiptPosted) is the F2 mutating-frontend
-                // slice: the runtime exposes no duty-result intake yet.
+        let admitted = {
+            let mut state = self.shared.lock();
+            match state.ledger.admit(result) {
+                Admission::Fresh(admitted) => {
+                    state.adapter.settle(admitted.duty().provenance);
+                    admitted
+                }
+                // Including `Incompatible`: an adapter that answered the wrong
+                // question has not done the work, so the duty stays outstanding
+                // and is re-delivered rather than discharged on a claim that
+                // says nothing.
+                _ => return false,
+            }
+        };
+        // The lock is released before the card is touched: delivery reaches the
+        // card actor, and holding the host's state across that would order the
+        // two locks against every other path that takes them the other way.
+        //
+        // A source answer goes to the product. Every other kind is admitted and
+        // settled here and goes no further — the receipt's own intake is still
+        // the F-phase slice it always was.
+        match admitted.into_source() {
+            Some(source) => {
+                self.runtime.deliver_source_result(source);
                 true
             }
-            _ => false,
+            None => true,
         }
     }
 

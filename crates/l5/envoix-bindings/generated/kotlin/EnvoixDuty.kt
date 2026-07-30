@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val DUTY_SCHEMA_ID: String = "envoix/binding/duty/1"
+const val DUTY_SCHEMA_ID: String = "envoix/binding/duty/2"
 const val DUTY_MAX_FRAME_BYTES: Int = 4096
 
 enum class DutyErrorKind {
@@ -106,9 +106,45 @@ data class DutyOrderView(
     val work: WorkView,
 )
 
+enum class SourceRetentionView {
+    PROCESS,
+    PERSISTED,
+}
+
+enum class SourceSeekabilityView {
+    SEEKABLE,
+    SEQUENTIAL_ONLY,
+}
+
+data class SourceAcquiredView(
+    val retention: SourceRetentionView,
+    val seekability: SourceSeekabilityView,
+)
+
+enum class SourceFailureView {
+    UNREADABLE,
+    PERMISSION_LOST,
+    STORAGE_FAULT,
+    INTERNAL,
+}
+
+data class SourceFailedView(
+    val reason: SourceFailureView,
+)
+
+sealed interface SourceReportView {
+    data class Acquired(val value: SourceAcquiredView) : SourceReportView
+    data class Failed(val value: SourceFailedView) : SourceReportView
+}
+
+sealed interface DutyAnswerView {
+    data class Outcome(val value: OutcomeCodeView) : DutyAnswerView
+    data class Source(val value: SourceReportView) : DutyAnswerView
+}
+
 data class DutyReportView(
     val provenance: DutyProvenanceView,
-    val outcome: OutcomeCodeView,
+    val answer: DutyAnswerView,
 )
 
 sealed interface DutyBody {
@@ -410,19 +446,135 @@ object EnvoixDutyCodec {
         )
     }
 
+    private fun decodeSourceRetentionView(value: Any?, context: String): SourceRetentionView = when (value) {
+        "process" -> SourceRetentionView.PROCESS
+        "persisted" -> SourceRetentionView.PERSISTED
+        is String -> throw DutyContractException(DutyErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw DutyContractException(DutyErrorKind.SHAPE, context)
+    }
+
+    private fun encodeSourceRetentionView(value: SourceRetentionView): String = when (value) {
+        SourceRetentionView.PROCESS -> "process"
+        SourceRetentionView.PERSISTED -> "persisted"
+    }
+
+    private fun decodeSourceSeekabilityView(value: Any?, context: String): SourceSeekabilityView = when (value) {
+        "seekable" -> SourceSeekabilityView.SEEKABLE
+        "sequential_only" -> SourceSeekabilityView.SEQUENTIAL_ONLY
+        is String -> throw DutyContractException(DutyErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw DutyContractException(DutyErrorKind.SHAPE, context)
+    }
+
+    private fun encodeSourceSeekabilityView(value: SourceSeekabilityView): String = when (value) {
+        SourceSeekabilityView.SEEKABLE -> "seekable"
+        SourceSeekabilityView.SEQUENTIAL_ONLY -> "sequential_only"
+    }
+
+    private fun decodeSourceAcquiredView(value: Any?, context: String): SourceAcquiredView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("retention", "seekability"), context)
+        return SourceAcquiredView(
+            retention = decodeSourceRetentionView(field(map, "retention", "SourceAcquiredView.retention"), "SourceAcquiredView.retention"),
+            seekability = decodeSourceSeekabilityView(field(map, "seekability", "SourceAcquiredView.seekability"), "SourceAcquiredView.seekability"),
+        )
+    }
+
+    private fun encodeSourceAcquiredView(value: SourceAcquiredView): JSONObject {
+        val map = JSONObject()
+        map.put("retention", encodeSourceRetentionView(value.retention))
+        map.put("seekability", encodeSourceSeekabilityView(value.seekability))
+        return map
+    }
+
+    private fun decodeSourceFailureView(value: Any?, context: String): SourceFailureView = when (value) {
+        "unreadable" -> SourceFailureView.UNREADABLE
+        "permission_lost" -> SourceFailureView.PERMISSION_LOST
+        "storage_fault" -> SourceFailureView.STORAGE_FAULT
+        "internal" -> SourceFailureView.INTERNAL
+        is String -> throw DutyContractException(DutyErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw DutyContractException(DutyErrorKind.SHAPE, context)
+    }
+
+    private fun encodeSourceFailureView(value: SourceFailureView): String = when (value) {
+        SourceFailureView.UNREADABLE -> "unreadable"
+        SourceFailureView.PERMISSION_LOST -> "permission_lost"
+        SourceFailureView.STORAGE_FAULT -> "storage_fault"
+        SourceFailureView.INTERNAL -> "internal"
+    }
+
+    private fun decodeSourceFailedView(value: Any?, context: String): SourceFailedView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("reason"), context)
+        return SourceFailedView(
+            reason = decodeSourceFailureView(field(map, "reason", "SourceFailedView.reason"), "SourceFailedView.reason"),
+        )
+    }
+
+    private fun encodeSourceFailedView(value: SourceFailedView): JSONObject {
+        val map = JSONObject()
+        map.put("reason", encodeSourceFailureView(value.reason))
+        return map
+    }
+
+    private fun decodeSourceReportView(value: Any?, context: String): SourceReportView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw DutyContractException(DutyErrorKind.SHAPE, context)
+        return when (kind) {
+            "acquired" -> SourceReportView.Acquired(
+                decodeSourceAcquiredView(payload(map, "SourceReportView.acquired"), "SourceReportView.acquired"),
+            )
+            "failed" -> SourceReportView.Failed(
+                decodeSourceFailedView(payload(map, "SourceReportView.failed"), "SourceReportView.failed"),
+            )
+            else -> throw DutyContractException(DutyErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun encodeSourceReportView(value: SourceReportView): JSONObject = when (value) {
+        is SourceReportView.Acquired ->
+            JSONObject().put("kind", "acquired").put("value", encodeSourceAcquiredView(value.value))
+        is SourceReportView.Failed ->
+            JSONObject().put("kind", "failed").put("value", encodeSourceFailedView(value.value))
+    }
+
+    private fun decodeDutyAnswerView(value: Any?, context: String): DutyAnswerView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw DutyContractException(DutyErrorKind.SHAPE, context)
+        return when (kind) {
+            "outcome" -> DutyAnswerView.Outcome(
+                decodeOutcomeCodeView(payload(map, "DutyAnswerView.outcome"), "DutyAnswerView.outcome"),
+            )
+            "source" -> DutyAnswerView.Source(
+                decodeSourceReportView(payload(map, "DutyAnswerView.source"), "DutyAnswerView.source"),
+            )
+            else -> throw DutyContractException(DutyErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun encodeDutyAnswerView(value: DutyAnswerView): JSONObject = when (value) {
+        is DutyAnswerView.Outcome ->
+            JSONObject().put("kind", "outcome").put("value", encodeOutcomeCodeView(value.value))
+        is DutyAnswerView.Source ->
+            JSONObject().put("kind", "source").put("value", encodeSourceReportView(value.value))
+    }
+
     private fun decodeDutyReportView(value: Any?, context: String): DutyReportView {
         val map = obj(value, context)
-        knownKeys(map, setOf("provenance", "outcome"), context)
+        knownKeys(map, setOf("provenance", "answer"), context)
         return DutyReportView(
             provenance = decodeDutyProvenanceView(field(map, "provenance", "DutyReportView.provenance"), "DutyReportView.provenance"),
-            outcome = decodeOutcomeCodeView(field(map, "outcome", "DutyReportView.outcome"), "DutyReportView.outcome"),
+            answer = decodeDutyAnswerView(field(map, "answer", "DutyReportView.answer"), "DutyReportView.answer"),
         )
     }
 
     private fun encodeDutyReportView(value: DutyReportView): JSONObject {
         val map = JSONObject()
         map.put("provenance", encodeDutyProvenanceView(value.provenance))
-        map.put("outcome", encodeOutcomeCodeView(value.outcome))
+        map.put("answer", encodeDutyAnswerView(value.answer))
         return map
     }
 

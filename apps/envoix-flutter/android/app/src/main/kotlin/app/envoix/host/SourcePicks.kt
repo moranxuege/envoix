@@ -235,6 +235,42 @@ object SourcePicks {
         runCatching { context.contentResolver.openInputStream(uri)?.use { true } }
             .getOrNull() == true
 
+    /**
+     * Whether Android really retained a read permission for this document.
+     *
+     * The claim above ASKS for a persistable grant; whether the provider gave
+     * one is its own answer, and this reads the answer rather than the request.
+     * A source reported `persisted` that a restart cannot reopen would send a
+     * card into a resume it can never complete.
+     */
+    fun isPersisted(
+        context: Context,
+        uri: Uri,
+    ): Boolean =
+        context.contentResolver.persistedUriPermissions.any {
+            it.isReadPermission && it.uri == uri
+        }
+
+    /**
+     * Whether the source can be re-read from an offset. Null = it could not be
+     * opened at all, which is a different answer to either.
+     *
+     * Probed, not assumed. Resume re-reads from an offset, and a provider that
+     * only streams cannot serve one — so a source reported seekable that is not
+     * would make every resume silently restart from zero.
+     */
+    fun probeSeekable(
+        context: Context,
+        uri: Uri,
+    ): Boolean? =
+        runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                // A descriptor with a real length is one the OS can seek within;
+                // a stream-only provider reports UNKNOWN_LENGTH.
+                descriptor.statSize >= 0
+            }
+        }.getOrNull()
+
     private fun journal(context: Context) =
         context.getSharedPreferences(
             OWNERSHIP_JOURNAL,

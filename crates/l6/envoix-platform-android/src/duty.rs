@@ -12,11 +12,16 @@
 //! existed.
 
 use envoix_bindings::duty::{
-    DutyBody, DutyError, DutyFrame, DutyOrderView, DutyProvenanceView, DutyReportView,
-    ForegroundWorkView, LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView,
-    OutcomeCodeView, PublicationWorkView, WorkView, decode_duty_frame, encode_duty_frame,
+    DutyAnswerView, DutyBody, DutyError, DutyFrame, DutyOrderView, DutyProvenanceView,
+    DutyReportView, ForegroundWorkView, LockDirectiveView, LockWorkView, NoticeView,
+    NotificationWorkView, OutcomeCodeView, PublicationWorkView, SourceAcquiredView,
+    SourceFailedView, SourceFailureView, SourceReportView, SourceRetentionView,
+    SourceSeekabilityView, WorkView, decode_duty_frame, encode_duty_frame,
 };
-use envoix_capabilities::{Duty, DutyKind, DutyProvenance, DutyReport, DutyResult};
+use envoix_capabilities::{
+    Duty, DutyKind, DutyProvenance, DutyReport, DutyResult, SourceAcquisitionFailure, SourceReport,
+    SourceRetention, SourceSeekability,
+};
 use envoix_outcomes::OutcomeCode;
 use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId};
 
@@ -342,6 +347,63 @@ fn lane_error(error: DutyError) -> LaneError {
     }
 }
 
+/// The duty's answer, in the contract's words. Total over both vocabularies, so
+/// a new answer kind cannot be dropped on the way out.
+fn answer_to_view(answer: DutyReport) -> DutyAnswerView {
+    match answer {
+        DutyReport::Outcome(outcome) => DutyAnswerView::Outcome(outcome_to_view(outcome)),
+        DutyReport::Source(SourceReport::Acquired {
+            retention,
+            seekability,
+        }) => DutyAnswerView::Source(SourceReportView::Acquired(SourceAcquiredView {
+            retention: match retention {
+                SourceRetention::Process => SourceRetentionView::Process,
+                SourceRetention::Persisted => SourceRetentionView::Persisted,
+            },
+            seekability: match seekability {
+                SourceSeekability::Seekable => SourceSeekabilityView::Seekable,
+                SourceSeekability::SequentialOnly => SourceSeekabilityView::SequentialOnly,
+            },
+        })),
+        DutyReport::Source(SourceReport::Failed(reason)) => {
+            DutyAnswerView::Source(SourceReportView::Failed(SourceFailedView {
+                reason: match reason {
+                    SourceAcquisitionFailure::Unreadable => SourceFailureView::Unreadable,
+                    SourceAcquisitionFailure::PermissionLost => SourceFailureView::PermissionLost,
+                    SourceAcquisitionFailure::StorageFault => SourceFailureView::StorageFault,
+                    SourceAcquisitionFailure::Internal => SourceFailureView::Internal,
+                },
+            }))
+        }
+    }
+}
+
+fn answer_from_view(view: DutyAnswerView) -> DutyReport {
+    match view {
+        DutyAnswerView::Outcome(outcome) => DutyReport::Outcome(outcome_from_view(outcome)),
+        DutyAnswerView::Source(SourceReportView::Acquired(acquired)) => {
+            DutyReport::Source(SourceReport::Acquired {
+                retention: match acquired.retention {
+                    SourceRetentionView::Process => SourceRetention::Process,
+                    SourceRetentionView::Persisted => SourceRetention::Persisted,
+                },
+                seekability: match acquired.seekability {
+                    SourceSeekabilityView::Seekable => SourceSeekability::Seekable,
+                    SourceSeekabilityView::SequentialOnly => SourceSeekability::SequentialOnly,
+                },
+            })
+        }
+        DutyAnswerView::Source(SourceReportView::Failed(failed)) => {
+            DutyReport::Source(SourceReport::Failed(match failed.reason {
+                SourceFailureView::Unreadable => SourceAcquisitionFailure::Unreadable,
+                SourceFailureView::PermissionLost => SourceAcquisitionFailure::PermissionLost,
+                SourceFailureView::StorageFault => SourceAcquisitionFailure::StorageFault,
+                SourceFailureView::Internal => SourceAcquisitionFailure::Internal,
+            }))
+        }
+    }
+}
+
 fn outcome_to_view(outcome: OutcomeCode) -> OutcomeCodeView {
     match outcome {
         OutcomeCode::Completed => OutcomeCodeView::Completed,
@@ -437,32 +499,40 @@ impl WorkOrder {
 }
 
 /// The service's typed answer for one executed work order.
+///
+/// An outcome for every kind but the source handle, which answers retention and
+/// seekability instead. Those are not an outcome code's to carry: `completed`
+/// says the platform did something, not whether its hold survives a restart or
+/// whether the source can be re-read from an offset — and those two facts are
+/// what decide whether a send streams or copies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkReport {
     pub provenance: WireProvenance,
-    pub outcome: OutcomeCode,
+    pub answer: DutyReport,
 }
 
 impl WorkReport {
     pub fn new(provenance: DutyProvenance, outcome: OutcomeCode) -> Self {
         Self {
             provenance: WireProvenance::from_provenance(provenance),
-            outcome,
+            answer: DutyReport::Outcome(outcome),
         }
     }
 
-    /// The untrusted adapter result; it must still pass the C6 ledger.
+    /// A source acquisition's answer, which no outcome code can spell.
+    pub fn source(provenance: DutyProvenance, report: SourceReport) -> Self {
+        Self {
+            provenance: WireProvenance::from_provenance(provenance),
+            answer: DutyReport::Source(report),
+        }
+    }
+
+    /// The untrusted adapter result; it must still pass the C6 ledger, which
+    /// refuses an answer in the wrong vocabulary for the duty's kind.
     pub fn to_result(self) -> DutyResult {
         DutyResult {
             provenance: self.provenance.to_provenance(),
-            // The generated duty contract carries an outcome code and nothing
-            // else, so a `SourceHandle` report arriving on this lane is refused
-            // by the ledger as `Incompatible` rather than acted on. That is the
-            // intended answer until duty/2 gives this lane the source
-            // vocabulary: an acquisition must state retention and seekability,
-            // and an adapter must not be able to launder a bare `completed`
-            // into a source the card then believes it holds.
-            report: DutyReport::Outcome(self.outcome),
+            report: self.answer,
         }
     }
 
@@ -470,7 +540,7 @@ impl WorkReport {
         let frame = DutyFrame {
             body: DutyBody::Report(DutyReportView {
                 provenance: self.provenance.to_view(),
-                outcome: outcome_to_view(self.outcome),
+                answer: answer_to_view(self.answer),
             }),
         };
         encode_duty_frame(&frame).map_err(lane_error)
@@ -482,7 +552,7 @@ impl WorkReport {
         };
         Ok(Self {
             provenance: WireProvenance::from_view(&report.provenance)?,
-            outcome: outcome_from_view(report.outcome),
+            answer: answer_from_view(report.answer),
         })
     }
 }

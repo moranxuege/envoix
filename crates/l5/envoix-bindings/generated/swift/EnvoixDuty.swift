@@ -17,7 +17,7 @@ import Foundation
 
 public enum EnvoixDuty {
 
-public static let dutySchemaId = "envoix/binding/duty/1"
+public static let dutySchemaId = "envoix/binding/duty/2"
 public static let dutyMaxFrameBytes = 4096
 private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -111,13 +111,58 @@ public struct DutyOrderView: Equatable {
     public let work: WorkView
 }
 
+public enum SourceRetentionView: String, Equatable {
+    case process = "process"
+    case persisted = "persisted"
+}
+
+public enum SourceSeekabilityView: String, Equatable {
+    case seekable = "seekable"
+    case sequentialOnly = "sequential_only"
+}
+
+public struct SourceAcquiredView: Equatable {
+    public let retention: SourceRetentionView
+    public let seekability: SourceSeekabilityView
+
+    public init(retention: SourceRetentionView, seekability: SourceSeekabilityView) {
+        self.retention = retention
+        self.seekability = seekability
+    }
+}
+
+public enum SourceFailureView: String, Equatable {
+    case unreadable = "unreadable"
+    case permissionLost = "permission_lost"
+    case storageFault = "storage_fault"
+    case `internal` = "internal"
+}
+
+public struct SourceFailedView: Equatable {
+    public let reason: SourceFailureView
+
+    public init(reason: SourceFailureView) {
+        self.reason = reason
+    }
+}
+
+public enum SourceReportView: Equatable {
+    case acquired(SourceAcquiredView)
+    case failed(SourceFailedView)
+}
+
+public enum DutyAnswerView: Equatable {
+    case outcome(OutcomeCodeView)
+    case source(SourceReportView)
+}
+
 public struct DutyReportView: Equatable {
     public let provenance: DutyProvenanceView
-    public let outcome: OutcomeCodeView
+    public let answer: DutyAnswerView
 
-    public init(provenance: DutyProvenanceView, outcome: OutcomeCodeView) {
+    public init(provenance: DutyProvenanceView, answer: DutyAnswerView) {
         self.provenance = provenance
-        self.outcome = outcome
+        self.answer = answer
     }
 }
 
@@ -403,21 +448,150 @@ public enum EnvoixDutyCodec {
         )
     }
 
+    private static func decodeSourceRetentionView(_ value: Any?, _ context: String) throws -> SourceRetentionView {
+        guard let text = value as? String else {
+            throw DutyContractError(kind: .shape, context: context)
+        }
+        guard let decoded = SourceRetentionView(rawValue: text) else {
+            throw DutyContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func encodeSourceRetentionView(_ value: SourceRetentionView) -> String {
+        return value.rawValue
+    }
+
+    private static func decodeSourceSeekabilityView(_ value: Any?, _ context: String) throws -> SourceSeekabilityView {
+        guard let text = value as? String else {
+            throw DutyContractError(kind: .shape, context: context)
+        }
+        guard let decoded = SourceSeekabilityView(rawValue: text) else {
+            throw DutyContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func encodeSourceSeekabilityView(_ value: SourceSeekabilityView) -> String {
+        return value.rawValue
+    }
+
+    private static func decodeSourceAcquiredView(_ value: Any?, _ context: String) throws -> SourceAcquiredView {
+        let map = try object(value, context)
+        try knownKeys(map, ["retention", "seekability"], context)
+        let retention = try decodeSourceRetentionView(try field(map, "retention", "SourceAcquiredView.retention"), "SourceAcquiredView.retention")
+        let seekability = try decodeSourceSeekabilityView(try field(map, "seekability", "SourceAcquiredView.seekability"), "SourceAcquiredView.seekability")
+        return SourceAcquiredView(
+            retention: retention,
+            seekability: seekability
+        )
+    }
+
+    private static func encodeSourceAcquiredView(_ value: SourceAcquiredView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["retention"] = encodeSourceRetentionView(value.retention)
+        map["seekability"] = encodeSourceSeekabilityView(value.seekability)
+        return map
+    }
+
+    private static func decodeSourceFailureView(_ value: Any?, _ context: String) throws -> SourceFailureView {
+        guard let text = value as? String else {
+            throw DutyContractError(kind: .shape, context: context)
+        }
+        guard let decoded = SourceFailureView(rawValue: text) else {
+            throw DutyContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func encodeSourceFailureView(_ value: SourceFailureView) -> String {
+        return value.rawValue
+    }
+
+    private static func decodeSourceFailedView(_ value: Any?, _ context: String) throws -> SourceFailedView {
+        let map = try object(value, context)
+        try knownKeys(map, ["reason"], context)
+        let reason = try decodeSourceFailureView(try field(map, "reason", "SourceFailedView.reason"), "SourceFailedView.reason")
+        return SourceFailedView(
+            reason: reason
+        )
+    }
+
+    private static func encodeSourceFailedView(_ value: SourceFailedView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["reason"] = encodeSourceFailureView(value.reason)
+        return map
+    }
+
+    private static func decodeSourceReportView(_ value: Any?, _ context: String) throws -> SourceReportView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw DutyContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "acquired":
+            return .acquired(try decodeSourceAcquiredView(payload(map, "SourceReportView.acquired"), "SourceReportView.acquired"))
+        case "failed":
+            return .failed(try decodeSourceFailedView(payload(map, "SourceReportView.failed"), "SourceReportView.failed"))
+        default:
+            throw DutyContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func encodeSourceReportView(_ value: SourceReportView) throws -> [String: Any] {
+        switch value {
+        case .acquired(let payload):
+            let encoded = try encodeSourceAcquiredView(payload)
+            return ["kind": "acquired", "value": encoded]
+        case .failed(let payload):
+            let encoded = try encodeSourceFailedView(payload)
+            return ["kind": "failed", "value": encoded]
+        }
+    }
+
+    private static func decodeDutyAnswerView(_ value: Any?, _ context: String) throws -> DutyAnswerView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw DutyContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "outcome":
+            return .outcome(try decodeOutcomeCodeView(payload(map, "DutyAnswerView.outcome"), "DutyAnswerView.outcome"))
+        case "source":
+            return .source(try decodeSourceReportView(payload(map, "DutyAnswerView.source"), "DutyAnswerView.source"))
+        default:
+            throw DutyContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func encodeDutyAnswerView(_ value: DutyAnswerView) throws -> [String: Any] {
+        switch value {
+        case .outcome(let payload):
+            let encoded = encodeOutcomeCodeView(payload)
+            return ["kind": "outcome", "value": encoded]
+        case .source(let payload):
+            let encoded = try encodeSourceReportView(payload)
+            return ["kind": "source", "value": encoded]
+        }
+    }
+
     private static func decodeDutyReportView(_ value: Any?, _ context: String) throws -> DutyReportView {
         let map = try object(value, context)
-        try knownKeys(map, ["provenance", "outcome"], context)
+        try knownKeys(map, ["provenance", "answer"], context)
         let provenance = try decodeDutyProvenanceView(try field(map, "provenance", "DutyReportView.provenance"), "DutyReportView.provenance")
-        let outcome = try decodeOutcomeCodeView(try field(map, "outcome", "DutyReportView.outcome"), "DutyReportView.outcome")
+        let answer = try decodeDutyAnswerView(try field(map, "answer", "DutyReportView.answer"), "DutyReportView.answer")
         return DutyReportView(
             provenance: provenance,
-            outcome: outcome
+            answer: answer
         )
     }
 
     private static func encodeDutyReportView(_ value: DutyReportView) throws -> [String: Any] {
         var map: [String: Any] = [:]
         map["provenance"] = try encodeDutyProvenanceView(value.provenance)
-        map["outcome"] = encodeOutcomeCodeView(value.outcome)
+        map["answer"] = try encodeDutyAnswerView(value.answer)
         return map
     }
 
