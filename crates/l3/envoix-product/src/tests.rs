@@ -960,27 +960,117 @@ fn a_settled_resume_cannot_be_replayed() {
 }
 
 /// A new attempt has not settled anything yet, whatever the last one settled.
+///
+/// Both paths, and the PAUSE one is why. Cancel clears progress wholesale, so it
+/// clears the settlement as a side effect and proves nothing about the rule. A
+/// pause deliberately KEEPS its remembered bytes — that memory is the point — so
+/// it is the path on which a settlement can be left standing into the next
+/// generation, where the once-only guard would then reject the new attempt's
+/// real answer and the card would never learn what it resumed from.
 #[test]
 fn a_new_generation_starts_unsettled() {
-    let mut record = transfer(Direction::Send);
+    for (intent, command) in [
+        (RetirementIntent::Cancel, ProductCommand::Cancel),
+        (RetirementIntent::Pause, ProductCommand::Pause),
+    ] {
+        let mut record = transfer(Direction::Send);
+        record
+            .reduce(event(
+                &record,
+                AttemptEventKind::ResumeEstablished {
+                    offset: ByteCount::new(40),
+                },
+            ))
+            .unwrap();
+        assert_eq!(record.bytes_resumed, Some(ByteCount::new(40)));
+
+        record.reduce(ProductInput::Command(command)).unwrap();
+        quiesce(&mut record, intent);
+        if intent == RetirementIntent::Cancel {
+            assert_eq!(record.bytes_resumed, None);
+            continue;
+        }
+
+        // The pause keeps what it remembers, and that is correct.
+        assert_eq!(record.bytes, ByteCount::new(40));
+        record
+            .reduce(ProductInput::Command(ProductCommand::Resume))
+            .unwrap();
+        assert_eq!(
+            record.bytes_resumed, None,
+            "a new attempt has settled nothing, whatever the last one settled"
+        );
+
+        // And the new attempt's own answer is admitted rather than swallowed.
+        record
+            .reduce(event(&record, AttemptEventKind::Phase(Phase::Transferring)))
+            .unwrap();
+        record
+            .reduce(event(
+                &record,
+                AttemptEventKind::ResumeEstablished {
+                    offset: ByteCount::new(25),
+                },
+            ))
+            .unwrap();
+        assert_eq!(record.bytes_resumed, Some(ByteCount::new(25)));
+        assert_eq!(record.bytes, ByteCount::new(25));
+    }
+}
+
+/// An empty file is a real file, and its bounds are real bounds.
+///
+/// `total()` cannot tell "nobody has said" from "known to be nothing", because
+/// both are zero — so every bound written against it switched OFF for an empty
+/// transfer. That is reachable today for a staged zero-byte send, and it would
+/// have applied to every receive the moment one admits its peer's declared
+/// content.
+#[test]
+fn a_known_empty_transfer_still_bounds_everything() {
+    let mut record = staging(Direction::Send);
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            content: staged(STAGED_NAME, 0),
+            possession: SourcePossession::Streamed,
+        })
+        .unwrap();
+    record
+        .reduce(ProductInput::StagingRetired { stamp })
+        .unwrap();
+    assert_eq!(record.total(), ByteCount::new(0));
+    assert_eq!(
+        record.known_total(),
+        Some(ByteCount::new(0)),
+        "an established empty total is KNOWN, not absent"
+    );
+
+    record
+        .reduce(event(&record, AttemptEventKind::Phase(Phase::Transferring)))
+        .unwrap();
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::Progress {
+                transferred: ByteCount::new(1),
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        record.bytes,
+        ByteCount::new(0),
+        "no transfer of an empty file moves a byte"
+    );
     record
         .reduce(event(
             &record,
             AttemptEventKind::ResumeEstablished {
-                offset: ByteCount::new(40),
+                offset: ByteCount::new(1),
             },
         ))
         .unwrap();
-    assert_eq!(record.bytes_resumed, Some(ByteCount::new(40)));
-
-    record
-        .reduce(ProductInput::Command(ProductCommand::Cancel))
-        .unwrap();
-    quiesce(&mut record, RetirementIntent::Cancel);
-    assert_eq!(
-        record.bytes_resumed, None,
-        "a discarded attempt leaves nothing settled behind it"
-    );
+    assert_eq!(record.bytes_resumed, None, "and none can be resumed");
 }
 
 /// More trusted than the other executor events, not trusted absolutely. An

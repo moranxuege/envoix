@@ -188,7 +188,15 @@ fn validate_record(record: &TransferRecord) -> Result<(), RecordCodecError> {
             RecordInvariant::ZeroGeneration,
         ));
     }
-    if record.total().get() != 0 && record.bytes.get() > record.total().get() {
+    // `known_total`, not `total`: a genuinely empty transfer has a total of zero
+    // and its bounds must still hold. Both counts are checked, because a settled
+    // resume past the end is the same impossible record as progress past it.
+    if let Some(total) = record.known_total()
+        && (record.bytes.get() > total.get()
+            || record
+                .bytes_resumed
+                .is_some_and(|resumed| resumed.get() > total.get()))
+    {
         return Err(RecordCodecError::InvalidRecord(
             RecordInvariant::ProgressExceedsTotal,
         ));

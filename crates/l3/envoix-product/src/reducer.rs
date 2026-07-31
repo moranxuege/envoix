@@ -140,9 +140,21 @@ impl TransferRecord {
     /// guards on it — a provider's claimed size is deliberately NOT promoted
     /// into this, so an unstaged card has no total at all.
     pub fn total(&self) -> ByteCount {
-        self.source
-            .content()
-            .map_or(ByteCount::new(0), TransferContent::total)
+        self.known_total().unwrap_or(ByteCount::new(0))
+    }
+
+    /// The authoritative byte count, or `None` when nothing has established one.
+    ///
+    /// What every BOUND must ask, because `total()` cannot tell "not yet known"
+    /// from "known to be empty" — and an empty file is a real file. Today a
+    /// staged zero-byte send already reads as unknown and turns every bound off;
+    /// once a receive admits its peer's declared content the same collapse would
+    /// apply to every empty transfer.
+    ///
+    /// `total()` stays as the projection's answer: a display needs a number, and
+    /// zero is the honest one to show for a size nobody has stated.
+    pub fn known_total(&self) -> Option<ByteCount> {
+        self.source.content().map(TransferContent::total)
     }
 
     /// The acquisition the platform is currently being asked to hold, if any.
@@ -376,6 +388,13 @@ impl TransferRecord {
         }
         let mut effects = self.exit_effects();
         self.generation = next_generation(self.generation)?;
+        // A new attempt has settled NOTHING, whatever the last one settled.
+        // `bytes` deliberately survives — it is what this card remembers and is
+        // the reason a resume is worth attempting — but the settled offset is a
+        // per-attempt fact, and leaving one behind made the once-only guard
+        // reject the new attempt's real answer. The card then never learned what
+        // it resumed from, silently.
+        self.bytes_resumed = None;
         self.outcome = None;
         self.state = ProductState::Connecting;
         self.quiescence = Quiescence::Running {
@@ -839,7 +858,9 @@ impl TransferRecord {
                     worker: WorkerKind::Staging,
                 })
             || transferred.get() < self.bytes.get()
-            || (self.total().get() != 0 && transferred.get() > self.total().get())
+            || self
+                .known_total()
+                .is_some_and(|total| transferred.get() > total.get())
         {
             return Vec::new();
         }
@@ -1079,7 +1100,9 @@ impl TransferRecord {
             // wherever it liked for the life of the attempt. `None` is the state
             // that permits it and settling is what leaves that state.
             || self.bytes_resumed.is_some()
-            || (self.total().get() != 0 && offset.get() > self.total().get())
+            || self
+                .known_total()
+                .is_some_and(|total| offset.get() > total.get())
         {
             return Vec::new();
         }
@@ -1095,7 +1118,9 @@ impl TransferRecord {
         // shown, which must not run backwards for an untrusted event.
         if self.state != ProductState::Transferring
             || transferred.get() < self.bytes.get()
-            || (self.total().get() != 0 && transferred.get() > self.total().get())
+            || self
+                .known_total()
+                .is_some_and(|total| transferred.get() > total.get())
         {
             return Vec::new();
         }
