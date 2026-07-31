@@ -3201,6 +3201,105 @@ fn a_persisted_staging_reacquires_across_a_restart() {
     );
 }
 
+/// An owned artifact that cannot be opened is a STORAGE failure, not a reason to
+/// choose a different file.
+///
+/// The premise that every source failure ends in re-pick was true while every
+/// source was somebody else's file. It stops being true the moment the bytes are
+/// ours: asking the person to choose the same documents again does not repair a
+/// disk fault, and it throws away an artifact that may still be there next time.
+///
+/// So the two codes do opposite things to the lifecycle. `SourceUnreadable`
+/// invalidates `Ready` — the document is gone, choose again. `StorageFault`
+/// leaves it exactly where it was, because the artifact is still what this card
+/// is sending and `RetryLater` is the recovery that fits.
+#[test]
+fn an_owned_artifact_that_cannot_be_opened_is_retryable_not_re_pickable() {
+    let ready_owned = || {
+        let mut card = create(Direction::Send).0;
+        card.reduce(ProductInput::SourceOffered {
+            offer: offer(&card, STAGED_NAME, None),
+        })
+        .unwrap();
+        card.reduce(settled(
+            &card.clone(),
+            SourceReport::Acquired(AcquiredSelection::of_one(
+                SourceRetention::Persisted,
+                SourceSeekability::SequentialOnly,
+            )),
+        ))
+        .unwrap();
+        let crate::SourceLifecycle::Staging {
+            offer: commissioned,
+            plan: StagingPlan::ProduceOwnedArtifact { derivation },
+            ..
+        } = card.source.clone()
+        else {
+            panic!("a sequential source did not commission a production");
+        };
+        let (blobs, sealed) = sealed_artifact(
+            card.identity.card,
+            card.generation,
+            card.identity.artifact,
+            &[3_u8; 16],
+            derivation.fingerprint(&commissioned),
+        );
+        let stamp = card.stamp();
+        card.reduce(ProductInput::StageComplete {
+            stamp,
+            content: crate::StagedContent::new(
+                crate::TransferContent::new(
+                    OfferedName::from_untrusted(STAGED_NAME).expect("a bounded name"),
+                    sealed.length(),
+                ),
+                sealed.digest(),
+            ),
+            possession: SourcePossession::Derived(sealed),
+        })
+        .unwrap();
+        card.reduce(ProductInput::StagingRetired { stamp }).unwrap();
+        (blobs, card)
+    };
+
+    // Storage failed: the artifact is still this card's source, and the person
+    // is offered a retry rather than the picker.
+    let (_blobs, mut card) = ready_owned();
+    card.reduce(event(
+        &card.clone(),
+        AttemptEventKind::Terminal(OutcomeCode::StorageFault),
+    ))
+    .unwrap();
+    assert!(
+        card.source.is_ready(),
+        "a disk fault threw away an artifact this card owns: {:?}",
+        card.source
+    );
+    card.quiescence = Quiescence::Quiescent;
+    assert_eq!(
+        card.outcome.as_ref().and_then(|outcome| outcome.recovery),
+        Some(Recovery::RetryLater)
+    );
+    assert!(
+        card.allowed_commands().contains(&ProductCommand::Resume),
+        "a retryable storage failure offered no retry: {:?}",
+        card.allowed_commands()
+    );
+
+    // And the provider code still does the opposite on the very same card, so
+    // the difference is the CODE rather than the backing happening to be safe.
+    let (_blobs, mut card) = ready_owned();
+    card.reduce(event(
+        &card.clone(),
+        AttemptEventKind::Terminal(OutcomeCode::SourceUnreadable),
+    ))
+    .unwrap();
+    assert!(!card.source.is_ready());
+    assert_eq!(
+        card.outcome.as_ref().and_then(|outcome| outcome.recovery),
+        Some(Recovery::RePickSource)
+    );
+}
+
 /// A ready source splits on WHO holds the bytes, and the two answers are
 /// opposite for the same reason.
 ///

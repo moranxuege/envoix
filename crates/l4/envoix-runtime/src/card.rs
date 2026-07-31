@@ -490,26 +490,25 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             ProductEffect::StartAttempt { plan } => {
                 // The runtime owns the supervisor and does the linearization.
                 let _ = self.supervisor.open(plan);
-                let Some(launch) = self.launch(plan) else {
-                    // A send whose source this process cannot open. Nothing runs
-                    // — opening a transport to send bytes we do not have would
-                    // spend a connection to fail on the first read — and the card
-                    // is told the one thing it can act on: the source is not
-                    // usable, so ask for one again. `classify_terminal` moves the
-                    // lifecycle off `Ready` for exactly this code, which is what
-                    // makes the offered re-pick an allowed command.
-                    //
-                    // Routed through `on_signal` so it takes the same supervisor
-                    // admission and the same retirement handshake a real
-                    // executor's terminal does; `current` stays `None`, so the
-                    // retirement the reducer then asks for acks immediately.
-                    self.on_signal(
-                        plan.stamp,
-                        ExecutorSignal::Event(AttemptEventKind::Terminal(
-                            OutcomeCode::SourceUnreadable,
-                        )),
-                    );
-                    return;
+                // A send whose source this process cannot open. Nothing runs —
+                // opening a transport to send bytes we do not have would spend a
+                // connection to fail on the first read — and the card is told
+                // the one thing it can act on, which differs by WHICH source
+                // could not be opened. See `launch`.
+                //
+                // Routed through `on_signal` so it takes the same supervisor
+                // admission and the same retirement handshake a real executor's
+                // terminal does; `current` stays `None`, so the retirement the
+                // reducer then asks for acks immediately.
+                let launch = match self.launch(plan) {
+                    Ok(launch) => launch,
+                    Err(unreachable) => {
+                        self.on_signal(
+                            plan.stamp,
+                            ExecutorSignal::Event(AttemptEventKind::Terminal(unreachable)),
+                        );
+                        return;
+                    }
                 };
                 let AttemptExecution { signals, stop } = self.executor.start(launch);
                 let pump = spawn_pump(&self.shared.handle, self.inbox.clone(), plan.stamp, signals);
@@ -669,21 +668,36 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
     /// outside would be reading the right fact at the wrong place: projections
     /// are drained asynchronously, so nothing orders that observation against
     /// this dispatch.
-    fn launch(&self, plan: AttemptPlan) -> Option<AttemptLaunch> {
+    fn launch(&self, plan: AttemptPlan) -> Result<AttemptLaunch, OutcomeCode> {
         if plan.direction == Direction::Receive {
-            return AttemptLaunch::receiving(plan);
+            return AttemptLaunch::receiving(plan).ok_or(OutcomeCode::Internal);
         }
         let record = self.session().record();
         let SourceLifecycle::Ready { content, .. } = &record.source else {
-            return None;
+            return Err(OutcomeCode::Internal);
         };
         let identity = StagedIdentity {
             total: content.total(),
             digest: content.content_hash(),
         };
-        let locator = SourceLocator::of(&record.source)?;
-        let source = self.sources.resolve(locator, identity).ok()?;
-        AttemptLaunch::sending(plan, source)
+        let locator = SourceLocator::of(&record.source).ok_or(OutcomeCode::Internal)?;
+        // WHICH source could not be opened decides what the person is told, and
+        // the card is the only thing that knows — it named the locator.
+        //
+        // A provider source is theirs: the document is gone or unreadable, and
+        // choosing again is the recovery. An owned artifact is OURS, in
+        // app-private storage, and re-picking the same documents does not repair
+        // a disk fault — so it is a storage failure, which carries
+        // `RetryLater` rather than blaming the selection.
+        let unreachable = match locator {
+            SourceLocator::PersistedProvider { .. } => OutcomeCode::SourceUnreadable,
+            SourceLocator::OwnedArtifact { .. } => OutcomeCode::StorageFault,
+        };
+        let source = self
+            .sources
+            .resolve(locator, identity)
+            .map_err(|_| unreachable)?;
+        AttemptLaunch::sending(plan, source).ok_or(OutcomeCode::Internal)
     }
 
     fn try_ack(&mut self, stamp: AttemptStamp) {
