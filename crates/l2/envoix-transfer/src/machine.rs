@@ -315,6 +315,7 @@ impl SenderAwaitResume {
         let mut hasher = Box::new(Hasher::new());
         let mut offset = 0;
         let mut index = 0;
+        let mut resumed_complete = false;
         if status.bytes_received.get() > 0 {
             let expected_hash = status.prefix_hash.ok_or_else(|| {
                 MachineFailure::from_engine_error(
@@ -322,18 +323,43 @@ impl SenderAwaitResume {
                     state.request.transfer_id,
                 )
             })?;
-            hash_source_prefix(
-                source,
-                status.bytes_received.get(),
-                state.request.chunk_size.get() as usize,
-                &mut hasher,
-            )
-            .map_err(|error| MachineFailure::from_engine_error(error, state.request.transfer_id))?;
-            if content_hash(&hasher) == expected_hash {
-                offset = status.bytes_received.get();
-                index = status.next_chunk_index;
+            if status.bytes_received == state.request.file_size {
+                // The peer says it holds the WHOLE file. Staging already
+                // established what the whole file hashes to, so the claim can be
+                // checked against that — exactly, and without opening a source.
+                //
+                // Re-reading here would re-hash the entire file to confirm
+                // something already known, and it is the read that turns a
+                // delivered transfer into a failure: an unconfirmed sender whose
+                // document has since gone away would fail, drop to
+                // `staging_failed`, and invite the person to pick a different
+                // file for a transfer the peer already has.
+                //
+                // What is given up is noticing that the LOCAL source changed
+                // after staging, and that does not matter here. The receiver
+                // holds the staged bytes and proved it; what became of this
+                // side's copy afterwards is not the transfer's business.
+                if expected_hash == state.request.content_hash {
+                    offset = status.bytes_received.get();
+                    index = status.next_chunk_index;
+                    resumed_complete = true;
+                }
             } else {
-                hasher = Box::new(Hasher::new());
+                hash_source_prefix(
+                    source,
+                    status.bytes_received.get(),
+                    state.request.chunk_size.get() as usize,
+                    &mut hasher,
+                )
+                .map_err(|error| {
+                    MachineFailure::from_engine_error(error, state.request.transfer_id)
+                })?;
+                if content_hash(&hasher) == expected_hash {
+                    offset = status.bytes_received.get();
+                    index = status.next_chunk_index;
+                } else {
+                    hasher = Box::new(Hasher::new());
+                }
             }
         }
 
@@ -343,6 +369,7 @@ impl SenderAwaitResume {
             index,
             resumed_bytes: offset,
             hasher,
+            resumed_complete,
             ack_deadline,
         })
     }
@@ -354,6 +381,15 @@ pub struct SenderSending {
     index: u64,
     resumed_bytes: u64,
     hasher: Box<Hasher>,
+    /// The peer proved it already holds the staged bytes, so nothing was read
+    /// and nothing will be sent.
+    ///
+    /// The completion hash then comes from the request rather than from the
+    /// hasher, because the hasher is empty — this run opened no source. That is
+    /// not a shortcut around the `SourceChanged` check: the receiver returned
+    /// the staged digest for the full length, which is the same equality that
+    /// check tests, established by the party that actually holds the bytes.
+    resumed_complete: bool,
     ack_deadline: Deadline,
 }
 
@@ -371,7 +407,11 @@ impl SenderSending {
         source: &mut impl SourceReader,
     ) -> Result<SenderStep, MachineFailure> {
         if self.offset == self.request.file_size.get() {
-            let file_hash = content_hash(&self.hasher);
+            let file_hash = if self.resumed_complete {
+                self.request.content_hash
+            } else {
+                content_hash(&self.hasher)
+            };
             // What was READ is what was staged, or this send does not complete.
             //
             // The bytes are already on the wire — the network is wasted either

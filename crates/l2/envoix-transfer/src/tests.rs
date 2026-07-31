@@ -473,15 +473,90 @@ fn claim_complete_redelivers_ack_without_chunks() {
     let driven = drive(sender, receiver, &mut source, &mut sink).unwrap();
     assert_eq!(driven.chunks, 0);
 
+    // A source swapped AFTER the peer already took the staged bytes changes
+    // nothing, and must not: the receiver proved it holds what was staged, so
+    // the transfer is done. This used to re-read the swapped file, restart from
+    // zero, and send the WRONG bytes to a peer that already held the right ones
+    // — turning a delivered transfer into an integrity failure and re-sending
+    // the whole file to earn it.
     let mut different = MemorySource::new(b"different-data!".to_vec());
-    let (sender, receiver) =
-        begin(transfer_request, &mut different, &mut sink, Some(claim)).unwrap();
-    let (_sender, frame) = one_sender_chunk(sender, &mut different);
-    let rejected = failure(receiver.receive(frame, NOW, DEADLINE, &mut sink));
-    assert_eq!(rejected.error(), TransferError::IntegrityMismatch);
     assert_eq!(
-        rejected.abort().map(|abort| abort.reason),
-        Some(ProtocolReason::IntegrityMismatch)
+        different.bytes.len(),
+        bytes.len(),
+        "same length, other bytes"
+    );
+    let (sender, receiver) = begin(
+        transfer_request.clone(),
+        &mut different,
+        &mut sink,
+        Some(claim),
+    )
+    .unwrap();
+    let SenderStep::Complete { frame, .. } = sender.next_frame(&mut different).unwrap() else {
+        panic!("a peer holding the staged bytes needs nothing sent to it");
+    };
+    let Frame::Complete(complete) = &frame else {
+        panic!("expected a completion");
+    };
+    assert_eq!(
+        complete.file_hash, known_hash,
+        "the completion declares what was STAGED, not what the source now holds"
+    );
+    let ReceiverStep::ReadyToCommit(_) = receiver.receive(frame, NOW, DEADLINE, &mut sink).unwrap()
+    else {
+        panic!("the peer already holds it; this completes");
+    };
+
+    // A peer claiming the WHOLE file is only believed when the digest it returns
+    // is the one staging established. Otherwise "I already have it" would be a
+    // sentence any peer could say to make a sender declare a transfer complete
+    // over bytes it never sent and the peer never had.
+    let mut honest_source = MemorySource::new(bytes.clone());
+    let (sender, hello) = sender_start(request(id, &bytes, 4, ResumeMode::Allowed), DEADLINE);
+    let receiver = receiver_start(ByteCount::new(4), DEADLINE).unwrap();
+    let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
+    let (sender, header) = sender.receive_ready(ready, NOW, DEADLINE).unwrap();
+    let (_receiver, honest) = receiver
+        .receive_header(header, NOW, DEADLINE, None, &mut MemorySink::default())
+        .unwrap();
+    let Frame::ResumeStatus(mut lying) = honest else {
+        panic!("expected a resume status");
+    };
+    lying.bytes_received = ByteCount::new(bytes.len() as u64);
+    lying.next_chunk_index = (bytes.len() as u64).div_ceil(4);
+    lying.prefix_hash = Some(ContentHash::from_bytes([0xab; 32]));
+    let sender = sender
+        .receive_resume(
+            Frame::ResumeStatus(lying),
+            NOW,
+            DEADLINE,
+            &mut honest_source,
+        )
+        .expect("an unbelievable claim is not a protocol violation, just unbelieved");
+    assert_eq!(
+        sender.progress().resumed_bytes,
+        ByteCount::new(0),
+        "a full-length claim with the wrong digest resumes nothing"
+    );
+    let SenderStep::Chunk { frame, .. } = sender.next_frame(&mut honest_source).unwrap() else {
+        panic!("the sender must send, not declare the transfer already done");
+    };
+    let Frame::Chunk(first) = &frame else {
+        panic!("expected a chunk");
+    };
+    assert_eq!(first.offset, ByteCount::new(0));
+
+    // And a swap IS still caught whenever the peer does not already hold the
+    // file — which is every case where those bytes would actually be sent.
+    let mut swapped = MemorySource::new(b"different-data!".to_vec());
+    let (sender, _receiver) = begin(transfer_request, &mut swapped, &mut sink, None).unwrap();
+    let (sender, _chunk) = one_sender_chunk(sender, &mut swapped);
+    let (sender, _chunk) = one_sender_chunk(sender, &mut swapped);
+    let (sender, _chunk) = one_sender_chunk(sender, &mut swapped);
+    let (sender, _chunk) = one_sender_chunk(sender, &mut swapped);
+    assert_eq!(
+        failure(sender.next_frame(&mut swapped)).error(),
+        TransferError::SourceChanged
     );
 
     let mut source = MemorySource::new(bytes);
