@@ -928,6 +928,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoix-blob-api"
+version = "0.2.0"
+dependencies = [
+ "envoix-types",
+ "serde",
+]
+
+[[package]]
+name = "envoix-blob-local"
+version = "0.2.0"
+dependencies = [
+ "envoix-blob-api",
+ "envoix-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "envoix-capabilities"
 version = "0.2.0"
 dependencies = [

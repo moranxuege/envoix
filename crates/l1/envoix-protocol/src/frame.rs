@@ -1,22 +1,6 @@
 use envoix_outcomes::OutcomeCode;
+pub use envoix_types::ContentHash;
 use envoix_types::{ByteCount, OfferedName, TransferId};
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ContentHash([u8; 32]);
-
-impl ContentHash {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn to_bytes(self) -> [u8; 32] {
-        self.0
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Hello;

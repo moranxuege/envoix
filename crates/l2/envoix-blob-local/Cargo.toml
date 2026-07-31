@@ -1,0 +1,18 @@
+[package]
+name = "envoix-blob-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.envoix]
+layer = "L2"
+role = "library"
+
+[dependencies]
+envoix-blob-api = { path = "../../l1/envoix-blob-api" }
+envoix-types = { path = "../../l0/envoix-types" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
