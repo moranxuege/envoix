@@ -576,6 +576,116 @@ fn a_source_offer_reaches_the_authority_and_moves_the_card() {
     host.shutdown();
 }
 
+/// Bytes nothing references do not survive a boot, and the ones a card is
+/// resting on do.
+///
+/// A card owns at most ONE artifact — whatever its `Ready` backing names — so
+/// anything else under its key is from a superseded incarnation: a re-pick mints
+/// a new acquisition and therefore a new blob, and a crash between a seal and
+/// the record that would have referenced it leaves one behind.
+///
+/// Reference-FIRST is the whole ordering. What a crash can leave is an orphan,
+/// which this collects; the opposite order leaves a live record naming bytes
+/// that are gone, which nothing can recover.
+#[test]
+fn a_boot_sweeps_blobs_no_record_references_and_keeps_the_one_that_is() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let contents = vec![0x5a_u8; 4096];
+    let document = root.path().join("chosen.bin");
+    std::fs::write(&document, &contents).expect("the source is written");
+
+    let host = Host::boot(root.path()).expect("the host boots");
+    host.intent(
+        &encode_command_frame(&CommandFrame {
+            body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+                intent: CreateIntentView::MintRoom(MintRoomView {
+                    local_direction: LocalDirectionView::Send,
+                }),
+                request_id: "55".repeat(16),
+            })),
+        })
+        .expect("the create encodes"),
+    )
+    .expect("the authority answers the create");
+    let token = host.open_lane();
+    let acquisition = published_acquisition(&host, token);
+    let key = SourceAcquisitionKey::of(DutyProvenance {
+        card: RecordId::new(u64::from_str_radix(&acquisition.card, 16).expect("hex card")),
+        generation: AttemptGen::new(acquisition.generation),
+        request: RequestId::from_bytes(
+            u128::from_str_radix(&acquisition.request, 16)
+                .expect("hex request")
+                .to_be_bytes(),
+        ),
+    });
+    host.sources().bind(key, document);
+    host.intent(&offer_bytes(&acquisition, "chosen.bin", None))
+        .expect("the authority answers the offer");
+    let order = poll_work(&host).expect("an accepted offer dispatches the handle duty");
+    let order = WorkOrder::decode(&order).expect("the order decodes");
+    assert!(
+        host.report_duty(
+            &WorkReport::source(
+                order.provenance.to_provenance(),
+                SourceReport::Acquired(AcquiredSelection::of_one(
+                    SourceRetention::Persisted,
+                    SourceSeekability::SequentialOnly,
+                )),
+            )
+            .encode()
+            .expect("the report encodes")
+        )
+    );
+    drain_until_source(&host, token, |source| {
+        matches!(source, SourceLifecycleView::Ready(_))
+    });
+    let card = order.provenance.to_provenance().card;
+    host.shutdown();
+
+    let blobs = envoix_blob_api::BlobStore::new(envoix_blob_local::LocalBlobs::new(root.path()));
+    let SourceLifecycle::Ready {
+        backing: SourceBacking::OwnedArtifact { seal },
+        ..
+    } = durable_record(root.path(), card).source
+    else {
+        panic!("the card did not rest on an owned artifact");
+    };
+
+    // An orphan from a superseded incarnation: the same card and artifact, an
+    // acquisition generation the record has moved past. Nothing references it.
+    let orphan = envoix_blob_api::BlobKey::new(
+        card,
+        envoix_blob_api::DerivationWorkId::of(
+            AttemptGen::new(acquisition.generation.wrapping_sub(1)),
+            seal.blob.artifact(),
+        ),
+    );
+    let mut lease = blobs
+        .begin(orphan, envoix_product::ContentHash::from_bytes([1; 32]))
+        .expect("a lease for the orphan");
+    lease
+        .append(envoix_types::ByteCount::new(0), b"superseded")
+        .expect("the orphan is written");
+    lease
+        .seal(envoix_product::ContentHash::from_bytes([2; 32]))
+        .expect("the orphan seals");
+    assert!(blobs.sealed(orphan).expect("inspectable").is_some());
+
+    // Boot again. The sweep runs where no writer can still be holding one.
+    let host = Host::boot(root.path()).expect("the host reboots");
+    host.shutdown();
+
+    assert_eq!(
+        blobs.sealed(orphan).expect("inspectable"),
+        None,
+        "a sealed blob no record references survived a boot"
+    );
+    assert!(
+        blobs.sealed(seal.blob).expect("inspectable").is_some(),
+        "the sweep deleted the artifact the card is resting on"
+    );
+}
+
 /// A source that cannot be streamed is PRODUCED, and the card rests on bytes
 /// this app now owns.
 ///

@@ -26,7 +26,7 @@ use envoix_platform_android::{DutyAdapter, IssueDecision, WorkOrder, WorkReport,
 use envoix_product::ProductState;
 use envoix_product::{
     ApplyOutcome, CommitStatus, CommittedSession, IdentityError, NewTransfer, RecordDecode,
-    SystemIdentitySource, decode_record,
+    SourceBacking, SourceLifecycle, SystemIdentitySource, decode_record,
 };
 use envoix_runtime::{
     AcceptedSourceOffer, CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict,
@@ -38,6 +38,9 @@ use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, Rec
 use crate::create;
 use crate::executor::PreparedIrohExecutor;
 use crate::provider::HostProvider;
+use envoix_blob_api::BlobStore;
+use envoix_blob_local::LocalBlobs;
+
 use crate::staging::{BoundSourceRegistry, BoundSourceStaging, HostSources};
 use crate::store::HostStore;
 use crate::stores::CardStores;
@@ -190,6 +193,10 @@ struct Shared {
     /// the process holding it dies, so a durable version would claim something
     /// untrue.
     sources: BoundSourceRegistry,
+    /// The bytes this host produced. Beside the lane for the same reason the
+    /// registry is: the pump deletes what a removed card owned, and the boot
+    /// sweep deletes what no record references.
+    blobs: BlobStore<LocalBlobs>,
 }
 
 /// The host's diagnostics projection (RT3) and the sessions the current
@@ -373,6 +380,7 @@ impl Host {
                 state: Mutex::new(SharedState::default()),
                 evidence,
                 sources,
+                blobs: blobs.clone(),
             }),
         };
 
@@ -390,11 +398,24 @@ impl Host {
                     .unwrap_or_else(PoisonError::into_inner)
                     .remember(request_id, endpoint, outcome);
             }
-            if host
-                .durable_record(card)
+            let record = host.durable_record(card);
+            if record
+                .as_ref()
                 .is_some_and(|record| record.facts.remove_requested)
             {
                 enqueue_source_release(&host.shared, card);
+            } else {
+                // Sweep what this card no longer references. A card owns at most
+                // ONE artifact — the one its `Ready` backing names — so anything
+                // else under its key is from a superseded incarnation: a re-pick
+                // mints a new acquisition and therefore a new blob, and a crash
+                // between a seal and the record that would have referenced it
+                // leaves one behind.
+                //
+                // Card-scoped and exact, so it cannot delete a blob some other
+                // card is resting on, and it runs at boot because that is when
+                // no writer can still be holding one.
+                host.sweep_orphan_blobs(card, record.as_ref());
             }
             // Absent/corrupt cards stay quarantined in storage; a restore
             // refusal must not fail the boot of every other card.
@@ -518,6 +539,27 @@ impl Host {
     /// Exposed because a filesystem host binds PATHS through it — the CLI and
     /// the off-device tests — while Android binds descriptors through the JNI
     /// lane. Same registry, same key, two platform answers.
+    /// Deletes every blob this card owns except the one its record references.
+    ///
+    /// The referenced blob is whatever `Ready { OwnedArtifact }` names. A card
+    /// that references none — still choosing, streaming, or removed — keeps
+    /// none, which is why this is stated as a difference rather than a list of
+    /// cases.
+    fn sweep_orphan_blobs(&self, card: RecordId, record: Option<&TransferRecord>) {
+        let referenced = record.and_then(|record| match &record.source {
+            SourceLifecycle::Ready {
+                backing: SourceBacking::OwnedArtifact { seal },
+                ..
+            } => Some(seal.blob),
+            _ => None,
+        });
+        for blob in self.shared.blobs.owned(card).unwrap_or_default() {
+            if Some(blob) != referenced {
+                let _ = self.shared.blobs.delete(blob);
+            }
+        }
+    }
+
     pub fn sources(&self) -> &BoundSourceRegistry {
         &self.shared.sources
     }
@@ -1063,6 +1105,15 @@ fn pump_once(shared: &Shared) {
 /// life of the process with no card left to read it.
 fn enqueue_source_release(shared: &Shared, card: RecordId) {
     shared.sources.discard_card(card);
+    // The bytes this card produced go too. REFERENCE-FIRST: the removal is
+    // already durable by the time this runs — that is what makes it a removal —
+    // so what a crash between here and the delete leaves is an orphan the boot
+    // sweep collects. Deleting before the record dropped its reference would
+    // leave the opposite: a live record naming bytes that are gone, which
+    // nothing can recover.
+    for blob in shared.blobs.owned(card).unwrap_or_default() {
+        let _ = shared.blobs.delete(blob);
+    }
     let mut state = shared.lock();
     if state.source_releases_seen.insert(card) {
         state.source_releases.push_back(card);

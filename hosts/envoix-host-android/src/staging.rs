@@ -298,7 +298,10 @@ impl<B: BlobBackend + Clone> SourceStagingExecutor for BoundSourceStaging<B> {
         let source = self.registry.open(&plan.acquisition);
         let blobs = self.blobs.clone();
         let card = plan.stamp.card;
-        let generation = plan.stamp.generation;
+        // The ACQUISITION's generation. See `DerivationWorkId`: a resume moves
+        // the attempt's and keeps the source, so deriving the blob key from it
+        // would hide a seal from the very run that should adopt it.
+        let generation = plan.acquisition.generation();
         match plan.work {
             StagingWork::Stream { .. } => {
                 tokio::task::spawn_blocking(move || read_through(source, &signals_tx, token));
