@@ -217,6 +217,33 @@ async fn run_attempt(
     };
 
     let control = handle.control();
+    // Declarations are pumped on their own task rather than in the event loop.
+    // A declaration BLOCKS the receive until answered, and the loop below can be
+    // parked on `next_event` — which will not produce one, because the attempt
+    // is waiting for this answer to make anything happen.
+    let mut declarations = handle.take_peer_content();
+    let declaring = signals.clone();
+    tokio::spawn(async move {
+        while let Some(request) = declarations.recv().await {
+            // The attempt's own reply channel is handed straight to the card.
+            // Relaying through a second one would only add a hop that could
+            // itself be dropped — and a dropped reply refuses, so every extra
+            // hop is another way to refuse something the card admitted.
+            if declaring
+                .send(ExecutorSignal::PeerContentDeclared {
+                    declaration: request.declaration,
+                    verdict: request.verdict,
+                })
+                .await
+                .is_err()
+            {
+                // Nobody is listening. The reply is dropped with the signal,
+                // which refuses — the right answer for an attempt whose card is
+                // already gone.
+                return;
+            }
+        }
+    });
     let mut stop = stopped;
     let mut stop_requested = false;
     loop {

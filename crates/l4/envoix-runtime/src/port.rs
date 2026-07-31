@@ -1,7 +1,7 @@
-use envoix_attempt_api::{AttemptEventKind, RetirementIntent};
+use envoix_attempt_api::{AttemptEventKind, PeerContentVerdict, RetirementIntent};
 use envoix_blob_api::SealedArtifact;
 use envoix_product::{CommittedSession, ContentHash, RecordStore, SourceStagingPlan};
-use envoix_types::{ByteCount, RecordId};
+use envoix_types::{ByteCount, PeerContentDeclaration, RecordId};
 use tokio::sync::{mpsc, oneshot};
 
 /// Restores the durable authority for a card from the operation store.
@@ -42,13 +42,29 @@ pub struct AttemptExecution {
     pub stop: StopHandle,
 }
 
-/// One observation from an executor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// One observation from an executor — or, once, a question.
+///
+/// No longer `Copy`, because `PeerContentDeclared` carries a channel the
+/// authority answers on. That is the point of it: everything else here may be
+/// dropped without stopping anything, and this one may not.
+#[derive(Debug)]
 pub enum ExecutorSignal {
     /// A phase / progress / terminal observation for the reducer. A `Terminal`
     /// also records the outcome with the supervisor so a later retirement can
     /// resolve to the true outcome.
     Event(AttemptEventKind),
+    /// The peer declared what it is sending, and the receive is BLOCKED until
+    /// this is answered.
+    ///
+    /// The executor has validated the header and touched nothing. Answering
+    /// `Admitted` is a promise that the declaration is durably recorded, so it
+    /// is sent only after the commit holds — the same discipline the source
+    /// offer follows, and for the same reason: a peer that is told it may
+    /// proceed will.
+    PeerContentDeclared {
+        declaration: PeerContentDeclaration,
+        verdict: oneshot::Sender<PeerContentVerdict>,
+    },
     /// The executor crossed its single irreversible commit point.
     CommitCrossed,
     /// The executor stopped and released its lease and handles.

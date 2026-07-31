@@ -126,6 +126,13 @@ impl AttemptSupervisor {
         }
     }
 
+    /// Whether this stamp is the live generation and its attempt has not
+    /// retired — the same admission rule [`Self::observe`] applies, for callers
+    /// that have a question rather than an event.
+    pub fn is_current(&self, stamp: AttemptStamp) -> bool {
+        matches!(self.slot(stamp), Ok(slot) if !slot.quiesced)
+    }
+
     /// Records a retirement intent without exposing its outcome before ack.
     pub fn request_retirement(
         &mut self,

@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor, EventAdmission,
-    RetirementAckResult, RetirementIntent,
+    PeerContentVerdict, RetirementAckResult, RetirementIntent,
 };
 use envoix_capabilities::AdmittedSourceResult;
 use envoix_outcomes::OutcomeCode;
 use envoix_product::{
     AcceptedSourceOffer, ApplyOutcome, CommandApplied, CommittedSession, ContentHash,
-    IdentityError, LedgerHit, ProductCommand, ProductEffect, ProductInput, ProductState,
-    Quiescence, RecordStore, SourceLifecycle, SourceOfferAnswer, SourcePossession, StagedContent,
-    TransferContent,
+    IdentityError, LedgerHit, PeerContentDecision, ProductCommand, ProductEffect, ProductInput,
+    ProductState, Quiescence, RecordStore, SourceLifecycle, SourceOfferAnswer, SourcePossession,
+    StagedContent, TransferContent,
 };
-use envoix_types::{ByteCount, CommandId, Direction, RecordId};
+use envoix_types::{ByteCount, CommandId, Direction, PeerContentDeclaration, RecordId};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
@@ -581,6 +581,12 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                     let _ = self.apply(ProductInput::AttemptObserved(admitted));
                 }
             }
+            ExecutorSignal::PeerContentDeclared {
+                declaration,
+                verdict,
+            } => {
+                let _ = verdict.send(self.answer_peer_content(stamp, &declaration));
+            }
             ExecutorSignal::CommitCrossed => {
                 let _ = self.supervisor.cross_commit_point(stamp);
             }
@@ -588,6 +594,40 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 self.current = None;
                 self.try_ack(stamp);
             }
+        }
+    }
+
+    /// The peer-declaration linearization point.
+    ///
+    /// The authority classifies FIRST, on this single-threaded actor, so the
+    /// answer describes the record the declaration will be applied to. Only an
+    /// admissible one mutates, and `Admitted` is reported only after the commit
+    /// HOLDS — a peer told it may proceed will, so answering before the barrier
+    /// would let it write against a card that never took the declaration.
+    ///
+    /// Exactly the shape of `on_source_offer`, and for the same reason.
+    fn answer_peer_content(
+        &mut self,
+        stamp: AttemptStamp,
+        declaration: &PeerContentDeclaration,
+    ) -> PeerContentVerdict {
+        // A superseded attempt speaks for nobody. The declaration it carries may
+        // be perfectly valid and still belong to a run this card has ended.
+        if !self.supervisor.is_current(stamp) {
+            return PeerContentVerdict::Refused;
+        }
+        let decision = self.session().record().classify_peer_content(declaration);
+        if let Some(verdict) = verdict_without_commit(decision) {
+            return verdict;
+        }
+        match self.apply(ProductInput::PeerContentDeclared(declaration.clone())) {
+            // The commit held, so the record now says what the peer declared.
+            // Only now may it proceed.
+            Ok(_) => PeerContentVerdict::Admitted,
+            // It did not. Refusing is the only honest answer: the peer would
+            // otherwise write bytes this card has no durable record of having
+            // agreed to.
+            Err(_) => PeerContentVerdict::Refused,
         }
     }
 
@@ -779,4 +819,57 @@ fn spawn_pump(
             }
         })
         .abort_handle()
+}
+
+/// What a classification answers on its own, or `None` when the declaration has
+/// to be RECORDED before the peer may proceed.
+///
+/// Separated so the answers that change nothing can be checked without standing
+/// up an actor and a store. The one that matters is `FinalContentConflict`: it
+/// must never resolve to `Admitted`, because admitting it would let a peer write
+/// a second document into a transfer that already has one — and a transfer has
+/// exactly one receipt.
+const fn verdict_without_commit(decision: PeerContentDecision) -> Option<PeerContentVerdict> {
+    match decision {
+        // Nothing to record; the record already says this.
+        PeerContentDecision::AlreadyEstablished => Some(PeerContentVerdict::Admitted),
+        PeerContentDecision::FinalContentConflict => Some(PeerContentVerdict::FinalContentConflict),
+        PeerContentDecision::NotThisTransfer => Some(PeerContentVerdict::Refused),
+        PeerContentDecision::Established | PeerContentDecision::Replaced => None,
+    }
+}
+
+#[cfg(test)]
+mod peer_content_tests {
+    use super::*;
+
+    /// Only a declaration that will be RECORDED defers its answer, and nothing
+    /// that changes the record answers before the commit.
+    #[test]
+    fn only_a_recordable_declaration_waits_for_a_commit() {
+        assert_eq!(
+            verdict_without_commit(PeerContentDecision::Established),
+            None
+        );
+        assert_eq!(verdict_without_commit(PeerContentDecision::Replaced), None);
+        assert_eq!(
+            verdict_without_commit(PeerContentDecision::AlreadyEstablished),
+            Some(PeerContentVerdict::Admitted)
+        );
+        assert_eq!(
+            verdict_without_commit(PeerContentDecision::NotThisTransfer),
+            Some(PeerContentVerdict::Refused)
+        );
+    }
+
+    /// A transfer whose content is final never admits a different document.
+    /// Admitting it would put a second document in a transfer that has exactly
+    /// one receipt, sealed at a fixed nonce.
+    #[test]
+    fn a_final_content_conflict_is_never_admitted() {
+        assert_eq!(
+            verdict_without_commit(PeerContentDecision::FinalContentConflict),
+            Some(PeerContentVerdict::FinalContentConflict)
+        );
+    }
 }
