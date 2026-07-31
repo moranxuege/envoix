@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/6"
+const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/7"
 const val COMMAND_MAX_FRAME_BYTES: Int = 1048576
 
 // Contract rules frozen by schema/command.schema.
@@ -114,10 +114,14 @@ data class SourceAcquisitionKeyView(
     val request: String,
 )
 
-data class SourceOfferView(
-    val key: SourceAcquisitionKeyView,
+data class OfferedItemView(
     val displayName: String,
     val reportedSize: Long?,
+)
+
+data class SourceOfferView(
+    val key: SourceAcquisitionKeyView,
+    val items: List<OfferedItemView>,
 )
 
 data class CreateView(
@@ -137,6 +141,7 @@ enum class SourceOfferAnswerView {
 enum class SourceOfferRefusalView {
     STALE_EPOCH,
     NAME_TOO_LONG,
+    OUTPUT_REQUIRED,
     RUNTIME_STOPPED,
     INTERRUPTED,
     STORAGE_FAULT,
@@ -353,6 +358,23 @@ object EnvoixCommandCodec {
         return value
     }
 
+    private fun <T> decodeList(
+        value: Any?,
+        maxLen: Int,
+        context: String,
+        decodeElement: (Any?, String) -> T,
+    ): List<T> {
+        val items = value as? JSONArray
+            ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
+        if (items.length() > maxLen) {
+            throw CommandContractException(CommandErrorKind.BOUND, context)
+        }
+        return (0 until items.length()).map { index ->
+            val item = items.get(index)
+            decodeElement(if (item == JSONObject.NULL) null else item, context)
+        }
+    }
+
     private fun payload(map: JSONObject, context: String): Any {
         val value = field(map, "value", context)
             ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
@@ -373,6 +395,22 @@ object EnvoixCommandCodec {
 
     private fun encodeUtf8Bounded(value: String, maxBytes: Int, context: String): String =
         utf8Bounded(value, maxBytes, context)
+
+    private fun <T> encodeList(
+        value: List<T>,
+        maxLen: Int,
+        context: String,
+        encodeElement: (T) -> Any,
+    ): JSONArray {
+        if (value.size > maxLen) {
+            throw CommandContractException(CommandErrorKind.BOUND, context)
+        }
+        val items = JSONArray()
+        for (item in value) {
+            items.put(encodeElement(item))
+        }
+        return items
+    }
 
     private fun decodeCommandView(value: Any?, context: String): CommandView = when (value) {
         "pause" -> CommandView.PAUSE
@@ -562,21 +600,35 @@ object EnvoixCommandCodec {
         return map
     }
 
+    private fun decodeOfferedItemView(value: Any?, context: String): OfferedItemView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("display_name", "reported_size"), context)
+        return OfferedItemView(
+            displayName = utf8Bounded(field(map, "display_name", "OfferedItemView.display_name"), 1020, "OfferedItemView.display_name"),
+            reportedSize = field(map, "reported_size", "OfferedItemView.reported_size")?.let { integer(it, Long.MAX_VALUE, "OfferedItemView.reported_size") },
+        )
+    }
+
+    private fun encodeOfferedItemView(value: OfferedItemView): JSONObject {
+        val map = JSONObject()
+        map.put("display_name", encodeUtf8Bounded(value.displayName, 1020, "OfferedItemView.display_name"))
+        map.put("reported_size", value.reportedSize?.let { encodeInteger(it, Long.MAX_VALUE, "OfferedItemView.reported_size") } ?: JSONObject.NULL)
+        return map
+    }
+
     private fun decodeSourceOfferView(value: Any?, context: String): SourceOfferView {
         val map = obj(value, context)
-        knownKeys(map, setOf("key", "display_name", "reported_size"), context)
+        knownKeys(map, setOf("key", "items"), context)
         return SourceOfferView(
             key = decodeSourceAcquisitionKeyView(field(map, "key", "SourceOfferView.key"), "SourceOfferView.key"),
-            displayName = utf8Bounded(field(map, "display_name", "SourceOfferView.display_name"), 1020, "SourceOfferView.display_name"),
-            reportedSize = field(map, "reported_size", "SourceOfferView.reported_size")?.let { integer(it, Long.MAX_VALUE, "SourceOfferView.reported_size") },
+            items = decodeList(field(map, "items", "SourceOfferView.items"), 1024, "SourceOfferView.items", ::decodeOfferedItemView),
         )
     }
 
     private fun encodeSourceOfferView(value: SourceOfferView): JSONObject {
         val map = JSONObject()
         map.put("key", encodeSourceAcquisitionKeyView(value.key))
-        map.put("display_name", encodeUtf8Bounded(value.displayName, 1020, "SourceOfferView.display_name"))
-        map.put("reported_size", value.reportedSize?.let { encodeInteger(it, Long.MAX_VALUE, "SourceOfferView.reported_size") } ?: JSONObject.NULL)
+        map.put("items", encodeList(value.items, 1024, "SourceOfferView.items", ::encodeOfferedItemView))
         return map
     }
 
@@ -610,6 +662,7 @@ object EnvoixCommandCodec {
     private fun decodeSourceOfferRefusalView(value: Any?, context: String): SourceOfferRefusalView = when (value) {
         "stale_epoch" -> SourceOfferRefusalView.STALE_EPOCH
         "name_too_long" -> SourceOfferRefusalView.NAME_TOO_LONG
+        "output_required" -> SourceOfferRefusalView.OUTPUT_REQUIRED
         "runtime_stopped" -> SourceOfferRefusalView.RUNTIME_STOPPED
         "interrupted" -> SourceOfferRefusalView.INTERRUPTED
         "storage_fault" -> SourceOfferRefusalView.STORAGE_FAULT

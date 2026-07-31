@@ -212,6 +212,13 @@ String sourceExchangeLabel(CapabilityAnswer answer) => switch (answer) {
                     'Re-attach and try again.',
               SourceOfferRefusalView.nameTooLong =>
                 'Not chosen — that file\'s name is too long. Rename it.',
+              // Not "too many files". Several files CAN be sent — as one thing
+              // produced from them — and what is missing is the say-so about
+              // what that thing is, which this app cannot ask for yet.
+              SourceOfferRefusalView.outputRequired =>
+                'Not chosen — sending several files at once needs Envoix to '
+                    'know what to make of them, which it cannot ask yet. '
+                    'Choose one file.',
               SourceOfferRefusalView.runtimeStopped =>
                 'Not chosen — Envoix is shutting down.',
               SourceOfferRefusalView.interrupted =>

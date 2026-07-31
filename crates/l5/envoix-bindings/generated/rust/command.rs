@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/6";
+pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/7";
 pub const COMMAND_MAX_FRAME_BYTES: usize = 1048576;
 
 // Contract rules frozen by schema/command.schema.
@@ -128,10 +128,15 @@ pub struct SourceAcquisitionKeyView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceOfferView {
-    pub key: SourceAcquisitionKeyView,
+pub struct OfferedItemView {
     pub display_name: String,
     pub reported_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceOfferView {
+    pub key: SourceAcquisitionKeyView,
+    pub items: Vec<OfferedItemView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,6 +170,7 @@ impl SourceOfferAnswerView {
 pub enum SourceOfferRefusalView {
     StaleEpoch,
     NameTooLong,
+    OutputRequired,
     RuntimeStopped,
     Interrupted,
     StorageFault,
@@ -172,9 +178,10 @@ pub enum SourceOfferRefusalView {
 }
 
 impl SourceOfferRefusalView {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::StaleEpoch,
         Self::NameTooLong,
+        Self::OutputRequired,
         Self::RuntimeStopped,
         Self::Interrupted,
         Self::StorageFault,
@@ -751,33 +758,67 @@ fn encode_source_acquisition_key_view_value(value: &SourceAcquisitionKeyView) ->
     Ok(Value::Object(map))
 }
 
+fn decode_offered_item_view_value(value: &Value, context: &'static str) -> Result<OfferedItemView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["display_name", "reported_size"], context)?;
+    let display_name = utf8_bounded(field(map, "display_name", "OfferedItemView.display_name")?, 1020, "OfferedItemView.display_name")?;
+    let reported_size = match field(map, "reported_size", "OfferedItemView.reported_size")? {
+        Value::Null => None,
+        present => Some(integer(present, U63_MAX, "OfferedItemView.reported_size")?),
+    };
+    Ok(OfferedItemView {
+        display_name,
+        reported_size,
+    })
+}
+
+fn encode_offered_item_view_value(value: &OfferedItemView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 1020, "OfferedItemView.display_name")?);
+    map.insert(
+        "reported_size".to_owned(),
+        match &value.reported_size {
+            None => Value::Null,
+            Some(inner) => encode_u63(*inner, "OfferedItemView.reported_size")?,
+        },
+    );
+    Ok(Value::Object(map))
+}
+
 fn decode_source_offer_view_value(value: &Value, context: &'static str) -> Result<SourceOfferView, CommandError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["key", "display_name", "reported_size"], context)?;
+    known_keys(map, &["key", "items"], context)?;
     let key = decode_source_acquisition_key_view_value(field(map, "key", "SourceOfferView.key")?, "SourceOfferView.key")?;
-    let display_name = utf8_bounded(field(map, "display_name", "SourceOfferView.display_name")?, 1020, "SourceOfferView.display_name")?;
-    let reported_size = match field(map, "reported_size", "SourceOfferView.reported_size")? {
-        Value::Null => None,
-        present => Some(integer(present, U63_MAX, "SourceOfferView.reported_size")?),
+    let items = {
+        let items = field(map, "items", "SourceOfferView.items")?.as_array().ok_or(CommandError::Shape { context: "SourceOfferView.items" })?;
+        if items.len() > 1024 {
+            return Err(CommandError::Bound { context: "SourceOfferView.items" });
+        }
+        let mut collected = Vec::with_capacity(items.len());
+        for item in items {
+            collected.push(decode_offered_item_view_value(item, "SourceOfferView.items")?);
+        }
+        collected
     };
     Ok(SourceOfferView {
         key,
-        display_name,
-        reported_size,
+        items,
     })
 }
 
 fn encode_source_offer_view_value(value: &SourceOfferView) -> Result<Value, CommandError> {
     let mut map = Map::new();
     map.insert("key".to_owned(), encode_source_acquisition_key_view_value(&value.key)?);
-    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 1020, "SourceOfferView.display_name")?);
-    map.insert(
-        "reported_size".to_owned(),
-        match &value.reported_size {
-            None => Value::Null,
-            Some(inner) => encode_u63(*inner, "SourceOfferView.reported_size")?,
-        },
-    );
+    map.insert("items".to_owned(), {
+        if value.items.len() > 1024 {
+            return Err(CommandError::Bound { context: "SourceOfferView.items" });
+        }
+        let mut items = Vec::with_capacity(value.items.len());
+        for item in &value.items {
+            items.push(encode_offered_item_view_value(item)?);
+        }
+        Value::Array(items)
+    });
     Ok(Value::Object(map))
 }
 
@@ -828,6 +869,7 @@ fn decode_source_offer_refusal_view_value(value: &Value, context: &'static str) 
     match text {
         "stale_epoch" => Ok(SourceOfferRefusalView::StaleEpoch),
         "name_too_long" => Ok(SourceOfferRefusalView::NameTooLong),
+        "output_required" => Ok(SourceOfferRefusalView::OutputRequired),
         "runtime_stopped" => Ok(SourceOfferRefusalView::RuntimeStopped),
         "interrupted" => Ok(SourceOfferRefusalView::Interrupted),
         "storage_fault" => Ok(SourceOfferRefusalView::StorageFault),
@@ -840,6 +882,7 @@ fn encode_source_offer_refusal_view_value(value: &SourceOfferRefusalView) -> Val
     Value::from(match value {
         SourceOfferRefusalView::StaleEpoch => "stale_epoch",
         SourceOfferRefusalView::NameTooLong => "name_too_long",
+        SourceOfferRefusalView::OutputRequired => "output_required",
         SourceOfferRefusalView::RuntimeStopped => "runtime_stopped",
         SourceOfferRefusalView::Interrupted => "interrupted",
         SourceOfferRefusalView::StorageFault => "storage_fault",

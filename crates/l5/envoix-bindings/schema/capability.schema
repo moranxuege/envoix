@@ -60,7 +60,7 @@
 # which is what keeps a platform's implementation out of the contract that
 # names its capability.
 
-id = "envoix/binding/capability/2"
+id = "envoix/binding/capability/3"
 root = "CapabilityFrame"
 direction = "bidirectional"
 
@@ -140,15 +140,15 @@ fields = [
   { name = "request", type = "hex32" },
 ]
 
-# What the platform can say about the document a person chose.
+# What the platform can say about ONE document a person chose.
 #
 # Metadata only, and deliberately so: the URI, the descriptor and the grant stay
-# inside the adapter, registered under the acquisition key. The scalar
-# vocabulary has no handle type, so this contract could not carry one even by
-# accident.
+# inside the adapter, registered under the acquisition key and this item's
+# ordinal. The scalar vocabulary has no handle type, so this contract could not
+# carry one even by accident.
 [[decl]]
 kind = "struct"
-name = "PickedSourceView"
+name = "PickedItemView"
 fields = [
   # The provider's claim, not yet normalized — Rust owns normalization and the
   # `name_too_long` answer, so the bound here is the command contract's intake
@@ -161,6 +161,27 @@ fields = [
   # from "empty".
   { name = "reported_size", type = "option(u63)" },
 ]
+
+# What a person chose: a SELECTION, in the order they chose it.
+#
+# A list rather than one document, because what a card sends may be DERIVED from
+# what was picked — compacted into an archive — and an archive has members. One
+# document is the one-element case, not a different shape.
+#
+# ORDER IS MEANING here. It fixes the order an archive is written in and the
+# ordinals the authority mints, so a platform that reorders is naming different
+# documents. The bound mirrors the authority's own inline-selection maximum; a
+# directory-scale pick exceeds it and needs the sealed manifest the product
+# reserves for that, not a bigger number here.
+#
+# Relative placement inside an archive is deliberately ABSENT. Android's
+# multi-select answers a display name per item and nothing more; a tree pick
+# answers paths, and when that arrives it is a field ADDED to the item rather
+# than a reshaping of this list.
+[[decl]]
+kind = "struct"
+name = "PickedSourceView"
+fields = [{ name = "items", type = "list(PickedItemView, 1024)" }]
 
 # The picker could not run, as distinct from a person declining it.
 #

@@ -77,6 +77,14 @@ pub struct SourceOfferSpec {
     pub card: RecordId,
     pub generation: u32,
     pub request: CommandId,
+    /// The documents offered, in the order chosen. Non-emptiness and the
+    /// bounds are the AUTHORITY's to enforce — this carries what arrived.
+    pub items: Vec<OfferedItemSpec>,
+}
+
+/// One offered document, as the provider described it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfferedItemSpec {
     /// Untrusted provider metadata; the authority sanitizes it.
     pub display_name: String,
     /// What the provider claimed, never the transfer's total.
@@ -120,8 +128,14 @@ fn source_offer_spec(offer: SourceOfferView) -> Result<SourceOfferSpec, SubmitDe
         card: RecordId::new(card),
         generation: offer.key.generation,
         request: command_id(&offer.key.request, "SourceAcquisitionKeyView.request")?,
-        display_name: offer.display_name,
-        reported_size: offer.reported_size,
+        items: offer
+            .items
+            .into_iter()
+            .map(|item| OfferedItemSpec {
+                display_name: item.display_name,
+                reported_size: item.reported_size,
+            })
+            .collect(),
     })
 }
 

@@ -91,10 +91,7 @@ Future<CapabilityAnswer> platformCapability(
             )
           : switch (it.step) {
               PickSourceStepViewProvided(value: final PickedSourceView picked) =>
-                SourcePicked(
-                  displayName: picked.displayName,
-                  reportedSize: picked.reportedSize,
-                ),
+                SourcePicked(items: picked.items),
               PickSourceStepViewDeclined(
                 value: final DeclinedReasonView declined
               ) =>

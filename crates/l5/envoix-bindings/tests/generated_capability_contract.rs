@@ -6,7 +6,7 @@ use envoix_bindings::capability::{
     CAPABILITY_MAX_FRAME_BYTES, CAPABILITY_SCHEMA_ID, CapabilityBody, CapabilityError,
     CapabilityExchangeView, CapabilityFrame, DeclinedReasonView, DeclinedView,
     PickSourceExchangeView, PickSourceFailureReasonView, PickSourceFailureView, PickSourceStepView,
-    PickedSourceView, ScanInviteExchangeView, ScanInviteStepView, ScannedTextView,
+    PickedItemView, PickedSourceView, ScanInviteExchangeView, ScanInviteStepView, ScannedTextView,
     SourceAcquisitionKeyView, decode_capability_frame, encode_capability_frame,
 };
 use envoix_bindings::{Decl, FieldTy, emit};
@@ -110,16 +110,37 @@ fn every_exchange_step_round_trips() {
         // An unknown size and a zero size are two values, and both survive as
         // themselves: the untyped map this replaced could only spell one.
         PickSourceStepView::Provided(PickedSourceView {
-            display_name: "quarterly report.pdf".to_owned(),
-            reported_size: None,
+            items: vec![PickedItemView {
+                display_name: "quarterly report.pdf".to_owned(),
+                reported_size: None,
+            }],
         }),
         PickSourceStepView::Provided(PickedSourceView {
-            display_name: String::new(),
-            reported_size: Some(0),
+            items: vec![PickedItemView {
+                display_name: String::new(),
+                reported_size: Some(0),
+            }],
         }),
         PickSourceStepView::Provided(PickedSourceView {
-            display_name: "é".repeat(510),
-            reported_size: Some(9_223_372_036_854_775_807),
+            items: vec![PickedItemView {
+                display_name: "é".repeat(510),
+                reported_size: Some(9_223_372_036_854_775_807),
+            }],
+        }),
+        // A selection, which is the shape this contract exists in: several
+        // documents in the order they were chosen, because what a card sends may
+        // be produced from them rather than be one of them.
+        PickSourceStepView::Provided(PickedSourceView {
+            items: vec![
+                PickedItemView {
+                    display_name: "a.txt".to_owned(),
+                    reported_size: Some(1),
+                },
+                PickedItemView {
+                    display_name: "b.txt".to_owned(),
+                    reported_size: None,
+                },
+            ],
         }),
         PickSourceStepView::Declined(DeclinedReasonView {
             reason: DeclinedView::Cancelled,
@@ -154,8 +175,10 @@ fn every_exchange_step_round_trips() {
 #[test]
 fn a_pick_answers_the_acquisition_it_was_asked_about() {
     let asked = pick(PickSourceStepView::Provided(PickedSourceView {
-        display_name: "a.bin".to_owned(),
-        reported_size: Some(1),
+        items: vec![PickedItemView {
+            display_name: "a.bin".to_owned(),
+            reported_size: Some(1),
+        }],
     }));
     let CapabilityBody::Exchange(CapabilityExchangeView::PickSource(mut other)) =
         asked.body.clone()
@@ -394,12 +417,12 @@ fn hostile_bytes_are_typed_refusals() {
         b"".as_slice(),
         b"{",
         b"null",
-        b"{\"schema\":\"envoix/binding/capability/2\"}",
+        b"{\"schema\":\"envoix/binding/capability/3\"}",
         b"{\"schema\":\"envoix/binding/capability/3\",\"body\":{\"kind\":\"exchange\"}}",
-        b"{\"schema\":\"envoix/binding/capability/2\",\"body\":{\"kind\":\"nope\"}}",
+        b"{\"schema\":\"envoix/binding/capability/3\",\"body\":{\"kind\":\"nope\"}}",
         // A pick answer with no acquisition: the field is required, so an
         // adapter cannot omit the identity its answer must carry.
-        b"{\"schema\":\"envoix/binding/capability/2\",\"body\":{\"kind\":\"exchange\",\
+        b"{\"schema\":\"envoix/binding/capability/3\",\"body\":{\"kind\":\"exchange\",\
           \"value\":{\"kind\":\"pick_source\",\"value\":{\"step\":{\"kind\":\"requested\"}}}}}",
     ] {
         assert!(
@@ -407,7 +430,7 @@ fn hostile_bytes_are_typed_refusals() {
             "hostile input must be refused, not believed"
         );
     }
-    assert_eq!(CAPABILITY_SCHEMA_ID, "envoix/binding/capability/2");
+    assert_eq!(CAPABILITY_SCHEMA_ID, "envoix/binding/capability/3");
     // The envelope must be able to carry the widest thing the contract permits,
     // or the bound below it would be unreachable and a legal scan would be
     // refused by the frame cap instead of admitted.
@@ -444,8 +467,8 @@ fn unknown_vocabulary_is_refused() {
 /// need is declared once per contract (EH-20). That was tolerable while the
 /// duplication was `CommandView`/`CommandKindView`, which a gate already
 /// compares. It is not tolerable unchecked for this one: read/9 publishes the
-/// acquisition, a frontend carries it to its adapter over capability/2, and it
-/// comes back to the authority inside command/6's source offer. Three spellings
+/// acquisition, a frontend carries it to its adapter over capability/3, and it
+/// comes back to the authority inside command/7's source offer. Three spellings
 /// of one identity, on one round trip.
 ///
 /// If they ever differ, the failure is silent in the worst way — a field that

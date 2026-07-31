@@ -10,8 +10,9 @@ use std::time::Duration;
 use envoix_attempt_api::{AttemptEvent, AttemptEventKind, AttemptSupervisor, EventAdmission};
 use envoix_bindings::command::{
     CommandBody, CommandFrame, CreateIntentView, CreateView, FrontendIntentView,
-    LocalDirectionView, MintRoomView, SourceAcquisitionKeyView, SourceOfferAnswerView,
-    SourceOfferOutcomeView, SourceOfferView, decode_command_frame, encode_command_frame,
+    LocalDirectionView, MintRoomView, OfferedItemView, SourceAcquisitionKeyView,
+    SourceOfferAnswerView, SourceOfferOutcomeView, SourceOfferRefusalView, SourceOfferView,
+    decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::read::{
     CardActionView, CardUpdateKindView, ReadBody, SourceLifecycleView, SourceSelectionGateView,
@@ -411,8 +412,84 @@ fn offer_bytes(key: &SourceAcquisitionKeyView, name: &str, size: Option<u64>) ->
     encode_command_frame(&CommandFrame {
         body: CommandBody::Intent(FrontendIntentView::SourceOffer(SourceOfferView {
             key: key.clone(),
-            display_name: name.to_owned(),
-            reported_size: size,
+            items: vec![OfferedItemView {
+                display_name: name.to_owned(),
+                reported_size: size,
+            }],
+        })),
+    })
+    .expect("the offer encodes")
+}
+
+/// A card sends ONE thing, so an offer of several documents is refused — for
+/// the reason that will still be true once it can be accepted.
+///
+/// Several documents CAN be sent, as one thing produced from them. What is
+/// missing is the offer saying what that thing is and what to call it, and no
+/// amount of re-offering the same documents supplies it. `output_required` names
+/// the absent decision rather than the count, so the answer does not have to
+/// change when the decision can be carried.
+///
+/// An EMPTY offer takes the same answer for the same reason: nothing was named
+/// to produce anything from.
+#[test]
+fn an_offer_of_several_documents_is_refused_for_naming_no_output() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let host = Host::boot(root.path()).expect("the host boots");
+    host.intent(
+        &encode_command_frame(&CommandFrame {
+            body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+                intent: CreateIntentView::MintRoom(MintRoomView {
+                    local_direction: LocalDirectionView::Send,
+                }),
+                request_id: "22".repeat(16),
+            })),
+        })
+        .expect("the create encodes"),
+    )
+    .expect("the authority answers the create");
+    let token = host.open_lane();
+    let acquisition = published_acquisition(&host, token);
+
+    for names in [&["a.txt", "b.txt"][..], &[][..]] {
+        assert_eq!(
+            offer_outcome(
+                &host
+                    .intent(&multi_offer_bytes(&acquisition, names))
+                    .expect("the authority answers")
+            ),
+            SourceOfferOutcomeView::Refused(SourceOfferRefusalView::OutputRequired),
+            "an offer of {} documents was not refused",
+            names.len()
+        );
+    }
+
+    // And ONE document is still accepted, so the refusal above is not the
+    // intake refusing everything.
+    assert_eq!(
+        offer_outcome(
+            &host
+                .intent(&offer_bytes(&acquisition, "a.txt", None))
+                .expect("the authority answers")
+        ),
+        SourceOfferOutcomeView::Answered(SourceOfferAnswerView::Accepted)
+    );
+
+    host.shutdown();
+}
+
+/// An offer naming several documents, which the contract can now carry.
+fn multi_offer_bytes(key: &SourceAcquisitionKeyView, names: &[&str]) -> Vec<u8> {
+    encode_command_frame(&CommandFrame {
+        body: CommandBody::Intent(FrontendIntentView::SourceOffer(SourceOfferView {
+            key: key.clone(),
+            items: names
+                .iter()
+                .map(|name| OfferedItemView {
+                    display_name: (*name).to_owned(),
+                    reported_size: None,
+                })
+                .collect(),
         })),
     })
     .expect("the offer encodes")

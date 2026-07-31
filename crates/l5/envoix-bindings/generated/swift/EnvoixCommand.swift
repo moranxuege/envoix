@@ -17,7 +17,7 @@ import Foundation
 
 public enum EnvoixCommand {
 
-public static let commandSchemaId = "envoix/binding/command/6"
+public static let commandSchemaId = "envoix/binding/command/7"
 public static let commandMaxFrameBytes = 1048576
 // Contract rules frozen by schema/command.schema.
 public static let newestAttachmentCommands = true
@@ -141,15 +141,23 @@ public struct SourceAcquisitionKeyView: Equatable {
     }
 }
 
-public struct SourceOfferView: Equatable {
-    public let key: SourceAcquisitionKeyView
+public struct OfferedItemView: Equatable {
     public let displayName: String
     public let reportedSize: Int64?
 
-    public init(key: SourceAcquisitionKeyView, displayName: String, reportedSize: Int64?) {
-        self.key = key
+    public init(displayName: String, reportedSize: Int64?) {
         self.displayName = displayName
         self.reportedSize = reportedSize
+    }
+}
+
+public struct SourceOfferView: Equatable {
+    public let key: SourceAcquisitionKeyView
+    public let items: [OfferedItemView]
+
+    public init(key: SourceAcquisitionKeyView, items: [OfferedItemView]) {
+        self.key = key
+        self.items = items
     }
 }
 
@@ -175,6 +183,7 @@ public enum SourceOfferAnswerView: String, Equatable {
 public enum SourceOfferRefusalView: String, Equatable {
     case staleEpoch = "stale_epoch"
     case nameTooLong = "name_too_long"
+    case outputRequired = "output_required"
     case runtimeStopped = "runtime_stopped"
     case interrupted = "interrupted"
     case storageFault = "storage_fault"
@@ -380,6 +389,21 @@ public enum EnvoixCommandCodec {
         return text
     }
 
+    private static func decodeList<T>(
+        _ value: Any?,
+        _ maxLen: Int,
+        _ context: String,
+        _ decodeElement: (Any?, String) throws -> T
+    ) throws -> [T] {
+        guard let items = value as? [Any] else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        if items.count > maxLen {
+            throw CommandContractError(kind: .bound, context: context)
+        }
+        return try items.map { try decodeElement($0 is NSNull ? nil : $0, context) }
+    }
+
     private static func payload(_ map: [String: Any], _ context: String) throws -> Any {
         guard let value = map["value"], !(value is NSNull) else {
             throw CommandContractError(kind: .shape, context: context)
@@ -403,6 +427,18 @@ public enum EnvoixCommandCodec {
 
     private static func encodeUtf8Bounded(_ value: String, _ maxBytes: Int, _ context: String) throws -> String {
         return try utf8Bounded(value, maxBytes, context)
+    }
+
+    private static func encodeList<T>(
+        _ value: [T],
+        _ maxLen: Int,
+        _ context: String,
+        _ encodeElement: (T) throws -> Any
+    ) throws -> [Any] {
+        if value.count > maxLen {
+            throw CommandContractError(kind: .bound, context: context)
+        }
+        return try value.map(encodeElement)
     }
 
     private static func decodeCommandView(_ value: Any?, _ context: String) throws -> CommandView {
@@ -598,33 +634,48 @@ public enum EnvoixCommandCodec {
         return map
     }
 
-    private static func decodeSourceOfferView(_ value: Any?, _ context: String) throws -> SourceOfferView {
+    private static func decodeOfferedItemView(_ value: Any?, _ context: String) throws -> OfferedItemView {
         let map = try object(value, context)
-        try knownKeys(map, ["key", "display_name", "reported_size"], context)
-        let key = try decodeSourceAcquisitionKeyView(try field(map, "key", "SourceOfferView.key"), "SourceOfferView.key")
-        let displayName = try utf8Bounded(try field(map, "display_name", "SourceOfferView.display_name"), 1020, "SourceOfferView.display_name")
+        try knownKeys(map, ["display_name", "reported_size"], context)
+        let displayName = try utf8Bounded(try field(map, "display_name", "OfferedItemView.display_name"), 1020, "OfferedItemView.display_name")
         let reportedSize: Int64?
-        if let present = try field(map, "reported_size", "SourceOfferView.reported_size") {
-            reportedSize = try integer(present, u63Max, "SourceOfferView.reported_size")
+        if let present = try field(map, "reported_size", "OfferedItemView.reported_size") {
+            reportedSize = try integer(present, u63Max, "OfferedItemView.reported_size")
         } else {
             reportedSize = nil
         }
-        return SourceOfferView(
-            key: key,
+        return OfferedItemView(
             displayName: displayName,
             reportedSize: reportedSize
+        )
+    }
+
+    private static func encodeOfferedItemView(_ value: OfferedItemView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["display_name"] = try encodeUtf8Bounded(value.displayName, 1020, "OfferedItemView.display_name")
+        if let present = value.reportedSize {
+            map["reported_size"] = try encodeInteger(present, u63Max, "OfferedItemView.reported_size")
+        } else {
+            map["reported_size"] = NSNull()
+        }
+        return map
+    }
+
+    private static func decodeSourceOfferView(_ value: Any?, _ context: String) throws -> SourceOfferView {
+        let map = try object(value, context)
+        try knownKeys(map, ["key", "items"], context)
+        let key = try decodeSourceAcquisitionKeyView(try field(map, "key", "SourceOfferView.key"), "SourceOfferView.key")
+        let items = try decodeList(try field(map, "items", "SourceOfferView.items"), 1024, "SourceOfferView.items", decodeOfferedItemView)
+        return SourceOfferView(
+            key: key,
+            items: items
         )
     }
 
     private static func encodeSourceOfferView(_ value: SourceOfferView) throws -> [String: Any] {
         var map: [String: Any] = [:]
         map["key"] = try encodeSourceAcquisitionKeyView(value.key)
-        map["display_name"] = try encodeUtf8Bounded(value.displayName, 1020, "SourceOfferView.display_name")
-        if let present = value.reportedSize {
-            map["reported_size"] = try encodeInteger(present, u63Max, "SourceOfferView.reported_size")
-        } else {
-            map["reported_size"] = NSNull()
-        }
+        map["items"] = try encodeList(value.items, 1024, "SourceOfferView.items", encodeOfferedItemView)
         return map
     }
 

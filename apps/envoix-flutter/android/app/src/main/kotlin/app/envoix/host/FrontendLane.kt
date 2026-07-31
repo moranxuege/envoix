@@ -12,6 +12,7 @@ import com.envoix.bindings.capability.PickSourceExchangeView
 import com.envoix.bindings.capability.PickSourceFailureReasonView
 import com.envoix.bindings.capability.PickSourceFailureView
 import com.envoix.bindings.capability.PickSourceStepView
+import com.envoix.bindings.capability.PickedItemView
 import com.envoix.bindings.capability.PickedSourceView
 import com.envoix.bindings.capability.ScanInviteExchangeView
 import com.envoix.bindings.capability.ScanInviteStepView
@@ -180,24 +181,42 @@ class FrontendLane(
 
     /**
      * The Activity's answer for the pick in flight: the sanitized metadata for
-     * the chosen document, or which decline it was. Never a URI, and always
+     * the chosen documents, or which decline it was. Never a URI, and always
      * naming the acquisition the request named — a frontend that receives an
      * answer for a different one refuses it before building an offer.
+     *
+     * A LIST, in the order chosen, because what a card sends may be produced
+     * from what was picked rather than be one of them. The picker is
+     * single-select today, so the list has one member; enabling multi-select is
+     * an Activity change that fills this seam rather than reshaping it.
+     *
+     * `null` is a decline. An EMPTY list is not a decline and not a selection
+     * either — nothing chose nothing — so it is refused as the platform failing
+     * to answer.
      */
-    fun sourcePicked(granted: SourcePicks.Granted?) {
+    fun sourcePicked(granted: List<SourcePicks.Granted>?) {
         val result = picking ?: return
         val acquisition = pickingFor ?: return
         picking = null
         pickingFor = null
         val step =
-            when (granted) {
-                null ->
+            when {
+                granted == null ->
                     PickSourceStepView.Declined(DeclinedReasonView(DeclinedView.CANCELLED))
+                granted.isEmpty() ->
+                    PickSourceStepView.Failed(
+                        PickSourceFailureReasonView(PickSourceFailureView.METADATA_UNAVAILABLE),
+                    )
                 else ->
                     PickSourceStepView.Provided(
                         PickedSourceView(
-                            displayName = granted.displayName,
-                            reportedSize = granted.sizeBytes,
+                            items =
+                                granted.map { item ->
+                                    PickedItemView(
+                                        displayName = item.displayName,
+                                        reportedSize = item.sizeBytes,
+                                    )
+                                },
                         ),
                     )
             }

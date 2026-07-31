@@ -290,12 +290,15 @@ String _intent(FrontendIntentView intent) => switch (intent) {
             '"request_id":"${value.requestId}"}}',
       FrontendIntentViewSourceOffer(:final SourceOfferView value) =>
         '{"kind":"source_offer","value":'
-            '{"display_name":${jsonEncode(value.displayName)},'
+            '{"items":[${value.items.map(_offeredItem).join(',')}],'
             '"key":{"card":"${value.key.card}",'
             '"generation":${value.key.generation},'
-            '"request":"${value.key.request}"},'
-            '"reported_size":${value.reportedSize}}}',
+            '"request":"${value.key.request}"}}}',
     };
+
+String _offeredItem(OfferedItemView item) =>
+    '{"display_name":${jsonEncode(item.displayName)},'
+    '"reported_size":${item.reportedSize}}';
 
 String _createIntent(CreateIntentView intent) => switch (intent) {
       CreateIntentViewMintRoom(:final MintRoomView value) =>

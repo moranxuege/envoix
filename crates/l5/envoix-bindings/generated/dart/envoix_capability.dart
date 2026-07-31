@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String capabilitySchemaId = 'envoix/binding/capability/2';
+const String capabilitySchemaId = 'envoix/binding/capability/3';
 const int capabilityMaxFrameBytes = 65536;
 const int _u63Max = 9223372036854775807;
 
@@ -113,14 +113,22 @@ final class SourceAcquisitionKeyView {
   final String request;
 }
 
-final class PickedSourceView {
-  const PickedSourceView({
+final class PickedItemView {
+  const PickedItemView({
     required this.displayName,
     required this.reportedSize,
   });
 
   final String displayName;
   final int? reportedSize;
+}
+
+final class PickedSourceView {
+  const PickedSourceView({
+    required this.items,
+  });
+
+  final List<PickedItemView> items;
 }
 
 enum PickSourceFailureView {
@@ -331,6 +339,23 @@ String _utf8Bounded(Object? value, int maxBytes, String context) {
   return value;
 }
 
+List<T> _list<T>(
+  Object? value,
+  int maxLen,
+  String context,
+  T Function(Object?, String) decodeElement,
+) {
+  if (value is! List<Object?>) {
+    throw CapabilityContractException(CapabilityErrorKind.shape, context);
+  }
+  if (value.length > maxLen) {
+    throw CapabilityContractException(CapabilityErrorKind.bound, context);
+  }
+  return List<T>.unmodifiable(
+    value.map((item) => decodeElement(item, context)),
+  );
+}
+
 Object? _payload(Map<String, Object?> map, String context) {
   final value = map['value'];
   if (value == null) {
@@ -353,6 +378,18 @@ String _encodeHexFixed(String value, int chars, String context) =>
 
 String _encodeUtf8Bounded(String value, int maxBytes, String context) =>
     _utf8Bounded(value, maxBytes, context);
+
+List<Object?> _encodeList<T>(
+  List<T> value,
+  int maxLen,
+  String context,
+  Object? Function(T) encodeElement,
+) {
+  if (value.length > maxLen) {
+    throw CapabilityContractException(CapabilityErrorKind.bound, context);
+  }
+  return value.map(encodeElement).toList();
+}
 
 ScannedTextView _decodeScannedTextView(Object? value, String context) {
   final map = _object(value, context);
@@ -471,22 +508,36 @@ Map<String, Object?> _encodeSourceAcquisitionKeyView(SourceAcquisitionKeyView va
   };
 }
 
-PickedSourceView _decodePickedSourceView(Object? value, String context) {
+PickedItemView _decodePickedItemView(Object? value, String context) {
   final map = _object(value, context);
   _knownKeys(map, const {'display_name', 'reported_size'}, context);
-  return PickedSourceView(
-    displayName: _utf8Bounded(_field(map, 'display_name', 'PickedSourceView.display_name'), 1020, 'PickedSourceView.display_name'),
-    reportedSize: switch (_field(map, 'reported_size', 'PickedSourceView.reported_size')) {
+  return PickedItemView(
+    displayName: _utf8Bounded(_field(map, 'display_name', 'PickedItemView.display_name'), 1020, 'PickedItemView.display_name'),
+    reportedSize: switch (_field(map, 'reported_size', 'PickedItemView.reported_size')) {
       null => null,
-      final present => _integer(present, _u63Max, 'PickedSourceView.reported_size'),
+      final present => _integer(present, _u63Max, 'PickedItemView.reported_size'),
     },
+  );
+}
+
+Map<String, Object?> _encodePickedItemView(PickedItemView value) {
+  return <String, Object?>{
+    'display_name': _encodeUtf8Bounded(value.displayName, 1020, 'PickedItemView.display_name'),
+    'reported_size': value.reportedSize == null ? null : _encodeInteger(value.reportedSize!, _u63Max, 'PickedItemView.reported_size'),
+  };
+}
+
+PickedSourceView _decodePickedSourceView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'items'}, context);
+  return PickedSourceView(
+    items: _list(_field(map, 'items', 'PickedSourceView.items'), 1024, 'PickedSourceView.items', _decodePickedItemView),
   );
 }
 
 Map<String, Object?> _encodePickedSourceView(PickedSourceView value) {
   return <String, Object?>{
-    'display_name': _encodeUtf8Bounded(value.displayName, 1020, 'PickedSourceView.display_name'),
-    'reported_size': value.reportedSize == null ? null : _encodeInteger(value.reportedSize!, _u63Max, 'PickedSourceView.reported_size'),
+    'items': _encodeList(value.items, 1024, 'PickedSourceView.items', _encodePickedItemView),
   };
 }
 

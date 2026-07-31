@@ -310,25 +310,21 @@ List<int> submitFrame({
       ),
     );
 
-/// A document offered to the acquisition a card published.
+/// A SELECTION offered to the acquisition a card published.
 ///
 /// The key is the ONE identity: no command id, because the acquisition already
 /// is one and a second whose disagreement needed its own policy would be a
-/// second authority. The name is the provider's, unnormalized — the authority
+/// second authority. The names are the providers', unnormalized — the authority
 /// owns normalization and the `name_too_long` refusal, so truncating here would
-/// make this platform's encoder into product policy.
+/// make this platform's encoder into product policy. The ORDER is the person's
+/// and is carried as given, because it decides what an archive would contain.
 List<int> sourceOfferFrame({
   required cmd.SourceAcquisitionKeyView key,
-  required String displayName,
-  required int? reportedSize,
+  required List<cmd.OfferedItemView> items,
 }) =>
     _intentFrame(
       FrontendIntentViewSourceOffer(
-        SourceOfferView(
-          key: key,
-          displayName: displayName,
-          reportedSize: reportedSize,
-        ),
+        SourceOfferView(key: key, items: items),
       ),
     );
 

@@ -11,6 +11,7 @@ import 'attachment.dart';
 import 'bindings/envoix_command.dart' hide SourceAcquisitionKeyView;
 import 'bindings/envoix_command.dart' as cmd;
 import 'bindings/envoix_read.dart';
+import 'bindings/envoix_capability.dart' show PickedItemView;
 import 'bindings/envoix_capability.dart' as cap;
 import 'capability.dart';
 import 'commands.dart';
@@ -224,7 +225,7 @@ class Creator {
 /// generated encoder, and records what came back. It decides nothing: every
 /// verdict, every completion and every refusal is the authority's, and an
 /// answer that does not arrive stays an answer that did not arrive.
-/// Read/9's acquisition key, as capability/2 spells it. See [Commander.offerSource].
+/// Read/9's acquisition key, as capability/3 spells it. See [Commander.offerSource].
 cap.SourceAcquisitionKeyView capabilityKey(SourceAcquisitionKeyView key) =>
     cap.SourceAcquisitionKeyView(
       card: key.card,
@@ -265,7 +266,7 @@ class Commander {
     SourceAcquisitionKeyView acquisition,
   ) async {
     // One identity, three Dart types. The generator has no cross-schema
-    // reference, so read/9, capability/2 and command/6 each declare the
+    // reference, so read/9, capability/3 and command/7 each declare the
     // acquisition key (EH-20) — and a value published by one contract cannot be
     // passed to another without being rebuilt field by field. What makes that
     // safe rather than a place to drift is
@@ -287,8 +288,13 @@ class Commander {
           generation: acquisition.generation,
           request: acquisition.request,
         ),
-        displayName: picked.displayName,
-        reportedSize: picked.reportedSize,
+        items: <cmd.OfferedItemView>[
+          for (final PickedItemView item in picked.items)
+            cmd.OfferedItemView(
+              displayName: item.displayName,
+              reportedSize: item.reportedSize,
+            ),
+        ],
       );
     } on CommandContractException catch (error) {
       // The encoder enforces every bound its decoder checks, so an offer that

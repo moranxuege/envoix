@@ -15,7 +15,7 @@
 # bytes/blob type and no handle/path/URI type, so a command can never carry
 # file bytes or an OS handle.
 
-id = "envoix/binding/command/6"
+id = "envoix/binding/command/7"
 root = "CommandFrame"
 # Frontends originate frames on this contract, so every native artifact carries
 # an encoder that enforces the same bounds its decoder checks. Which frames is
@@ -162,9 +162,8 @@ fields = [
 # metadata is a conflict that was never committed.
 [[decl]]
 kind = "struct"
-name = "SourceOfferView"
+name = "OfferedItemView"
 fields = [
-  { name = "key", type = "SourceAcquisitionKeyView" },
   # Wider than OfferedName::MAX_BYTES so ordinary provider names whose UTF-8
   # representation exceeds a filesystem leaf reach the authority and receive its
   # typed refusal instead of dying as a local codec exception. Android providers
@@ -174,6 +173,22 @@ fields = [
   # What the provider CLAIMED. Never the transfer's total: staging counts the
   # bytes, and a provider is untrusted about length.
   { name = "reported_size", type = "option(u63)" },
+]
+
+# The documents a frontend offers for one acquisition, in the order chosen.
+#
+# A LIST because what a card sends may be derived from what was picked, and a
+# derivation has members. One document is the one-element case.
+#
+# Idempotency is still classified over the WHOLE offer, which now includes the
+# order: the same key with the same documents in a different order is a
+# different offer, because it would produce a different archive.
+[[decl]]
+kind = "struct"
+name = "SourceOfferView"
+fields = [
+  { name = "key", type = "SourceAcquisitionKeyView" },
+  { name = "items", type = "list(OfferedItemView, 1024)" },
 ]
 
 [[decl]]
@@ -209,13 +224,21 @@ variants = [
 #
 # Separate from the answers above because the card was never consulted: nothing
 # about the acquisition is now known that was not known before, and re-offering
-# the SAME document is the recovery for every one of them.
+# the SAME document is the recovery for most of them.
+#
+# `output_required` is the exception, and it is not a limitation dressed as a
+# refusal. A card sends ONE thing. When an offer names several documents, what
+# to produce from them — an archive, under a name — is a decision the offer has
+# to carry, and this contract does not carry it yet. Re-offering the same
+# documents will not help; stating an output will, and that is the field this
+# grows when a person can ask for one.
 [[decl]]
 kind = "enum"
 name = "SourceOfferRefusalView"
 variants = [
   "stale_epoch",
   "name_too_long",
+  "output_required",
   "runtime_stopped",
   "interrupted",
   "storage_fault",

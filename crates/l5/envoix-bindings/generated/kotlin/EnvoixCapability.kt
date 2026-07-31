@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val CAPABILITY_SCHEMA_ID: String = "envoix/binding/capability/2"
+const val CAPABILITY_SCHEMA_ID: String = "envoix/binding/capability/3"
 const val CAPABILITY_MAX_FRAME_BYTES: Int = 65536
 
 enum class CapabilityErrorKind {
@@ -76,9 +76,13 @@ data class SourceAcquisitionKeyView(
     val request: String,
 )
 
-data class PickedSourceView(
+data class PickedItemView(
     val displayName: String,
     val reportedSize: Long?,
+)
+
+data class PickedSourceView(
+    val items: List<PickedItemView>,
 )
 
 enum class PickSourceFailureView {
@@ -238,6 +242,23 @@ object EnvoixCapabilityCodec {
         return value
     }
 
+    private fun <T> decodeList(
+        value: Any?,
+        maxLen: Int,
+        context: String,
+        decodeElement: (Any?, String) -> T,
+    ): List<T> {
+        val items = value as? JSONArray
+            ?: throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+        if (items.length() > maxLen) {
+            throw CapabilityContractException(CapabilityErrorKind.BOUND, context)
+        }
+        return (0 until items.length()).map { index ->
+            val item = items.get(index)
+            decodeElement(if (item == JSONObject.NULL) null else item, context)
+        }
+    }
+
     private fun payload(map: JSONObject, context: String): Any {
         val value = field(map, "value", context)
             ?: throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
@@ -258,6 +279,22 @@ object EnvoixCapabilityCodec {
 
     private fun encodeUtf8Bounded(value: String, maxBytes: Int, context: String): String =
         utf8Bounded(value, maxBytes, context)
+
+    private fun <T> encodeList(
+        value: List<T>,
+        maxLen: Int,
+        context: String,
+        encodeElement: (T) -> Any,
+    ): JSONArray {
+        if (value.size > maxLen) {
+            throw CapabilityContractException(CapabilityErrorKind.BOUND, context)
+        }
+        val items = JSONArray()
+        for (item in value) {
+            items.put(encodeElement(item))
+        }
+        return items
+    }
 
     private fun decodeScannedTextView(value: Any?, context: String): ScannedTextView {
         val map = obj(value, context)
@@ -361,19 +398,33 @@ object EnvoixCapabilityCodec {
         return map
     }
 
-    private fun decodePickedSourceView(value: Any?, context: String): PickedSourceView {
+    private fun decodePickedItemView(value: Any?, context: String): PickedItemView {
         val map = obj(value, context)
         knownKeys(map, setOf("display_name", "reported_size"), context)
+        return PickedItemView(
+            displayName = utf8Bounded(field(map, "display_name", "PickedItemView.display_name"), 1020, "PickedItemView.display_name"),
+            reportedSize = field(map, "reported_size", "PickedItemView.reported_size")?.let { integer(it, Long.MAX_VALUE, "PickedItemView.reported_size") },
+        )
+    }
+
+    private fun encodePickedItemView(value: PickedItemView): JSONObject {
+        val map = JSONObject()
+        map.put("display_name", encodeUtf8Bounded(value.displayName, 1020, "PickedItemView.display_name"))
+        map.put("reported_size", value.reportedSize?.let { encodeInteger(it, Long.MAX_VALUE, "PickedItemView.reported_size") } ?: JSONObject.NULL)
+        return map
+    }
+
+    private fun decodePickedSourceView(value: Any?, context: String): PickedSourceView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("items"), context)
         return PickedSourceView(
-            displayName = utf8Bounded(field(map, "display_name", "PickedSourceView.display_name"), 1020, "PickedSourceView.display_name"),
-            reportedSize = field(map, "reported_size", "PickedSourceView.reported_size")?.let { integer(it, Long.MAX_VALUE, "PickedSourceView.reported_size") },
+            items = decodeList(field(map, "items", "PickedSourceView.items"), 1024, "PickedSourceView.items", ::decodePickedItemView),
         )
     }
 
     private fun encodePickedSourceView(value: PickedSourceView): JSONObject {
         val map = JSONObject()
-        map.put("display_name", encodeUtf8Bounded(value.displayName, 1020, "PickedSourceView.display_name"))
-        map.put("reported_size", value.reportedSize?.let { encodeInteger(it, Long.MAX_VALUE, "PickedSourceView.reported_size") } ?: JSONObject.NULL)
+        map.put("items", encodeList(value.items, 1024, "PickedSourceView.items", ::encodePickedItemView))
         return map
     }
 

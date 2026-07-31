@@ -125,7 +125,7 @@ fn generated_command_schema_exhaustiveness() {
         assert!(SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY);
         assert!(RETRY_HORIZON_COMPLETIONS as usize == CommandLedger::RETENTION);
     }
-    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/6");
+    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/7");
 
     // The invite field carries text the grammar has not seen yet, so its bound
     // is the one place `MAX_INVITE_INPUT_LENGTH` — the parser's permissive
@@ -320,18 +320,19 @@ fn generated_command_schema_exhaustiveness() {
 #[test]
 fn the_picked_name_bound_reaches_the_authority_for_every_android_leaf() {
     let doc = doc();
-    // The bound moved with the field: a document's name now crosses on the
-    // SOURCE OFFER rather than at create, because a card exists before a
-    // document is chosen. The invariant is unchanged — the authority, not the
-    // frontend's encoder, must be the thing that says a name is too long.
-    let Some(Decl::Struct(decl)) = doc.find("SourceOfferView") else {
-        panic!("SourceOfferView expected");
+    // The bound moved with the field twice: to the SOURCE OFFER, because a card
+    // exists before a document is chosen, and then to the offer's ITEM, because
+    // an offer names a selection. The invariant is unchanged — the authority,
+    // not the frontend's encoder, must be the thing that says a name is too
+    // long, and it must be true of every item rather than of a first one.
+    let Some(Decl::Struct(decl)) = doc.find("OfferedItemView") else {
+        panic!("OfferedItemView expected");
     };
     let field = decl
         .fields
         .iter()
         .find(|field| field.name == "display_name")
-        .expect("SourceOfferView declares a display_name");
+        .expect("OfferedItemView declares a display_name");
     assert!(
         matches!(field.ty, FieldTy::Str { max_bytes }
             if max_bytes as usize == OfferedName::MAX_BYTES * 4),
@@ -365,7 +366,7 @@ fn command_frames_reject_hostile_input() {
     );
 
     let future_version = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/command/7");
+        value["schema"] = serde_json::json!("envoix/binding/command/8");
     });
     assert_eq!(
         decode_command_frame(&future_version),

@@ -17,7 +17,7 @@ import Foundation
 
 public enum EnvoixCapability {
 
-public static let capabilitySchemaId = "envoix/binding/capability/2"
+public static let capabilitySchemaId = "envoix/binding/capability/3"
 public static let capabilityMaxFrameBytes = 65536
 private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -101,13 +101,21 @@ public struct SourceAcquisitionKeyView: Equatable {
     }
 }
 
-public struct PickedSourceView: Equatable {
+public struct PickedItemView: Equatable {
     public let displayName: String
     public let reportedSize: Int64?
 
     public init(displayName: String, reportedSize: Int64?) {
         self.displayName = displayName
         self.reportedSize = reportedSize
+    }
+}
+
+public struct PickedSourceView: Equatable {
+    public let items: [PickedItemView]
+
+    public init(items: [PickedItemView]) {
+        self.items = items
     }
 }
 
@@ -266,6 +274,21 @@ public enum EnvoixCapabilityCodec {
         return text
     }
 
+    private static func decodeList<T>(
+        _ value: Any?,
+        _ maxLen: Int,
+        _ context: String,
+        _ decodeElement: (Any?, String) throws -> T
+    ) throws -> [T] {
+        guard let items = value as? [Any] else {
+            throw CapabilityContractError(kind: .shape, context: context)
+        }
+        if items.count > maxLen {
+            throw CapabilityContractError(kind: .bound, context: context)
+        }
+        return try items.map { try decodeElement($0 is NSNull ? nil : $0, context) }
+    }
+
     private static func payload(_ map: [String: Any], _ context: String) throws -> Any {
         guard let value = map["value"], !(value is NSNull) else {
             throw CapabilityContractError(kind: .shape, context: context)
@@ -289,6 +312,18 @@ public enum EnvoixCapabilityCodec {
 
     private static func encodeUtf8Bounded(_ value: String, _ maxBytes: Int, _ context: String) throws -> String {
         return try utf8Bounded(value, maxBytes, context)
+    }
+
+    private static func encodeList<T>(
+        _ value: [T],
+        _ maxLen: Int,
+        _ context: String,
+        _ encodeElement: (T) throws -> Any
+    ) throws -> [Any] {
+        if value.count > maxLen {
+            throw CapabilityContractError(kind: .bound, context: context)
+        }
+        return try value.map(encodeElement)
     }
 
     private static func decodeScannedTextView(_ value: Any?, _ context: String) throws -> ScannedTextView {
@@ -403,30 +438,45 @@ public enum EnvoixCapabilityCodec {
         return map
     }
 
-    private static func decodePickedSourceView(_ value: Any?, _ context: String) throws -> PickedSourceView {
+    private static func decodePickedItemView(_ value: Any?, _ context: String) throws -> PickedItemView {
         let map = try object(value, context)
         try knownKeys(map, ["display_name", "reported_size"], context)
-        let displayName = try utf8Bounded(try field(map, "display_name", "PickedSourceView.display_name"), 1020, "PickedSourceView.display_name")
+        let displayName = try utf8Bounded(try field(map, "display_name", "PickedItemView.display_name"), 1020, "PickedItemView.display_name")
         let reportedSize: Int64?
-        if let present = try field(map, "reported_size", "PickedSourceView.reported_size") {
-            reportedSize = try integer(present, u63Max, "PickedSourceView.reported_size")
+        if let present = try field(map, "reported_size", "PickedItemView.reported_size") {
+            reportedSize = try integer(present, u63Max, "PickedItemView.reported_size")
         } else {
             reportedSize = nil
         }
-        return PickedSourceView(
+        return PickedItemView(
             displayName: displayName,
             reportedSize: reportedSize
         )
     }
 
-    private static func encodePickedSourceView(_ value: PickedSourceView) throws -> [String: Any] {
+    private static func encodePickedItemView(_ value: PickedItemView) throws -> [String: Any] {
         var map: [String: Any] = [:]
-        map["display_name"] = try encodeUtf8Bounded(value.displayName, 1020, "PickedSourceView.display_name")
+        map["display_name"] = try encodeUtf8Bounded(value.displayName, 1020, "PickedItemView.display_name")
         if let present = value.reportedSize {
-            map["reported_size"] = try encodeInteger(present, u63Max, "PickedSourceView.reported_size")
+            map["reported_size"] = try encodeInteger(present, u63Max, "PickedItemView.reported_size")
         } else {
             map["reported_size"] = NSNull()
         }
+        return map
+    }
+
+    private static func decodePickedSourceView(_ value: Any?, _ context: String) throws -> PickedSourceView {
+        let map = try object(value, context)
+        try knownKeys(map, ["items"], context)
+        let items = try decodeList(try field(map, "items", "PickedSourceView.items"), 1024, "PickedSourceView.items", decodePickedItemView)
+        return PickedSourceView(
+            items: items
+        )
+    }
+
+    private static func encodePickedSourceView(_ value: PickedSourceView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["items"] = try encodeList(value.items, 1024, "PickedSourceView.items", encodePickedItemView)
         return map
     }
 

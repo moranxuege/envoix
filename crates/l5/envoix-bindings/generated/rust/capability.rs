@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const CAPABILITY_SCHEMA_ID: &str = "envoix/binding/capability/2";
+pub const CAPABILITY_SCHEMA_ID: &str = "envoix/binding/capability/3";
 pub const CAPABILITY_MAX_FRAME_BYTES: usize = 65536;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -69,9 +69,14 @@ pub struct SourceAcquisitionKeyView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PickedSourceView {
+pub struct PickedItemView {
     pub display_name: String,
     pub reported_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PickedSourceView {
+    pub items: Vec<PickedItemView>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -417,30 +422,64 @@ fn encode_source_acquisition_key_view_value(value: &SourceAcquisitionKeyView) ->
     Ok(Value::Object(map))
 }
 
-fn decode_picked_source_view_value(value: &Value, context: &'static str) -> Result<PickedSourceView, CapabilityError> {
+fn decode_picked_item_view_value(value: &Value, context: &'static str) -> Result<PickedItemView, CapabilityError> {
     let map = frame_object(value, context)?;
     known_keys(map, &["display_name", "reported_size"], context)?;
-    let display_name = utf8_bounded(field(map, "display_name", "PickedSourceView.display_name")?, 1020, "PickedSourceView.display_name")?;
-    let reported_size = match field(map, "reported_size", "PickedSourceView.reported_size")? {
+    let display_name = utf8_bounded(field(map, "display_name", "PickedItemView.display_name")?, 1020, "PickedItemView.display_name")?;
+    let reported_size = match field(map, "reported_size", "PickedItemView.reported_size")? {
         Value::Null => None,
-        present => Some(integer(present, U63_MAX, "PickedSourceView.reported_size")?),
+        present => Some(integer(present, U63_MAX, "PickedItemView.reported_size")?),
     };
-    Ok(PickedSourceView {
+    Ok(PickedItemView {
         display_name,
         reported_size,
     })
 }
 
-fn encode_picked_source_view_value(value: &PickedSourceView) -> Result<Value, CapabilityError> {
+fn encode_picked_item_view_value(value: &PickedItemView) -> Result<Value, CapabilityError> {
     let mut map = Map::new();
-    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 1020, "PickedSourceView.display_name")?);
+    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 1020, "PickedItemView.display_name")?);
     map.insert(
         "reported_size".to_owned(),
         match &value.reported_size {
             None => Value::Null,
-            Some(inner) => encode_u63(*inner, "PickedSourceView.reported_size")?,
+            Some(inner) => encode_u63(*inner, "PickedItemView.reported_size")?,
         },
     );
+    Ok(Value::Object(map))
+}
+
+fn decode_picked_source_view_value(value: &Value, context: &'static str) -> Result<PickedSourceView, CapabilityError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["items"], context)?;
+    let items = {
+        let items = field(map, "items", "PickedSourceView.items")?.as_array().ok_or(CapabilityError::Shape { context: "PickedSourceView.items" })?;
+        if items.len() > 1024 {
+            return Err(CapabilityError::Bound { context: "PickedSourceView.items" });
+        }
+        let mut collected = Vec::with_capacity(items.len());
+        for item in items {
+            collected.push(decode_picked_item_view_value(item, "PickedSourceView.items")?);
+        }
+        collected
+    };
+    Ok(PickedSourceView {
+        items,
+    })
+}
+
+fn encode_picked_source_view_value(value: &PickedSourceView) -> Result<Value, CapabilityError> {
+    let mut map = Map::new();
+    map.insert("items".to_owned(), {
+        if value.items.len() > 1024 {
+            return Err(CapabilityError::Bound { context: "PickedSourceView.items" });
+        }
+        let mut items = Vec::with_capacity(value.items.len());
+        for item in &value.items {
+            items.push(encode_picked_item_view_value(item)?);
+        }
+        Value::Array(items)
+    });
     Ok(Value::Object(map))
 }
 

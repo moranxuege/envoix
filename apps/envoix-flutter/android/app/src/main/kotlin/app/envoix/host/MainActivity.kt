@@ -131,7 +131,7 @@ class MainActivity : FlutterActivity() {
             lane?.sourcePickFailed(PickSourceFailureView.METADATA_UNAVAILABLE)
             return
         }
-        lane?.sourcePicked(granted)
+        lane?.sourcePicked(listOf(granted))
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {

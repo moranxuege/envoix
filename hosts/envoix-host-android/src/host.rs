@@ -675,22 +675,36 @@ impl Host {
     /// that cannot be a name — a frontend that truncated first would make a
     /// platform's encoder into product policy.
     fn submit_source_offer(&self, spec: &SourceOfferSpec) -> Vec<u8> {
-        let Ok(display_name) = OfferedName::from_untrusted(&spec.display_name) else {
-            return encode_command_frame(&source_offer_result_frame(
+        let refuse = |reason| {
+            encode_command_frame(&source_offer_result_frame(
                 offer_key_view(spec),
-                SourceOfferOutcomeView::Refused(SourceOfferRefusalView::NameTooLong),
+                SourceOfferOutcomeView::Refused(reason),
             ))
-            .unwrap_or_default();
+            .unwrap_or_default()
         };
-        let offer = AcceptedSourceOffer::of_one_document(
-            SourceAcquisitionKey::of(DutyProvenance {
-                card: spec.card,
-                generation: AttemptGen::new(spec.generation),
-                request: RequestId::from_bytes(spec.request.to_bytes()),
-            }),
-            display_name,
-            spec.reported_size.map(ByteCount::new),
-        );
+        let mut names = Vec::with_capacity(spec.items.len());
+        for item in &spec.items {
+            let Ok(name) = OfferedName::from_untrusted(&item.display_name) else {
+                return refuse(SourceOfferRefusalView::NameTooLong);
+            };
+            names.push((name, item.reported_size.map(ByteCount::new)));
+        }
+        let key = SourceAcquisitionKey::of(DutyProvenance {
+            card: spec.card,
+            generation: AttemptGen::new(spec.generation),
+            request: RequestId::from_bytes(spec.request.to_bytes()),
+        });
+        // A card sends ONE thing. One document IS that thing; several are not,
+        // until the offer says what to produce from them and under what name.
+        // That is the output intent, and this contract does not carry it yet —
+        // so an offer of several documents is refused for the reason that will
+        // still be true when it does: it named no output.
+        let offer = match names.as_slice() {
+            [(name, reported_size)] => {
+                AcceptedSourceOffer::of_one_document(key, name.clone(), *reported_size)
+            }
+            [] | [_, ..] => return refuse(SourceOfferRefusalView::OutputRequired),
+        };
         let shared = Arc::clone(&self.shared);
         let runtime = Arc::clone(&self.runtime);
         let outcome = self.tokio.block_on(async move {

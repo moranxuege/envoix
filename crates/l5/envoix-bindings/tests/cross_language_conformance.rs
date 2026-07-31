@@ -110,7 +110,7 @@ fields = [
 /// statement of intent have to agree.
 fn originable_decls(id: &str) -> &'static [&'static str] {
     match id {
-        "envoix/binding/command/6" => &[
+        "envoix/binding/command/7" => &[
             "CommandView",
             "SubmitView",
             "CreateIntentView",
@@ -119,6 +119,7 @@ fn originable_decls(id: &str) -> &'static [&'static str] {
             "JoinInviteView",
             "LocalDirectionView",
             "MintRoomView",
+            "OfferedItemView",
             "SourceAcquisitionKeyView",
             "SourceOfferView",
         ],
@@ -912,7 +913,7 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
                     abi_schema: AbiSchemaManifestView {
                         read_binding_schema_id: "envoix/binding/read/2".to_owned(),
                         command_binding_schema_id: "envoix/binding/command/2".to_owned(),
-                        capability_binding_schema_id: "envoix/binding/capability/2".to_owned(),
+                        capability_binding_schema_id: "envoix/binding/capability/3".to_owned(),
                         evidence_rust_abi_id: "envoix/evidence/abi/1".to_owned(),
                         evidence_timeline_schema_id: "envoix/evidence/timeline/1".to_owned(),
                         mailbox_receipt_schema_id: "envoix/mailbox/receipt/1".to_owned(),

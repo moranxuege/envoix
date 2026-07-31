@@ -26,17 +26,22 @@ final class CapabilityProvided extends CapabilityAnswer {
   final String text;
 }
 
-/// The picker produced a document, described. No handle, no path, no URI: those
-/// stay in the adapter, registered under the acquisition this answer names.
+/// The picker produced a SELECTION, described. No handle, no path, no URI:
+/// those stay in the adapter, registered under the acquisition this answer names
+/// and each item's position in this list.
+///
+/// A list rather than one document, because what a card sends may be produced
+/// from what was picked rather than be one of them. One document is the
+/// one-element case, and the order is the person's — it decides how an archive
+/// is written.
+///
+/// Each item's `reportedSize` is null when the provider did not say. NOT zero —
+/// an empty file reports zero, and a frontend that could not tell them apart
+/// would offer a size it had invented.
 final class SourcePicked extends CapabilityAnswer {
-  const SourcePicked({required this.displayName, required this.reportedSize});
+  const SourcePicked({required this.items});
 
-  final String displayName;
-
-  /// Null when the provider did not say. NOT zero — an empty file reports
-  /// zero, and a frontend that could not tell them apart would offer a size it
-  /// had invented.
-  final int? reportedSize;
+  final List<PickedItemView> items;
 }
 
 /// The picker itself could not run. Distinct from `declined`, which is a person

@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String commandSchemaId = 'envoix/binding/command/6';
+const String commandSchemaId = 'envoix/binding/command/7';
 const int commandMaxFrameBytes = 1048576;
 // Contract rules frozen by schema/command.schema.
 const bool newestAttachmentCommands = true;
@@ -190,16 +190,24 @@ final class SourceAcquisitionKeyView {
   final String request;
 }
 
-final class SourceOfferView {
-  const SourceOfferView({
-    required this.key,
+final class OfferedItemView {
+  const OfferedItemView({
     required this.displayName,
     required this.reportedSize,
   });
 
-  final SourceAcquisitionKeyView key;
   final String displayName;
   final int? reportedSize;
+}
+
+final class SourceOfferView {
+  const SourceOfferView({
+    required this.key,
+    required this.items,
+  });
+
+  final SourceAcquisitionKeyView key;
+  final List<OfferedItemView> items;
 }
 
 final class CreateView {
@@ -224,6 +232,7 @@ enum SourceOfferAnswerView {
 enum SourceOfferRefusalView {
   staleEpoch,
   nameTooLong,
+  outputRequired,
   runtimeStopped,
   interrupted,
   storageFault,
@@ -570,6 +579,23 @@ String _utf8Bounded(Object? value, int maxBytes, String context) {
   return value;
 }
 
+List<T> _list<T>(
+  Object? value,
+  int maxLen,
+  String context,
+  T Function(Object?, String) decodeElement,
+) {
+  if (value is! List<Object?>) {
+    throw CommandContractException(CommandErrorKind.shape, context);
+  }
+  if (value.length > maxLen) {
+    throw CommandContractException(CommandErrorKind.bound, context);
+  }
+  return List<T>.unmodifiable(
+    value.map((item) => decodeElement(item, context)),
+  );
+}
+
 Object? _payload(Map<String, Object?> map, String context) {
   final value = map['value'];
   if (value == null) {
@@ -592,6 +618,18 @@ String _encodeHexFixed(String value, int chars, String context) =>
 
 String _encodeUtf8Bounded(String value, int maxBytes, String context) =>
     _utf8Bounded(value, maxBytes, context);
+
+List<Object?> _encodeList<T>(
+  List<T> value,
+  int maxLen,
+  String context,
+  Object? Function(T) encodeElement,
+) {
+  if (value.length > maxLen) {
+    throw CommandContractException(CommandErrorKind.bound, context);
+  }
+  return value.map(encodeElement).toList();
+}
 
 CommandView _decodeCommandView(Object? value, String context) {
   return switch (value) {
@@ -799,24 +837,38 @@ Map<String, Object?> _encodeSourceAcquisitionKeyView(SourceAcquisitionKeyView va
   };
 }
 
+OfferedItemView _decodeOfferedItemView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'display_name', 'reported_size'}, context);
+  return OfferedItemView(
+    displayName: _utf8Bounded(_field(map, 'display_name', 'OfferedItemView.display_name'), 1020, 'OfferedItemView.display_name'),
+    reportedSize: switch (_field(map, 'reported_size', 'OfferedItemView.reported_size')) {
+      null => null,
+      final present => _integer(present, _u63Max, 'OfferedItemView.reported_size'),
+    },
+  );
+}
+
+Map<String, Object?> _encodeOfferedItemView(OfferedItemView value) {
+  return <String, Object?>{
+    'display_name': _encodeUtf8Bounded(value.displayName, 1020, 'OfferedItemView.display_name'),
+    'reported_size': value.reportedSize == null ? null : _encodeInteger(value.reportedSize!, _u63Max, 'OfferedItemView.reported_size'),
+  };
+}
+
 SourceOfferView _decodeSourceOfferView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'key', 'display_name', 'reported_size'}, context);
+  _knownKeys(map, const {'key', 'items'}, context);
   return SourceOfferView(
     key: _decodeSourceAcquisitionKeyView(_field(map, 'key', 'SourceOfferView.key'), 'SourceOfferView.key'),
-    displayName: _utf8Bounded(_field(map, 'display_name', 'SourceOfferView.display_name'), 1020, 'SourceOfferView.display_name'),
-    reportedSize: switch (_field(map, 'reported_size', 'SourceOfferView.reported_size')) {
-      null => null,
-      final present => _integer(present, _u63Max, 'SourceOfferView.reported_size'),
-    },
+    items: _list(_field(map, 'items', 'SourceOfferView.items'), 1024, 'SourceOfferView.items', _decodeOfferedItemView),
   );
 }
 
 Map<String, Object?> _encodeSourceOfferView(SourceOfferView value) {
   return <String, Object?>{
-    'display_name': _encodeUtf8Bounded(value.displayName, 1020, 'SourceOfferView.display_name'),
+    'items': _encodeList(value.items, 1024, 'SourceOfferView.items', _encodeOfferedItemView),
     'key': _encodeSourceAcquisitionKeyView(value.key),
-    'reported_size': value.reportedSize == null ? null : _encodeInteger(value.reportedSize!, _u63Max, 'SourceOfferView.reported_size'),
   };
 }
 
@@ -854,6 +906,7 @@ SourceOfferRefusalView _decodeSourceOfferRefusalView(Object? value, String conte
   return switch (value) {
     'stale_epoch' => SourceOfferRefusalView.staleEpoch,
     'name_too_long' => SourceOfferRefusalView.nameTooLong,
+    'output_required' => SourceOfferRefusalView.outputRequired,
     'runtime_stopped' => SourceOfferRefusalView.runtimeStopped,
     'interrupted' => SourceOfferRefusalView.interrupted,
     'storage_fault' => SourceOfferRefusalView.storageFault,
