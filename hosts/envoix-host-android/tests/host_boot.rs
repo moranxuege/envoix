@@ -19,7 +19,8 @@ use envoix_bindings::read::{
     decode_read_frame,
 };
 use envoix_capabilities::{
-    DutyProvenance, SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
+    AcquiredSelection, DutyProvenance, SourceAcquisitionKey, SourceReport, SourceRetention,
+    SourceSeekability,
 };
 use envoix_host_android::{CardStores, FramePoll, Host, HostStore};
 use envoix_operation_store::{ArtifactKey, OperationStore, PossessionState};
@@ -615,10 +616,10 @@ fn an_admitted_acquisition_moves_the_card_out_of_acquiring() {
     // both are what the stream-versus-copy decision reads.
     let report = WorkReport::source(
         order.provenance.to_provenance(),
-        SourceReport::Acquired {
-            retention: SourceRetention::Persisted,
-            seekability: SourceSeekability::Seekable,
-        },
+        SourceReport::Acquired(AcquiredSelection::of_one(
+            SourceRetention::Persisted,
+            SourceSeekability::Seekable,
+        )),
     );
     assert!(
         host.report_duty(&report.encode().expect("the report encodes")),
@@ -767,10 +768,10 @@ fn staging_reads_the_source_through_and_ready_says_which_bytes() {
     let order = WorkOrder::decode(&order).expect("the order decodes");
     let report = WorkReport::source(
         order.provenance.to_provenance(),
-        SourceReport::Acquired {
-            retention: SourceRetention::Persisted,
-            seekability: SourceSeekability::Seekable,
-        },
+        SourceReport::Acquired(AcquiredSelection::of_one(
+            SourceRetention::Persisted,
+            SourceSeekability::Seekable,
+        )),
     );
     assert!(host.report_duty(&report.encode().expect("the report encodes")));
 

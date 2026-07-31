@@ -11,6 +11,7 @@ import com.envoix.bindings.duty.DutyProvenanceView
 import com.envoix.bindings.duty.LockDirectiveView
 import com.envoix.bindings.duty.NoticeView
 import com.envoix.bindings.duty.OutcomeCodeView
+import com.envoix.bindings.duty.AcquiredItemView
 import com.envoix.bindings.duty.SourceAcquiredView
 import com.envoix.bindings.duty.SourceReportView
 import com.envoix.bindings.duty.SourceRetentionView
@@ -55,13 +56,20 @@ class RecordingEffects : DutyEffects {
 
     override fun bindSource(provenance: DutyProvenanceView): SourceReportView {
         seen += "source card=${provenance.card} gen=${provenance.generation}"
-        // The acquisition answer this lane could not carry before duty/2. Both
-        // facts, because both are what the authority's stream-versus-copy
-        // decision reads.
+        // The acquisition answer this lane could not carry before duty/2, now
+        // PER ITEM (duty/3). Both facts for every document, because both are
+        // what the authority's stream-versus-copy decision reads and a selection
+        // streams only if every one of its documents can.
         return SourceReportView.Acquired(
             SourceAcquiredView(
-                retention = SourceRetentionView.PERSISTED,
-                seekability = SourceSeekabilityView.SEEKABLE,
+                items =
+                    listOf(
+                        AcquiredItemView(
+                            item = 0,
+                            retention = SourceRetentionView.PERSISTED,
+                            seekability = SourceSeekabilityView.SEEKABLE,
+                        ),
+                    ),
             ),
         )
     }

@@ -3,9 +3,9 @@ use envoix_attempt_api::{
     OpenResult, ResumeIntent, RetirementAck, RetirementAckResult, RetirementIntent,
 };
 use envoix_capabilities::{
-    Admission, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult, GenerationUpdate,
-    Registration, SourceAcquisitionFailure, SourceAcquisitionKey, SourceReport, SourceRetention,
-    SourceSeekability,
+    AcquiredSelection, Admission, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult,
+    GenerationUpdate, Registration, SourceAcquisitionFailure, SourceAcquisitionKey, SourceReport,
+    SourceRetention, SourceSeekability,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_protocol::ContentHash;
@@ -1938,7 +1938,7 @@ fn every_published_command_moves_the_card_and_the_rest_are_inert() {
         crate::SourceLifecycle::Acquiring(held.clone()),
         crate::SourceLifecycle::staging(
             held.clone(),
-            SourceRetention::Persisted,
+            AcquiredSelection::of_one(SourceRetention::Persisted, SourceSeekability::Seekable),
             crate::StagingPlan::ProviderStream,
         ),
         base.source.clone(),
@@ -2453,7 +2453,10 @@ fn fixture_record() -> TransferRecord {
             OfferedName::from_untrusted("a.txt").unwrap(),
             Some(ByteCount::new(10)),
         ),
-        acquired_retention: crate::SourceRetention::Persisted,
+        acquired: AcquiredSelection::of_one(
+            crate::SourceRetention::Persisted,
+            SourceSeekability::Seekable,
+        ),
         backing: crate::SourceBacking::PersistedProvider,
         content: crate::StagedContent::new(
             crate::TransferContent::new(
@@ -2509,12 +2512,12 @@ fn product_record_roundtrips() {
 }
 
 #[test]
-fn product_record_v7_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired_retention":"persisted","backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+fn product_record_v8_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired":[{"item":0,"retention":"persisted","seekability":"seekable"}],"backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&7_u32.to_be_bytes());
+    expected.extend_from_slice(&8_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);
@@ -2826,10 +2829,10 @@ fn a_copy_plan_is_not_established_by_a_stream() {
     // so the authority commissions a copy.
     card.reduce(settled(
         &card.clone(),
-        SourceReport::Acquired {
-            retention: SourceRetention::Persisted,
-            seekability: SourceSeekability::SequentialOnly,
-        },
+        SourceReport::Acquired(AcquiredSelection::of_one(
+            SourceRetention::Persisted,
+            SourceSeekability::SequentialOnly,
+        )),
     ))
     .unwrap();
     assert!(matches!(
@@ -2866,10 +2869,10 @@ fn a_copy_plan_is_not_established_by_a_stream() {
     copied
         .reduce(settled(
             &copied.clone(),
-            SourceReport::Acquired {
-                retention: SourceRetention::Persisted,
-                seekability: SourceSeekability::SequentialOnly,
-            },
+            SourceReport::Acquired(AcquiredSelection::of_one(
+                SourceRetention::Persisted,
+                SourceSeekability::SequentialOnly,
+            )),
         ))
         .unwrap();
     let stamp = copied.stamp();
@@ -2896,7 +2899,7 @@ fn a_copy_plan_is_not_established_by_a_stream() {
 /// `Persisted` grant does not. Failing the card here would send the user back to
 /// the picker to choose the file Android is still holding on their behalf — and
 /// the record already says the grant survives, which is the whole reason
-/// `acquired_retention` is frozen onto it.
+/// the platform's per-item answers are frozen onto it.
 ///
 /// The re-issued duty must name the SAME acquisition, because the platform
 /// resolves its ownership journal by that key: a fresh one would find nothing
@@ -2912,10 +2915,8 @@ fn a_persisted_staging_reacquires_across_a_restart() {
     });
     assert!(matches!(
         card.source,
-        crate::SourceLifecycle::Staging {
-            acquired_retention: SourceRetention::Persisted,
-            ..
-        }
+        crate::SourceLifecycle::Staging { ref acquired, .. }
+            if acquired.retention() == SourceRetention::Persisted
     ));
     // Bytes were counted before the crash, and none of them were established.
     card.reduce(ProductInput::StageProgress {
@@ -2963,10 +2964,10 @@ fn a_persisted_staging_reacquires_across_a_restart() {
         matches!(
             card.source,
             crate::SourceLifecycle::Staging {
-                acquired_retention: SourceRetention::Persisted,
+                ref acquired,
                 plan: StagingPlan::ProviderStream,
                 ..
-            }
+            } if acquired.retention() == SourceRetention::Persisted
         ),
         "the platform's answer did not restart staging: {:?}",
         card.source
@@ -2985,18 +2986,16 @@ fn a_process_only_staging_asks_for_a_document_again_across_a_restart() {
     .unwrap();
     card.reduce(settled(
         &card.clone(),
-        SourceReport::Acquired {
-            retention: SourceRetention::Process,
-            seekability: SourceSeekability::Seekable,
-        },
+        SourceReport::Acquired(AcquiredSelection::of_one(
+            SourceRetention::Process,
+            SourceSeekability::Seekable,
+        )),
     ))
     .unwrap();
     assert!(matches!(
         card.source,
-        crate::SourceLifecycle::Staging {
-            acquired_retention: SourceRetention::Process,
-            ..
-        }
+        crate::SourceLifecycle::Staging { ref acquired, .. }
+        if acquired.retention() == SourceRetention::Process
     ));
 
     assert!(card.reduce(ProductInput::Restore).unwrap().is_empty());
@@ -3087,7 +3086,7 @@ fn fixture_body_with(from: &str, to: &str) -> String {
 /// holding a send source, an acquisition belonging to another card, and a
 /// process-only grant claiming a provider it could reopen.
 #[test]
-fn hostile_v6_bytes_are_refused_one_invariant_at_a_time() {
+fn hostile_v8_bytes_are_refused_one_invariant_at_a_time() {
     // Sanity: the unmodified body is accepted, so each refusal below is caused
     // by its own edit rather than by the harness.
     assert!(matches!(
@@ -3141,8 +3140,13 @@ fn hostile_v6_bytes_are_refused_one_invariant_at_a_time() {
     for (what, from, to) in [
         (
             "a process grant claiming a provider it can reopen",
-            "\"acquired_retention\":\"persisted\"",
-            "\"acquired_retention\":\"process\"",
+            "\"retention\":\"persisted\"",
+            "\"retention\":\"process\"",
+        ),
+        (
+            "answers that describe a different selection than the offer beside them",
+            "\"acquired\":[{\"item\":0,\"retention\":\"persisted\",\"seekability\":\"seekable\"}]",
+            "\"acquired\":[{\"item\":0,\"retention\":\"persisted\",\"seekability\":\"seekable\"},{\"item\":1,\"retention\":\"persisted\",\"seekability\":\"seekable\"}]",
         ),
         (
             "a byte count past what this product can carry end to end",

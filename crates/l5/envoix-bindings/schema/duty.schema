@@ -44,16 +44,27 @@
 # contract. Artifact bytes and source handles cannot be spelled here at all —
 # which is why a duty report can carry an outcome and never a file.
 
-id = "envoix/binding/duty/2"
+id = "envoix/binding/duty/3"
 root = "DutyFrame"
 direction = "bidirectional"
 
 [limits]
-# `MAX_LANE_FRAME_BYTES` as it stood before this contract. It bounds the
-# ENCODED frame including escaping, so individually in-bound text can still add
-# up to a refusal — an honest `frame_too_large`, and what keeps a trusted
-# control lane from quietly becoming a bulk-data lane.
-max_frame_bytes = 4096
+# Bounds the ENCODED frame including escaping, so individually in-bound text can
+# still add up to a refusal — an honest `frame_too_large`, and what keeps a
+# trusted control lane from quietly becoming a bulk-data lane.
+#
+# DERIVED from the largest thing this lane must carry, which is one answer per
+# item of a selection. An offer may name 1024 documents (`Selection::MAX_ITEMS`,
+# and `list(OfferedItemView, 1024)` in schema/command.schema), and this contract
+# answers about every one of them, so it must hold 1024 `AcquiredItemView`s. At
+# their longest — `{"item":1023,"retention":"persisted","seekability":
+# "sequential_only"}` — that is a little over 62 bytes each, so ~64 KiB, and this
+# is that doubled for the envelope and headroom.
+#
+# It was 4096 while a duty answered about ONE document. A cap that cannot hold
+# what the contract above it may legitimately ask about is not containment, it is
+# a lane that refuses valid work.
+max_frame_bytes = 131072
 
 # L0's complete transfer outcome vocabulary, as today's `WorkReport` carries it.
 # Restated at the binding boundary on purpose: the projection's exhaustive match
@@ -209,13 +220,39 @@ kind = "enum"
 name = "SourceSeekabilityView"
 variants = ["seekable", "sequential_only"]
 
+# What the platform promises about ONE item of the selection.
+#
+# Per item, never aggregated. Recovery is decided per document: a selection whose
+# first file is a persisted seekable provider and whose second is a
+# process-lifetime stream can resume the first and not the second, and one pair
+# of words for the whole selection cannot say that. An aggregate is derivable
+# from these — "all persisted" is a fold — while the per-item answers are not
+# derivable from an aggregate, which is why the answers are what cross.
+#
+# The item is named by its ORDINAL in the accepted selection, which is the same
+# ordinal the authority minted. An adapter answering out of order, or for an item
+# that is not in the selection, is answering about a document nobody asked about.
 [[decl]]
 kind = "struct"
-name = "SourceAcquiredView"
+name = "AcquiredItemView"
 fields = [
+  { name = "item", type = "u32" },
   { name = "retention", type = "SourceRetentionView" },
   { name = "seekability", type = "SourceSeekabilityView" },
 ]
+
+# The whole selection, held.
+#
+# ALL OF IT OR NONE. There is no per-item failure arm, deliberately: a person
+# chose a set, and sending a subset of what they chose — silently — is worse than
+# not sending. So one unreadable document fails the acquisition, and the failure
+# is the report's own `failed` arm rather than a hole in this list.
+#
+# The bound matches the offer's, because this answers that offer.
+[[decl]]
+kind = "struct"
+name = "SourceAcquiredView"
+fields = [{ name = "items", type = "list(AcquiredItemView, 1024)" }]
 
 # Why an acquisition failed, in the vocabulary the PLATFORM can speak.
 #

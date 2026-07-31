@@ -21,8 +21,8 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val DUTY_SCHEMA_ID: String = "envoix/binding/duty/2"
-const val DUTY_MAX_FRAME_BYTES: Int = 4096
+const val DUTY_SCHEMA_ID: String = "envoix/binding/duty/3"
+const val DUTY_MAX_FRAME_BYTES: Int = 131072
 
 enum class DutyErrorKind {
     FRAME_TOO_LARGE,
@@ -116,9 +116,14 @@ enum class SourceSeekabilityView {
     SEQUENTIAL_ONLY,
 }
 
-data class SourceAcquiredView(
+data class AcquiredItemView(
+    val item: Long,
     val retention: SourceRetentionView,
     val seekability: SourceSeekabilityView,
+)
+
+data class SourceAcquiredView(
+    val items: List<AcquiredItemView>,
 )
 
 enum class SourceFailureView {
@@ -278,6 +283,23 @@ object EnvoixDutyCodec {
         return value
     }
 
+    private fun <T> decodeList(
+        value: Any?,
+        maxLen: Int,
+        context: String,
+        decodeElement: (Any?, String) -> T,
+    ): List<T> {
+        val items = value as? JSONArray
+            ?: throw DutyContractException(DutyErrorKind.SHAPE, context)
+        if (items.length() > maxLen) {
+            throw DutyContractException(DutyErrorKind.BOUND, context)
+        }
+        return (0 until items.length()).map { index ->
+            val item = items.get(index)
+            decodeElement(if (item == JSONObject.NULL) null else item, context)
+        }
+    }
+
     private fun payload(map: JSONObject, context: String): Any {
         val value = field(map, "value", context)
             ?: throw DutyContractException(DutyErrorKind.SHAPE, context)
@@ -295,6 +317,22 @@ object EnvoixDutyCodec {
 
     private fun encodeHexFixed(value: String, chars: Int, context: String): String =
         hexFixed(value, chars, context)
+
+    private fun <T> encodeList(
+        value: List<T>,
+        maxLen: Int,
+        context: String,
+        encodeElement: (T) -> Any,
+    ): JSONArray {
+        if (value.size > maxLen) {
+            throw DutyContractException(DutyErrorKind.BOUND, context)
+        }
+        val items = JSONArray()
+        for (item in value) {
+            items.put(encodeElement(item))
+        }
+        return items
+    }
 
     private fun decodeOutcomeCodeView(value: Any?, context: String): OutcomeCodeView = when (value) {
         "completed" -> OutcomeCodeView.COMPLETED
@@ -470,19 +508,35 @@ object EnvoixDutyCodec {
         SourceSeekabilityView.SEQUENTIAL_ONLY -> "sequential_only"
     }
 
+    private fun decodeAcquiredItemView(value: Any?, context: String): AcquiredItemView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("item", "retention", "seekability"), context)
+        return AcquiredItemView(
+            item = integer(field(map, "item", "AcquiredItemView.item"), 4294967295, "AcquiredItemView.item"),
+            retention = decodeSourceRetentionView(field(map, "retention", "AcquiredItemView.retention"), "AcquiredItemView.retention"),
+            seekability = decodeSourceSeekabilityView(field(map, "seekability", "AcquiredItemView.seekability"), "AcquiredItemView.seekability"),
+        )
+    }
+
+    private fun encodeAcquiredItemView(value: AcquiredItemView): JSONObject {
+        val map = JSONObject()
+        map.put("item", encodeInteger(value.item, 4294967295, "AcquiredItemView.item"))
+        map.put("retention", encodeSourceRetentionView(value.retention))
+        map.put("seekability", encodeSourceSeekabilityView(value.seekability))
+        return map
+    }
+
     private fun decodeSourceAcquiredView(value: Any?, context: String): SourceAcquiredView {
         val map = obj(value, context)
-        knownKeys(map, setOf("retention", "seekability"), context)
+        knownKeys(map, setOf("items"), context)
         return SourceAcquiredView(
-            retention = decodeSourceRetentionView(field(map, "retention", "SourceAcquiredView.retention"), "SourceAcquiredView.retention"),
-            seekability = decodeSourceSeekabilityView(field(map, "seekability", "SourceAcquiredView.seekability"), "SourceAcquiredView.seekability"),
+            items = decodeList(field(map, "items", "SourceAcquiredView.items"), 1024, "SourceAcquiredView.items", ::decodeAcquiredItemView),
         )
     }
 
     private fun encodeSourceAcquiredView(value: SourceAcquiredView): JSONObject {
         val map = JSONObject()
-        map.put("retention", encodeSourceRetentionView(value.retention))
-        map.put("seekability", encodeSourceSeekabilityView(value.seekability))
+        map.put("items", encodeList(value.items, 1024, "SourceAcquiredView.items", ::encodeAcquiredItemView))
         return map
     }
 

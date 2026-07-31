@@ -56,7 +56,7 @@ pub struct Duty {
 /// kind answers an outcome and nothing more. The ledger enforces the pairing
 /// ([`crate::Admission::Incompatible`]), so a matched kind and report is a fact
 /// downstream code can rely on rather than re-check.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DutyReport {
     Outcome(OutcomeCode),
@@ -80,7 +80,7 @@ impl DutyReport {
 
 /// An untrusted adapter response. It must pass through [`crate::DutyLedger`]
 /// before product state may consume it.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DutyResult {
     pub provenance: DutyProvenance,
     pub report: DutyReport,
@@ -98,15 +98,15 @@ impl AdmittedDutyResult {
         self.duty
     }
 
-    pub const fn report(&self) -> DutyReport {
-        self.report
+    pub const fn report(&self) -> &DutyReport {
+        &self.report
     }
 
     /// The outcome, for the kinds that answer one. `None` for a source duty,
     /// which never does.
     pub const fn outcome(&self) -> Option<OutcomeCode> {
-        match self.report {
-            DutyReport::Outcome(outcome) => Some(outcome),
+        match &self.report {
+            DutyReport::Outcome(outcome) => Some(*outcome),
             DutyReport::Source(_) => None,
         }
     }
@@ -117,7 +117,7 @@ impl AdmittedDutyResult {
     /// type can be trusted to mean "the ledger admitted exactly this, once, for
     /// a duty that was outstanding". A caller cannot assemble one from a
     /// provenance and a report it liked the look of.
-    pub const fn into_source(self) -> Option<AdmittedSourceResult> {
+    pub fn into_source(self) -> Option<AdmittedSourceResult> {
         match self.report {
             DutyReport::Source(report) => Some(AdmittedSourceResult {
                 duty: self.duty,
@@ -158,7 +158,7 @@ impl AdmittedSourceResult {
         SourceAcquisitionKey::of(self.duty.provenance)
     }
 
-    pub const fn report(&self) -> SourceReport {
-        self.report
+    pub const fn report(&self) -> &SourceReport {
+        &self.report
     }
 }

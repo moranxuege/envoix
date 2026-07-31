@@ -3,8 +3,8 @@
 
 use serde_json::{Map, Value};
 
-pub const DUTY_SCHEMA_ID: &str = "envoix/binding/duty/2";
-pub const DUTY_MAX_FRAME_BYTES: usize = 4096;
+pub const DUTY_SCHEMA_ID: &str = "envoix/binding/duty/3";
+pub const DUTY_MAX_FRAME_BYTES: usize = 131072;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
 
@@ -158,9 +158,15 @@ impl SourceSeekabilityView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceAcquiredView {
+pub struct AcquiredItemView {
+    pub item: u32,
     pub retention: SourceRetentionView,
     pub seekability: SourceSeekabilityView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceAcquiredView {
+    pub items: Vec<AcquiredItemView>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -668,21 +674,58 @@ fn encode_source_seekability_view_value(value: &SourceSeekabilityView) -> Value 
     })
 }
 
-fn decode_source_acquired_view_value(value: &Value, context: &'static str) -> Result<SourceAcquiredView, DutyError> {
+fn decode_acquired_item_view_value(value: &Value, context: &'static str) -> Result<AcquiredItemView, DutyError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["retention", "seekability"], context)?;
-    let retention = decode_source_retention_view_value(field(map, "retention", "SourceAcquiredView.retention")?, "SourceAcquiredView.retention")?;
-    let seekability = decode_source_seekability_view_value(field(map, "seekability", "SourceAcquiredView.seekability")?, "SourceAcquiredView.seekability")?;
-    Ok(SourceAcquiredView {
+    known_keys(map, &["item", "retention", "seekability"], context)?;
+    let item = integer_u32(field(map, "item", "AcquiredItemView.item")?, "AcquiredItemView.item")?;
+    let retention = decode_source_retention_view_value(field(map, "retention", "AcquiredItemView.retention")?, "AcquiredItemView.retention")?;
+    let seekability = decode_source_seekability_view_value(field(map, "seekability", "AcquiredItemView.seekability")?, "AcquiredItemView.seekability")?;
+    Ok(AcquiredItemView {
+        item,
         retention,
         seekability,
     })
 }
 
-fn encode_source_acquired_view_value(value: &SourceAcquiredView) -> Result<Value, DutyError> {
+fn encode_acquired_item_view_value(value: &AcquiredItemView) -> Result<Value, DutyError> {
     let mut map = Map::new();
+    map.insert("item".to_owned(), Value::from(value.item));
     map.insert("retention".to_owned(), encode_source_retention_view_value(&value.retention));
     map.insert("seekability".to_owned(), encode_source_seekability_view_value(&value.seekability));
+    Ok(Value::Object(map))
+}
+
+fn decode_source_acquired_view_value(value: &Value, context: &'static str) -> Result<SourceAcquiredView, DutyError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["items"], context)?;
+    let items = {
+        let items = field(map, "items", "SourceAcquiredView.items")?.as_array().ok_or(DutyError::Shape { context: "SourceAcquiredView.items" })?;
+        if items.len() > 1024 {
+            return Err(DutyError::Bound { context: "SourceAcquiredView.items" });
+        }
+        let mut collected = Vec::with_capacity(items.len());
+        for item in items {
+            collected.push(decode_acquired_item_view_value(item, "SourceAcquiredView.items")?);
+        }
+        collected
+    };
+    Ok(SourceAcquiredView {
+        items,
+    })
+}
+
+fn encode_source_acquired_view_value(value: &SourceAcquiredView) -> Result<Value, DutyError> {
+    let mut map = Map::new();
+    map.insert("items".to_owned(), {
+        if value.items.len() > 1024 {
+            return Err(DutyError::Bound { context: "SourceAcquiredView.items" });
+        }
+        let mut items = Vec::with_capacity(value.items.len());
+        for item in &value.items {
+            items.push(encode_acquired_item_view_value(item)?);
+        }
+        Value::Array(items)
+    });
     Ok(Value::Object(map))
 }
 

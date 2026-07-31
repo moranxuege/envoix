@@ -3,12 +3,13 @@
 //! independently decide a JSON shape.
 
 use envoix_bindings::duty::{
-    DUTY_MAX_FRAME_BYTES, DutyAnswerView, DutyBody, DutyFrame, DutyOrderView, DutyProvenanceView,
-    DutyReportView, LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView,
-    OutcomeCodeView, SourceAcquiredView, SourceFailedView, SourceFailureView, SourceReportView,
-    SourceRetentionView, SourceSeekabilityView, WorkView, decode_duty_frame, encode_duty_frame,
+    AcquiredItemView, DUTY_MAX_FRAME_BYTES, DutyAnswerView, DutyBody, DutyFrame, DutyOrderView,
+    DutyProvenanceView, DutyReportView, LockDirectiveView, LockWorkView, NoticeView,
+    NotificationWorkView, OutcomeCodeView, SourceAcquiredView, SourceFailedView, SourceFailureView,
+    SourceReportView, SourceRetentionView, SourceSeekabilityView, WorkView, decode_duty_frame,
+    encode_duty_frame,
 };
-use envoix_bindings::{Decl, FieldTy, emit};
+use envoix_bindings::{Decl, FieldTy, emit, parse_schema};
 
 fn doc() -> envoix_bindings::SchemaDoc {
     envoix_bindings::parse_schema(envoix_bindings::duty_schema_text()).expect("duty schema parses")
@@ -161,8 +162,11 @@ fn a_report_carries_an_answer_and_nothing_else() {
         ] {
             answers.push(DutyAnswerView::Source(SourceReportView::Acquired(
                 SourceAcquiredView {
-                    retention,
-                    seekability,
+                    items: vec![AcquiredItemView {
+                        item: 0,
+                        retention,
+                        seekability,
+                    }],
                 },
             )));
         }
@@ -191,29 +195,77 @@ fn a_report_carries_an_answer_and_nothing_else() {
 
 /// Containment: nothing on this lane can spell a file, a handle or a path.
 /// A duty report answering with bytes is the shape this rules out.
+///
+/// A bounded LIST of a bounded thing is still contained, and the check recurses
+/// into the element rather than allowing the list wholesale — so a list of
+/// something unbounded would fail exactly as a bare unbounded field does. The
+/// property this defends is what a field can SPELL, and nesting does not change
+/// that.
 #[test]
 fn the_duty_vocabulary_cannot_spell_a_handle() {
+    fn contained(ty: &FieldTy) -> bool {
+        match ty {
+            FieldTy::Str { .. }
+            | FieldTy::Ascii { .. }
+            | FieldTy::Hex16
+            | FieldTy::Hex32
+            | FieldTy::U16
+            | FieldTy::U32
+            | FieldTy::U63
+            | FieldTy::Named(_) => true,
+            FieldTy::List { element, .. } => contained(element),
+            _ => false,
+        }
+    }
     let doc = doc();
     for decl in &doc.decls {
         let Decl::Struct(decl) = decl else { continue };
         for field in &decl.fields {
-            let bounded = matches!(
-                &field.ty,
-                FieldTy::Str { .. }
-                    | FieldTy::Ascii { .. }
-                    | FieldTy::Hex16
-                    | FieldTy::Hex32
-                    | FieldTy::U16
-                    | FieldTy::U32
-                    | FieldTy::U63
-                    | FieldTy::Named(_)
-            );
             assert!(
-                bounded,
+                contained(&field.ty),
                 "{}.{} is not a bounded scalar the duty lane admits",
-                decl.name, field.name
+                decl.name,
+                field.name
             );
         }
     }
-    assert_eq!(DUTY_MAX_FRAME_BYTES, 4096);
+    assert_eq!(DUTY_MAX_FRAME_BYTES, 131_072);
+}
+
+/// The offer and the answer must agree about how many documents a selection may
+/// hold. They are two schemas with no cross-reference (EH-20), so the number is
+/// spelled twice and nothing but this compares them — and a duty lane that could
+/// answer about fewer documents than an offer may name would refuse valid work
+/// at a boundary neither contract mentions.
+#[test]
+fn a_selection_is_bounded_the_same_on_both_contracts() {
+    fn list_bound(text: &str, decl: &str, field: &str) -> u32 {
+        let doc = parse_schema(text).expect("the schema parses");
+        let Some(Decl::Struct(found)) = doc.find(decl) else {
+            panic!("{decl} expected");
+        };
+        match found
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == field)
+            .unwrap_or_else(|| panic!("{decl}.{field} expected"))
+            .ty
+        {
+            FieldTy::List { max_len, .. } => max_len,
+            ref other => panic!("{decl}.{field} is {other:?}, not a list"),
+        }
+    }
+    assert_eq!(
+        list_bound(
+            envoix_bindings::duty_schema_text(),
+            "SourceAcquiredView",
+            "items"
+        ),
+        list_bound(
+            envoix_bindings::command_schema_text(),
+            "SourceOfferView",
+            "items"
+        ),
+        "a selection may name more documents than its acquisition can answer about"
+    );
 }

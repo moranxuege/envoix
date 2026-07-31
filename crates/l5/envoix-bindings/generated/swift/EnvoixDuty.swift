@@ -17,8 +17,8 @@ import Foundation
 
 public enum EnvoixDuty {
 
-public static let dutySchemaId = "envoix/binding/duty/2"
-public static let dutyMaxFrameBytes = 4096
+public static let dutySchemaId = "envoix/binding/duty/3"
+public static let dutyMaxFrameBytes = 131072
 private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
 public enum DutyErrorKind {
@@ -121,13 +121,23 @@ public enum SourceSeekabilityView: String, Equatable {
     case sequentialOnly = "sequential_only"
 }
 
-public struct SourceAcquiredView: Equatable {
+public struct AcquiredItemView: Equatable {
+    public let item: Int64
     public let retention: SourceRetentionView
     public let seekability: SourceSeekabilityView
 
-    public init(retention: SourceRetentionView, seekability: SourceSeekabilityView) {
+    public init(item: Int64, retention: SourceRetentionView, seekability: SourceSeekabilityView) {
+        self.item = item
         self.retention = retention
         self.seekability = seekability
+    }
+}
+
+public struct SourceAcquiredView: Equatable {
+    public let items: [AcquiredItemView]
+
+    public init(items: [AcquiredItemView]) {
+        self.items = items
     }
 }
 
@@ -286,6 +296,21 @@ public enum EnvoixDutyCodec {
         return text
     }
 
+    private static func decodeList<T>(
+        _ value: Any?,
+        _ maxLen: Int,
+        _ context: String,
+        _ decodeElement: (Any?, String) throws -> T
+    ) throws -> [T] {
+        guard let items = value as? [Any] else {
+            throw DutyContractError(kind: .shape, context: context)
+        }
+        if items.count > maxLen {
+            throw DutyContractError(kind: .bound, context: context)
+        }
+        return try items.map { try decodeElement($0 is NSNull ? nil : $0, context) }
+    }
+
     private static func payload(_ map: [String: Any], _ context: String) throws -> Any {
         guard let value = map["value"], !(value is NSNull) else {
             throw DutyContractError(kind: .shape, context: context)
@@ -305,6 +330,18 @@ public enum EnvoixDutyCodec {
 
     private static func encodeHexFixed(_ value: String, _ chars: Int, _ context: String) throws -> String {
         return try hexFixed(value, chars, context)
+    }
+
+    private static func encodeList<T>(
+        _ value: [T],
+        _ maxLen: Int,
+        _ context: String,
+        _ encodeElement: (T) throws -> Any
+    ) throws -> [Any] {
+        if value.count > maxLen {
+            throw DutyContractError(kind: .bound, context: context)
+        }
+        return try value.map(encodeElement)
     }
 
     private static func decodeOutcomeCodeView(_ value: Any?, _ context: String) throws -> OutcomeCodeView {
@@ -476,21 +513,39 @@ public enum EnvoixDutyCodec {
         return value.rawValue
     }
 
-    private static func decodeSourceAcquiredView(_ value: Any?, _ context: String) throws -> SourceAcquiredView {
+    private static func decodeAcquiredItemView(_ value: Any?, _ context: String) throws -> AcquiredItemView {
         let map = try object(value, context)
-        try knownKeys(map, ["retention", "seekability"], context)
-        let retention = try decodeSourceRetentionView(try field(map, "retention", "SourceAcquiredView.retention"), "SourceAcquiredView.retention")
-        let seekability = try decodeSourceSeekabilityView(try field(map, "seekability", "SourceAcquiredView.seekability"), "SourceAcquiredView.seekability")
-        return SourceAcquiredView(
+        try knownKeys(map, ["item", "retention", "seekability"], context)
+        let item = try integer(try field(map, "item", "AcquiredItemView.item"), 4294967295, "AcquiredItemView.item")
+        let retention = try decodeSourceRetentionView(try field(map, "retention", "AcquiredItemView.retention"), "AcquiredItemView.retention")
+        let seekability = try decodeSourceSeekabilityView(try field(map, "seekability", "AcquiredItemView.seekability"), "AcquiredItemView.seekability")
+        return AcquiredItemView(
+            item: item,
             retention: retention,
             seekability: seekability
         )
     }
 
-    private static func encodeSourceAcquiredView(_ value: SourceAcquiredView) throws -> [String: Any] {
+    private static func encodeAcquiredItemView(_ value: AcquiredItemView) throws -> [String: Any] {
         var map: [String: Any] = [:]
+        map["item"] = try encodeInteger(value.item, 4294967295, "AcquiredItemView.item")
         map["retention"] = encodeSourceRetentionView(value.retention)
         map["seekability"] = encodeSourceSeekabilityView(value.seekability)
+        return map
+    }
+
+    private static func decodeSourceAcquiredView(_ value: Any?, _ context: String) throws -> SourceAcquiredView {
+        let map = try object(value, context)
+        try knownKeys(map, ["items"], context)
+        let items = try decodeList(try field(map, "items", "SourceAcquiredView.items"), 1024, "SourceAcquiredView.items", decodeAcquiredItemView)
+        return SourceAcquiredView(
+            items: items
+        )
+    }
+
+    private static func encodeSourceAcquiredView(_ value: SourceAcquiredView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["items"] = try encodeList(value.items, 1024, "SourceAcquiredView.items", encodeAcquiredItemView)
         return map
     }
 

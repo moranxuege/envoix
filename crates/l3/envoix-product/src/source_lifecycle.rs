@@ -22,7 +22,8 @@
 //! than deserializing these types directly; that lands with record v5.
 
 use envoix_capabilities::{
-    SourceAcquisitionFailure, SourceAcquisitionKey, SourceRetention, SourceSeekability,
+    AcquiredSelection, SourceAcquisitionFailure, SourceAcquisitionKey, SourceRetention,
+    SourceSeekability,
 };
 use envoix_protocol::ContentHash;
 use std::collections::BTreeSet;
@@ -675,7 +676,7 @@ pub enum SourceLifecycle {
     /// a `Process` grant that a restart would lose, or a source that cannot
     /// seek, which resume requires.
     ///
-    /// Copying does NOT rewrite `acquired_retention` — that stays the duty's
+    /// Copying does NOT rewrite `acquired` — that stays the duty's
     /// own answer. What a copy changes is the BACKING, which is why `plan`
     /// exists: an app-private copy is re-openable whatever the platform
     /// originally promised.
@@ -683,12 +684,18 @@ pub enum SourceLifecycle {
     Staging {
         offer: AcceptedSourceOffer,
         /// The duty's answer, frozen. See [`SourceRetention`].
-        acquired_retention: SourceRetention,
+        /// The duty's answers, per item, frozen. See [`AcquiredSelection`].
+        ///
+        /// Kept whole rather than folded to one retention: recovery is decided
+        /// per document, and an aggregate is derivable from these while these
+        /// are not derivable from an aggregate. Folding at the moment the
+        /// answers arrive loses them where nothing can ask again.
+        acquired: AcquiredSelection,
         plan: StagingPlan,
     },
     /// The content is established and the source can be sent.
     ///
-    /// `backing` is what a restart consults, NOT `acquired_retention`: an
+    /// `backing` is what a restart consults, NOT `acquired`: an
     /// `OwnedArtifact` reopens its own bytes and is valid even when the
     /// platform only ever promised this process, while a `PersistedProvider`
     /// must revalidate the grant it depends on.
@@ -696,7 +703,8 @@ pub enum SourceLifecycle {
     Ready {
         offer: AcceptedSourceOffer,
         /// The duty's answer, frozen. See [`SourceRetention`].
-        acquired_retention: SourceRetention,
+        /// The duty's answers, per item, frozen. See [`AcquiredSelection`].
+        acquired: AcquiredSelection,
         backing: SourceBacking,
         content: StagedContent,
     },
@@ -720,12 +728,12 @@ impl SourceLifecycle {
     /// The platform holds the document; establish what it contains.
     pub const fn staging(
         offer: AcceptedSourceOffer,
-        acquired_retention: SourceRetention,
+        acquired: AcquiredSelection,
         plan: StagingPlan,
     ) -> Self {
         Self::Staging {
             offer,
-            acquired_retention,
+            acquired,
             plan,
         }
     }
@@ -1033,12 +1041,18 @@ mod tests {
             SourceLifecycle::Acquiring(offer(2)),
             SourceLifecycle::Staging {
                 offer: offer(2),
-                acquired_retention: SourceRetention::Process,
+                acquired: AcquiredSelection::of_one(
+                    SourceRetention::Process,
+                    SourceSeekability::Seekable,
+                ),
                 plan: StagingPlan::CopyToOwnedArtifact,
             },
             SourceLifecycle::Ready {
                 offer: offer(2),
-                acquired_retention: SourceRetention::Persisted,
+                acquired: AcquiredSelection::of_one(
+                    SourceRetention::Persisted,
+                    SourceSeekability::Seekable,
+                ),
                 backing: SourceBacking::PersistedProvider,
                 content: staged(4096),
             },
@@ -1059,7 +1073,10 @@ mod tests {
         assert!(
             !SourceLifecycle::Staging {
                 offer: offer(1),
-                acquired_retention: SourceRetention::Persisted,
+                acquired: AcquiredSelection::of_one(
+                    SourceRetention::Persisted,
+                    SourceSeekability::Seekable
+                ),
                 plan: StagingPlan::ProviderStream,
             }
             .is_ready()
@@ -1067,7 +1084,10 @@ mod tests {
         assert!(
             SourceLifecycle::Ready {
                 offer: offer(1),
-                acquired_retention: SourceRetention::Persisted,
+                acquired: AcquiredSelection::of_one(
+                    SourceRetention::Persisted,
+                    SourceSeekability::Seekable
+                ),
                 backing: SourceBacking::OwnedArtifact,
                 content: staged(1),
             }
@@ -1160,7 +1180,10 @@ mod tests {
     fn retention_records_the_duty_and_backing_records_the_bytes() {
         let streamed = SourceLifecycle::Ready {
             offer: offer(1),
-            acquired_retention: SourceRetention::Persisted,
+            acquired: AcquiredSelection::of_one(
+                SourceRetention::Persisted,
+                SourceSeekability::Seekable,
+            ),
             backing: SourceBacking::PersistedProvider,
             content: staged(4096),
         };
@@ -1168,7 +1191,10 @@ mod tests {
             offer: offer(1),
             // The platform only ever promised this process; copying is what
             // made the bytes durable, and the duty's answer is left alone.
-            acquired_retention: SourceRetention::Process,
+            acquired: AcquiredSelection::of_one(
+                SourceRetention::Process,
+                SourceSeekability::Seekable,
+            ),
             backing: SourceBacking::OwnedArtifact,
             content: staged(4096),
         };
@@ -1332,7 +1358,10 @@ mod tests {
         );
         let ready = SourceLifecycle::Ready {
             offer: lying.clone(),
-            acquired_retention: SourceRetention::Persisted,
+            acquired: AcquiredSelection::of_one(
+                SourceRetention::Persisted,
+                SourceSeekability::Seekable,
+            ),
             backing: SourceBacking::PersistedProvider,
             content: staged(4096),
         };
@@ -1596,12 +1625,18 @@ pub(crate) enum SourceLifecycleDto {
     },
     Staging {
         offer: OfferDto,
-        acquired_retention: SourceRetention,
+        /// The duty's answers, per item, frozen. See [`AcquiredSelection`].
+        ///
+        /// Kept whole rather than folded to one retention: recovery is decided
+        /// per document, and an aggregate is derivable from these while these
+        /// are not derivable from an aggregate. Folding at the moment the
+        /// answers arrive loses them where nothing can ask again.
+        acquired: AcquiredSelection,
         plan: StagingPlan,
     },
     Ready {
         offer: OfferDto,
-        acquired_retention: SourceRetention,
+        acquired: AcquiredSelection,
         backing: SourceBacking,
         content: ContentDto,
     },
@@ -1612,6 +1647,10 @@ pub(crate) enum SourceLifecycleDto {
 pub enum SourceDecodeError {
     /// A post-failure gate claiming the card never tried.
     ImpossiblePromptReason,
+    /// The platform's per-item answers do not describe the selection beside
+    /// them. A record whose answers and documents disagree could resume the
+    /// wrong one.
+    NotTheSelection,
     /// A retention the plan or the backing beside it cannot be true with.
     ///
     /// `ProviderStream` means the grant is persisted and the source can seek —
@@ -1631,6 +1670,9 @@ impl core::fmt::Display for SourceDecodeError {
         match self {
             Self::ImpossiblePromptReason => formatter
                 .write_str("a post-failure selection gate cannot claim the card never tried"),
+            Self::NotTheSelection => {
+                formatter.write_str("the acquired answers do not describe the selection")
+            }
             Self::ImpossibleRetention => formatter
                 .write_str("the platform retention cannot be true beside this plan or backing"),
             Self::SourceTooLarge => {
@@ -1760,21 +1802,21 @@ impl From<&SourceLifecycle> for SourceLifecycleDto {
             },
             SourceLifecycle::Staging {
                 offer,
-                acquired_retention,
+                acquired,
                 plan,
             } => Self::Staging {
                 offer: offer.into(),
-                acquired_retention: *acquired_retention,
+                acquired: acquired.clone(),
                 plan: *plan,
             },
             SourceLifecycle::Ready {
                 offer,
-                acquired_retention,
+                acquired,
                 backing,
                 content,
             } => Self::Ready {
                 offer: offer.into(),
-                acquired_retention: *acquired_retention,
+                acquired: acquired.clone(),
                 backing: *backing,
                 content: content.into(),
             },
@@ -1807,25 +1849,36 @@ impl TryFrom<SourceLifecycleDto> for SourceLifecycle {
             SourceLifecycleDto::Acquiring { offer } => Self::Acquiring(checked_offer(offer)?),
             SourceLifecycleDto::Staging {
                 offer,
-                acquired_retention,
+                acquired,
                 plan,
             } => {
-                if !plan.is_possible_with(acquired_retention) {
+                let offer = checked_offer(offer)?;
+                // The platform answered about THIS selection, item for item.
+                // Hostile bytes that answer about a different number of
+                // documents describe a card that could not exist.
+                if acquired.items().len() != offer.selection().len() {
+                    return Err(SourceDecodeError::NotTheSelection);
+                }
+                if !plan.is_possible_with(acquired.retention()) {
                     return Err(SourceDecodeError::ImpossibleRetention);
                 }
                 Self::Staging {
-                    offer: checked_offer(offer)?,
-                    acquired_retention,
+                    offer,
+                    acquired,
                     plan,
                 }
             }
             SourceLifecycleDto::Ready {
                 offer,
-                acquired_retention,
+                acquired,
                 backing,
                 content,
             } => {
-                if !backing.is_possible_with(acquired_retention) {
+                let offer = checked_offer(offer)?;
+                if acquired.items().len() != offer.selection().len() {
+                    return Err(SourceDecodeError::NotTheSelection);
+                }
+                if !backing.is_possible_with(acquired.retention()) {
                     return Err(SourceDecodeError::ImpossibleRetention);
                 }
                 let content: StagedContent = content.into();
@@ -1833,8 +1886,8 @@ impl TryFrom<SourceLifecycleDto> for SourceLifecycle {
                     return Err(SourceDecodeError::SourceTooLarge);
                 }
                 Self::Ready {
-                    offer: checked_offer(offer)?,
-                    acquired_retention,
+                    offer,
+                    acquired,
                     backing,
                     content,
                 }

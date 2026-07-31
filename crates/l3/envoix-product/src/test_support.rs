@@ -8,8 +8,9 @@
 //! dance lives here once instead of in each suite.
 
 use envoix_capabilities::{
-    Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult, Registration,
-    SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
+    AcquiredSelection, Admission, Duty, DutyKind, DutyLedger, DutyProvenance, DutyReport,
+    DutyResult, Registration, SourceAcquisitionKey, SourceReport, SourceRetention,
+    SourceSeekability,
 };
 use envoix_protocol::ContentHash;
 use envoix_types::{ByteCount, OfferedName};
@@ -69,11 +70,11 @@ pub(crate) fn settled(record: &TransferRecord, report: SourceReport) -> ProductI
 
 /// A grant that survives a restart on a source that can seek: the streaming
 /// case, and the one that needs no copy.
-pub(crate) const fn acquired() -> SourceReport {
-    SourceReport::Acquired {
-        retention: SourceRetention::Persisted,
-        seekability: SourceSeekability::Seekable,
-    }
+pub(crate) fn acquired() -> SourceReport {
+    SourceReport::Acquired(AcquiredSelection::of_one(
+        SourceRetention::Persisted,
+        SourceSeekability::Seekable,
+    ))
 }
 
 /// What staging read: a name, a counted total, and which bytes they were.

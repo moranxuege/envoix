@@ -9,8 +9,9 @@ use envoix_attempt_api::{
     RetirementRequestResult,
 };
 use envoix_capabilities::{
-    Admission, Duty, DutyKind, DutyLedger, DutyReport, DutyResult, GenerationUpdate, Registration,
-    SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
+    AcquiredSelection, Admission, Duty, DutyKind, DutyLedger, DutyReport, DutyResult,
+    GenerationUpdate, Registration, SourceAcquisitionKey, SourceReport, SourceRetention,
+    SourceSeekability,
 };
 use envoix_invite::RoomCode;
 use envoix_operation_store::{
@@ -399,10 +400,10 @@ fn stage_the_source<S: RecordStore>(
     );
     let Admission::Fresh(admitted) = ledger.admit(DutyResult {
         provenance,
-        report: DutyReport::Source(SourceReport::Acquired {
-            retention: SourceRetention::Persisted,
-            seekability: SourceSeekability::Seekable,
-        }),
+        report: DutyReport::Source(SourceReport::Acquired(AcquiredSelection::of_one(
+            SourceRetention::Persisted,
+            SourceSeekability::Seekable,
+        ))),
     }) else {
         panic!("an outstanding source duty admits its first result");
     };
@@ -770,6 +771,7 @@ async fn product_crash_receipt_publish_tombstone_slice() {
 
     let mut courier = FakeCourier::default();
     let posted = courier.post(duty);
+    let replay = posted.clone();
     let admitted = match receiver
         .store_mut()
         .operation_mut()
@@ -794,7 +796,7 @@ async fn product_crash_receipt_publish_tombstone_slice() {
         receiver
             .store_mut()
             .operation_mut()
-            .admit_duty(posted)
+            .admit_duty(replay)
             .unwrap(),
         Admission::Duplicate
     );

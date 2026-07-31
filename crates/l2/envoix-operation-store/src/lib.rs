@@ -110,7 +110,7 @@ struct RecordRevision {
     body: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct PersistedDuty {
     duty: Duty,
     result: Option<DutyResult>,
@@ -539,7 +539,8 @@ impl<S: Storage> OperationStore<S> {
 
     pub fn admit_duty(&mut self, result: DutyResult) -> Result<Admission, StoreError<S::Error>> {
         self.refresh()?;
-        let admission = self.ledger.admit(result);
+        let provenance = result.provenance;
+        let admission = self.ledger.admit(result.clone());
         if !matches!(admission, Admission::Fresh(_)) {
             return Ok(admission);
         }
@@ -548,7 +549,7 @@ impl<S: Storage> OperationStore<S> {
         let entry = candidate
             .duties
             .iter_mut()
-            .find(|entry| entry.duty.provenance == result.provenance)
+            .find(|entry| entry.duty.provenance == provenance)
             .ok_or(StoreError::CorruptState)?;
         entry.result = Some(result);
         self.persist(candidate, None, Durability::Durable)?;
@@ -727,7 +728,7 @@ fn rebuild_ledger<E>(image: &StoreImage) -> Result<DutyLedger, StoreError<E>> {
         if ledger.register(entry.duty) != Registration::Registered {
             return Err(StoreError::CorruptState);
         }
-        if let Some(result) = entry.result
+        if let Some(result) = entry.result.clone()
             && !matches!(ledger.admit(result), Admission::Fresh(_))
         {
             return Err(StoreError::CorruptState);

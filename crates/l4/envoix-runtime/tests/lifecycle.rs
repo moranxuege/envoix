@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use envoix_attempt_api::{AttemptEventKind, RetirementIntent};
 use envoix_capabilities::{
-    Admission, Duty, DutyLedger, DutyProvenance, DutyReport, DutyResult, Registration,
-    SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
+    AcquiredSelection, Admission, Duty, DutyLedger, DutyProvenance, DutyReport, DutyResult,
+    Registration, SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
 };
 use envoix_evidence::EvidenceRecord;
 use envoix_operation_store::OperationStore;
@@ -334,10 +334,10 @@ fn stage_the_source(
     session
         .apply(source_settled(
             provenance,
-            SourceReport::Acquired {
-                retention: SourceRetention::Persisted,
-                seekability: SourceSeekability::Seekable,
-            },
+            SourceReport::Acquired(AcquiredSelection::of_one(
+                SourceRetention::Persisted,
+                SourceSeekability::Seekable,
+            )),
         ))
         .unwrap();
     let stamp = session.record().stamp();

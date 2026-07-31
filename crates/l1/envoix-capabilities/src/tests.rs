@@ -43,7 +43,7 @@ fn stale_or_duplicate_duty_rejected() {
     assert_eq!(ledger.register(notify), Registration::Registered);
 
     let publish_result = result(publish, OutcomeCode::Completed);
-    let Admission::Fresh(admitted) = ledger.admit(publish_result) else {
+    let Admission::Fresh(admitted) = ledger.admit(publish_result.clone()) else {
         panic!("first matching result must be fresh");
     };
     assert_eq!(admitted.duty(), publish);

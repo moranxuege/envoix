@@ -3,8 +3,8 @@ use envoix_attempt_api::{
     RetirementIntent,
 };
 use envoix_capabilities::{
-    AdmittedDutyResult, AdmittedSourceResult, Duty, DutyKind, DutyProvenance, SourceAcquisitionKey,
-    SourceReport, SourceRetention,
+    AdmittedDutyResult, AdmittedSourceResult, Duty, DutyKind, DutyProvenance,
+    SourceAcquisitionFailure, SourceAcquisitionKey, SourceReport, SourceRetention,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_types::{ArtifactId, ByteCount, Direction, RequestId, TransferId};
@@ -488,12 +488,25 @@ impl TransferRecord {
         }
         let offer = offer.clone();
         match result.report() {
-            SourceReport::Acquired {
-                retention,
-                seekability,
-            } => {
-                let plan = StagingPlan::for_source(retention, seekability);
-                self.source = SourceLifecycle::staging(offer, retention, plan);
+            SourceReport::Acquired(acquired) => {
+                // The platform must have answered about THIS selection. An
+                // adapter describing a different number of documents is
+                // answering about something nobody offered, and binding it would
+                // stage a card over documents it never accepted.
+                if acquired.items().len() != offer.selection().len() {
+                    self.source = SourceLifecycle::lost(offer, SourceAcquisitionFailure::Internal);
+                    self.quiescence = Quiescence::Quiescent;
+                    self.state = ProductState::Failed;
+                    self.outcome = Some(source_failure(Phase::Preparing));
+                    return Vec::new();
+                }
+                // The aggregate decides the plan — a selection streams only if
+                // EVERY document survives a restart and can seek — while the
+                // per-item answers are kept, because recovery is decided per
+                // document and cannot be recomputed from a fold.
+                let plan = StagingPlan::for_source(acquired.retention(), acquired.seekability());
+                let acquired = acquired.clone();
+                self.source = SourceLifecycle::staging(offer, acquired, plan);
                 self.quiescence = Quiescence::Running {
                     worker: WorkerKind::Staging,
                 };
@@ -515,7 +528,7 @@ impl TransferRecord {
                 // The generation is NOT advanced here. Only `RePickSource`
                 // advances it, and it must, because a fresh key is what stops a
                 // late answer under the discharged key resurrecting this card.
-                self.source = SourceLifecycle::lost(offer, failure);
+                self.source = SourceLifecycle::lost(offer, *failure);
                 self.quiescence = Quiescence::Quiescent;
                 self.state = ProductState::Failed;
                 self.outcome = Some(source_failure(Phase::Preparing));
@@ -715,10 +728,8 @@ impl TransferRecord {
             ProductState::Preparing
                 if matches!(
                     &self.source,
-                    SourceLifecycle::Staging {
-                        acquired_retention: SourceRetention::Persisted,
-                        ..
-                    }
+                    SourceLifecycle::Staging { acquired, .. }
+                        if acquired.retention() == SourceRetention::Persisted
                 ) =>
             {
                 let SourceLifecycle::Staging { offer, .. } = self.source.clone() else {
@@ -790,7 +801,7 @@ impl TransferRecord {
         // manufacture a ready source for a card that had never held a document.
         let SourceLifecycle::Staging {
             offer,
-            acquired_retention,
+            acquired,
             plan,
         } = self.source.clone()
         else {
@@ -824,7 +835,7 @@ impl TransferRecord {
         }
         self.source = SourceLifecycle::Ready {
             offer,
-            acquired_retention,
+            acquired,
             backing: possession.backing(),
             content,
         };

@@ -8,8 +8,9 @@ use envoix_attempt_api::{
     OpenResult, RetirementAckResult, RetirementIntent, RetirementRequestResult,
 };
 use envoix_capabilities::{
-    Admission, Duty, DutyKind, DutyLedger, DutyReport, DutyResult, GenerationUpdate, Registration,
-    SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
+    AcquiredSelection, Admission, Duty, DutyKind, DutyLedger, DutyReport, DutyResult,
+    GenerationUpdate, Registration, SourceAcquisitionKey, SourceReport, SourceRetention,
+    SourceSeekability,
 };
 use envoix_mailbox::{HttpReceiptMailbox, MailboxClientError};
 use envoix_outcomes::{OutcomeCode, Phase};
@@ -141,10 +142,10 @@ fn stage_the_source<S: RecordStore>(
     );
     let Admission::Fresh(admitted) = ledger.admit(DutyResult {
         provenance,
-        report: DutyReport::Source(SourceReport::Acquired {
-            retention: SourceRetention::Persisted,
-            seekability: SourceSeekability::Seekable,
-        }),
+        report: DutyReport::Source(SourceReport::Acquired(AcquiredSelection::of_one(
+            SourceRetention::Persisted,
+            SourceSeekability::Seekable,
+        ))),
     }) else {
         panic!("an outstanding source duty admits its first result");
     };

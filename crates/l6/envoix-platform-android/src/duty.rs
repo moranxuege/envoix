@@ -12,17 +12,18 @@
 //! existed.
 
 use envoix_bindings::duty::{
-    DutyAnswerView, DutyBody, DutyError, DutyFrame, DutyOrderView, DutyProvenanceView,
-    DutyReportView, ForegroundWorkView, LockDirectiveView, LockWorkView, NoticeView,
-    NotificationWorkView, OutcomeCodeView, PublicationWorkView, SourceAcquiredView,
+    AcquiredItemView, DutyAnswerView, DutyBody, DutyError, DutyFrame, DutyOrderView,
+    DutyProvenanceView, DutyReportView, ForegroundWorkView, LockDirectiveView, LockWorkView,
+    NoticeView, NotificationWorkView, OutcomeCodeView, PublicationWorkView, SourceAcquiredView,
     SourceFailedView, SourceFailureView, SourceReportView, SourceRetentionView,
     SourceSeekabilityView, WorkView, decode_duty_frame, encode_duty_frame,
 };
 use envoix_capabilities::{
-    Duty, DutyKind, DutyProvenance, DutyReport, DutyResult, SourceAcquisitionFailure, SourceReport,
-    SourceRetention, SourceSeekability,
+    AcquiredItem, AcquiredSelection, Duty, DutyKind, DutyProvenance, DutyReport, DutyResult,
+    SourceAcquisitionFailure, SourceReport, SourceRetention, SourceSeekability,
 };
 use envoix_outcomes::OutcomeCode;
+use envoix_types::SourceItemId;
 use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId};
 
 /// Longest permitted staged-artifact relative path, in UTF-8 bytes.
@@ -32,7 +33,13 @@ pub const MAX_STAGED_PATH_BYTES: usize = 512;
 /// maximum for that type rather than a fourth statement of it.
 pub const MAX_DISPLAY_NAME_BYTES: usize = OfferedName::MAX_BYTES;
 /// Hard cap on one encoded order/report crossing the lane.
-pub const MAX_LANE_FRAME_BYTES: usize = 4096;
+///
+/// The generated duty contract's own `max_frame_bytes`, restated here because
+/// this module refuses a frame BEFORE handing it to the codec — and the two
+/// disagreeing would mean either refusing frames the contract permits or
+/// parsing ones it does not. See `schema/duty.schema`, where the number is
+/// derived from a selection's maximum item count.
+pub const MAX_LANE_FRAME_BYTES: usize = envoix_bindings::duty::DUTY_MAX_FRAME_BYTES;
 
 /// Why an encoded work order or report was rejected by this module.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -352,19 +359,27 @@ fn lane_error(error: DutyError) -> LaneError {
 fn answer_to_view(answer: DutyReport) -> DutyAnswerView {
     match answer {
         DutyReport::Outcome(outcome) => DutyAnswerView::Outcome(outcome_to_view(outcome)),
-        DutyReport::Source(SourceReport::Acquired {
-            retention,
-            seekability,
-        }) => DutyAnswerView::Source(SourceReportView::Acquired(SourceAcquiredView {
-            retention: match retention {
-                SourceRetention::Process => SourceRetentionView::Process,
-                SourceRetention::Persisted => SourceRetentionView::Persisted,
-            },
-            seekability: match seekability {
-                SourceSeekability::Seekable => SourceSeekabilityView::Seekable,
-                SourceSeekability::SequentialOnly => SourceSeekabilityView::SequentialOnly,
-            },
-        })),
+        DutyReport::Source(SourceReport::Acquired(acquired)) => {
+            DutyAnswerView::Source(SourceReportView::Acquired(SourceAcquiredView {
+                items: acquired
+                    .items()
+                    .iter()
+                    .map(|item| AcquiredItemView {
+                        item: item.item.get(),
+                        retention: match item.retention {
+                            SourceRetention::Process => SourceRetentionView::Process,
+                            SourceRetention::Persisted => SourceRetentionView::Persisted,
+                        },
+                        seekability: match item.seekability {
+                            SourceSeekability::Seekable => SourceSeekabilityView::Seekable,
+                            SourceSeekability::SequentialOnly => {
+                                SourceSeekabilityView::SequentialOnly
+                            }
+                        },
+                    })
+                    .collect(),
+            }))
+        }
         DutyReport::Source(SourceReport::Failed(reason)) => {
             DutyAnswerView::Source(SourceReportView::Failed(SourceFailedView {
                 reason: match reason {
@@ -382,16 +397,33 @@ fn answer_from_view(view: DutyAnswerView) -> DutyReport {
     match view {
         DutyAnswerView::Outcome(outcome) => DutyReport::Outcome(outcome_from_view(outcome)),
         DutyAnswerView::Source(SourceReportView::Acquired(acquired)) => {
-            DutyReport::Source(SourceReport::Acquired {
-                retention: match acquired.retention {
-                    SourceRetentionView::Process => SourceRetention::Process,
-                    SourceRetentionView::Persisted => SourceRetention::Persisted,
-                },
-                seekability: match acquired.seekability {
-                    SourceSeekabilityView::Seekable => SourceSeekability::Seekable,
-                    SourceSeekabilityView::SequentialOnly => SourceSeekability::SequentialOnly,
-                },
-            })
+            let count = acquired.items.len();
+            let items: Vec<AcquiredItem> = acquired
+                .items
+                .into_iter()
+                .map(|item| AcquiredItem {
+                    item: SourceItemId::new(item.item),
+                    retention: match item.retention {
+                        SourceRetentionView::Process => SourceRetention::Process,
+                        SourceRetentionView::Persisted => SourceRetention::Persisted,
+                    },
+                    seekability: match item.seekability {
+                        SourceSeekabilityView::Seekable => SourceSeekability::Seekable,
+                        SourceSeekabilityView::SequentialOnly => SourceSeekability::SequentialOnly,
+                    },
+                })
+                .collect();
+            // The ordinals must be the selection's, in order. An adapter that
+            // answers out of order — or about an item nobody offered — is
+            // describing documents this card never accepted, and that is an
+            // INTERNAL platform failure rather than a source that could not be
+            // read.
+            match AcquiredSelection::of(items, count) {
+                Ok(acquired) => DutyReport::Source(SourceReport::Acquired(acquired)),
+                Err(_) => {
+                    DutyReport::Source(SourceReport::Failed(SourceAcquisitionFailure::Internal))
+                }
+            }
         }
         DutyAnswerView::Source(SourceReportView::Failed(failed)) => {
             DutyReport::Source(SourceReport::Failed(match failed.reason {
@@ -505,7 +537,7 @@ impl WorkOrder {
 /// says the platform did something, not whether its hold survives a restart or
 /// whether the source can be re-read from an offset — and those two facts are
 /// what decide whether a send streams or copies.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkReport {
     pub provenance: WireProvenance,
     pub answer: DutyReport,
@@ -540,7 +572,7 @@ impl WorkReport {
         let frame = DutyFrame {
             body: DutyBody::Report(DutyReportView {
                 provenance: self.provenance.to_view(),
-                answer: answer_to_view(self.answer),
+                answer: answer_to_view(self.answer.clone()),
             }),
         };
         encode_duty_frame(&frame).map_err(lane_error)

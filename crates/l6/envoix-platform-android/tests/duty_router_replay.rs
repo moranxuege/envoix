@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use envoix_bindings::duty::{
-    DutyAnswerView, DutyBody, DutyFrame, DutyOrderView, DutyProvenanceView, ForegroundWorkView,
-    LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView, OutcomeCodeView,
-    PublicationWorkView, SourceAcquiredView, SourceReportView, SourceRetentionView,
-    SourceSeekabilityView, WorkView, decode_duty_frame, encode_duty_frame,
+    AcquiredItemView, DutyAnswerView, DutyBody, DutyFrame, DutyOrderView, DutyProvenanceView,
+    ForegroundWorkView, LockDirectiveView, LockWorkView, NoticeView, NotificationWorkView,
+    OutcomeCodeView, PublicationWorkView, SourceAcquiredView, SourceReportView,
+    SourceRetentionView, SourceSeekabilityView, WorkView, decode_duty_frame, encode_duty_frame,
 };
 
 /// Skips the replay. Named in the failure message on purpose: a gate that
@@ -196,8 +196,11 @@ fn vectors() -> Vec<(String, &'static str, Option<DutyAnswerView>)> {
             // the source can seek — the two facts the authority reads.
             Some(DutyAnswerView::Source(SourceReportView::Acquired(
                 SourceAcquiredView {
-                    retention: SourceRetentionView::Persisted,
-                    seekability: SourceSeekabilityView::Seekable,
+                    items: vec![AcquiredItemView {
+                        item: 0,
+                        retention: SourceRetentionView::Persisted,
+                        seekability: SourceSeekabilityView::Seekable,
+                    }],
                 },
             ))),
         ),

@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.PowerManager
 import android.provider.MediaStore
 import com.envoix.bindings.capability.SourceAcquisitionKeyView
+import com.envoix.bindings.duty.AcquiredItemView
 import com.envoix.bindings.duty.DutyProvenanceView
 import com.envoix.bindings.duty.LockDirectiveView
 import com.envoix.bindings.duty.NoticeView
@@ -98,6 +99,13 @@ class DutyExecutor(
      * carry a handle even if this wanted to. A card with no outstanding pick —
      * a process death lost it, or nothing was ever chosen — reports the honest
      * `source_unreadable`, which is the outcome that means "re-pick".
+     *
+     * Answers PER ITEM. A selection may name several documents and the answer
+     * describes every one of them, because recovery is decided per document.
+     * This adapter reports one because it claimed one: the picker is
+     * single-select, and the authority refuses an offer of several as
+     * `output_required` until an offer can say what to produce from them. Item
+     * `0` is that lone document's ordinal, the same one the authority minted.
      */
     override fun bindSource(provenance: DutyProvenanceView): SourceReportView {
         // The WHOLE provenance, never the card alone: the duty is issued for one
@@ -160,7 +168,16 @@ class DutyExecutor(
                 SourceReportView.Failed(SourceFailedView(SourceFailureView.INTERNAL))
             } else {
                 SourceReportView.Acquired(
-                    SourceAcquiredView(retention = retention, seekability = seekability),
+                    SourceAcquiredView(
+                        items =
+                            listOf(
+                                AcquiredItemView(
+                                    item = 0,
+                                    retention = retention,
+                                    seekability = seekability,
+                                ),
+                            ),
+                    ),
                 )
             }
         } ?: SourceReportView.Failed(SourceFailedView(SourceFailureView.UNREADABLE))

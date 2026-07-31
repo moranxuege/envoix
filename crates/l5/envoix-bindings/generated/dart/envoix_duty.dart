@@ -11,8 +11,8 @@
 
 import 'dart:convert';
 
-const String dutySchemaId = 'envoix/binding/duty/2';
-const int dutyMaxFrameBytes = 4096;
+const String dutySchemaId = 'envoix/binding/duty/3';
+const int dutyMaxFrameBytes = 131072;
 const int _u63Max = 9223372036854775807;
 
 enum DutyErrorKind {
@@ -179,14 +179,24 @@ enum SourceSeekabilityView {
   sequentialOnly,
 }
 
-final class SourceAcquiredView {
-  const SourceAcquiredView({
+final class AcquiredItemView {
+  const AcquiredItemView({
+    required this.item,
     required this.retention,
     required this.seekability,
   });
 
+  final int item;
   final SourceRetentionView retention;
   final SourceSeekabilityView seekability;
+}
+
+final class SourceAcquiredView {
+  const SourceAcquiredView({
+    required this.items,
+  });
+
+  final List<AcquiredItemView> items;
 }
 
 enum SourceFailureView {
@@ -394,6 +404,23 @@ String _utf8Bounded(Object? value, int maxBytes, String context) {
   return value;
 }
 
+List<T> _list<T>(
+  Object? value,
+  int maxLen,
+  String context,
+  T Function(Object?, String) decodeElement,
+) {
+  if (value is! List<Object?>) {
+    throw DutyContractException(DutyErrorKind.shape, context);
+  }
+  if (value.length > maxLen) {
+    throw DutyContractException(DutyErrorKind.bound, context);
+  }
+  return List<T>.unmodifiable(
+    value.map((item) => decodeElement(item, context)),
+  );
+}
+
 Object? _payload(Map<String, Object?> map, String context) {
   final value = map['value'];
   if (value == null) {
@@ -413,6 +440,18 @@ int _encodeInteger(int value, int max, String context) =>
 
 String _encodeHexFixed(String value, int chars, String context) =>
     _hexFixed(value, chars, context);
+
+List<Object?> _encodeList<T>(
+  List<T> value,
+  int maxLen,
+  String context,
+  Object? Function(T) encodeElement,
+) {
+  if (value.length > maxLen) {
+    throw DutyContractException(DutyErrorKind.bound, context);
+  }
+  return value.map(encodeElement).toList();
+}
 
 OutcomeCodeView _decodeOutcomeCodeView(Object? value, String context) {
   return switch (value) {
@@ -611,19 +650,35 @@ String _encodeSourceSeekabilityView(SourceSeekabilityView value) {
   };
 }
 
+AcquiredItemView _decodeAcquiredItemView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'item', 'retention', 'seekability'}, context);
+  return AcquiredItemView(
+    item: _integer(_field(map, 'item', 'AcquiredItemView.item'), 4294967295, 'AcquiredItemView.item'),
+    retention: _decodeSourceRetentionView(_field(map, 'retention', 'AcquiredItemView.retention'), 'AcquiredItemView.retention'),
+    seekability: _decodeSourceSeekabilityView(_field(map, 'seekability', 'AcquiredItemView.seekability'), 'AcquiredItemView.seekability'),
+  );
+}
+
+Map<String, Object?> _encodeAcquiredItemView(AcquiredItemView value) {
+  return <String, Object?>{
+    'item': _encodeInteger(value.item, 4294967295, 'AcquiredItemView.item'),
+    'retention': _encodeSourceRetentionView(value.retention),
+    'seekability': _encodeSourceSeekabilityView(value.seekability),
+  };
+}
+
 SourceAcquiredView _decodeSourceAcquiredView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'retention', 'seekability'}, context);
+  _knownKeys(map, const {'items'}, context);
   return SourceAcquiredView(
-    retention: _decodeSourceRetentionView(_field(map, 'retention', 'SourceAcquiredView.retention'), 'SourceAcquiredView.retention'),
-    seekability: _decodeSourceSeekabilityView(_field(map, 'seekability', 'SourceAcquiredView.seekability'), 'SourceAcquiredView.seekability'),
+    items: _list(_field(map, 'items', 'SourceAcquiredView.items'), 1024, 'SourceAcquiredView.items', _decodeAcquiredItemView),
   );
 }
 
 Map<String, Object?> _encodeSourceAcquiredView(SourceAcquiredView value) {
   return <String, Object?>{
-    'retention': _encodeSourceRetentionView(value.retention),
-    'seekability': _encodeSourceSeekabilityView(value.seekability),
+    'items': _encodeList(value.items, 1024, 'SourceAcquiredView.items', _encodeAcquiredItemView),
   };
 }
 

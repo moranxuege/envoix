@@ -15,7 +15,8 @@ pub use model::{
 };
 pub use source_key::SourceAcquisitionKey;
 pub use source_report::{
-    SourceAcquisitionFailure, SourceReport, SourceRetention, SourceSeekability,
+    AcquiredItem, AcquiredSelection, AcquiredSelectionError, SourceAcquisitionFailure,
+    SourceReport, SourceRetention, SourceSeekability,
 };
 pub use source_session::{SourceReadError, SourceSession};
 

@@ -175,12 +175,15 @@ fn durable_receipt_duty_survives_restart() {
         provenance: duty.provenance,
         report: DutyReport::Outcome(OutcomeCode::Completed),
     };
-    let Admission::Fresh(admitted) = reopened.admit_duty(correct).unwrap() else {
+    let Admission::Fresh(admitted) = reopened.admit_duty(correct.clone()).unwrap() else {
         panic!("current outstanding result should be admitted");
     };
     assert_eq!(admitted.duty(), duty);
     assert_eq!(admitted.outcome(), Some(OutcomeCode::Completed));
-    assert_eq!(reopened.admit_duty(correct).unwrap(), Admission::Duplicate);
+    assert_eq!(
+        reopened.admit_duty(correct.clone()).unwrap(),
+        Admission::Duplicate
+    );
     drop(reopened);
 
     let mut reopened = open(&root, card);
