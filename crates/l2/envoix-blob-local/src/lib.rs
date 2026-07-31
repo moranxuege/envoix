@@ -30,8 +30,10 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use envoix_blob_api::{BlobBackend, BlobError, BlobKey, BlobState, CopyCheckpoint, SealFact};
-use envoix_types::{ArtifactId, AttemptGen, ByteCount, ContentHash, RecordId};
+use envoix_blob_api::{
+    BlobBackend, BlobError, BlobKey, BlobState, BlobWorkId, CopyCheckpoint, SealFact,
+};
+use envoix_types::{ArtifactId, AttemptGen, ByteCount, ContentHash, RecordId, TransferId};
 use serde::{Deserialize, Serialize};
 
 const BLOBS_DIR: &str = "blobs";
@@ -70,15 +72,45 @@ impl LocalBlobs {
         }
     }
 
+    /// One directory per incarnation, named by which KIND of work made it.
+    ///
+    /// The arm is in the name because the two are stable under different facts —
+    /// a derivation under its acquisition generation, a reception under its
+    /// transfer — and a single flat encoding would let one be read as the other
+    /// after a restart.
     fn dir(&self, blob: BlobKey) -> PathBuf {
         self.root
             .join(BLOBS_DIR)
             .join(format!("{:016x}", blob.card().get()))
-            .join(format!(
-                "{:08x}-{}",
-                blob.work().generation().get(),
-                blob.artifact()
-            ))
+            .join(Self::leaf(blob.work()))
+    }
+
+    fn leaf(work: BlobWorkId) -> String {
+        match work {
+            BlobWorkId::Derivation {
+                acquisition,
+                artifact,
+            } => format!("d{:08x}-{artifact}", acquisition.get()),
+            BlobWorkId::Reception { transfer, artifact } => format!("r{transfer}-{artifact}"),
+        }
+    }
+
+    fn work_from_leaf(leaf: &str) -> Option<BlobWorkId> {
+        let (kind, rest) = leaf.split_at(leaf.char_indices().nth(1)?.0);
+        let (left, artifact) = rest.split_once('-')?;
+        let artifact =
+            ArtifactId::from_bytes(u128::from_str_radix(artifact, 16).ok()?.to_be_bytes());
+        Some(match kind {
+            "d" => BlobWorkId::of_derivation(
+                AttemptGen::new(u32::from_str_radix(left, 16).ok()?),
+                artifact,
+            ),
+            "r" => BlobWorkId::of_reception(
+                TransferId::from_bytes(u128::from_str_radix(left, 16).ok()?.to_be_bytes()),
+                artifact,
+            ),
+            _ => return None,
+        })
     }
 
     fn read_fact(path: &Path, blob: BlobKey) -> Option<(ByteCount, ContentHash, ContentHash)> {
@@ -237,21 +269,10 @@ impl BlobBackend for LocalBlobs {
         let mut owned = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Some((generation, artifact)) = name.split_once('-') else {
+            let Some(work) = name.to_str().and_then(Self::work_from_leaf) else {
                 continue;
             };
-            let (Ok(generation), Ok(artifact)) = (
-                u32::from_str_radix(generation, 16),
-                u128::from_str_radix(artifact, 16),
-            ) else {
-                continue;
-            };
-            let artifact = ArtifactId::from_bytes(artifact.to_be_bytes());
-            owned.push(BlobKey::new(
-                card,
-                envoix_blob_api::DerivationWorkId::of(AttemptGen::new(generation), artifact),
-            ));
+            owned.push(BlobKey::new(card, work));
         }
         owned.sort_unstable();
         Ok(owned)

@@ -108,14 +108,28 @@ pub trait BlobBackend: Send + Sync + 'static {
 /// The two leases never overlap in the other direction either: a worker seals
 /// and releases before the actor commits `Ready`, so there is no order in which
 /// they can deadlock.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct BlobStore<B> {
-    backend: B,
+    backend: std::sync::Arc<B>,
+}
+
+impl<B> Clone for BlobStore<B> {
+    /// Cloning shares ONE backend, so two handles are two views of the same
+    /// medium rather than two mediums. Derived would have demanded `B: Clone`
+    /// and cloned the backend itself, which for a stateful one would have been
+    /// two exclusion tables and no exclusion at all.
+    fn clone(&self) -> Self {
+        Self {
+            backend: std::sync::Arc::clone(&self.backend),
+        }
+    }
 }
 
 impl<B: BlobBackend> BlobStore<B> {
-    pub const fn new(backend: B) -> Self {
-        Self { backend }
+    pub fn new(backend: B) -> Self {
+        Self {
+            backend: std::sync::Arc::new(backend),
+        }
     }
 
     /// What this blob is, after whatever happened last time. Never infers
@@ -138,7 +152,7 @@ impl<B: BlobBackend> BlobStore<B> {
         &self,
         blob: BlobKey,
         fingerprint: ContentHash,
-    ) -> Result<BlobLease<'_, B>, BlobError> {
+    ) -> Result<BlobLease<B>, BlobError> {
         match self.backend.state(blob)? {
             BlobState::Sealed(_) => return Err(BlobError::Sealed),
             BlobState::Absent | BlobState::Partial { .. } => {}
@@ -159,10 +173,11 @@ impl<B: BlobBackend> BlobStore<B> {
             return Err(error);
         }
         Ok(BlobLease {
-            store: self,
+            store: self.clone(),
             blob,
             fingerprint,
             offset: resume,
+            opened_at: resume,
             released: false,
         })
     }
@@ -225,18 +240,97 @@ impl<B: BlobBackend> BlobStore<B> {
 /// Dropping it releases the lease and leaves the blob `Partial` at its last
 /// durable checkpoint. That is the honest outcome of a worker that stopped: the
 /// bytes it did not promise are gone, and the ones it did are still there.
-pub struct BlobLease<'a, B: BlobBackend> {
-    store: &'a BlobStore<B>,
+pub struct BlobLease<B: BlobBackend> {
+    /// OWNED, not borrowed. A prepared receive sink is moved into the attempt
+    /// task that writes through it, so a lease that borrowed its store could not
+    /// be `'static` and every method would have had to reacquire the writer —
+    /// which is the exclusion this type exists to hold.
+    store: BlobStore<B>,
     blob: BlobKey,
     fingerprint: ContentHash,
     offset: ByteCount,
+    /// Where this lease opened. What a resumed run must hash back to rebuild the
+    /// state it did not compute in this process.
+    opened_at: ByteCount,
     released: bool,
 }
 
-impl<B: BlobBackend> BlobLease<'_, B> {
+impl<B: BlobBackend> BlobLease<B> {
     /// Where the next append must start.
     pub const fn offset(&self) -> ByteCount {
         self.offset
+    }
+
+    /// Where this lease opened: the durable prefix it inherited, or zero.
+    pub const fn opened_at(&self) -> ByteCount {
+        self.opened_at
+    }
+
+    /// The checkpoint this lease opened at, if it inherited one.
+    ///
+    /// Its `prefix_digest` is what a resumed run compares its re-read prefix
+    /// against — local evidence that the bytes are the ones that were promised,
+    /// which is a different question from the one the peer asks on the wire.
+    pub fn opened_checkpoint(&self) -> Option<CopyCheckpoint> {
+        match self.store.backend.state(self.blob) {
+            Ok(BlobState::Partial {
+                durable_checkpoint: Some(checkpoint),
+            }) if checkpoint.fingerprint == self.fingerprint => Some(checkpoint),
+            _ => None,
+        }
+    }
+
+    /// Reads back what THIS lease has written, up to its own offset.
+    ///
+    /// Not an exception to "an unsealed artifact is not a source" — a
+    /// capability distinction. `BlobStore::read_at` is ambient: a caller
+    /// presents a key and asks for bytes, and it refuses anything unsealed
+    /// forever. This is reachable only through the exclusive writer lease, which
+    /// is precisely the party entitled to read its own work, and the partial
+    /// still cannot be handed to a sender or a publication because neither holds
+    /// one.
+    ///
+    /// It is what lets a resumed run rebuild a hasher by re-reading rather than
+    /// by persisting an opaque hasher state a future library version might not
+    /// understand.
+    pub fn read_partial_at(
+        &self,
+        offset: ByteCount,
+        destination: &mut [u8],
+    ) -> Result<usize, BlobError> {
+        if offset.get() >= self.offset.get() {
+            return Ok(0);
+        }
+        let available = (self.offset.get() - offset.get()) as usize;
+        let want = destination.len().min(available);
+        self.store
+            .backend
+            .read_at(self.blob, offset, &mut destination[..want])
+    }
+
+    /// Throws away everything and starts this incarnation over.
+    ///
+    /// ONE transition, and the order is the point: the zero prefix is published
+    /// FIRST, then the bytes are truncated. A crash after publication leaves an
+    /// ignorable tail the next `begin` removes; the other order leaves a
+    /// checkpoint naming bytes that were already shortened, which is a promise
+    /// about something that is not there.
+    ///
+    /// Here rather than at every call site, because a caller doing truncate-then
+    /// -publish has the same two operations in the wrong order and no way to
+    /// notice.
+    pub fn reset(&mut self) -> Result<(), BlobError> {
+        let zeroed = CopyCheckpoint {
+            blob: self.blob,
+            length: ByteCount::new(0),
+            prefix_digest: empty_digest(),
+            fingerprint: self.fingerprint,
+        };
+        self.store.backend.publish_checkpoint(zeroed)?;
+        self.store.backend.truncate(self.blob, ByteCount::new(0))?;
+        self.offset = ByteCount::new(0);
+        self.opened_at = ByteCount::new(0);
+        Ok(())
     }
 
     /// Appends at exactly `offset`. The engine owns the offset, so a mismatch is
@@ -289,10 +383,15 @@ impl<B: BlobBackend> BlobLease<'_, B> {
     }
 }
 
-impl<B: BlobBackend> Drop for BlobLease<'_, B> {
+impl<B: BlobBackend> Drop for BlobLease<B> {
     fn drop(&mut self) {
         if !self.released {
             self.store.backend.release(self.blob);
         }
     }
+}
+
+/// The digest of nothing, for a checkpoint that promises nothing.
+fn empty_digest() -> ContentHash {
+    ContentHash::from_bytes(*blake3::Hasher::new().finalize().as_bytes())
 }

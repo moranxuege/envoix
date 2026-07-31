@@ -123,7 +123,7 @@ pub(crate) fn sealed_artifact(
     let store = envoix_blob_api::BlobStore::new(envoix_blob_local::LocalBlobs::new(root.path()));
     let blob = envoix_blob_api::BlobKey::new(
         card,
-        envoix_blob_api::DerivationWorkId::of(generation, artifact),
+        envoix_blob_api::BlobWorkId::of_derivation(generation, artifact),
     );
     let mut lease = store.begin(blob, fingerprint).expect("a lease");
     lease

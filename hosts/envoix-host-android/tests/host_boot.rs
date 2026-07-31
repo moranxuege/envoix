@@ -755,7 +755,7 @@ fn a_boot_sweeps_blobs_no_record_references_and_keeps_the_one_that_is() {
     // acquisition generation the record has moved past. Nothing references it.
     let orphan = envoix_blob_api::BlobKey::new(
         card,
-        envoix_blob_api::DerivationWorkId::of(
+        envoix_blob_api::BlobWorkId::of_derivation(
             AttemptGen::new(acquisition.generation.wrapping_sub(1)),
             seal.blob.artifact(),
         ),

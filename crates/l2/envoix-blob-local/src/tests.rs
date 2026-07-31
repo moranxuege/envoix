@@ -1,4 +1,4 @@
-use envoix_blob_api::{BlobKey, BlobState, BlobStore, DerivationWorkId};
+use envoix_blob_api::{BlobKey, BlobState, BlobStore, BlobWorkId};
 use envoix_types::{ArtifactId, AttemptGen, ByteCount, ContentHash, RecordId};
 use tempfile::TempDir;
 
@@ -7,7 +7,7 @@ use crate::LocalBlobs;
 fn blob(generation: u32) -> BlobKey {
     BlobKey::new(
         RecordId::new(9),
-        DerivationWorkId::of(AttemptGen::new(generation), ArtifactId::from_bytes([3; 16])),
+        BlobWorkId::of_derivation(AttemptGen::new(generation), ArtifactId::from_bytes([3; 16])),
     )
 }
 
@@ -199,4 +199,105 @@ fn a_later_incarnation_does_not_disturb_the_earlier_one() {
     assert_eq!(store.inspect(blob(1)), Ok(BlobState::Absent));
     // Idempotent: the caller asked for absent, and it already is.
     assert_eq!(store.delete(blob(1)), Ok(()));
+}
+
+/// A reception keeps its partial across an attempt resume; a derivation keeps
+/// its across a re-pick. Neither key contains what the other's retries move.
+///
+/// This is the fourth place the attempt-versus-stable generation distinction has
+/// decided something, and the first where the type prevents it: a reception has
+/// no generation to accidentally reach for.
+#[test]
+fn the_two_kinds_of_work_are_stable_under_different_retries() {
+    let root = TempDir::new().expect("a root");
+    let store = store(&root);
+    let card = RecordId::new(9);
+    let artifact = ArtifactId::from_bytes([3; 16]);
+    let transfer = envoix_types::TransferId::from_bytes([8; 16]);
+
+    let received = BlobKey::new(card, BlobWorkId::of_reception(transfer, artifact));
+    let mut lease = store.begin(received, hash(1)).expect("a lease");
+    lease
+        .append(ByteCount::new(0), b"received")
+        .expect("appends");
+    lease.checkpoint(hash(2)).expect("a checkpoint");
+    drop(lease);
+
+    // Nothing an attempt generation could change is in this key, so the same
+    // transfer re-opens the same partial.
+    let again = BlobKey::new(card, BlobWorkId::of_reception(transfer, artifact));
+    assert_eq!(
+        store.begin(again, hash(1)).expect("a lease").offset(),
+        ByteCount::new(8)
+    );
+
+    // A derivation of the same artifact is a DIFFERENT blob, so neither can
+    // stumble onto the other's bytes.
+    let derived = BlobKey::new(
+        card,
+        BlobWorkId::of_derivation(AttemptGen::new(1), artifact),
+    );
+    assert_eq!(
+        store.begin(derived, hash(1)).expect("a lease").offset(),
+        ByteCount::new(0)
+    );
+    let mut owned = store.owned(card).expect("owned");
+    owned.sort_unstable();
+    assert_eq!(owned.len(), 2, "the two kinds collapsed onto one blob");
+    assert!(owned.contains(&received) && owned.contains(&derived));
+}
+
+/// A writer may read back what IT wrote, and only up to its own offset.
+///
+/// Not an exception to "an unsealed artifact is not a source" — the ambient
+/// `read_at` still refuses this blob. The lease is the capability, and holding
+/// it is what makes reading your own work legitimate.
+#[test]
+fn a_lease_reads_its_own_partial_and_no_further() {
+    let root = TempDir::new().expect("a root");
+    let store = store(&root);
+    let key = blob(1);
+    let mut lease = store.begin(key, hash(1)).expect("a lease");
+    lease
+        .append(ByteCount::new(0), b"written")
+        .expect("appends");
+
+    let mut into = [0_u8; 7];
+    assert_eq!(lease.read_partial_at(ByteCount::new(0), &mut into), Ok(7));
+    assert_eq!(&into, b"written");
+    // Past its own offset there is nothing to promise, whatever the medium has.
+    assert_eq!(lease.read_partial_at(ByteCount::new(7), &mut into), Ok(0));
+
+    // And the ambient reader still refuses the same blob, because it has no
+    // lease and the blob has no seal.
+    assert!(store.read_at(key, ByteCount::new(0), &mut into).is_err());
+}
+
+/// `reset` publishes the zero prefix BEFORE truncating.
+///
+/// The other order leaves a checkpoint naming bytes that were already
+/// shortened — a promise about something that is not there — and a caller doing
+/// the two operations itself has no way to notice it got them backwards.
+#[test]
+fn a_reset_never_leaves_a_checkpoint_ahead_of_the_bytes() {
+    let root = TempDir::new().expect("a root");
+    let store = store(&root);
+    let key = blob(1);
+
+    let mut lease = store.begin(key, hash(1)).expect("a lease");
+    lease
+        .append(ByteCount::new(0), b"a longer prefix")
+        .expect("appends");
+    lease.checkpoint(hash(2)).expect("a checkpoint");
+    lease.reset().expect("resets");
+    assert_eq!(lease.offset(), ByteCount::new(0));
+    drop(lease);
+
+    // Whatever a crash interrupts, the durable checkpoint never names more than
+    // the bytes: a reopened lease starts at zero rather than at the old prefix.
+    assert_eq!(
+        store.begin(key, hash(1)).expect("a lease").offset(),
+        ByteCount::new(0),
+        "a reset left a checkpoint naming bytes that had been truncated"
+    );
 }

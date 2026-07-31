@@ -1333,7 +1333,7 @@ mod tests {
         SealFact {
             blob: envoix_blob_api::BlobKey::new(
                 envoix_types::RecordId::new(1),
-                envoix_blob_api::DerivationWorkId::of(
+                envoix_blob_api::BlobWorkId::of_derivation(
                     AttemptGen::new(1),
                     ArtifactId::from_bytes([3; 16]),
                 ),
@@ -1735,7 +1735,15 @@ impl From<SourceBacking> for BackingDto {
             SourceBacking::OwnedArtifact { seal } => Self::OwnedArtifact {
                 seal: SealDto {
                     card: seal.blob.card(),
-                    generation: seal.blob.work().generation(),
+                    generation: match seal.blob.work() {
+                        envoix_blob_api::BlobWorkId::Derivation { acquisition, .. } => acquisition,
+                        // A send's backing is never a reception; a record that
+                        // said otherwise could not have been written by this
+                        // build, and the decoder below refuses it.
+                        envoix_blob_api::BlobWorkId::Reception { .. } => {
+                            envoix_types::AttemptGen::new(0)
+                        }
+                    },
                     artifact: seal.blob.artifact(),
                     length: seal.length,
                     digest: seal.digest.to_bytes(),
@@ -1754,7 +1762,7 @@ impl From<BackingDto> for SourceBacking {
                 seal: SealFact {
                     blob: envoix_blob_api::BlobKey::new(
                         seal.card,
-                        envoix_blob_api::DerivationWorkId::of(seal.generation, seal.artifact),
+                        envoix_blob_api::BlobWorkId::of_derivation(seal.generation, seal.artifact),
                     ),
                     length: seal.length,
                     digest: ContentHash::from_bytes(seal.digest),

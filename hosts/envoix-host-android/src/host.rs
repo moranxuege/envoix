@@ -591,7 +591,7 @@ impl Host {
                 ..
             } => vec![envoix_blob_api::BlobKey::new(
                 record.identity.card,
-                envoix_blob_api::DerivationWorkId::of(
+                envoix_blob_api::BlobWorkId::of_derivation(
                     offer.key().generation(),
                     record.identity.artifact,
                 ),

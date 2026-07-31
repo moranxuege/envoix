@@ -931,6 +931,7 @@ dependencies = [
 name = "envoix-blob-api"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "envoix-types",
  "serde",
 ]

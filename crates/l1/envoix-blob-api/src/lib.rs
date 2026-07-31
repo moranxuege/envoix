@@ -38,6 +38,6 @@ mod key;
 mod seal;
 mod store;
 
-pub use key::{BlobKey, DerivationWorkId};
+pub use key::{BlobKey, BlobWorkId};
 pub use seal::{CopyCheckpoint, SealFact, SealedArtifact};
 pub use store::{BlobBackend, BlobError, BlobLease, BlobState, BlobStore};

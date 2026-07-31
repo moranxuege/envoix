@@ -10,4 +10,5 @@ role = "library"
 
 [dependencies]
 envoix-types = { path = "../../l0/envoix-types" }
+blake3.workspace = true
 serde.workspace = true

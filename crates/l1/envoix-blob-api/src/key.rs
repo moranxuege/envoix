@@ -1,47 +1,57 @@
 //! Which blob, and which incarnation of it.
 
-use envoix_types::{ArtifactId, AttemptGen, RecordId};
+use envoix_types::{ArtifactId, AttemptGen, RecordId, TransferId};
 use serde::{Deserialize, Serialize};
 
-/// One run of one derivation.
+/// One incarnation of one card's bulk bytes, and what makes it one.
 ///
-/// A card's artifact identity is minted once and never moves, so a re-pick
-/// produces a NEW derivation of the SAME artifact id. Without something to tell
-/// those apart, a worker still finishing the old one would append to — or delete
-/// — the new one's bytes, and the logical id could not say which was meant.
-///
-/// DERIVED rather than minted: the ACQUISITION's generation and the artifact. A
-/// re-pick mints a new acquisition, which is exactly when a new incarnation
-/// begins — so this needs no entropy and no durable field of its own. Two runs
-/// that should share a blob do; two that should not, cannot.
-///
-/// The acquisition's generation, never the ATTEMPT's. They look alike and their
-/// lifetimes are not the same: a resume advances the attempt generation while
-/// deliberately keeping the source, so deriving from it would give one
-/// unchanged source two blob keys — and a seal published under the first would
-/// be invisible to a run that computed the second. This is the third place that
-/// distinction has decided something; the first was a resume closing the
-/// descriptor it was about to send from.
+/// Two arms because two things produce bulk bytes and they are stable under
+/// different facts. Getting that wrong loses a partial exactly when it is worth
+/// most, so what each arm carries is chosen by what SURVIVES the retries that
+/// arm expects — never by what happens to be in scope.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct DerivationWorkId {
-    generation: AttemptGen,
-    artifact: ArtifactId,
+#[serde(rename_all = "snake_case")]
+pub enum BlobWorkId {
+    /// Bytes produced from a card's own selection.
+    ///
+    /// Keyed by the ACQUISITION's generation. A card's artifact id is minted
+    /// once and never moves, so a re-pick produces a new derivation of the same
+    /// id — and the acquisition generation is what advances exactly then. The
+    /// ATTEMPT's generation advances on resume while the source stays, so
+    /// deriving from it would give one unchanged source two keys and hide a seal
+    /// from the run that should adopt it.
+    Derivation {
+        acquisition: AttemptGen,
+        artifact: ArtifactId,
+    },
+    /// Bytes received from a peer.
+    ///
+    /// Keyed by the TRANSFER, which is stable product identity, and never by the
+    /// attempt generation — a receive resume advances that on purpose and must
+    /// find the same partial. The same distinction the derivation arm makes,
+    /// resolved to a different stable fact because a receive has no acquisition.
+    Reception {
+        transfer: TransferId,
+        artifact: ArtifactId,
+    },
 }
 
-impl DerivationWorkId {
-    pub const fn of(generation: AttemptGen, artifact: ArtifactId) -> Self {
-        Self {
-            generation,
+impl BlobWorkId {
+    pub const fn of_derivation(acquisition: AttemptGen, artifact: ArtifactId) -> Self {
+        Self::Derivation {
+            acquisition,
             artifact,
         }
     }
 
-    pub const fn generation(self) -> AttemptGen {
-        self.generation
+    pub const fn of_reception(transfer: TransferId, artifact: ArtifactId) -> Self {
+        Self::Reception { transfer, artifact }
     }
 
     pub const fn artifact(self) -> ArtifactId {
-        self.artifact
+        match self {
+            Self::Derivation { artifact, .. } | Self::Reception { artifact, .. } => artifact,
+        }
     }
 }
 
@@ -53,11 +63,11 @@ impl DerivationWorkId {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct BlobKey {
     card: RecordId,
-    work: DerivationWorkId,
+    work: BlobWorkId,
 }
 
 impl BlobKey {
-    pub const fn new(card: RecordId, work: DerivationWorkId) -> Self {
+    pub const fn new(card: RecordId, work: BlobWorkId) -> Self {
         Self { card, work }
     }
 
@@ -65,7 +75,7 @@ impl BlobKey {
         self.card
     }
 
-    pub const fn work(self) -> DerivationWorkId {
+    pub const fn work(self) -> BlobWorkId {
         self.work
     }
 

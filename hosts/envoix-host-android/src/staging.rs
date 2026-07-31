@@ -23,7 +23,7 @@ use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use envoix_blob_api::{BlobBackend, BlobKey, BlobState, BlobStore, DerivationWorkId};
+use envoix_blob_api::{BlobBackend, BlobKey, BlobState, BlobStore, BlobWorkId};
 use envoix_capabilities::{SourceReadError, SourceSession};
 use envoix_runtime::{
     ContentHash, DerivationSpec, PreparedSource, PreparedSourceResolver, SourceAcquisitionKey,
@@ -298,7 +298,7 @@ impl<B: BlobBackend + Clone> SourceStagingExecutor for BoundSourceStaging<B> {
         let source = self.registry.open(&plan.acquisition);
         let blobs = self.blobs.clone();
         let card = plan.stamp.card;
-        // The ACQUISITION's generation. See `DerivationWorkId`: a resume moves
+        // The ACQUISITION's generation. See `BlobWorkId`: a resume moves
         // the attempt's and keeps the source, so deriving the blob key from it
         // would hide a seal from the very run that should adopt it.
         let generation = plan.acquisition.generation();
@@ -311,7 +311,7 @@ impl<B: BlobBackend + Clone> SourceStagingExecutor for BoundSourceStaging<B> {
                 derivation,
                 fingerprint,
             } => {
-                let blob = BlobKey::new(card, DerivationWorkId::of(generation, artifact));
+                let blob = BlobKey::new(card, BlobWorkId::of_derivation(generation, artifact));
                 tokio::task::spawn_blocking(move || {
                     produce(
                         source,

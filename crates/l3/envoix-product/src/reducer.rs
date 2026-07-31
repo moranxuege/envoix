@@ -905,7 +905,11 @@ impl TransferRecord {
             let seal = sealed.fact();
             let describes_this_work = seal.blob.card() == self.identity.card
                 && seal.blob.artifact() == self.identity.artifact
-                && seal.blob.work().generation() == offer.key().generation()
+                && seal.blob.work()
+                    == envoix_blob_api::BlobWorkId::of_derivation(
+                        offer.key().generation(),
+                        self.identity.artifact,
+                    )
                 && seal.fingerprint == derivation.fingerprint(&offer);
             // And the content the card is about to rest on is the SEAL's, not a
             // second account of the same bytes: one value, so there is nothing
