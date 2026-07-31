@@ -3,7 +3,7 @@ use envoix_protocol::{
     Abort, Chunk, Complete, CompleteAck, ContentHash, FileHeader, Frame, FrameKind, Hello,
     IngressState, MAX_CHUNK_SIZE, ProtocolReason, Ready, ResumeMode, ResumeStatus,
 };
-use envoix_types::{ByteCount, OfferedName, TransferId};
+use envoix_types::{ByteCount, OfferedName, PeerContentDeclaration, TransferId};
 
 use crate::{
     DurablePrefix, MachineFailure, ProtocolViolation, SourceReader, StagingSink, StorageFault,
@@ -648,18 +648,6 @@ impl ReceiverAwaitHeader {
         let (admitted, _declaration) = self.inspect_header(frame, now)?;
         admitted.begin_receive(data_deadline, claim, sink)
     }
-}
-
-/// What the peer declared it is sending, before anything has acted on it.
-///
-/// Carries the transfer id as well as the content so a card can check the
-/// declaration against the one it commissioned without trusting the channel it
-/// arrived on to have done it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PeerContentDeclaration {
-    pub transfer: TransferId,
-    pub offered_name: OfferedName,
-    pub file_size: ByteCount,
 }
 
 /// A validated header whose declaration has not yet been acted on.

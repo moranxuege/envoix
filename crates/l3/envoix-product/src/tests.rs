@@ -10,8 +10,8 @@ use envoix_capabilities::{
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_protocol::ContentHash;
 use envoix_types::{
-    ArchivePath, ArtifactId, AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId,
-    RequestId, SourceItemId, TransferId,
+    ArchivePath, ArtifactId, AttemptGen, ByteCount, CommandId, Direction, OfferedName,
+    PeerContentDeclaration, RecordId, RequestId, SourceItemId, TransferId,
 };
 
 use crate::record::RecordInvariant;
@@ -20,9 +20,9 @@ use crate::test_support::{
 };
 use crate::{
     AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
-    PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
-    Quiescence, RecordCodecError, RecordDecode, StorageAction, TransferRecord, WorkerKind,
-    decode_record, encode_record,
+    PauseOrigin, PeerContentDecision, ProductCommand, ProductEffect, ProductIdentity, ProductInput,
+    ProductState, Quiescence, RecordCodecError, RecordDecode, StorageAction, TransferRecord,
+    WorkerKind, decode_record, encode_record,
 };
 use crate::{DerivationSpec, Selection, SourcePossession, StagingPlan};
 
@@ -1016,6 +1016,161 @@ fn a_new_generation_starts_unsettled() {
         assert_eq!(record.bytes_resumed, Some(ByteCount::new(25)));
         assert_eq!(record.bytes, ByteCount::new(25));
     }
+}
+
+fn declaration(record: &TransferRecord, name: &str, size: u64) -> PeerContentDeclaration {
+    PeerContentDeclaration {
+        transfer: record.identity.transfer,
+        offered_name: OfferedName::from_untrusted(name).expect("a bounded name"),
+        file_size: ByteCount::new(size),
+    }
+}
+
+/// A receive learns what it is receiving, once, from the peer that knows.
+///
+/// Until this arrives a receiving card has no total at all, which is why every
+/// bound in this reducer was inert for it.
+#[test]
+fn a_peer_declaration_establishes_a_receives_content() {
+    let mut record = create(Direction::Receive).0;
+    assert_eq!(record.known_total(), None, "nobody has said yet");
+
+    let declared = declaration(&record, "report.pdf", 4096);
+    assert_eq!(
+        record.classify_peer_content(&declared),
+        PeerContentDecision::Established
+    );
+    record
+        .reduce(ProductInput::PeerContentDeclared(declared.clone()))
+        .unwrap();
+    assert_eq!(record.known_total(), Some(ByteCount::new(4096)));
+
+    // The same header again — every resumed attempt re-sends one — settles
+    // nothing new and must not restart anything.
+    record.bytes = ByteCount::new(1000);
+    assert_eq!(
+        record.classify_peer_content(&declared),
+        PeerContentDecision::AlreadyEstablished
+    );
+    record
+        .reduce(ProductInput::PeerContentDeclared(declared))
+        .unwrap();
+    assert_eq!(
+        record.bytes,
+        ByteCount::new(1000),
+        "an identical retry is inert"
+    );
+}
+
+/// A re-picked document replaces what was announced, and takes the progress
+/// measured against the old one with it.
+///
+/// Nobody chooses to swap a document — `RePickSource` is refused while a source
+/// is ready. The only route is the person's file going away and the app asking
+/// them to choose again, which does not constrain what they choose.
+#[test]
+fn a_different_declaration_replaces_an_unsealed_partial() {
+    let mut record = create(Direction::Receive).0;
+    record
+        .reduce(ProductInput::PeerContentDeclared(declaration(
+            &record, "a.pdf", 1000,
+        )))
+        .unwrap();
+    record.state = ProductState::Transferring;
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::ResumeEstablished {
+                offset: ByteCount::new(0),
+            },
+        ))
+        .unwrap();
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::Progress {
+                transferred: ByteCount::new(400),
+            },
+        ))
+        .unwrap();
+    assert_eq!(record.bytes, ByteCount::new(400));
+
+    let replacement = declaration(&record, "b.pdf", 2000);
+    assert_eq!(
+        record.classify_peer_content(&replacement),
+        PeerContentDecision::Replaced
+    );
+    record
+        .reduce(ProductInput::PeerContentDeclared(replacement))
+        .unwrap();
+    assert_eq!(record.known_total(), Some(ByteCount::new(2000)));
+    assert_eq!(
+        record.bytes,
+        ByteCount::new(0),
+        "400 bytes of the OLD document is not progress towards the new one"
+    );
+    assert_eq!(record.bytes_resumed, None, "nor is anything resumed");
+}
+
+/// Delivered content is frozen, and not as a matter of taste.
+///
+/// The mailbox receipt seals under a transfer-derived key with a fixed zero
+/// nonce, which is safe only because one transfer yields one canonical receipt
+/// (`envoix-protocol/src/mailbox/receipt.rs`). A second content under the same
+/// transfer would be nonce reuse.
+#[test]
+fn a_delivered_transfer_refuses_a_different_declaration() {
+    for state in [
+        ProductState::Completed,
+        ProductState::Unconfirmed,
+        ProductState::Verifying,
+    ] {
+        let mut record = create(Direction::Receive).0;
+        record
+            .reduce(ProductInput::PeerContentDeclared(declaration(
+                &record, "a.pdf", 1000,
+            )))
+            .unwrap();
+        record.state = state;
+
+        let replacement = declaration(&record, "b.pdf", 2000);
+        assert_eq!(
+            record.classify_peer_content(&replacement),
+            PeerContentDecision::FinalContentConflict,
+            "{state:?} must not accept a different document"
+        );
+        record
+            .reduce(ProductInput::PeerContentDeclared(replacement))
+            .unwrap();
+        assert_eq!(
+            record.known_total(),
+            Some(ByteCount::new(1000)),
+            "and must not have changed anything by refusing"
+        );
+    }
+}
+
+/// A declaration for another transfer, or to a card that sends, changes nothing.
+#[test]
+fn a_declaration_that_is_not_this_cards_is_refused() {
+    let mut record = create(Direction::Receive).0;
+    let mut foreign = declaration(&record, "a.pdf", 1000);
+    foreign.transfer = TransferId::from_bytes([0x9f; 16]);
+    assert_eq!(
+        record.classify_peer_content(&foreign),
+        PeerContentDecision::NotThisTransfer
+    );
+    record
+        .reduce(ProductInput::PeerContentDeclared(foreign))
+        .unwrap();
+    assert_eq!(record.known_total(), None);
+
+    let sender = staging(Direction::Send);
+    assert_eq!(
+        sender.classify_peer_content(&declaration(&sender, "a.pdf", 1000)),
+        PeerContentDecision::NotThisTransfer,
+        "a card that sends is not told what it is receiving"
+    );
 }
 
 /// An empty file is a real file, and its bounds are real bounds.

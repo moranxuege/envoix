@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::{OfferedName, TransferId};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -83,4 +85,22 @@ impl ContentHash {
 pub struct DurablePrefix {
     pub length: ByteCount,
     pub digest: ContentHash,
+}
+
+/// What a peer says it is sending: a name and a byte count, and the transfer
+/// they are about.
+///
+/// L0 for the same reason as [`DurablePrefix`]: the transfer machine reads it
+/// off the wire and the product authority decides what to do with it, and
+/// neither should depend on the other for three fields it already owns.
+///
+/// A CLAIM, never a measurement. A sender establishes its total by counting
+/// bytes it read; a receiver is told. The absence of a digest here is that
+/// difference made structural — there is nothing in this type a receiver could
+/// mistake for proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerContentDeclaration {
+    pub transfer: TransferId,
+    pub offered_name: OfferedName,
+    pub file_size: ByteCount,
 }

@@ -4,7 +4,8 @@ use envoix_attempt_api::{
 use envoix_capabilities::{AdmittedDutyResult, AdmittedSourceResult, Duty, SourceAcquisitionKey};
 use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{
-    ArtifactId, AttemptGen, ByteCount, CommandId, Direction, RequestId, SourceItemId,
+    ArtifactId, AttemptGen, ByteCount, CommandId, Direction, PeerContentDeclaration, RequestId,
+    SourceItemId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +96,37 @@ pub struct Facts {
     pub remove_requested: bool,
 }
 
+/// What a card does with a peer's declaration of what it is sending.
+///
+/// The content of one transfer is settled once and then frozen at delivery. A
+/// re-picked document may replace an announcement while the receive is still a
+/// partial — the person's file went away and they were asked to choose again,
+/// and dead-ending the card for doing so would be punishing them for a failure
+/// that was not theirs.
+///
+/// It may NOT replace one that has been delivered. That is not a policy
+/// preference: the mailbox receipt seals under a transfer-derived key with a
+/// fixed zero nonce, which is safe only because one transfer yields one
+/// canonical receipt. Two contents per transfer would be nonce reuse.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerContentDecision {
+    /// Nothing was declared before. This becomes the transfer's content.
+    Established,
+    /// The same declaration again — a resumed attempt re-sending its header.
+    /// Idempotent, and in particular it does NOT restart progress.
+    AlreadyEstablished,
+    /// A different document, and this receive is still an unsealed partial.
+    /// The announcement is replaced and everything measured against the old one
+    /// is cleared.
+    Replaced,
+    /// A different document, but this transfer's content is final. The peer must
+    /// use a new transfer; nothing here changes.
+    FinalContentConflict,
+    /// The declaration does not name this card's transfer, or this card does not
+    /// receive at all. Nothing changes.
+    NotThisTransfer,
+}
+
 /// What a frontend states to create a card.
 ///
 /// Carries NO source metadata. A document is chosen after the card is durable,
@@ -137,6 +169,14 @@ pub enum ProductInput {
     SourceOffered {
         offer: AcceptedSourceOffer,
     },
+    /// What the peer declared it is sending, on a receiving card.
+    ///
+    /// Only ever applied after [`TransferRecord::classify_peer_content`] said
+    /// the declaration is admissible, on the same actor, so this input never
+    /// has to re-decide. The classification is separate because a caller is
+    /// WAITING on it: the answer describes the record the declaration will be
+    /// applied to, and only an admitted one may change anything.
+    PeerContentDeclared(PeerContentDeclaration),
     /// The platform's admitted answer about the acquisition it was asked for.
     ///
     /// The edge that was missing: the source duty was issued and dispatched,

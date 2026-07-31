@@ -7,15 +7,17 @@ use envoix_capabilities::{
     SourceAcquisitionFailure, SourceAcquisitionKey, SourceReport, SourceRetention,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
-use envoix_types::{ArtifactId, ByteCount, Direction, RequestId, TransferId};
+use envoix_types::{
+    ArtifactId, ByteCount, Direction, PeerContentDeclaration, RequestId, TransferId,
+};
 
 use crate::identity::next_generation;
 use crate::{
     AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
-    PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
-    Quiescence, SelectionGate, SourceBacking, SourceLifecycle, SourceOfferAnswer, SourcePossession,
-    SourceStagingPlan, StagedContent, StagingPlan, StagingWork, StorageAction, TransferContent,
-    TransferRecord, WorkerKind,
+    PauseOrigin, PeerContentDecision, ProductCommand, ProductEffect, ProductIdentity, ProductInput,
+    ProductState, Quiescence, SelectionGate, SourceBacking, SourceLifecycle, SourceOfferAnswer,
+    SourcePossession, SourceStagingPlan, StagedContent, StagingPlan, StagingWork, StorageAction,
+    TransferContent, TransferRecord, WorkerKind,
 };
 
 /// The domain tag that separates a card's source-duty request identity from its
@@ -233,6 +235,9 @@ impl TransferRecord {
             ProductInput::Command(command) => self.on_command(command)?,
             ProductInput::Restore => self.on_restore(),
             ProductInput::SourceOffered { offer } => self.on_source_offered(offer)?,
+            ProductInput::PeerContentDeclared(declaration) => {
+                self.on_peer_content_declared(&declaration)
+            }
             ProductInput::SourceSettled(result) => self.on_source_settled(&result),
             ProductInput::StageProgress { stamp, transferred } => {
                 self.on_stage_progress(stamp, transferred)
@@ -486,6 +491,88 @@ impl TransferRecord {
     /// currently asking for.
     pub fn answer_source_offer(&self, offer: &AcceptedSourceOffer) -> SourceOfferAnswer {
         self.source.answer_offer(&self.current_acquisition(), offer)
+    }
+
+    /// What this card would do with a peer's declaration, deciding nothing.
+    ///
+    /// Pure, and separate from applying it, because a caller is WAITING: the
+    /// answer has to describe the record the declaration will be applied to, and
+    /// only an admissible one may change anything. Same shape as
+    /// [`Self::answer_source_offer`], and for the same reason.
+    pub fn classify_peer_content(
+        &self,
+        declaration: &PeerContentDeclaration,
+    ) -> PeerContentDecision {
+        if self.direction != Direction::Receive || declaration.transfer != self.identity.transfer {
+            return PeerContentDecision::NotThisTransfer;
+        }
+        let SourceLifecycle::NotRequired { peer_content } = &self.source else {
+            return PeerContentDecision::NotThisTransfer;
+        };
+        let Some(current) = peer_content else {
+            return PeerContentDecision::Established;
+        };
+        if current.name() == &declaration.offered_name && current.total() == declaration.file_size {
+            return PeerContentDecision::AlreadyEstablished;
+        }
+        // Delivered content is frozen. Below that a re-picked document may
+        // replace what was announced; at or after it the receive holds bytes a
+        // receipt is or will be about, and one transfer has exactly one of
+        // those — the receipt seals under a transfer-derived key at a fixed zero
+        // nonce, which is only safe while that stays true.
+        if self.content_is_final() {
+            return PeerContentDecision::FinalContentConflict;
+        }
+        PeerContentDecision::Replaced
+    }
+
+    /// Whether this transfer's content can no longer change.
+    ///
+    /// Conservative on purpose: anything that has completed, is confirming a
+    /// completion, or has been cancelled counts. A card that is merely
+    /// transferring has written nothing a receipt can be about yet.
+    const fn content_is_final(&self) -> bool {
+        matches!(
+            self.state,
+            ProductState::Completed
+                | ProductState::Verifying
+                | ProductState::Unconfirmed
+                | ProductState::Cancelled
+        ) || self.facts.complete_sent
+            || self.facts.proof_delivered
+            || self.facts.remove_requested
+    }
+
+    fn on_peer_content_declared(
+        &mut self,
+        declaration: &PeerContentDeclaration,
+    ) -> Vec<ProductEffect> {
+        let content = TransferContent::new(declaration.offered_name.clone(), declaration.file_size);
+        match self.classify_peer_content(declaration) {
+            PeerContentDecision::Established => {
+                self.source = SourceLifecycle::NotRequired {
+                    peer_content: Some(content),
+                };
+                // A remembered count from before anyone stated a total can
+                // exceed it. Clamp rather than refuse: the record must not
+                // persist progress past its own total, and the settled resume is
+                // the authority on what is actually skipped anyway.
+                if self.bytes.get() > declaration.file_size.get() {
+                    self.bytes = declaration.file_size;
+                }
+            }
+            PeerContentDecision::Replaced => {
+                self.source = SourceLifecycle::NotRequired {
+                    peer_content: Some(content),
+                };
+                // Everything measured against the old document goes with it.
+                self.clear_progress();
+            }
+            PeerContentDecision::AlreadyEstablished
+            | PeerContentDecision::FinalContentConflict
+            | PeerContentDecision::NotThisTransfer => {}
+        }
+        Vec::new()
     }
 
     /// Applies the platform's answer about the acquisition it was asked for.
