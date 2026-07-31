@@ -340,42 +340,91 @@ async fn remembered_locator_rejects_reversed_roles() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn room_control_locator_pairs_only_the_fixed_control_roles() {
+    for room in ["c1_123456", "c2_123456"] {
+        let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(5)));
+        let (creator, creator_serve) =
+            start_peer(registry.clone(), room_control_creator_join(room));
+        wait_for_creator(&registry).await;
+        let (joiner, joiner_serve) = start_peer(registry, room_control_joiner_join(room));
+
+        let Reply::Paired(creator) = creator.await.unwrap() else {
+            panic!("room-control creator was not paired");
+        };
+        let Reply::Paired(joiner) = joiner.await.unwrap() else {
+            panic!("room-control joiner was not paired");
+        };
+        assert_eq!(creator.role, Role::Responder);
+        assert_eq!(joiner.role, Role::Initiator);
+        assert_eq!(creator.selected_bootstrap_method, BootstrapKind::RoomCode);
+        assert_eq!(joiner.selected_bootstrap_method, BootstrapKind::RoomCode);
+
+        creator_serve.await.unwrap().expect("serve creator");
+        joiner_serve.await.unwrap().expect("serve joiner");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_control_locator_namespaces_do_not_cross_match() {
     let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(5)));
-    let room = "c1_123456";
-    let (creator, creator_serve) = start_peer(registry.clone(), room_control_creator_join(room));
+    let (creator, creator_serve) =
+        start_peer(registry.clone(), room_control_creator_join("c1_123456"));
     wait_for_creator(&registry).await;
-    let (joiner, joiner_serve) = start_peer(registry, room_control_joiner_join(room));
 
-    let Reply::Paired(creator) = creator.await.unwrap() else {
-        panic!("room-control creator was not paired");
-    };
-    let Reply::Paired(joiner) = joiner.await.unwrap() else {
-        panic!("room-control joiner was not paired");
-    };
-    assert_eq!(creator.role, Role::Responder);
-    assert_eq!(joiner.role, Role::Initiator);
-    assert_eq!(creator.selected_bootstrap_method, BootstrapKind::RoomCode);
-    assert_eq!(joiner.selected_bootstrap_method, BootstrapKind::RoomCode);
+    let (wrong_joiner, wrong_joiner_serve) =
+        start_peer(registry.clone(), room_control_joiner_join("c2_123456"));
+    assert!(matches!(
+        wrong_joiner.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomNotFound,
+            ..
+        })
+    ));
+    assert!(matches!(
+        wrong_joiner_serve.await.unwrap(),
+        Err(RendezvousError::Rejected(BrokerOutcome::RoomNotFound))
+    ));
 
+    let (joiner, joiner_serve) = start_peer(registry, room_control_joiner_join("c1_123456"));
+    assert!(matches!(creator.await.unwrap(), Reply::Paired(_)));
+    assert!(matches!(joiner.await.unwrap(), Reply::Paired(_)));
     creator_serve.await.unwrap().expect("serve creator");
     joiner_serve.await.unwrap().expect("serve joiner");
 }
 
 #[tokio::test]
+async fn room_control_locator_rejects_unsupported_namespaces_and_shapes() {
+    for room in ["c1_12345", "c2_abcdef", "c3_123456"] {
+        let registry = Arc::new(RoomRegistry::new());
+        let (reply, serve) = start_peer(registry, room_control_creator_join(room));
+        assert!(matches!(
+            reply.await.unwrap(),
+            Reply::Rejected(BrokerRejection {
+                outcome: BrokerOutcome::MalformedJoin,
+                ..
+            })
+        ));
+        assert!(matches!(
+            serve.await.unwrap(),
+            Err(RendezvousError::Rejected(BrokerOutcome::MalformedJoin))
+        ));
+    }
+}
+
+#[tokio::test]
 async fn room_control_locator_rejects_non_control_join_shapes() {
     let invalid_joins = [
-        creator_join("c1_123456", TransferRole::Receiver),
+        creator_join("c2_123456", TransferRole::Receiver),
         Join {
             transfer_role: TransferRole::Sender,
-            ..room_control_creator_join("c1_123456")
+            ..room_control_creator_join("c2_123456")
         },
         Join {
             selected_bootstrap_method: Some(BootstrapKind::FullTicket),
-            ..room_control_joiner_join("c1_123456")
+            ..room_control_joiner_join("c2_123456")
         },
         Join {
             transfer_role: TransferRole::Receiver,
-            ..room_control_joiner_join("c1_123456")
+            ..room_control_joiner_join("c2_123456")
         },
     ];
 

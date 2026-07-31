@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::oneshot;
 
-use envoix_invite::is_room_control_locator;
-
 use crate::peer::{PeerConn, PeerParts};
 use crate::protocol::{
     BrokerOutcome, BrokerRejection, Join, Paired, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role,
@@ -20,6 +18,7 @@ use crate::{
 };
 
 const ROOM_ID_LEN: usize = 6;
+const SUPPORTED_ROOM_CONTROL_LOCATOR_PREFIXES: [&str; 2] = ["c1_", "c2_"];
 const REMEMBERED_ROOM_ID_PREFIX: &str = "r1_";
 const REMEMBERED_ROOM_ID_ENCODED_LEN: usize = 43;
 
@@ -588,7 +587,7 @@ impl RoomRegistry {
         let room_id = join.room_id.clone();
         let room_log_label = if is_remembered_room_id(&room_id) {
             "<remembered>"
-        } else if is_room_control_locator(&room_id) {
+        } else if is_supported_room_control_locator(&room_id) {
             "<room-control>"
         } else {
             room_id.as_str()
@@ -998,7 +997,7 @@ fn validate_join(join: &Join) -> Result<(), BrokerOutcome> {
     let invitation_room =
         join.room_id.len() == ROOM_ID_LEN && join.room_id.bytes().all(|byte| byte.is_ascii_digit());
     let remembered_room = is_remembered_room_id(&join.room_id);
-    let room_control = is_room_control_locator(&join.room_id);
+    let room_control = is_supported_room_control_locator(&join.room_id);
     if !invitation_room && !remembered_room && !room_control {
         return Err(BrokerOutcome::MalformedJoin);
     }
@@ -1033,6 +1032,16 @@ fn validate_join(join: &Join) -> Result<(), BrokerOutcome> {
         }
     }
     Ok(())
+}
+
+fn is_supported_room_control_locator(value: &str) -> bool {
+    SUPPORTED_ROOM_CONTROL_LOCATOR_PREFIXES
+        .iter()
+        .any(|prefix| {
+            value.strip_prefix(prefix).is_some_and(|room_id| {
+                room_id.len() == ROOM_ID_LEN && room_id.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
 }
 
 fn is_remembered_room_id(value: &str) -> bool {
