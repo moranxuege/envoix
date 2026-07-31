@@ -351,6 +351,11 @@ impl Host {
                 // readable file and the difference is the platform's, not the
                 // design's.
                 BoundSourceStaging::new(sources.clone()),
+                // The SAME registry answers both: staging reads the bound source
+                // through to establish what it contains, and the attempt reads it
+                // again to send it. One binding, two readers, and the second one
+                // cannot name a source the first did not.
+                sources.clone(),
                 EvidenceIntake(Arc::clone(&evidence)),
             ))
         };

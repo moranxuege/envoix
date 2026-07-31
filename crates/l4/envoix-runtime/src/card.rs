@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
 use envoix_attempt_api::{
-    AttemptEvent, AttemptEventKind, AttemptStamp, AttemptSupervisor, EventAdmission,
+    AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor, EventAdmission,
     RetirementAckResult, RetirementIntent,
 };
 use envoix_capabilities::AdmittedSourceResult;
+use envoix_outcomes::OutcomeCode;
 use envoix_product::{
     AcceptedSourceOffer, ApplyOutcome, CommandApplied, CommittedSession, ContentHash,
     IdentityError, LedgerHit, ProductCommand, ProductEffect, ProductInput, ProductState,
     Quiescence, RecordStore, SourceLifecycle, SourceOfferAnswer, SourcePossession, StagedContent,
     TransferContent,
 };
-use envoix_types::{ByteCount, CommandId, RecordId};
+use envoix_types::{ByteCount, CommandId, Direction, RecordId};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
@@ -19,6 +20,7 @@ use tokio::task::AbortHandle;
 
 use crate::command::{CommandCompletion, FrontendVerdict};
 use crate::error::CommandRejected;
+use crate::launch::{AttemptLaunch, PreparedSourceResolver, SourceLocator, StagedIdentity};
 use crate::port::{
     AttemptExecution, AttemptExecutor, ExecutorSignal, SourceStagingExecution,
     SourceStagingExecutor, SourceStagingSignal, StopHandle,
@@ -128,6 +130,8 @@ pub(crate) struct CardActor<R: RecordStore, E: AttemptExecutor> {
     /// have rippled through every `Runtime<..>` signature in the workspace for
     /// no property the compiler was not already giving us.
     staging_executor: Arc<dyn SourceStagingExecutor>,
+    /// How this card opens the source it is about to send.
+    sources: Arc<dyn PreparedSourceResolver>,
     card: RecordId,
     // `Option` so `Drop` can free the admission permit BEFORE the registry
     // entry is removed — see the `Drop` impl.
@@ -174,6 +178,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
         shared: Arc<Shared>,
         executor: Arc<E>,
         staging_executor: Arc<dyn SourceStagingExecutor>,
+        sources: Arc<dyn PreparedSourceResolver>,
         card: RecordId,
         permit: OwnedSemaphorePermit,
         session: CommittedSession<R>,
@@ -185,6 +190,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             shared,
             executor,
             staging_executor,
+            sources,
             card,
             permit: Some(permit),
             session: Some(session),
@@ -484,7 +490,28 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             ProductEffect::StartAttempt { plan } => {
                 // The runtime owns the supervisor and does the linearization.
                 let _ = self.supervisor.open(plan);
-                let AttemptExecution { signals, stop } = self.executor.start(plan);
+                let Some(launch) = self.launch(plan) else {
+                    // A send whose source this process cannot open. Nothing runs
+                    // — opening a transport to send bytes we do not have would
+                    // spend a connection to fail on the first read — and the card
+                    // is told the one thing it can act on: the source is not
+                    // usable, so ask for one again. `classify_terminal` moves the
+                    // lifecycle off `Ready` for exactly this code, which is what
+                    // makes the offered re-pick an allowed command.
+                    //
+                    // Routed through `on_signal` so it takes the same supervisor
+                    // admission and the same retirement handshake a real
+                    // executor's terminal does; `current` stays `None`, so the
+                    // retirement the reducer then asks for acks immediately.
+                    self.on_signal(
+                        plan.stamp,
+                        ExecutorSignal::Event(AttemptEventKind::Terminal(
+                            OutcomeCode::SourceUnreadable,
+                        )),
+                    );
+                    return;
+                };
+                let AttemptExecution { signals, stop } = self.executor.start(launch);
                 let pump = spawn_pump(&self.shared.handle, self.inbox.clone(), plan.stamp, signals);
                 self.current = Some(AttemptMeta {
                     stamp: plan.stamp,
@@ -629,6 +656,30 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             ),
             possession,
         })
+    }
+
+    /// The launch for one attempt, or `None` when a send cannot open its source.
+    ///
+    /// Resolved HERE, in the same step that starts the attempt, from the record
+    /// this actor has already committed. Anything watching for `Ready` from
+    /// outside would be reading the right fact at the wrong place: projections
+    /// are drained asynchronously, so nothing orders that observation against
+    /// this dispatch.
+    fn launch(&self, plan: AttemptPlan) -> Option<AttemptLaunch> {
+        if plan.direction == Direction::Receive {
+            return AttemptLaunch::receiving(plan);
+        }
+        let record = self.session().record();
+        let SourceLifecycle::Ready { content, .. } = &record.source else {
+            return None;
+        };
+        let identity = StagedIdentity {
+            total: content.total(),
+            digest: content.content_hash(),
+        };
+        let locator = SourceLocator::of(&record.source, record.identity.artifact)?;
+        let source = self.sources.resolve(locator, identity).ok()?;
+        AttemptLaunch::sending(plan, source)
     }
 
     fn try_ack(&mut self, stamp: AttemptStamp) {

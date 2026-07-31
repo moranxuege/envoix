@@ -5,12 +5,19 @@ use envoix_attempt_api::{AttemptEventKind, AttemptPlan, AttemptStamp, Retirement
 use envoix_attempt_iroh::{AttemptError, AttemptHandle};
 use envoix_outcomes::OutcomeCode;
 use envoix_runtime::{
-    AttemptExecution, AttemptExecutor, ExecutorSignal, StopSignal, StopToken, stop_channel,
+    AttemptExecution, AttemptExecutor, AttemptLaunch, ExecutorSignal, PreparedAttemptIo,
+    StopSignal, StopToken, stop_channel,
 };
 use tokio::sync::{mpsc, oneshot};
 
-type PreparedLaunch =
-    Box<dyn FnOnce(AttemptPlan) -> Result<AttemptHandle, AttemptError> + Send + 'static>;
+/// The transport half: everything an attempt needs that the AUTHORITY does not
+/// supply — the link, the token, the timeouts. The I/O half arrives separately,
+/// resolved by the card from its own committed record, and the two meet here.
+type PreparedLaunch = Box<
+    dyn FnOnce(AttemptPlan, PreparedAttemptIo) -> Result<AttemptHandle, AttemptError>
+        + Send
+        + 'static,
+>;
 
 /// One attempt's two halves, whichever arrived first.
 ///
@@ -75,7 +82,9 @@ impl PreparedIrohExecutor {
     pub fn prepare(
         &self,
         stamp: AttemptStamp,
-        launch: impl FnOnce(AttemptPlan) -> Result<AttemptHandle, AttemptError> + Send + 'static,
+        launch: impl FnOnce(AttemptPlan, PreparedAttemptIo) -> Result<AttemptHandle, AttemptError>
+        + Send
+        + 'static,
     ) -> bool {
         let launch: PreparedLaunch = Box::new(launch);
         let mut pending = self.lock();
@@ -109,7 +118,8 @@ impl PreparedIrohExecutor {
 }
 
 impl AttemptExecutor for PreparedIrohExecutor {
-    fn start(&self, plan: AttemptPlan) -> AttemptExecution {
+    fn start(&self, launch: AttemptLaunch) -> AttemptExecution {
+        let (plan, io) = launch.into_parts();
         let (signals_tx, signals) = mpsc::channel(32);
         let (stop, token) = stop_channel();
         let rendezvous = {
@@ -135,6 +145,7 @@ impl AttemptExecutor for PreparedIrohExecutor {
         };
         tokio::spawn(run_attempt(
             plan,
+            io,
             rendezvous,
             self.clone(),
             signals_tx,
@@ -152,6 +163,7 @@ enum Waiting {
 
 async fn run_attempt(
     plan: AttemptPlan,
+    io: PreparedAttemptIo,
     waiting: Waiting,
     executor: PreparedIrohExecutor,
     signals: mpsc::Sender<ExecutorSignal>,
@@ -193,7 +205,7 @@ async fn run_attempt(
             }
         }
     };
-    let Ok(mut handle) = launch(plan) else {
+    let Ok(mut handle) = launch(plan, io) else {
         // A prepared launch that fails to spawn a real link is a genuine error.
         let _ = signals
             .send(ExecutorSignal::Event(AttemptEventKind::Terminal(
@@ -255,6 +267,7 @@ const fn teardown_intent(signal: StopSignal) -> RetirementIntent {
 #[cfg(test)]
 mod tests {
     use envoix_attempt_api::ResumeIntent;
+    use envoix_runtime::{PreparedSource, StagedIdentity};
     use envoix_types::{ArtifactId, AttemptGen, Direction, RecordId, TransferId};
 
     use super::*;
@@ -278,8 +291,37 @@ mod tests {
     /// A launch that refuses to spawn. Its refusal is OBSERVABLE — the executor
     /// answers a terminal — which is what lets a test see that an attempt got
     /// the launch at all, without standing up a transport.
-    fn refusing_launch() -> impl FnOnce(AttemptPlan) -> Result<AttemptHandle, AttemptError> {
-        |_| Err(AttemptError::WrongDirection)
+    fn refusing_launch()
+    -> impl FnOnce(AttemptPlan, PreparedAttemptIo) -> Result<AttemptHandle, AttemptError> {
+        |_, _| Err(AttemptError::WrongDirection)
+    }
+
+    /// A send launch over a source that reads nothing. These cases are about the
+    /// RENDEZVOUS — which half arrives first, and what happens when a retirement
+    /// races it — so the bytes never matter; what matters is that a send arrives
+    /// with a source at all, which the launch type now requires.
+    fn sending(plan: AttemptPlan) -> AttemptLaunch {
+        struct EmptySource;
+        impl envoix_capabilities::SourceSession for EmptySource {
+            fn read_at(
+                &mut self,
+                _offset: envoix_types::ByteCount,
+                _destination: &mut [u8],
+            ) -> Result<usize, envoix_capabilities::SourceReadError> {
+                Ok(0)
+            }
+        }
+        AttemptLaunch::sending(
+            plan,
+            PreparedSource::new(
+                Box::new(EmptySource),
+                StagedIdentity {
+                    total: envoix_types::ByteCount::new(0),
+                    digest: envoix_runtime::ContentHash::from_bytes([0; 32]),
+                },
+            ),
+        )
+        .expect("the plan sends")
     }
 
     /// Asserts this attempt received its launch, by the terminal the refusing
@@ -318,10 +360,10 @@ mod tests {
     async fn a_launch_and_its_attempt_meet_in_either_order() {
         let executor = PreparedIrohExecutor::default();
         assert!(executor.prepare(plan(1).stamp, refusing_launch()));
-        assert_launched(executor.start(plan(1))).await;
+        assert_launched(executor.start(sending(plan(1)))).await;
 
         let executor = PreparedIrohExecutor::default();
-        let execution = executor.start(plan(2));
+        let execution = executor.start(sending(plan(2)));
         assert!(executor.prepare(plan(2).stamp, refusing_launch()));
         assert_launched(execution).await;
     }
@@ -336,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn a_retirement_beats_a_launch_that_arrives_with_it() {
         let executor = PreparedIrohExecutor::default();
-        let mut execution = executor.start(plan(1));
+        let mut execution = executor.start(sending(plan(1)));
         // No await between the spawn and these, so the attempt's task has not
         // polled yet and both branches are ready when it does.
         execution.stop.stop(RetirementIntent::Cancel);
@@ -356,7 +398,7 @@ mod tests {
         let executor = PreparedIrohExecutor::default();
         assert!(executor.prepare(plan(1).stamp, refusing_launch()));
 
-        assert_parked(executor.start(plan(2))).await;
+        assert_parked(executor.start(sending(plan(2)))).await;
     }
 
     /// And the superseded launch does not sit in the map forever.
@@ -365,7 +407,7 @@ mod tests {
         let executor = PreparedIrohExecutor::default();
         assert!(executor.prepare(plan(1).stamp, refusing_launch()));
 
-        let execution = executor.start(plan(2));
+        let execution = executor.start(sending(plan(2)));
 
         assert!(
             !executor.lock().contains_key(&plan(1).stamp),
@@ -394,7 +436,7 @@ mod tests {
     async fn an_attempt_nobody_prepared_parks_and_leaves_nothing_behind() {
         let executor = PreparedIrohExecutor::default();
 
-        assert_parked(executor.start(plan(1))).await;
+        assert_parked(executor.start(sending(plan(1)))).await;
 
         assert!(
             executor.lock().is_empty(),

@@ -23,9 +23,11 @@ use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use envoix_capabilities::{SourceReadError, SourceSession};
 use envoix_runtime::{
-    ContentHash, SourceAcquisitionKey, SourceStagingExecution, SourceStagingExecutor,
-    SourceStagingPlan, SourceStagingSignal, StagingPlan, StopToken, stop_channel,
+    ContentHash, PreparedSource, PreparedSourceResolver, SourceAcquisitionKey, SourceLocator,
+    SourceResolveError, SourceStagingExecution, SourceStagingExecutor, SourceStagingPlan,
+    SourceStagingSignal, StagedIdentity, StagingPlan, StopToken, stop_channel,
 };
 use envoix_types::{AttemptGen, ByteCount};
 use tokio::sync::mpsc;
@@ -161,6 +163,51 @@ impl BoundSourceRegistry {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SourceAcquisitionKey, BoundSource>> {
         self.sources.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// One bound source, opened for one attempt to read positionally.
+///
+/// Holds a DUPLICATE of the registry's descriptor, so the registry keeps its own
+/// and a second attempt — a retry, a resume — can open another. Reads are
+/// positional precisely because those duplicates share a file offset.
+struct BoundSourceReader(File);
+
+impl SourceSession for BoundSourceReader {
+    fn read_at(
+        &mut self,
+        offset: ByteCount,
+        destination: &mut [u8],
+    ) -> Result<usize, SourceReadError> {
+        self.0
+            .read_at(destination, offset.get())
+            .map_err(|_| SourceReadError)
+    }
+}
+
+impl PreparedSourceResolver for BoundSourceRegistry {
+    fn resolve(
+        &self,
+        locator: SourceLocator,
+        identity: StagedIdentity,
+    ) -> Result<PreparedSource, SourceResolveError> {
+        let SourceLocator::PersistedProvider { acquisition } = locator else {
+            // An owned artifact is resolved from the bulk store, which does not
+            // exist. Nothing can currently reach this: the only plan that
+            // produces that backing is the copy plan, and the staging worker
+            // refuses it rather than establishing a source it did not write.
+            return Err(SourceResolveError::Unsupported);
+        };
+        // Absent, not unsupported: this host DOES resolve provider sources, and
+        // the card's own record says this one was established. What is missing
+        // is the process-local session — a descriptor does not outlive the
+        // process that opened it — so a restart lands here until something
+        // rebinds the persisted grant.
+        let source = self.open(&acquisition).ok_or(SourceResolveError::Absent)?;
+        Ok(PreparedSource::new(
+            Box::new(BoundSourceReader(source)),
+            identity,
+        ))
     }
 }
 

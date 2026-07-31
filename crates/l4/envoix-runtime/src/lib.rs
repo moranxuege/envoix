@@ -55,6 +55,7 @@ mod command;
 mod config;
 mod error;
 mod evidence;
+mod launch;
 mod port;
 mod runtime;
 mod subscription;
@@ -76,6 +77,10 @@ pub use envoix_product::{
     SystemIdentitySource, TransferContent, TransferRecord, WorkerKind,
 };
 pub use error::{AcquireError, CommandRejected};
+pub use launch::{
+    AttemptLaunch, NoSourceSessions, PreparedAttemptIo, PreparedSource, PreparedSourceResolver,
+    SourceLocator, SourceResolveError, StagedIdentity,
+};
 pub use port::{
     AttemptExecution, AttemptExecutor, ExecutorSignal, NoSourceStaging, SessionProvider,
     SourceStagingExecution, SourceStagingExecutor, SourceStagingSignal, StopHandle, StopSignal,

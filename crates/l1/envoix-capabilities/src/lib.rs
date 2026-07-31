@@ -6,6 +6,7 @@ mod ledger;
 mod model;
 mod source_key;
 mod source_report;
+mod source_session;
 
 pub use ledger::{Admission, DutyLedger, GenerationUpdate, Registration};
 pub use model::{
@@ -16,6 +17,7 @@ pub use source_key::SourceAcquisitionKey;
 pub use source_report::{
     SourceAcquisitionFailure, SourceReport, SourceRetention, SourceSeekability,
 };
+pub use source_session::{SourceReadError, SourceSession};
 
 #[cfg(test)]
 mod tests;

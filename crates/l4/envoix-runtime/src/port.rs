@@ -1,4 +1,4 @@
-use envoix_attempt_api::{AttemptEventKind, AttemptPlan, RetirementIntent};
+use envoix_attempt_api::{AttemptEventKind, RetirementIntent};
 use envoix_product::{CommittedSession, ContentHash, RecordStore, SourceStagingPlan};
 use envoix_types::{ArtifactId, ByteCount, RecordId};
 use tokio::sync::{mpsc, oneshot};
@@ -22,8 +22,15 @@ pub trait SessionProvider: Send + Sync + 'static {
 /// RT1 owns the C7 `AttemptSupervisor`; the executor only produces raw signals.
 /// The real iroh executor is wired at the host — see the crate docs.
 pub trait AttemptExecutor: Send + Sync + 'static {
-    /// Begin executing `plan`, returning the runtime's view of its signals.
-    fn start(&self, plan: AttemptPlan) -> AttemptExecution;
+    /// Begin executing one attempt, returning the runtime's view of its signals.
+    ///
+    /// Takes an [`AttemptLaunch`] rather than a bare plan: a send arrives with
+    /// the source it will read already opened by the authority that owns it, so
+    /// an executor has nothing to resolve and no way to resolve a source the
+    /// card did not name.
+    ///
+    /// [`AttemptLaunch`]: crate::AttemptLaunch
+    fn start(&self, launch: crate::AttemptLaunch) -> AttemptExecution;
 }
 
 /// The runtime's handle onto one running attempt.

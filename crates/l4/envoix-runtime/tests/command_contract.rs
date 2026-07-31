@@ -9,15 +9,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use envoix_attempt_api::AttemptPlan;
 use envoix_operation_store::OperationStore;
 use envoix_product::{
     CommitError, CommittedSession, IdentityError, IdentitySource, LedgerHit, NewTransfer,
     ProductCommand, ProductState, RecordDecode, RecordStore, TransferRecord, decode_record,
 };
 use envoix_runtime::{
-    AttemptExecution, AttemptExecutor, CommandCompletion, CommandRejected, CommandVerdict,
-    NoSourceStaging, Runtime, RuntimeConfig, SessionProvider, stop_channel,
+    AttemptExecution, AttemptExecutor, AttemptLaunch, CommandCompletion, CommandRejected,
+    CommandVerdict, NoSourceStaging, PreparedSource, PreparedSourceResolver, Runtime,
+    RuntimeConfig, SessionProvider, SourceLocator, SourceResolveError, StagedIdentity,
+    stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -178,7 +179,7 @@ impl SessionProvider for ScriptedProvider {
 struct InertExecutor;
 
 impl AttemptExecutor for InertExecutor {
-    fn start(&self, _plan: AttemptPlan) -> AttemptExecution {
+    fn start(&self, _launch: AttemptLaunch) -> AttemptExecution {
         let (signal_tx, signals) = mpsc::channel(4);
         let (stop, token) = stop_channel();
         tokio::spawn(async move {
@@ -290,6 +291,7 @@ async fn mutating_hot_restart_exactly_once() {
         },
         InertExecutor,
         NoSourceStaging,
+        MemorySources,
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -322,6 +324,7 @@ async fn mutating_hot_restart_exactly_once() {
         },
         InertExecutor,
         NoSourceStaging,
+        MemorySources,
     );
     runtime.restore(card).unwrap();
     let commander = runtime.subscribe(card, CAPACITY).unwrap();
@@ -383,6 +386,7 @@ async fn mutating_hot_restart_exactly_once() {
         },
         InertExecutor,
         NoSourceStaging,
+        MemorySources,
     );
     runtime.restore(second).unwrap();
     let commander = runtime.subscribe(second, CAPACITY).unwrap();
@@ -426,6 +430,7 @@ async fn stale_epoch_commands_are_inert() {
         },
         InertExecutor,
         NoSourceStaging,
+        MemorySources,
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -511,6 +516,7 @@ async fn acceptance_is_not_completion() {
         },
         InertExecutor,
         NoSourceStaging,
+        MemorySources,
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -582,6 +588,7 @@ async fn reused_identity_with_different_command_conflicts() {
         },
         InertExecutor,
         NoSourceStaging,
+        MemorySources,
     );
     let (session, outcome) = create_card(root, &script, 0x70);
     let card = session.record().identity.card;
@@ -656,6 +663,7 @@ async fn interrupted_command_disambiguates_after_restore() {
         },
         InertExecutor,
         NoSourceStaging,
+        MemorySources,
     );
     let (session, outcome) = create_card(root, &script, 0x80);
     let card = session.record().identity.card;
@@ -701,4 +709,34 @@ async fn interrupted_command_disambiguates_after_restore() {
         })
     );
     runtime.shutdown().await;
+}
+
+/// A resolver that always opens an empty in-memory source.
+///
+/// These suites drive the LIFECYCLE, not the bytes: what they need is for a send
+/// to be able to start. Answering `Unsupported` would fail every send before it
+/// began, which is correct behaviour and the wrong thing to be testing here.
+#[derive(Clone, Copy, Debug, Default)]
+struct MemorySources;
+
+struct EmptySource;
+
+impl envoix_capabilities::SourceSession for EmptySource {
+    fn read_at(
+        &mut self,
+        _offset: envoix_types::ByteCount,
+        _destination: &mut [u8],
+    ) -> Result<usize, envoix_capabilities::SourceReadError> {
+        Ok(0)
+    }
+}
+
+impl PreparedSourceResolver for MemorySources {
+    fn resolve(
+        &self,
+        _locator: SourceLocator,
+        identity: StagedIdentity,
+    ) -> Result<PreparedSource, SourceResolveError> {
+        Ok(PreparedSource::new(Box::new(EmptySource), identity))
+    }
 }

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use envoix_attempt_api::{AttemptEventKind, AttemptPlan, RetirementIntent};
+use envoix_attempt_api::{AttemptEventKind, RetirementIntent};
 use envoix_capabilities::{
     Admission, Duty, DutyLedger, DutyProvenance, DutyReport, DutyResult, Registration,
     SourceAcquisitionKey, SourceReport, SourceRetention, SourceSeekability,
@@ -26,10 +26,11 @@ use envoix_product::{
     TransferRecord, decode_record,
 };
 use envoix_runtime::{
-    AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, CommandCompletion,
-    CommandVerdict, DutyKind, EvidenceSink, EvidenceSinkError, ExecutorSignal, LosslessUpdateKind,
-    NoSourceStaging, Runtime, RuntimeConfig, SessionProvider, ShutdownReport, StopSignal,
-    SubscribeError, TryRecvError, stop_channel,
+    AcquireError, AttemptExecution, AttemptExecutor, AttemptLaunch, CardUpdateKind,
+    CommandCompletion, CommandVerdict, DutyKind, EvidenceSink, EvidenceSinkError, ExecutorSignal,
+    LosslessUpdateKind, NoSourceStaging, PreparedSource, PreparedSourceResolver, Runtime,
+    RuntimeConfig, SessionProvider, ShutdownReport, SourceLocator, SourceResolveError,
+    StagedIdentity, StopSignal, SubscribeError, TryRecvError, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -157,7 +158,8 @@ impl ScriptedExecutor {
 }
 
 impl AttemptExecutor for ScriptedExecutor {
-    fn start(&self, plan: AttemptPlan) -> AttemptExecution {
+    fn start(&self, launch: AttemptLaunch) -> AttemptExecution {
+        let plan = launch.plan();
         let script = self
             .scripts
             .lock()
@@ -467,6 +469,7 @@ async fn evidence_failure_is_non_authoritative() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
         evidence.clone(),
     );
 
@@ -536,6 +539,7 @@ async fn runtime_lease_shutdown_hibernate_restore() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
 
     // --- exclusive lease + shared handle (idempotent bootstrap) ---
@@ -574,6 +578,7 @@ async fn runtime_lease_shutdown_hibernate_restore() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
     runtime.restore(card).unwrap();
     // Restore reconciles + commits, then the quiescent card hibernates (owns no
@@ -617,6 +622,7 @@ async fn supervision_panic_does_not_wedge_runtime() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -655,6 +661,7 @@ async fn admission_rejects_over_cap() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
 
     let (first, first_outcome) = create_session(root, Direction::Send, 0x10);
@@ -709,6 +716,7 @@ async fn detach_reattach_epoch_backpressure() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -792,6 +800,7 @@ async fn terminal_events_and_duties_never_dropped() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
 
     let (session, outcome) = create_session(root, Direction::Receive, 0x60);
@@ -906,6 +915,7 @@ async fn an_outstanding_source_duty_is_replayed_to_every_attachment() {
         OpStoreProvider { root: root.into() },
         ScriptedExecutor::new(Script::RunUntilStop),
         NoSourceStaging,
+        MemorySources,
     );
     let (session, initial) = create_awaiting_session(root, 0x2b);
     let card = session.record().identity.card;
@@ -989,6 +999,7 @@ async fn removed_card_evicts_projection() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -1032,6 +1043,7 @@ async fn reissued_duty_supersedes_not_accumulates() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
 
     let (session, outcome) = create_session(root, Direction::Receive, 0x60);
@@ -1097,7 +1109,7 @@ impl CapturingExecutor {
 }
 
 impl AttemptExecutor for CapturingExecutor {
-    fn start(&self, _plan: AttemptPlan) -> AttemptExecution {
+    fn start(&self, _launch: AttemptLaunch) -> AttemptExecution {
         let (signal_tx, signals) = mpsc::channel(4);
         let (stop, token) = stop_channel();
         let captured = Arc::clone(&self.signal);
@@ -1135,6 +1147,7 @@ async fn stop_intent_reaches_the_executor() {
             },
             executor.clone(),
             NoSourceStaging,
+            MemorySources,
         );
 
         let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -1172,6 +1185,7 @@ async fn teardown_reaches_the_executor_as_detached_not_cancel() {
         },
         executor.clone(),
         NoSourceStaging,
+        MemorySources,
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x11);
@@ -1181,4 +1195,107 @@ async fn teardown_reaches_the_executor_as_detached_not_cancel() {
 
     runtime.shutdown().await;
     assert_eq!(executor.captured().await, StopSignal::Detached);
+}
+
+/// Refuses every source, and remembers what it was asked for.
+#[derive(Clone, Default)]
+struct AbsentSources(Arc<std::sync::Mutex<Vec<SourceLocator>>>);
+
+impl PreparedSourceResolver for AbsentSources {
+    fn resolve(
+        &self,
+        locator: SourceLocator,
+        _identity: StagedIdentity,
+    ) -> Result<PreparedSource, SourceResolveError> {
+        self.0.lock().unwrap().push(locator);
+        Err(SourceResolveError::Absent)
+    }
+}
+
+/// A resolver that always opens an empty in-memory source.
+///
+/// These suites drive the LIFECYCLE, not the bytes: what they need is for a send
+/// to be able to start. Answering `Unsupported` would fail every send before it
+/// began, which is correct behaviour and the wrong thing to be testing here.
+#[derive(Clone, Copy, Debug, Default)]
+struct MemorySources;
+
+struct EmptySource;
+
+impl envoix_capabilities::SourceSession for EmptySource {
+    fn read_at(
+        &mut self,
+        _offset: envoix_types::ByteCount,
+        _destination: &mut [u8],
+    ) -> Result<usize, envoix_capabilities::SourceReadError> {
+        Ok(0)
+    }
+}
+
+impl PreparedSourceResolver for MemorySources {
+    fn resolve(
+        &self,
+        _locator: SourceLocator,
+        identity: StagedIdentity,
+    ) -> Result<PreparedSource, SourceResolveError> {
+        Ok(PreparedSource::new(Box::new(EmptySource), identity))
+    }
+}
+
+/// A send whose source this process cannot open does not start a transport, and
+/// does not park pretending to connect.
+///
+/// It asks for the source NAMED BY ITS OWN COMMITTED RECORD — the assertion on
+/// the locator is what proves the card derived it from `Ready` rather than from
+/// anything the executor could have supplied — and when that source is gone it
+/// fails the one way the person can act on: the lifecycle leaves `Ready`, so the
+/// `RePickSource` the outcome recommends is a command the card will accept.
+///
+/// Opening a link first would spend a connection to discover on the first read
+/// that there are no bytes behind it.
+#[tokio::test]
+async fn a_send_that_cannot_open_its_source_fails_instead_of_connecting() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let sources = AbsentSources::default();
+    let runtime = Runtime::start(
+        config(8),
+        OpStoreProvider {
+            root: root.to_path_buf(),
+        },
+        // The executor must never be reached: nothing should start.
+        CapturingExecutor::new(),
+        NoSourceStaging,
+        sources.clone(),
+    );
+
+    let (session, outcome) = create_session(root, Direction::Send, 0x70);
+    let card = session.record().identity.card;
+    let expected = *session
+        .record()
+        .source
+        .key()
+        .expect("a staged sender names its acquisition");
+    runtime.admit(session, outcome).unwrap();
+
+    wait_for_state(&runtime, card, ProductState::Failed).await;
+    runtime.shutdown().await;
+
+    assert_eq!(
+        sources.0.lock().unwrap().as_slice(),
+        [SourceLocator::PersistedProvider {
+            acquisition: expected
+        }],
+        "the card asked for a source other than the one its record established"
+    );
+    let record = durable_state(root, card);
+    assert!(
+        !record.source.is_ready(),
+        "a source that could not be opened is still ready: {:?}",
+        record.source
+    );
+    assert_eq!(
+        record.outcome.as_ref().and_then(|outcome| outcome.recovery),
+        Some(envoix_outcomes::Recovery::RePickSource)
+    );
 }
