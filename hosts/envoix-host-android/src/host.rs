@@ -828,13 +828,13 @@ impl Host {
             return false;
         };
         let result = report.to_result();
+        // ADMITTED, not discharged. The duty is in flight until something says
+        // the result reached durable product state — and for every kind but the
+        // source that is right here, because there is nothing further to reach.
         let admitted = {
             let mut state = self.shared.lock();
             match state.ledger.admit(result) {
-                Admission::Fresh(admitted) => {
-                    state.adapter.settle(admitted.duty().provenance);
-                    admitted
-                }
+                Admission::Fresh(admitted) => admitted,
                 // Including `Incompatible`: an adapter that answered the wrong
                 // question has not done the work, so the duty stays outstanding
                 // and is re-delivered rather than discharged on a claim that
@@ -849,25 +849,38 @@ impl Host {
         // A source answer goes to the product. Every other kind is admitted and
         // settled here and goes no further — the receipt's own intake is still
         // the F-phase slice it always was.
+        let provenance = admitted.duty().provenance;
         match admitted.into_source() {
             Some(source) => {
                 let runtime = Arc::clone(&self.runtime);
-                // The delivery ANSWER, not a discarded one. `true` here told the
-                // platform its work had landed even when every delivery round
-                // failed and the card was left in `Acquiring` with the duty
-                // discharged — the one state in which nothing re-asks.
-                //
-                // Reporting the failure does not by itself recover it: the
-                // ledger has already admitted this provenance, so a re-report
-                // would be refused as a duplicate. What recovers it is restore —
-                // an `Acquiring` card re-issues its source duty, and the ledger
-                // is process memory rebuilt at boot, so the re-issued duty is
-                // genuinely outstanding again. Until then the honest answer is
-                // that this did not land.
-                self.tokio
-                    .block_on(async move { runtime.deliver_source_result(source).await })
+                let delivered = self
+                    .tokio
+                    .block_on(async move { runtime.deliver_source_result(source).await });
+                // The SECOND phase, and which one depends on whether the card
+                // actually took it. A delivery that failed leaves the duty
+                // outstanding, so the same answer can be reported again and be
+                // admitted — rather than being refused as a duplicate of
+                // something nothing acted on, which left the card waiting for an
+                // answer it could never receive until a restart.
+                let mut state = self.shared.lock();
+                if delivered {
+                    state.ledger.finalize(provenance);
+                    state.adapter.settle(provenance);
+                } else {
+                    state.ledger.abandon(provenance);
+                    state.adapter.release(provenance);
+                }
+                delivered
             }
-            None => true,
+            // Every other kind is answered by being reported: there is no
+            // further place for the result to reach, so admission IS the whole
+            // transaction and finalizing here says exactly that.
+            None => {
+                let mut state = self.shared.lock();
+                state.ledger.finalize(provenance);
+                state.adapter.settle(provenance);
+                true
+            }
         }
     }
 

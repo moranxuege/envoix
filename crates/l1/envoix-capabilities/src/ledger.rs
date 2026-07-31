@@ -47,6 +47,15 @@ pub enum Admission {
 pub struct DutyLedger {
     current_generations: HashMap<RecordId, AttemptGen>,
     outstanding: HashMap<DutyProvenance, Duty>,
+    /// Admitted, and not yet known to have been ACTED ON.
+    ///
+    /// The middle state a one-phase ledger did not have. Admission used to
+    /// discharge immediately, so a result the card never committed was recorded
+    /// as done: the platform was told its work had landed, the card sat waiting
+    /// for an answer that would now be refused as a duplicate, and only a
+    /// restart could clear it — because the ledger is process memory rebuilt at
+    /// boot, which is the only reason that was survivable at all.
+    in_flight: HashMap<DutyProvenance, Duty>,
     discharged: HashSet<DutyProvenance>,
 }
 
@@ -80,6 +89,9 @@ impl DutyLedger {
                 self.outstanding.retain(|provenance, _| {
                     provenance.card != card || provenance.generation >= generation
                 });
+                self.in_flight.retain(|provenance, _| {
+                    provenance.card != card || provenance.generation >= generation
+                });
                 self.discharged.retain(|provenance| {
                     provenance.card != card || provenance.generation >= generation
                 });
@@ -104,7 +116,10 @@ impl DutyLedger {
         if self.discharged.contains(&provenance) {
             return Registration::AlreadyDischarged;
         }
-        if self.outstanding.contains_key(&provenance) {
+        // An answer in flight is still this duty's answer. Re-registering would
+        // dispatch the work a second time while the first result is being
+        // applied.
+        if self.outstanding.contains_key(&provenance) || self.in_flight.contains_key(&provenance) {
             return Registration::AlreadyOutstanding;
         }
 
@@ -122,7 +137,7 @@ impl DutyLedger {
         if provenance.generation < current {
             return Admission::Stale;
         }
-        if self.discharged.contains(&provenance) {
+        if self.discharged.contains(&provenance) || self.in_flight.contains_key(&provenance) {
             return Admission::Duplicate;
         }
 
@@ -136,13 +151,38 @@ impl DutyLedger {
         if !result.report.answers(duty.kind) {
             return Admission::Incompatible;
         }
+        // The FIRST phase. The duty leaves `outstanding` so nothing dispatches
+        // it again, and does not reach `discharged` until something says the
+        // result was acted on — see `finalize` and `abandon`.
         self.outstanding.remove(&provenance);
-        self.discharged.insert(provenance);
+        self.in_flight.insert(provenance, duty);
 
         Admission::Fresh(AdmittedDutyResult {
             duty,
             report: result.report,
         })
+    }
+
+    /// The second phase: this result reached durable product state.
+    ///
+    /// Only now is the duty done. A caller that never calls this has not lied to
+    /// anyone — the duty simply stays in flight until it is abandoned.
+    pub fn finalize(&mut self, provenance: DutyProvenance) {
+        if self.in_flight.remove(&provenance).is_some() {
+            self.discharged.insert(provenance);
+        }
+    }
+
+    /// The other second phase: the result did NOT reach product state.
+    ///
+    /// The duty goes back to outstanding, so the same answer can be admitted
+    /// again rather than being refused as a duplicate of something nothing
+    /// acted on. This is what makes a lost delivery recoverable within the
+    /// process instead of only across a restart.
+    pub fn abandon(&mut self, provenance: DutyProvenance) {
+        if let Some(duty) = self.in_flight.remove(&provenance) {
+            self.outstanding.insert(provenance, duty);
+        }
     }
 
     pub fn outstanding_len(&self) -> usize {

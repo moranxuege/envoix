@@ -62,6 +62,17 @@ impl DutyAdapter {
         IssueDecision::Dispatch(order)
     }
 
+    /// Forgets an issued duty whose result did NOT reach product state.
+    ///
+    /// The counterpart of the ledger abandoning it. Without this the adapter
+    /// still believes the order is in flight and answers `AlreadyInFlight` to
+    /// every re-issue, so a duty the ledger has made outstanding again would
+    /// never be dispatched — the two would disagree about whether the work is
+    /// pending, and the card would wait on the one that said yes.
+    pub fn release(&mut self, provenance: DutyProvenance) {
+        self.issued.remove(&provenance);
+    }
+
     /// Marks a publication (or any duty) settled: its result was admitted by
     /// the ledger AND the consuming record write committed.
     pub fn settle(&mut self, provenance: DutyProvenance) {

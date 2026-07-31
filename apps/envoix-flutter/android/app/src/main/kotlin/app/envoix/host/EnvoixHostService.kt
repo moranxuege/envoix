@@ -73,11 +73,45 @@ class EnvoixHostService : Service() {
                 Thread.sleep(WORK_POLL_MILLIS)
                 continue
             }
-            executor.execute(order)?.let { report ->
-                NativeHost.reportDuty(report)
-            }
+            executor.execute(order)?.let(unreported::add)
+            drainReports()
         }
     }
+
+    /**
+     * Reports produced but not yet accepted, oldest first.
+     *
+     * `reportDuty` answers whether the result reached durable product state, and
+     * that answer used to be discarded — so a report the authority admitted and
+     * then could not deliver was simply lost, and the card waited for an answer
+     * nothing would send again. The authority now leaves such a duty outstanding
+     * precisely so it CAN be re-reported; this is the half that re-reports it.
+     *
+     * In memory, and correctly so: a report describes work this process did, and
+     * a process that died did not do it. The duty is still outstanding on the
+     * other side, so the next run is re-issued the order rather than replaying an
+     * answer nobody produced.
+     *
+     * Bounded, because an authority that refuses everything must not make this
+     * grow without limit. The OLDEST goes first when it is full: a newer report
+     * is the one more likely to still matter, and the older one will be re-issued
+     * as a fresh duty if it does.
+     */
+    private fun drainReports() {
+        val iterator = unreported.iterator()
+        while (iterator.hasNext()) {
+            if (!NativeHost.reportDuty(iterator.next())) {
+                break
+            }
+            iterator.remove()
+        }
+        while (unreported.size > MAX_UNREPORTED) {
+            unreported.removeFirst()
+        }
+    }
+
+    /** Reports this process produced and the authority has not accepted. */
+    private val unreported = ArrayDeque<ByteArray>()
 
     private fun startInForeground() {
         val manager = getSystemService(NotificationManager::class.java)
@@ -112,5 +146,15 @@ class EnvoixHostService : Service() {
         const val CHANNEL_ID = "envoix.host"
         const val FOREGROUND_ID = 1
         const val WORK_POLL_MILLIS = 100L
+
+        /**
+         * How many unaccepted reports this process holds.
+         *
+         * A bound rather than a limit anyone should meet: every report here is
+         * one the authority admitted and could not deliver, which is a
+         * transient. It exists so an authority that refuses everything cannot
+         * make a queue grow without end.
+         */
+        const val MAX_UNREPORTED = 64
     }
 }

@@ -106,14 +106,62 @@ fn registration_requires_the_authoritative_current_generation() {
     assert_eq!(ledger.register(current), Registration::Registered);
     assert_eq!(ledger.register(current), Registration::AlreadyOutstanding);
 
+    // ADMITTED is not DONE. An answer in flight leaves the duty pending, so
+    // nothing dispatches the work a second time while its result is being
+    // applied — and it is not discharged, because nothing has yet said the
+    // result was acted on.
     assert!(matches!(
         ledger.admit(result(current, OutcomeCode::Completed)),
         Admission::Fresh(_)
     ));
+    assert_eq!(ledger.register(current), Registration::AlreadyOutstanding);
+    assert_eq!(
+        ledger.admit(result(current, OutcomeCode::Completed)),
+        Admission::Duplicate,
+        "a second answer was admitted while the first was in flight"
+    );
+    ledger.finalize(current.provenance);
     assert_eq!(ledger.register(current), Registration::AlreadyDischarged);
     assert_eq!(
         ledger.advance_generation(RecordId::new(4), AttemptGen::new(2)),
         GenerationUpdate::RejectedRegression
+    );
+}
+
+/// A result that did not reach product state leaves the duty OUTSTANDING.
+///
+/// One-phase admission discharged immediately, so a delivery that failed was
+/// recorded as done: the platform was told its work had landed, and the same
+/// answer re-reported was refused as a duplicate of something nothing had acted
+/// on. Only a restart cleared it, and only because this ledger is process memory.
+#[test]
+fn an_abandoned_result_can_be_reported_again() {
+    let mut ledger = DutyLedger::new();
+    let duty = duty(9, 1, 1, DutyKind::Lock);
+    assert_eq!(
+        ledger.advance_generation(RecordId::new(9), AttemptGen::new(1)),
+        GenerationUpdate::Initialized
+    );
+    assert_eq!(ledger.register(duty), Registration::Registered);
+    assert!(matches!(
+        ledger.admit(result(duty, OutcomeCode::Completed)),
+        Admission::Fresh(_)
+    ));
+
+    ledger.abandon(duty.provenance);
+
+    assert!(
+        matches!(
+            ledger.admit(result(duty, OutcomeCode::Completed)),
+            Admission::Fresh(_)
+        ),
+        "an abandoned result could not be reported again"
+    );
+    // And finalizing THAT one is what ends it.
+    ledger.finalize(duty.provenance);
+    assert_eq!(
+        ledger.admit(result(duty, OutcomeCode::Completed)),
+        Admission::Duplicate
     );
 }
 

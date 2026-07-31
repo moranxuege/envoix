@@ -499,6 +499,19 @@ fn persistable_source_grants_have_exactly_one_lifecycle_owner() {
             "the service never completes `{fact}`"
         );
     }
+    // A report the authority admitted and could not deliver leaves its duty
+    // OUTSTANDING so it can be reported again — and this side is the half that
+    // reports it again. Discarding the answer is what made a lost delivery
+    // unrecoverable until a restart, so the answer must be read.
+    let service = code_only(SERVICE);
+    assert!(
+        service.contains("if (!NativeHost.reportDuty("),
+        "the service does not read whether its report was accepted"
+    );
+    assert!(
+        service.contains("unreported"),
+        "the service keeps no report it could not get accepted"
+    );
 }
 
 /// `payload.bin` -> `payload.bin`, `payload (2).bin`, ... mirroring the Kotlin
