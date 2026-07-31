@@ -13,7 +13,7 @@ use crate::identity::next_generation;
 use crate::{
     AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
     PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
-    Quiescence, SelectionGate, SourceLifecycle, SourceOfferAnswer, SourcePossession,
+    Quiescence, SelectionGate, SourceBacking, SourceLifecycle, SourceOfferAnswer, SourcePossession,
     SourceStagingPlan, StagedContent, StagingPlan, StagingWork, StorageAction, TransferContent,
     TransferRecord, WorkerKind,
 };
@@ -531,21 +531,7 @@ impl TransferRecord {
                 // second time: both follow from the record, so carrying them
                 // here is the reducer telling the worker rather than the record
                 // holding two copies that could drift.
-                let work = match plan {
-                    StagingPlan::ProviderStream { item } => StagingWork::Stream { item },
-                    StagingPlan::ProduceOwnedArtifact { derivation } => StagingWork::Produce {
-                        artifact: self.identity.artifact,
-                        derivation,
-                        fingerprint: derivation.fingerprint(&offer_for_work),
-                    },
-                };
-                return vec![ProductEffect::StartSourceStaging {
-                    plan: SourceStagingPlan {
-                        stamp: self.stamp(),
-                        acquisition: result.acquisition(),
-                        work,
-                    },
-                }];
+                return vec![self.start_staging(plan, &offer_for_work, result.acquisition())];
             }
             SourceReport::Failed(failure) => {
                 // The generation is NOT advanced here. Only `RePickSource`
@@ -707,6 +693,33 @@ impl TransferRecord {
                 self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Restoring));
                 Vec::new()
             }
+            // A ready source the PROVIDER still holds. The descriptor died with
+            // the process, and the document may have changed while we were gone
+            // — neither is knowable from the record — so the card re-acquires
+            // and re-reads rather than opening an attempt that would discover
+            // both on its first read, after spending a connection.
+            //
+            // An OWNED artifact takes the arm below instead: those bytes are
+            // ours, sealed, and immutable, so re-deriving them because a process
+            // died would be absurd. The store validates the seal when the
+            // attempt opens it, and the send hashes what it transmits either
+            // way.
+            ProductState::Preparing
+                if matches!(
+                    &self.source,
+                    SourceLifecycle::Ready {
+                        backing: SourceBacking::PersistedProvider,
+                        ..
+                    }
+                ) =>
+            {
+                let SourceLifecycle::Ready { offer, .. } = self.source.clone() else {
+                    unreachable!("the guard matched Ready")
+                };
+                self.clear_progress();
+                self.source = SourceLifecycle::Acquiring(offer);
+                vec![self.acquire_source()]
+            }
             ProductState::Preparing if self.source_is_ready() => {
                 self.clear_progress();
                 self.state = ProductState::Connecting;
@@ -765,12 +778,42 @@ impl TransferRecord {
                 self.source = SourceLifecycle::Acquiring(offer);
                 vec![self.acquire_source()]
             }
-            // A document was held and the process died holding it. What was held
-            // was a `Process` grant — the platform promised this process only,
-            // and this is a different one — or the card was `Staging` a source
-            // whose own retention says it cannot be reopened. Asking the
-            // platform a question its answer already settled would spend a round
-            // trip to be told what the record says.
+            // A production that was interrupted over a grant this process cannot
+            // have. The INPUT is gone for good — `Process` means exactly that —
+            // but the OUTPUT may not be: a seal published before the crash is
+            // durable, immutable, and was produced under this commissioning.
+            //
+            // So the bulk state is asked FIRST, by re-commissioning the same
+            // work. The worker adopts a matching seal without touching the
+            // source at all, and answers `Failed` when there is nothing to
+            // adopt — which is a re-pick, the same place asking the platform
+            // would have arrived, minus throwing away an artifact the card
+            // already owns.
+            ProductState::Preparing
+                if matches!(
+                    &self.source,
+                    SourceLifecycle::Staging {
+                        plan: StagingPlan::ProduceOwnedArtifact { .. },
+                        ..
+                    }
+                ) =>
+            {
+                let SourceLifecycle::Staging { offer, plan, .. } = self.source.clone() else {
+                    unreachable!("the guard matched Staging")
+                };
+                // Whatever was counted before the crash was never established.
+                self.clear_progress();
+                self.quiescence = Quiescence::Running {
+                    worker: WorkerKind::Staging,
+                };
+                let acquisition = *offer.key();
+                vec![self.start_staging(plan, &offer, acquisition)]
+            }
+            // A document was held and the process died holding it, and nothing
+            // above could recover it: a `Process` grant on a plan that produced
+            // nothing to adopt. Asking the platform a question its answer
+            // already settled would spend a round trip to be told what the
+            // record says.
             ProductState::Preparing => {
                 self.state = ProductState::Failed;
                 self.phase = Phase::Restoring;
@@ -1429,6 +1472,34 @@ impl TransferRecord {
         ProductEffect::StorageIntent {
             identity: self.identity,
             action: StorageAction::TombstoneCard,
+        }
+    }
+
+    /// Commissions the staging worker for what the card has committed.
+    ///
+    /// One place, because restore commissions the same work a fresh acquisition
+    /// does — and a second construction of it could drift in the fingerprint,
+    /// which is the value that decides whether a partial artifact is eligible.
+    fn start_staging(
+        &self,
+        plan: StagingPlan,
+        offer: &AcceptedSourceOffer,
+        acquisition: SourceAcquisitionKey,
+    ) -> ProductEffect {
+        let work = match plan {
+            StagingPlan::ProviderStream { item } => StagingWork::Stream { item },
+            StagingPlan::ProduceOwnedArtifact { derivation } => StagingWork::Produce {
+                artifact: self.identity.artifact,
+                derivation,
+                fingerprint: derivation.fingerprint(offer),
+            },
+        };
+        ProductEffect::StartSourceStaging {
+            plan: SourceStagingPlan {
+                stamp: self.stamp(),
+                acquisition,
+                work,
+            },
         }
     }
 

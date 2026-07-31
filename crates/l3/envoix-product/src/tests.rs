@@ -3201,11 +3201,150 @@ fn a_persisted_staging_reacquires_across_a_restart() {
     );
 }
 
-/// The other half: a `Process` grant promised THIS process, and this is a
-/// different one. Asking the platform would spend a round trip to be told what
-/// the record already says, so the card asks for a document instead.
+/// A ready source splits on WHO holds the bytes, and the two answers are
+/// opposite for the same reason.
+///
+/// A PROVIDER source is somebody else's file reached through a descriptor that
+/// died with the process, and it may have changed while we were gone — neither
+/// knowable from the record. So the card re-acquires and re-reads, which is the
+/// owner's ruling and costs a full pass per process death.
+///
+/// An OWNED artifact is ours: produced, sealed, immutable. Re-deriving it
+/// because a process died would re-zip gigabytes to learn what the seal already
+/// says, so restore does nothing at all and the attempt opens it — the store
+/// refuses anything unsealed, and the send hashes what it transmits either way.
 #[test]
-fn a_process_only_staging_asks_for_a_document_again_across_a_restart() {
+fn restore_reacquires_a_provider_source_and_leaves_an_owned_one_alone() {
+    // Provider: back to acquiring, under the same key the platform journals.
+    let (mut provider, _) = create(Direction::Send);
+    give_a_source(&mut provider);
+    let stamp = provider.stamp();
+    provider
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            content: staged(STAGED_NAME, STAGED_TOTAL),
+            possession: SourcePossession::Streamed,
+        })
+        .unwrap();
+    // Restored while still `Preparing`: the window between staging finishing
+    // and the attempt starting. A card that had already STARTED an attempt
+    // restores as `Paused(Lost)` and reaches its source through `Resume`, which
+    // is a separate path with the transfer's own resume offset to preserve.
+    let expected = *provider
+        .source
+        .key()
+        .expect("a ready sender names its acquisition");
+    assert!(matches!(
+        provider.source,
+        crate::SourceLifecycle::Ready {
+            backing: crate::SourceBacking::PersistedProvider,
+            ..
+        }
+    ));
+
+    let effects = provider.reduce(ProductInput::Restore).unwrap();
+    let crate::SourceLifecycle::Acquiring(reacquired) = &provider.source else {
+        panic!(
+            "a ready provider source was not reacquired: {:?}",
+            provider.source
+        );
+    };
+    assert!(
+        reacquired.key().is(&expected),
+        "the restart asked for a different acquisition"
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        ProductEffect::CapabilityDuty {
+            action: CapabilityAction::AcquireSource,
+            ..
+        }
+    )));
+
+    // Owned: untouched, and the attempt starts. Nothing asks the platform,
+    // because the platform does not hold these bytes.
+    let mut owned = create(Direction::Send).0;
+    owned
+        .reduce(ProductInput::SourceOffered {
+            offer: offer(&owned, STAGED_NAME, None),
+        })
+        .unwrap();
+    owned
+        .reduce(settled(
+            &owned.clone(),
+            SourceReport::Acquired(AcquiredSelection::of_one(
+                SourceRetention::Persisted,
+                SourceSeekability::SequentialOnly,
+            )),
+        ))
+        .unwrap();
+    let crate::SourceLifecycle::Staging {
+        offer: commissioned,
+        plan: StagingPlan::ProduceOwnedArtifact { derivation },
+        ..
+    } = owned.source.clone()
+    else {
+        panic!("a sequential source did not commission a production");
+    };
+    let (_blobs, sealed) = sealed_artifact(
+        owned.identity.card,
+        owned.generation,
+        owned.identity.artifact,
+        &[7_u8; 24],
+        derivation.fingerprint(&commissioned),
+    );
+    let stamp = owned.stamp();
+    owned
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            content: crate::StagedContent::new(
+                crate::TransferContent::new(
+                    OfferedName::from_untrusted(STAGED_NAME).expect("a bounded name"),
+                    sealed.length(),
+                ),
+                sealed.digest(),
+            ),
+            possession: SourcePossession::Derived(sealed),
+        })
+        .unwrap();
+    let before = owned.source.clone();
+
+    let effects = owned.reduce(ProductInput::Restore).unwrap();
+
+    assert_eq!(
+        owned.source, before,
+        "an owned artifact was disturbed by a restart"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, ProductEffect::StartAttempt { .. })),
+        "a ready owned artifact did not start its attempt: {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            ProductEffect::CapabilityDuty {
+                action: CapabilityAction::AcquireSource,
+                ..
+            }
+        )),
+        "an owned artifact asked the platform for a document it does not hold"
+    );
+}
+
+/// The other half: a `Process` grant promised THIS process, and this is a
+/// different one — so the INPUT is gone for good. But the OUTPUT may not be, and
+/// that is a different question, asked of a different thing.
+///
+/// So restore re-commissions the same production rather than asking the platform
+/// for a document it cannot have. The worker adopts a seal published before the
+/// crash — durable, immutable, produced under this exact commissioning — and
+/// answers `Failed` when there is nothing to adopt, which lands on the same
+/// re-pick the platform round trip would have reached, minus throwing away an
+/// artifact the card already owns.
+#[test]
+fn a_process_only_production_asks_the_bulk_store_before_giving_up() {
     let (mut card, _) = create(Direction::Send);
     card.reduce(ProductInput::SourceOffered {
         offer: offer(&card, STAGED_NAME, None),
@@ -3219,18 +3358,38 @@ fn a_process_only_staging_asks_for_a_document_again_across_a_restart() {
         )),
     ))
     .unwrap();
+    let crate::SourceLifecycle::Staging { offer, plan, .. } = card.source.clone() else {
+        panic!("a process grant did not commission a production");
+    };
+    let StagingPlan::ProduceOwnedArtifact { derivation } = plan else {
+        panic!("a process grant is not streamable: {plan:?}");
+    };
+
+    let effects = card.reduce(ProductInput::Restore).unwrap();
+
+    // Still staging, and commissioned with the SAME fingerprint — a different
+    // one would make the seal it is trying to adopt ineligible.
     assert!(matches!(
         card.source,
-        crate::SourceLifecycle::Staging { ref acquired, .. }
-        if acquired.retention() == SourceRetention::Process
+        crate::SourceLifecycle::Staging { .. }
     ));
-
-    assert!(card.reduce(ProductInput::Restore).unwrap().is_empty());
-
-    assert_eq!(card.state, ProductState::Failed);
     assert_eq!(
-        card.outcome.as_ref().and_then(|outcome| outcome.recovery),
-        Some(Recovery::RePickSource)
+        card.quiescence,
+        Quiescence::Running {
+            worker: WorkerKind::Staging
+        }
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            ProductEffect::StartSourceStaging { plan }
+                if plan.work == crate::StagingWork::Produce {
+                    artifact: card.identity.artifact,
+                    derivation,
+                    fingerprint: derivation.fingerprint(&offer),
+                }
+        )),
+        "the production was not re-commissioned: {effects:?}"
     );
 }
 
