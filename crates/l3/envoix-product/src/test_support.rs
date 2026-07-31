@@ -13,7 +13,7 @@ use envoix_capabilities::{
     SourceSeekability,
 };
 use envoix_protocol::ContentHash;
-use envoix_types::{ByteCount, OfferedName};
+use envoix_types::{ArtifactId, AttemptGen, ByteCount, OfferedName, RecordId};
 
 use crate::{AcceptedSourceOffer, ProductInput, StagedContent, TransferContent, TransferRecord};
 
@@ -100,4 +100,39 @@ pub(crate) fn give_a_source(record: &mut TransferRecord) {
     record
         .reduce(settlement)
         .expect("the acquisition is applied");
+}
+
+/// A real sealed artifact, EARNED rather than constructed.
+///
+/// `SealedArtifact` has no public constructor: holding one means a blob store
+/// sealed something. So a test that needs one seals something — through the same
+/// store production uses, in a temporary root — rather than through a back door
+/// that would make the witness meaningless everywhere else.
+///
+/// The `TempDir` comes back with it because the blob outlives nothing: dropping
+/// the directory removes the bytes, and the witness is only interesting while
+/// they exist.
+pub(crate) fn sealed_artifact(
+    card: RecordId,
+    generation: AttemptGen,
+    artifact: ArtifactId,
+    bytes: &[u8],
+    fingerprint: ContentHash,
+) -> (tempfile::TempDir, envoix_blob_api::SealedArtifact) {
+    let root = tempfile::TempDir::new().expect("a blob root");
+    let store = envoix_blob_api::BlobStore::new(envoix_blob_local::LocalBlobs::new(root.path()));
+    let blob = envoix_blob_api::BlobKey::new(
+        card,
+        envoix_blob_api::DerivationWorkId::of(generation, artifact),
+    );
+    let mut lease = store.begin(blob, fingerprint).expect("a lease");
+    lease
+        .append(envoix_types::ByteCount::new(0), bytes)
+        .expect("the bytes are written");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(bytes);
+    let sealed = lease
+        .seal(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
+        .expect("the blob seals");
+    (root, sealed)
 }

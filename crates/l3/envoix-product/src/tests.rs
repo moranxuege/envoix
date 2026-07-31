@@ -16,7 +16,7 @@ use envoix_types::{
 
 use crate::record::RecordInvariant;
 use crate::test_support::{
-    STAGED_NAME, STAGED_TOTAL, acquired, give_a_source, offer, settled, staged,
+    STAGED_NAME, STAGED_TOTAL, acquired, give_a_source, offer, sealed_artifact, settled, staged,
 };
 use crate::{
     AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
@@ -2619,12 +2619,12 @@ fn a_plan_naming_an_item_outside_the_selection_is_refused() {
 }
 
 #[test]
-fn product_record_v9_has_a_byte_exact_fixture() {
+fn product_record_v10_has_a_byte_exact_fixture() {
     let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired":[{"item":0,"retention":"persisted","seekability":"seekable"}],"backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&9_u32.to_be_bytes());
+    expected.extend_from_slice(&10_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);
@@ -2984,21 +2984,139 @@ fn a_copy_plan_is_not_established_by_a_stream() {
             )),
         ))
         .unwrap();
+    // The witness is EARNED: a real store seals real bytes, because
+    // `SealedArtifact` has no other way in. Its facts have to describe this
+    // card's commissioned work, so they are read off the card rather than
+    // invented.
+    let crate::SourceLifecycle::Staging {
+        offer,
+        plan: StagingPlan::ProduceOwnedArtifact { derivation },
+        ..
+    } = copied.source.clone()
+    else {
+        panic!("a sequential source did not commission a derivation");
+    };
+    let bytes = vec![0xab_u8; 32];
+    let (_blobs, sealed) = sealed_artifact(
+        copied.identity.card,
+        copied.generation,
+        copied.identity.artifact,
+        &bytes,
+        derivation.fingerprint(&offer),
+    );
     let stamp = copied.stamp();
     copied
         .reduce(ProductInput::StageComplete {
             stamp,
-            content: staged(STAGED_NAME, STAGED_TOTAL),
-            possession: SourcePossession::Copied(ArtifactId::from_bytes([3; 16])),
+            // From the SEAL, not a second account of the same bytes: one value,
+            // so there is nothing for the two to disagree about.
+            content: crate::StagedContent::new(
+                crate::TransferContent::new(
+                    OfferedName::from_untrusted(STAGED_NAME).expect("a bounded name"),
+                    sealed.length(),
+                ),
+                sealed.digest(),
+            ),
+            possession: SourcePossession::Derived(sealed),
         })
         .unwrap();
     assert!(matches!(
         copied.source,
         crate::SourceLifecycle::Ready {
-            backing: crate::SourceBacking::OwnedArtifact,
+            backing: crate::SourceBacking::OwnedArtifact { .. },
             ..
         }
     ));
+}
+
+/// A GENUINE seal for the wrong work does not establish this card's source.
+///
+/// The witness cannot be forged — only a blob store mints one — but that only
+/// says the bytes were sealed somewhere, not that they are the bytes this card
+/// commissioned. Four facts have to agree, and each is a different way of
+/// sending the wrong file:
+///
+/// - a different ARTIFACT is the sharp one. Staging vouches for what the attempt
+///   will open, and the attempt opens the card's own minted artifact — so a seal
+///   naming another would have staging vouch for X while the attempt reads Y,
+///   and both are real artifacts, so nothing downstream could tell.
+/// - a different CARD is another card's document.
+/// - a different GENERATION is a superseded run's, from before a re-pick.
+/// - a different FINGERPRINT is the same bytes produced under a different
+///   commissioning — another selection, or another version of the derivation.
+#[test]
+fn a_seal_for_other_work_does_not_establish_this_card() {
+    let bytes = vec![0xcd_u8; 16];
+    let commission = |card: &TransferRecord| {
+        let crate::SourceLifecycle::Staging {
+            offer,
+            plan: StagingPlan::ProduceOwnedArtifact { derivation },
+            ..
+        } = card.source.clone()
+        else {
+            panic!("a sequential source did not commission a derivation");
+        };
+        derivation.fingerprint(&offer)
+    };
+
+    for wrong in ["artifact", "card", "generation", "fingerprint"] {
+        let mut card = create(Direction::Send).0;
+        card.reduce(ProductInput::SourceOffered {
+            offer: offer(&card, STAGED_NAME, None),
+        })
+        .unwrap();
+        card.reduce(settled(
+            &card.clone(),
+            SourceReport::Acquired(AcquiredSelection::of_one(
+                SourceRetention::Persisted,
+                SourceSeekability::SequentialOnly,
+            )),
+        ))
+        .unwrap();
+        let honest = commission(&card);
+        let (_blobs, sealed) = sealed_artifact(
+            if wrong == "card" {
+                RecordId::new(card.identity.card.get() ^ 0x5a5a)
+            } else {
+                card.identity.card
+            },
+            if wrong == "generation" {
+                AttemptGen::new(card.generation.get() + 1)
+            } else {
+                card.generation
+            },
+            if wrong == "artifact" {
+                ArtifactId::from_bytes([0x77; 16])
+            } else {
+                card.identity.artifact
+            },
+            &bytes,
+            if wrong == "fingerprint" {
+                ContentHash::from_bytes([0x11; 32])
+            } else {
+                honest
+            },
+        );
+        let stamp = card.stamp();
+        card.reduce(ProductInput::StageComplete {
+            stamp,
+            content: crate::StagedContent::new(
+                crate::TransferContent::new(
+                    OfferedName::from_untrusted(STAGED_NAME).expect("a bounded name"),
+                    sealed.length(),
+                ),
+                sealed.digest(),
+            ),
+            possession: SourcePossession::Derived(sealed),
+        })
+        .unwrap();
+
+        assert!(
+            !card.source.is_ready(),
+            "a seal with the wrong {wrong} established this card's source"
+        );
+        assert_eq!(card.state, ProductState::Failed);
+    }
 }
 
 /// A persisted source that was mid-staging when the process died is REACQUIRED,

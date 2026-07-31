@@ -13,8 +13,14 @@ envoix-attempt-api = { path = "../../l1/envoix-attempt-api" }
 envoix-capabilities = { path = "../../l1/envoix-capabilities" }
 envoix-invite = { path = "../../l1/envoix-invite" }
 envoix-outcomes = { path = "../../l0/envoix-outcomes" }
+envoix-blob-api = { path = "../../l1/envoix-blob-api" }
 envoix-protocol = { path = "../../l1/envoix-protocol" }
+blake3.workspace = true
 envoix-types = { path = "../../l0/envoix-types" }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+envoix-blob-local = { path = "../../l2/envoix-blob-local" }
+tempfile.workspace = true

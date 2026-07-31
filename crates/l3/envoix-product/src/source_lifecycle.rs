@@ -21,6 +21,7 @@
 //! becoming live values is the record decoder converting through a DTO rather
 //! than deserializing these types directly; that lands with record v5.
 
+use envoix_blob_api::{SealFact, SealedArtifact};
 use envoix_capabilities::{
     AcquiredSelection, SourceAcquisitionFailure, SourceAcquisitionKey, SourceRetention,
     SourceSeekability,
@@ -418,6 +419,38 @@ impl DerivationSpec {
             Self::VerbatimV1 { item } => Some(item),
         }
     }
+
+    /// Everything this derivation was COMMISSIONED to do, folded to one value:
+    /// the algorithm and its version, the selection in order, and the name the
+    /// output was commissioned under.
+    ///
+    /// It exists so a partial artifact can be asked whether it belongs to the
+    /// work now being done. A checkpoint's offset is perfectly usable-looking
+    /// whatever produced it, so resuming on the offset alone would splice one
+    /// selection's bytes onto another's — or continue a `VerbatimV2` prefix
+    /// under `VerbatimV1` rules.
+    ///
+    /// Defined HERE because the product is what commissions the work. A worker
+    /// computing its own idea of "the same job" could differ from the authority's
+    /// silently, and the disagreement would only show as a resumed copy that is
+    /// subtly wrong.
+    pub fn fingerprint(self, offer: &AcceptedSourceOffer) -> ContentHash {
+        let mut hasher = blake3::Hasher::new();
+        match self {
+            Self::VerbatimV1 { item } => {
+                hasher.update(b"verbatim/1");
+                hasher.update(&item.get().to_be_bytes());
+            }
+        }
+        hasher.update(b"\0output\0");
+        hasher.update(offer.output_name().as_str().as_bytes());
+        for item in offer.selection().items() {
+            hasher.update(b"\0item\0");
+            hasher.update(&item.id().get().to_be_bytes());
+            hasher.update(item.path().to_string().as_bytes());
+        }
+        ContentHash::from_bytes(*hasher.finalize().as_bytes())
+    }
 }
 
 /// The largest source this product can carry from end to end.
@@ -472,14 +505,6 @@ impl StagingPlan {
         })
     }
 
-    /// What owns the bytes once staging under this plan has finished.
-    pub const fn backing(self) -> SourceBacking {
-        match self {
-            Self::ProviderStream { .. } => SourceBacking::PersistedProvider,
-            Self::ProduceOwnedArtifact { .. } => SourceBacking::OwnedArtifact,
-        }
-    }
-
     /// Every item this plan reads, so a record can be checked against the
     /// selection beside it.
     pub const fn input(self) -> Option<SourceItemId> {
@@ -491,15 +516,24 @@ impl StagingPlan {
 }
 
 /// What owns the bytes once staging has finished.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// Not `Serialize`: the seal it carries is the blob store's, and how a seal is
+/// written down is that store's business. The record has its own DTO, so the two
+/// shapes can differ without either pretending to be the other.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceBacking {
     /// The provider, reopened through its persisted grant. That grant must be
     /// retained and revalidated.
     PersistedProvider,
     /// An app-private artifact this build owns outright. The provider grant can
     /// be released.
-    OwnedArtifact,
+    ///
+    /// Carries the SEAL, not just the fact that one exists. A fieldless arm
+    /// could not name what it claimed to possess: a restart had to guess which
+    /// artifact, and could not check the bytes were the ones staging vouched
+    /// for. What is stored is plain data — anyone can write a `SealFact` down —
+    /// so revalidating it means asking the store, never trusting the record.
+    OwnedArtifact { seal: SealFact },
 }
 
 /// What staging actually achieved, reported by the worker that did it.
@@ -509,16 +543,19 @@ pub enum SourceBacking {
 /// the same value — the backing was derived from the plan — and that made a
 /// worker's silence about what it had done indistinguishable from a copy.
 ///
-/// [`Self::Copied`] carries the artifact rather than a flag because an
-/// `ArtifactId` cannot be produced without writing one. A worker with no copy
-/// sink is unable to spell it, which is why a plan it cannot perform fails
-/// instead of resting at `Ready` over nothing.
+/// [`Self::Derived`] carries the store's WITNESS rather than an artifact id. An
+/// id proves nothing — `ArtifactId::from_bytes` is public, so a worker can name
+/// an artifact it never wrote — while a [`SealedArtifact`] has no public
+/// constructor and no way in from stored bytes: holding one means having sealed
+/// something. That is what makes a plan this build cannot perform fail instead
+/// of resting at `Ready` over nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourcePossession {
     /// Read through where it lies. Nothing was written.
     Streamed,
-    /// Copied into an artifact this app owns outright.
-    Copied(ArtifactId),
+    /// Produced into an artifact this app owns outright, witnessed by the store
+    /// that sealed it.
+    Derived(SealedArtifact),
 }
 
 impl SourcePossession {
@@ -526,7 +563,9 @@ impl SourcePossession {
     pub const fn backing(self) -> SourceBacking {
         match self {
             Self::Streamed => SourceBacking::PersistedProvider,
-            Self::Copied(_) => SourceBacking::OwnedArtifact,
+            Self::Derived(sealed) => SourceBacking::OwnedArtifact {
+                seal: sealed.fact(),
+            },
         }
     }
 
@@ -540,7 +579,7 @@ impl SourcePossession {
         matches!(
             (plan, self),
             (StagingPlan::ProviderStream { .. }, Self::Streamed)
-                | (StagingPlan::ProduceOwnedArtifact { .. }, Self::Copied(_))
+                | (StagingPlan::ProduceOwnedArtifact { .. }, Self::Derived(_))
         )
     }
 }
@@ -553,9 +592,8 @@ impl SourceBacking {
     pub const fn is_possible_with(self, retention: SourceRetention) -> bool {
         match (self, retention) {
             (Self::PersistedProvider, SourceRetention::Process) => false,
-            (Self::PersistedProvider, SourceRetention::Persisted) | (Self::OwnedArtifact, _) => {
-                true
-            }
+            (Self::PersistedProvider, SourceRetention::Persisted)
+            | (Self::OwnedArtifact { .. }, _) => true,
         }
     }
 }
@@ -1151,7 +1189,7 @@ mod tests {
                     SourceRetention::Persisted,
                     SourceSeekability::Seekable
                 ),
-                backing: SourceBacking::OwnedArtifact,
+                backing: SourceBacking::OwnedArtifact { seal: a_seal(1) },
                 content: staged(1),
             }
             .is_ready()
@@ -1258,7 +1296,7 @@ mod tests {
                 SourceRetention::Process,
                 SourceSeekability::Seekable,
             ),
-            backing: SourceBacking::OwnedArtifact,
+            backing: SourceBacking::OwnedArtifact { seal: a_seal(4096) },
             content: staged(4096),
         };
         assert_ne!(streamed, copied);
@@ -1289,6 +1327,21 @@ mod tests {
         assert_eq!(measured.total(), swapped.total());
         assert_ne!(measured.content_hash(), swapped.content_hash());
         assert_ne!(measured, swapped);
+    }
+
+    fn a_seal(length: u64) -> SealFact {
+        SealFact {
+            blob: envoix_blob_api::BlobKey::new(
+                envoix_types::RecordId::new(1),
+                envoix_blob_api::DerivationWorkId::of(
+                    AttemptGen::new(1),
+                    ArtifactId::from_bytes([3; 16]),
+                ),
+            ),
+            length: ByteCount::new(length),
+            digest: ContentHash::from_bytes([7; 32]),
+            fingerprint: ContentHash::from_bytes([9; 32]),
+        }
     }
 
     fn path(name: &str) -> ArchivePath {
@@ -1655,6 +1708,63 @@ pub(crate) struct TransferContentDto {
     total: ByteCount,
 }
 
+/// The record's own shape for a seal. The blob store deliberately does not
+/// dictate one, so this is the product's, and neither pretends to be the other.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SealDto {
+    card: envoix_types::RecordId,
+    generation: envoix_types::AttemptGen,
+    artifact: ArtifactId,
+    length: ByteCount,
+    digest: [u8; 32],
+    fingerprint: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(crate) enum BackingDto {
+    PersistedProvider,
+    OwnedArtifact { seal: SealDto },
+}
+
+impl From<SourceBacking> for BackingDto {
+    fn from(backing: SourceBacking) -> Self {
+        match backing {
+            SourceBacking::PersistedProvider => Self::PersistedProvider,
+            SourceBacking::OwnedArtifact { seal } => Self::OwnedArtifact {
+                seal: SealDto {
+                    card: seal.blob.card(),
+                    generation: seal.blob.work().generation(),
+                    artifact: seal.blob.artifact(),
+                    length: seal.length,
+                    digest: seal.digest.to_bytes(),
+                    fingerprint: seal.fingerprint.to_bytes(),
+                },
+            },
+        }
+    }
+}
+
+impl From<BackingDto> for SourceBacking {
+    fn from(dto: BackingDto) -> Self {
+        match dto {
+            BackingDto::PersistedProvider => Self::PersistedProvider,
+            BackingDto::OwnedArtifact { seal } => Self::OwnedArtifact {
+                seal: SealFact {
+                    blob: envoix_blob_api::BlobKey::new(
+                        seal.card,
+                        envoix_blob_api::DerivationWorkId::of(seal.generation, seal.artifact),
+                    ),
+                    length: seal.length,
+                    digest: ContentHash::from_bytes(seal.digest),
+                    fingerprint: ContentHash::from_bytes(seal.fingerprint),
+                },
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContentDto {
@@ -1700,7 +1810,7 @@ pub(crate) enum SourceLifecycleDto {
     Ready {
         offer: OfferDto,
         acquired: AcquiredSelection,
-        backing: SourceBacking,
+        backing: BackingDto,
         content: ContentDto,
     },
 }
@@ -1880,7 +1990,7 @@ impl From<&SourceLifecycle> for SourceLifecycleDto {
             } => Self::Ready {
                 offer: offer.into(),
                 acquired: acquired.clone(),
-                backing: *backing,
+                backing: (*backing).into(),
                 content: content.into(),
             },
         }
@@ -1947,6 +2057,7 @@ impl TryFrom<SourceLifecycleDto> for SourceLifecycle {
                 content,
             } => {
                 let offer = checked_offer(offer)?;
+                let backing: SourceBacking = backing.into();
                 if acquired.items().len() != offer.selection().len() {
                     return Err(SourceDecodeError::NotTheSelection);
                 }

@@ -1,6 +1,7 @@
 use envoix_attempt_api::{AttemptEventKind, RetirementIntent};
+use envoix_blob_api::SealedArtifact;
 use envoix_product::{CommittedSession, ContentHash, RecordStore, SourceStagingPlan};
-use envoix_types::{ArtifactId, ByteCount, RecordId};
+use envoix_types::{ByteCount, RecordId};
 use tokio::sync::{mpsc, oneshot};
 
 /// Restores the durable authority for a card from the operation store.
@@ -118,7 +119,8 @@ pub enum SourceStagingSignal {
         total: ByteCount,
         digest: ContentHash,
     },
-    /// The bytes were copied into an artifact this app owns outright.
+    /// The bytes were produced into an artifact this app owns outright, and the
+    /// store that sealed it says so.
     ///
     /// A separate arm from [`Self::Streamed`] because the two establish
     /// different POSSESSION, and the record says which: a card backed by an
@@ -127,17 +129,11 @@ pub enum SourceStagingSignal {
     /// source through satisfy a copy plan, and the card then rested at `Ready`
     /// claiming an artifact nobody had written.
     ///
-    /// The `ArtifactId` is NOT proof of a copy — `ArtifactId::from_bytes` is
-    /// public, so any executor can name an artifact it never wrote. What this
-    /// arm buys today is that a worker must STATE which operation it performed,
-    /// which is enough to stop the reducer inferring possession from the plan it
-    /// commissioned. Proof needs a witness the bulk store alone can mint, binding
-    /// the artifact to a durable seal, and that arrives with the store.
-    Copied {
-        total: ByteCount,
-        digest: ContentHash,
-        artifact: ArtifactId,
-    },
+    /// It carries the WITNESS and nothing else. The length and the digest are
+    /// the seal's, so there is no second account of the same bytes for the two
+    /// to disagree about — and a witness cannot be produced without sealing,
+    /// which is what makes this arm unspellable by a worker with no store.
+    Derived(SealedArtifact),
     /// The source could not be read through. Distinct from an acquisition
     /// failure: the platform DID hold it, and reading is what failed.
     Failed,

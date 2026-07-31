@@ -613,11 +613,14 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             SourceStagingSignal::Streamed { total, digest } => {
                 self.stage_complete(stamp, total, digest, SourcePossession::Streamed)
             }
-            SourceStagingSignal::Copied {
-                total,
-                digest,
-                artifact,
-            } => self.stage_complete(stamp, total, digest, SourcePossession::Copied(artifact)),
+            // The seal IS the length and the digest, so nothing else is passed
+            // alongside it to disagree with.
+            SourceStagingSignal::Derived(sealed) => self.stage_complete(
+                stamp,
+                sealed.length(),
+                sealed.digest(),
+                SourcePossession::Derived(sealed),
+            ),
             SourceStagingSignal::Failed => Some(ProductInput::StageFailed { stamp }),
             SourceStagingSignal::Stopped => {
                 self.staging = None;
@@ -678,7 +681,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             total: content.total(),
             digest: content.content_hash(),
         };
-        let locator = SourceLocator::of(&record.source, record.identity.artifact)?;
+        let locator = SourceLocator::of(&record.source)?;
         let source = self.sources.resolve(locator, identity).ok()?;
         AttemptLaunch::sending(plan, source)
     }

@@ -834,6 +834,34 @@ impl TransferRecord {
         if !possession.performs(plan) {
             return self.fail_staging(stamp);
         }
+        // A witness has to describe THIS card's commissioned work. It cannot be
+        // forged — only the blob store mints one — but a genuine seal for
+        // something else is still the wrong bytes, and the reducer is the only
+        // place that knows what was asked for.
+        //
+        // The artifact identity is the sharp one: staging vouches for what the
+        // attempt will open, and the attempt opens the card's own minted
+        // artifact. A seal naming a different one would have staging vouch for
+        // X while the attempt reads Y — which nothing downstream could detect,
+        // because both are real artifacts.
+        if let SourcePossession::Derived(sealed) = possession {
+            let StagingPlan::ProduceOwnedArtifact { derivation } = plan else {
+                return self.fail_staging(stamp);
+            };
+            let seal = sealed.fact();
+            let describes_this_work = seal.blob.card() == self.identity.card
+                && seal.blob.artifact() == self.identity.artifact
+                && seal.blob.work().generation() == self.generation
+                && seal.fingerprint == derivation.fingerprint(&offer);
+            // And the content the card is about to rest on is the SEAL's, not a
+            // second account of the same bytes: one value, so there is nothing
+            // for the two to disagree about.
+            let describes_these_bytes =
+                seal.length == content.total() && seal.digest == content.content_hash();
+            if !describes_this_work || !describes_these_bytes {
+                return self.fail_staging(stamp);
+            }
+        }
         // Staging counted the bytes and can say which ones; that is what makes
         // the card's content authoritative, so it is recorded where the
         // lifecycle keeps it and nowhere else.

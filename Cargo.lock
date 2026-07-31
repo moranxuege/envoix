@@ -1128,7 +1128,10 @@ dependencies = [
 name = "envoix-product"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "envoix-attempt-api",
+ "envoix-blob-api",
+ "envoix-blob-local",
  "envoix-capabilities",
  "envoix-invite",
  "envoix-outcomes",
@@ -1137,6 +1140,7 @@ dependencies = [
  "getrandom 0.3.4",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1175,6 +1179,7 @@ name = "envoix-runtime"
 version = "0.2.0"
 dependencies = [
  "envoix-attempt-api",
+ "envoix-blob-api",
  "envoix-capabilities",
  "envoix-evidence",
  "envoix-operation-store",

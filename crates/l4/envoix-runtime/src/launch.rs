@@ -32,7 +32,11 @@ pub enum SourceLocator {
 impl SourceLocator {
     /// The locator for a source that is ready to send, or `None` for a card that
     /// has no established source to name.
-    pub fn of(source: &SourceLifecycle, artifact: ArtifactId) -> Option<Self> {
+    ///
+    /// Takes only the lifecycle. An owned artifact is named by its own SEAL, so
+    /// nothing has to be passed in beside the record and there is no second
+    /// value for the seal to disagree with.
+    pub fn of(source: &SourceLifecycle) -> Option<Self> {
         let SourceLifecycle::Ready { offer, backing, .. } = source else {
             return None;
         };
@@ -40,7 +44,13 @@ impl SourceLocator {
             SourceBacking::PersistedProvider => Self::PersistedProvider {
                 acquisition: *offer.key(),
             },
-            SourceBacking::OwnedArtifact => Self::OwnedArtifact { artifact },
+            // The SEAL's artifact, not the card's minted identity. They agree —
+            // the reducer refuses a seal that names a different one — but
+            // reading the seal is what makes that agreement load-bearing rather
+            // than a coincidence two fields happen to share.
+            SourceBacking::OwnedArtifact { seal } => Self::OwnedArtifact {
+                artifact: seal.blob.artifact(),
+            },
         })
     }
 }
@@ -266,14 +276,13 @@ mod tests {
     #[test]
     fn a_source_that_is_only_held_cannot_be_located() {
         assert_eq!(
-            SourceLocator::of(
-                &SourceLifecycle::Acquiring(AcceptedSourceOffer::of_one_document(
+            SourceLocator::of(&SourceLifecycle::Acquiring(
+                AcceptedSourceOffer::of_one_document(
                     acquisition(),
                     OfferedName::from_untrusted("payload.bin").expect("a bounded name"),
                     None,
-                )),
-                ArtifactId::from_bytes([2; 16])
-            ),
+                )
+            )),
             None,
             "a card that only holds a document named bytes to send"
         );
