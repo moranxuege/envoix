@@ -26,7 +26,7 @@ use envoix_platform_android::{DutyAdapter, IssueDecision, WorkOrder, WorkReport,
 use envoix_product::ProductState;
 use envoix_product::{
     ApplyOutcome, CommitStatus, CommittedSession, IdentityError, NewTransfer, RecordDecode,
-    SourceBacking, SourceLifecycle, SystemIdentitySource, decode_record,
+    SourceBacking, SourceLifecycle, StagingPlan, SystemIdentitySource, decode_record,
 };
 use envoix_runtime::{
     AcceptedSourceOffer, CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict,
@@ -539,24 +539,64 @@ impl Host {
     /// Exposed because a filesystem host binds PATHS through it — the CLI and
     /// the off-device tests — while Android binds descriptors through the JNI
     /// lane. Same registry, same key, two platform answers.
-    /// Deletes every blob this card owns except the one its record references.
+    /// Deletes every blob this card owns that its durable state does not retain.
     ///
-    /// The referenced blob is whatever `Ready { OwnedArtifact }` names. A card
-    /// that references none — still choosing, streaming, or removed — keeps
-    /// none, which is why this is stated as a difference rather than a list of
-    /// cases.
+    /// RETAINED IS A SET, and that is the correction. It once meant "whatever
+    /// `Ready { OwnedArtifact }` names", which read every other durable state as
+    /// consent to delete — including the two that most need their bytes:
+    ///
+    /// - A card still `Staging` a production has no `Ready` reference YET. Its
+    ///   partial is what a resumed run continues, and a seal published just
+    ///   before the crash is what restore adopts instead of re-deriving
+    ///   gigabytes. This sweep runs BEFORE restore, so deleting it destroyed
+    ///   exactly what the next line of code exists to recover.
+    /// - A card whose record cannot be decoded answers nothing, and "nothing
+    ///   referenced" is not "nothing needed". The boot loop leaves such a card
+    ///   quarantined intact rather than reinterpreting it; reading the same
+    ///   silence as permission would destroy what quarantine preserves.
+    ///
+    /// So it fails CLOSED: unable to say what to keep, it keeps everything.
     fn sweep_orphan_blobs(&self, card: RecordId, record: Option<&TransferRecord>) {
-        let referenced = record.and_then(|record| match &record.source {
+        let Some(record) = record else {
+            return;
+        };
+        let retained = Self::retained_blobs(record);
+        for blob in self.shared.blobs.owned(card).unwrap_or_default() {
+            if !retained.contains(&blob) {
+                let _ = self.shared.blobs.delete(blob);
+            }
+        }
+    }
+
+    /// Every blob this record's durable state still speaks for.
+    ///
+    /// Small by construction today — a card produces at most one artifact — but
+    /// a SET rather than an option, because the question is "what does durable
+    /// state retain", and states that retain something without referencing a
+    /// seal are exactly what the first version got wrong.
+    fn retained_blobs(record: &TransferRecord) -> Vec<envoix_blob_api::BlobKey> {
+        match &record.source {
+            // Established: the seal names itself.
             SourceLifecycle::Ready {
                 backing: SourceBacking::OwnedArtifact { seal },
                 ..
-            } => Some(seal.blob),
-            _ => None,
-        });
-        for blob in self.shared.blobs.owned(card).unwrap_or_default() {
-            if Some(blob) != referenced {
-                let _ = self.shared.blobs.delete(blob);
-            }
+            } => vec![seal.blob],
+            // Commissioned but not established. The record carries enough to
+            // name the blob the work produces into — the same derivation the
+            // worker computes — so a partial or an early seal is retained
+            // without the record having referenced either.
+            SourceLifecycle::Staging {
+                offer,
+                plan: StagingPlan::ProduceOwnedArtifact { .. },
+                ..
+            } => vec![envoix_blob_api::BlobKey::new(
+                record.identity.card,
+                envoix_blob_api::DerivationWorkId::of(
+                    offer.key().generation(),
+                    record.identity.artifact,
+                ),
+            )],
+            _ => Vec::new(),
         }
     }
 

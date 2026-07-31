@@ -576,6 +576,106 @@ fn a_source_offer_reaches_the_authority_and_moves_the_card() {
     host.shutdown();
 }
 
+/// A card whose record cannot be decoded keeps its bytes.
+///
+/// The sweep asks the record what is referenced and deletes the rest. A record
+/// it cannot read answers nothing — and "nothing referenced" is not "nothing
+/// needed". The boot loop deliberately leaves such a card quarantined INTACT
+/// rather than reinterpreting it; a sweep that reads the same silence as consent
+/// to delete destroys the very thing quarantine exists to preserve.
+///
+/// So the sweep fails CLOSED: it cannot name what to keep, so it keeps
+/// everything. The same reasoning is why the retained set includes a staging
+/// card's commissioned work — durable state that has not yet produced a `Ready`
+/// reference still says which blob belongs to it.
+#[test]
+fn a_card_whose_record_cannot_be_read_keeps_its_bytes() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let contents = vec![0x3c_u8; 2048];
+    let document = root.path().join("chosen.bin");
+    std::fs::write(&document, &contents).expect("the source is written");
+
+    let host = Host::boot(root.path()).expect("the host boots");
+    host.intent(
+        &encode_command_frame(&CommandFrame {
+            body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+                intent: CreateIntentView::MintRoom(MintRoomView {
+                    local_direction: LocalDirectionView::Send,
+                }),
+                request_id: "66".repeat(16),
+            })),
+        })
+        .expect("the create encodes"),
+    )
+    .expect("the authority answers the create");
+    let token = host.open_lane();
+    let acquisition = published_acquisition(&host, token);
+    let key = SourceAcquisitionKey::of(DutyProvenance {
+        card: RecordId::new(u64::from_str_radix(&acquisition.card, 16).expect("hex card")),
+        generation: AttemptGen::new(acquisition.generation),
+        request: RequestId::from_bytes(
+            u128::from_str_radix(&acquisition.request, 16)
+                .expect("hex request")
+                .to_be_bytes(),
+        ),
+    });
+    host.sources().bind(key, document);
+    host.intent(&offer_bytes(&acquisition, "chosen.bin", None))
+        .expect("the authority answers the offer");
+    let order = poll_work(&host).expect("an accepted offer dispatches the handle duty");
+    let order = WorkOrder::decode(&order).expect("the order decodes");
+    let card = order.provenance.to_provenance().card;
+    assert!(
+        host.report_duty(
+            &WorkReport::source(
+                order.provenance.to_provenance(),
+                SourceReport::Acquired(AcquiredSelection::of_one(
+                    SourceRetention::Process,
+                    SourceSeekability::Seekable,
+                )),
+            )
+            .encode()
+            .expect("the report encodes")
+        )
+    );
+    drain_until_source(&host, token, |source| {
+        matches!(source, SourceLifecycleView::Ready(_))
+    });
+    host.shutdown();
+
+    let blobs = envoix_blob_api::BlobStore::new(envoix_blob_local::LocalBlobs::new(root.path()));
+    let owned = blobs.owned(card).expect("owned blobs");
+    assert_eq!(owned.len(), 1, "the production wrote no artifact");
+    let produced = owned[0];
+    assert!(blobs.sealed(produced).expect("inspectable").is_some());
+
+    // Corrupt every operation file this card has, so the record is present and
+    // unreadable — quarantine, which the boot loop preserves rather than
+    // reinterprets.
+    let cards = root.path().join("cards");
+    for entry in std::fs::read_dir(&cards).expect("the card directory reads") {
+        let entry = entry.expect("a card entry");
+        for revision in std::fs::read_dir(entry.path().join("revisions"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let operation = revision.path().join("operation.env");
+            if operation.is_file() {
+                std::fs::write(&operation, b"not a record").expect("the record is corrupted");
+            }
+        }
+    }
+
+    let host = Host::boot(root.path()).expect("the host reboots over a quarantined card");
+    host.shutdown();
+
+    assert!(
+        blobs.sealed(produced).expect("inspectable").is_some(),
+        "a sweep that could not read the record deleted the card's artifact"
+    );
+}
+
 /// Bytes nothing references do not survive a boot, and the ones a card is
 /// resting on do.
 ///
