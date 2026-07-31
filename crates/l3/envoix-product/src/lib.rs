@@ -43,8 +43,9 @@ pub use envoix_capabilities::{SourceAcquisitionKey, SourceRetention};
 // requires.
 pub use envoix_protocol::ContentHash;
 pub use source_lifecycle::{
-    AcceptedSourceOffer, SelectionGate, SourceBacking, SourceLifecycle, SourceOfferAnswer,
-    SourcePossession, SourcePromptReason, StagedContent, StagingPlan, TransferContent,
+    AcceptedSourceOffer, DerivationSpec, SelectedItem, Selection, SelectionError, SelectionGate,
+    SourceBacking, SourceLifecycle, SourceOfferAnswer, SourcePossession, SourcePromptReason,
+    StagedContent, StagingPlan, TransferContent,
 };
 
 #[cfg(test)]

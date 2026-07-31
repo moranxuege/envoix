@@ -369,14 +369,55 @@ impl AcceptedSourceOffer {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StagingPlan {
-    /// Read straight from the provider. Implies the grant is persisted and the
-    /// source is seekable — the two things resume requires — which is why the
-    /// owner's streaming decision is expressible as a type rather than a
-    /// comment.
-    ProviderStream,
-    /// Copy into an app-private artifact, because the grant would not survive a
-    /// restart or the source cannot seek.
-    CopyToOwnedArtifact,
+    /// Read the one chosen document straight from the provider, where it lies.
+    ///
+    /// Implies the grant is persisted and the source is seekable — the two
+    /// things resume requires — which is why the owner's streaming decision is
+    /// expressible as a type rather than a comment. It names WHICH document
+    /// because streaming is possible only for a lone one: you cannot stream two
+    /// as one, so a selection of several must be produced into something.
+    ProviderStream { item: SourceItemId },
+    /// Produce an artifact this app owns outright, by applying `derivation` to
+    /// what was chosen.
+    ///
+    /// Not a fallback. A copy is the IDENTITY member of this family, and its
+    /// siblings compact a selection into an archive — so this arm is where the
+    /// thing a card sends stops being one of the documents and becomes something
+    /// made from them.
+    ProduceOwnedArtifact { derivation: DerivationSpec },
+}
+
+/// How an owned artifact is produced from the selection.
+///
+/// Every member is VERSIONED in its own name. A derivation is durable — a
+/// record commissions one and a restart reads it back — and what a later
+/// implementation may change is not just its output but its checkpoint format
+/// and what a partial one means. `VerbatimV2` would be a different value, not
+/// the same value behaving differently, and a checkpoint taken under one version
+/// is ineligible for another however useful its offset looks.
+///
+/// Only the identity member exists. An archive is not named here until something
+/// can produce one: a durable value nothing constructs is a record shape with no
+/// writer, and the arc has spent commits removing exactly that.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivationSpec {
+    /// One document's bytes, copied unchanged.
+    ///
+    /// Names WHICH document for the same reason `ProviderStream` does: a
+    /// verbatim copy has exactly one input. An archive member of this family
+    /// would take the whole selection instead, which is the difference that
+    /// makes them different derivations rather than one with a flag.
+    VerbatimV1 { item: SourceItemId },
+}
+
+impl DerivationSpec {
+    /// The one document this derivation reads, when it reads exactly one.
+    pub const fn sole_input(self) -> Option<SourceItemId> {
+        match self {
+            Self::VerbatimV1 { item } => Some(item),
+        }
+    }
 }
 
 /// The largest source this product can carry from end to end.
@@ -398,37 +439,53 @@ impl StagingPlan {
     /// `retention`. See [`SourceDecodeError::ImpossibleRetention`].
     pub const fn is_possible_with(self, retention: SourceRetention) -> bool {
         match (self, retention) {
-            (Self::ProviderStream, SourceRetention::Process) => false,
-            (Self::ProviderStream, SourceRetention::Persisted) | (Self::CopyToOwnedArtifact, _) => {
-                true
-            }
+            (Self::ProviderStream { .. }, SourceRetention::Process) => false,
+            (Self::ProviderStream { .. }, SourceRetention::Persisted)
+            | (Self::ProduceOwnedArtifact { .. }, _) => true,
         }
     }
 
-    /// The plan for a source the platform will serve under these terms.
+    /// The plan for a selection the platform will serve under these terms, or
+    /// `None` when nothing this build can do serves it.
     ///
-    /// Streaming is the default and the copy is the exception: copying every
-    /// send would double disk for a multi-gigabyte file on a phone. The two
-    /// facts that force a copy are the two resume depends on — a grant that a
-    /// restart would lose, and a source that cannot be re-read from an offset.
-    /// Both come from the platform's own answer, so this is a total function of
-    /// what was reported rather than a policy that has to guess.
-    pub const fn for_source(retention: SourceRetention, seekability: SourceSeekability) -> Self {
-        match (retention, seekability) {
-            (SourceRetention::Persisted, SourceSeekability::Seekable) => Self::ProviderStream,
-            (SourceRetention::Persisted, SourceSeekability::SequentialOnly)
-            | (SourceRetention::Process, SourceSeekability::Seekable)
-            | (SourceRetention::Process, SourceSeekability::SequentialOnly) => {
-                Self::CopyToOwnedArtifact
+    /// Streaming is the default and producing is the exception: copying every
+    /// send would double disk for a multi-gigabyte file on a phone. Three facts
+    /// decide it, and all three come from what was actually reported rather than
+    /// from a policy that guesses — how many documents were chosen, whether the
+    /// grant survives a restart, and whether the source can be re-read from an
+    /// offset. The last two are what resume depends on.
+    ///
+    /// `None` is a selection of several documents. It has to be produced into
+    /// one thing, and no archive derivation exists yet — so this says so instead
+    /// of returning a plan that means something else. The authority refuses such
+    /// an offer at intake for the same reason, and this is the arm that will
+    /// carry the requested archive when an offer can name one.
+    pub fn for_selection(selection: &Selection, acquired: &AcquiredSelection) -> Option<Self> {
+        let item = selection.sole()?.id();
+        Some(match (acquired.retention(), acquired.seekability()) {
+            (SourceRetention::Persisted, SourceSeekability::Seekable) => {
+                Self::ProviderStream { item }
             }
-        }
+            _ => Self::ProduceOwnedArtifact {
+                derivation: DerivationSpec::VerbatimV1 { item },
+            },
+        })
     }
 
     /// What owns the bytes once staging under this plan has finished.
     pub const fn backing(self) -> SourceBacking {
         match self {
-            Self::ProviderStream => SourceBacking::PersistedProvider,
-            Self::CopyToOwnedArtifact => SourceBacking::OwnedArtifact,
+            Self::ProviderStream { .. } => SourceBacking::PersistedProvider,
+            Self::ProduceOwnedArtifact { .. } => SourceBacking::OwnedArtifact,
+        }
+    }
+
+    /// Every item this plan reads, so a record can be checked against the
+    /// selection beside it.
+    pub const fn input(self) -> Option<SourceItemId> {
+        match self {
+            Self::ProviderStream { item } => Some(item),
+            Self::ProduceOwnedArtifact { derivation } => derivation.sole_input(),
         }
     }
 }
@@ -482,8 +539,8 @@ impl SourcePossession {
     pub const fn performs(self, plan: StagingPlan) -> bool {
         matches!(
             (plan, self),
-            (StagingPlan::ProviderStream, Self::Streamed)
-                | (StagingPlan::CopyToOwnedArtifact, Self::Copied(_))
+            (StagingPlan::ProviderStream { .. }, Self::Streamed)
+                | (StagingPlan::ProduceOwnedArtifact { .. }, Self::Copied(_))
         )
     }
 }
@@ -1045,7 +1102,11 @@ mod tests {
                     SourceRetention::Process,
                     SourceSeekability::Seekable,
                 ),
-                plan: StagingPlan::CopyToOwnedArtifact,
+                plan: StagingPlan::ProduceOwnedArtifact {
+                    derivation: DerivationSpec::VerbatimV1 {
+                        item: SourceItemId::new(0),
+                    },
+                },
             },
             SourceLifecycle::Ready {
                 offer: offer(2),
@@ -1077,7 +1138,9 @@ mod tests {
                     SourceRetention::Persisted,
                     SourceSeekability::Seekable
                 ),
-                plan: StagingPlan::ProviderStream,
+                plan: StagingPlan::ProviderStream {
+                    item: SourceItemId::new(0)
+                },
             }
             .is_ready()
         );
@@ -1647,9 +1710,9 @@ pub(crate) enum SourceLifecycleDto {
 pub enum SourceDecodeError {
     /// A post-failure gate claiming the card never tried.
     ImpossiblePromptReason,
-    /// The platform's per-item answers do not describe the selection beside
-    /// them. A record whose answers and documents disagree could resume the
-    /// wrong one.
+    /// The platform's per-item answers, or the plan's chosen input, do not
+    /// describe the selection beside them. A record whose parts disagree about
+    /// which documents exist could resume — or send — the wrong one.
     NotTheSelection,
     /// A retention the plan or the backing beside it cannot be true with.
     ///
@@ -1861,6 +1924,15 @@ impl TryFrom<SourceLifecycleDto> for SourceLifecycle {
                 }
                 if !plan.is_possible_with(acquired.retention()) {
                     return Err(SourceDecodeError::ImpossibleRetention);
+                }
+                // The plan reads an item the selection actually holds. A plan
+                // naming an ordinal that is not there would send a document the
+                // card never accepted, or nothing at all.
+                if plan
+                    .input()
+                    .is_some_and(|item| offer.selection().item(item).is_none())
+                {
+                    return Err(SourceDecodeError::NotTheSelection);
                 }
                 Self::Staging {
                     offer,

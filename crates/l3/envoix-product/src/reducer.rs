@@ -504,7 +504,19 @@ impl TransferRecord {
                 // EVERY document survives a restart and can seek — while the
                 // per-item answers are kept, because recovery is decided per
                 // document and cannot be recomputed from a fold.
-                let plan = StagingPlan::for_source(acquired.retention(), acquired.seekability());
+                //
+                // `None` is a selection nothing this build can serve: several
+                // documents have to be produced into one thing, and no archive
+                // derivation exists. The intake refuses such an offer, so this
+                // is unreachable today — and it fails honestly rather than
+                // commissioning a plan that means something else.
+                let Some(plan) = StagingPlan::for_selection(offer.selection(), acquired) else {
+                    self.source = SourceLifecycle::lost(offer, SourceAcquisitionFailure::Internal);
+                    self.quiescence = Quiescence::Quiescent;
+                    self.state = ProductState::Failed;
+                    self.outcome = Some(source_failure(Phase::Preparing));
+                    return Vec::new();
+                };
                 let acquired = acquired.clone();
                 self.source = SourceLifecycle::staging(offer, acquired, plan);
                 self.quiescence = Quiescence::Running {

@@ -3,15 +3,15 @@ use envoix_attempt_api::{
     OpenResult, ResumeIntent, RetirementAck, RetirementAckResult, RetirementIntent,
 };
 use envoix_capabilities::{
-    AcquiredSelection, Admission, DutyKind, DutyLedger, DutyProvenance, DutyReport, DutyResult,
-    GenerationUpdate, Registration, SourceAcquisitionFailure, SourceAcquisitionKey, SourceReport,
-    SourceRetention, SourceSeekability,
+    AcquiredItem, AcquiredSelection, Admission, DutyKind, DutyLedger, DutyProvenance, DutyReport,
+    DutyResult, GenerationUpdate, Registration, SourceAcquisitionFailure, SourceAcquisitionKey,
+    SourceReport, SourceRetention, SourceSeekability,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_protocol::ContentHash;
 use envoix_types::{
-    ArtifactId, AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId, RequestId,
-    TransferId,
+    ArchivePath, ArtifactId, AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId,
+    RequestId, SourceItemId, TransferId,
 };
 
 use crate::record::RecordInvariant;
@@ -24,7 +24,7 @@ use crate::{
     Quiescence, RecordCodecError, RecordDecode, StorageAction, TransferRecord, WorkerKind,
     decode_record, encode_record,
 };
-use crate::{SourcePossession, StagingPlan};
+use crate::{DerivationSpec, Selection, SourcePossession, StagingPlan};
 
 #[derive(Default)]
 struct DeterministicEntropy {
@@ -317,14 +317,25 @@ fn receiver_adopts_authenticated_transfer_identity_and_mints_local_identity() {
 }
 
 /// The policy that replaced `resolve_source`: it reads what the PLATFORM
-/// answered instead of what a caller decided, and it is total over both facts.
+/// answered instead of what a caller decided, and it is total over every fact
+/// it consults — how many documents, whether the grant survives, whether the
+/// source can seek.
 #[test]
-fn a_send_streams_unless_the_platform_forces_a_copy() {
+fn a_send_streams_unless_something_forces_it_to_be_produced() {
     use crate::StagingPlan;
+    let one = Selection::of_one(
+        OfferedName::from_untrusted("a.txt").expect("a bounded name"),
+        None,
+    );
     assert_eq!(
-        StagingPlan::for_source(SourceRetention::Persisted, SourceSeekability::Seekable),
-        StagingPlan::ProviderStream,
-        "the default: no copy, so a multi-gigabyte send does not double disk"
+        StagingPlan::for_selection(
+            &one,
+            &AcquiredSelection::of_one(SourceRetention::Persisted, SourceSeekability::Seekable)
+        ),
+        Some(StagingPlan::ProviderStream {
+            item: SourceItemId::new(0)
+        }),
+        "the default: nothing produced, so a multi-gigabyte send does not double disk"
     );
     for (retention, seekability) in [
         (
@@ -335,11 +346,53 @@ fn a_send_streams_unless_the_platform_forces_a_copy() {
         (SourceRetention::Process, SourceSeekability::SequentialOnly),
     ] {
         assert_eq!(
-            StagingPlan::for_source(retention, seekability),
-            StagingPlan::CopyToOwnedArtifact,
-            "a grant a restart loses, or a source resume cannot re-read, must be copied"
+            StagingPlan::for_selection(&one, &AcquiredSelection::of_one(retention, seekability)),
+            Some(StagingPlan::ProduceOwnedArtifact {
+                derivation: DerivationSpec::VerbatimV1 {
+                    item: SourceItemId::new(0)
+                }
+            }),
+            "a grant a restart loses, or a source resume cannot re-read, must be produced"
         );
     }
+
+    // Several documents have to be produced into ONE thing, and no archive
+    // derivation exists — so there is no plan, rather than a plan that means
+    // something else. The intake refuses such an offer for the same reason.
+    let several = Selection::accept(vec![
+        (
+            ArchivePath::from_untrusted(["a.txt"]).expect("a path"),
+            None,
+        ),
+        (
+            ArchivePath::from_untrusted(["b.txt"]).expect("a path"),
+            None,
+        ),
+    ])
+    .expect("a selection");
+    assert_eq!(
+        StagingPlan::for_selection(
+            &several,
+            &AcquiredSelection::of(
+                vec![
+                    AcquiredItem {
+                        item: SourceItemId::new(0),
+                        retention: SourceRetention::Persisted,
+                        seekability: SourceSeekability::Seekable,
+                    },
+                    AcquiredItem {
+                        item: SourceItemId::new(1),
+                        retention: SourceRetention::Persisted,
+                        seekability: SourceSeekability::Seekable,
+                    },
+                ],
+                2
+            )
+            .expect("the answers describe the selection")
+        ),
+        None,
+        "a selection of several documents was given a plan that sends one"
+    );
 }
 
 #[test]
@@ -1939,7 +1992,9 @@ fn every_published_command_moves_the_card_and_the_rest_are_inert() {
         crate::SourceLifecycle::staging(
             held.clone(),
             AcquiredSelection::of_one(SourceRetention::Persisted, SourceSeekability::Seekable),
-            crate::StagingPlan::ProviderStream,
+            crate::StagingPlan::ProviderStream {
+                item: SourceItemId::new(0),
+            },
         ),
         base.source.clone(),
     ];
@@ -2511,13 +2566,65 @@ fn product_record_roundtrips() {
     );
 }
 
+/// A staging plan must read a document the selection actually holds.
+///
+/// The plan names WHICH item it streams or copies, because a lone document is
+/// the only thing that can be streamed and a verbatim copy has exactly one
+/// input. A record whose plan names an ordinal that is not in its own selection
+/// would send a document the card never accepted — or nothing at all — so it is
+/// refused where it is decoded rather than puzzled over when it is read.
 #[test]
-fn product_record_v8_has_a_byte_exact_fixture() {
+fn a_plan_naming_an_item_outside_the_selection_is_refused() {
+    /// The envelope this build writes: schema length, schema, version, body
+    /// length. The body is everything after it.
+    const HEADER_BYTES: usize = 2 + 23 + 4 + 4;
+
+    let (mut card, _) = create(Direction::Send);
+    give_a_source(&mut card);
+    let encoded = encode_record(&card).expect("a staging record encodes");
+    let body = std::str::from_utf8(&encoded[HEADER_BYTES..]).expect("the body is text");
+    assert!(
+        body.contains(r#""provider_stream":{"item":0}"#),
+        "the fixture is not a streaming staging record: {body}"
+    );
+
+    let reframed = |body: &str| {
+        let body = body.as_bytes();
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&23_u16.to_be_bytes());
+        encoded.extend_from_slice(b"envoix/product-record/1");
+        encoded.extend_from_slice(&crate::PRODUCT_RECORD_VERSION.to_be_bytes());
+        encoded.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        encoded.extend_from_slice(body);
+        encoded
+    };
+
+    // The same record with the plan pointed at an item the selection has not
+    // got. Nothing else about it changes.
+    assert_eq!(
+        decode_record(&reframed(&body.replace(
+            r#""provider_stream":{"item":0}"#,
+            r#""provider_stream":{"item":7}"#,
+        ))),
+        Err(RecordCodecError::MalformedBody),
+        "a plan reading a document the card never accepted was made live"
+    );
+
+    // And the untampered bytes DO decode, so the refusal is about the ordinal
+    // rather than about the reframing.
+    assert!(
+        matches!(decode_record(&reframed(body)), Ok(RecordDecode::Loaded(_))),
+        "reframing broke the untampered record"
+    );
+}
+
+#[test]
+fn product_record_v9_has_a_byte_exact_fixture() {
     let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired":[{"item":0,"retention":"persisted","seekability":"seekable"}],"backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&8_u32.to_be_bytes());
+    expected.extend_from_slice(&9_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);
@@ -2838,7 +2945,9 @@ fn a_copy_plan_is_not_established_by_a_stream() {
     assert!(matches!(
         card.source,
         crate::SourceLifecycle::Staging {
-            plan: StagingPlan::CopyToOwnedArtifact,
+            plan: StagingPlan::ProduceOwnedArtifact {
+                derivation: DerivationSpec::VerbatimV1 { .. },
+            },
             ..
         }
     ));
@@ -2965,7 +3074,7 @@ fn a_persisted_staging_reacquires_across_a_restart() {
             card.source,
             crate::SourceLifecycle::Staging {
                 ref acquired,
-                plan: StagingPlan::ProviderStream,
+                plan: StagingPlan::ProviderStream { .. },
                 ..
             } if acquired.retention() == SourceRetention::Persisted
         ),

@@ -236,8 +236,8 @@ impl SourceStagingExecutor for BoundSourceStaging {
         // exists; the alternative is what the possession split removed, a card
         // resting at `Ready` over an owned artifact that was never written.
         let source = match plan.plan {
-            StagingPlan::ProviderStream => self.registry.open(&plan.acquisition),
-            StagingPlan::CopyToOwnedArtifact => None,
+            StagingPlan::ProviderStream { .. } => self.registry.open(&plan.acquisition),
+            StagingPlan::ProduceOwnedArtifact { .. } => None,
         };
         tokio::task::spawn_blocking(move || read_through(source, &signals_tx, token));
         SourceStagingExecution { signals, stop }
