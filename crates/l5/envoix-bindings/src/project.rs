@@ -20,7 +20,7 @@ use envoix_runtime::{
     SourceLifecycle, SourcePromptReason, SubscribeError, TransferContent, TransferRecord,
     WorkerKind,
 };
-use envoix_types::{Direction, OfferedName, RecordId, Secret};
+use envoix_types::{ByteCount, Direction, OfferedName, RecordId, Secret};
 
 use crate::capability::CAPABILITY_SCHEMA_ID;
 use crate::command::COMMAND_SCHEMA_ID;
@@ -349,9 +349,27 @@ fn acquisition_view(key: SourceAcquisitionKey) -> SourceAcquisitionKeyView {
 fn accepted_offer_view(offer: &AcceptedSourceOffer) -> AcceptedSourceOfferView {
     AcceptedSourceOfferView {
         acquisition: acquisition_view(*offer.key()),
-        display_name: truncate_utf8(offer.display_name().as_str(), MAX_NAME_BYTES),
-        reported_size: offer.reported_size().map(|size| u63(size.get())),
+        // The OUTPUT's name — what this transfer is called. For a lone streamed
+        // document that is the document's own name; for a produced archive it is
+        // the archive's, and neither is "the first thing in the selection".
+        display_name: truncate_utf8(offer.output_name().as_str(), MAX_NAME_BYTES),
+        // The sum of what the providers claimed, and only when EVERY item made a
+        // claim. A partial sum would be a smaller number presented as the whole,
+        // which is worse than saying nothing — and this field is advisory
+        // regardless, because the authoritative total comes from staging.
+        reported_size: reported_total(offer).map(|size| u63(size.get())),
     }
+}
+
+fn reported_total(offer: &AcceptedSourceOffer) -> Option<ByteCount> {
+    offer
+        .selection()
+        .items()
+        .iter()
+        .try_fold(0_u64, |total, item| {
+            Some(total.saturating_add(item.reported_size()?.get()))
+        })
+        .map(ByteCount::new)
 }
 
 fn transfer_content_view(content: &TransferContent) -> TransferContentView {

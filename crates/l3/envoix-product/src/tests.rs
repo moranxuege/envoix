@@ -2373,7 +2373,7 @@ fn re_picking_a_source_asks_again_under_a_new_generation() {
     // And the discharged key is refused where the fresh one is accepted, which
     // is what makes a late answer to the old ask inert rather than binding.
     assert_eq!(
-        record.answer_source_offer(&AcceptedSourceOffer::new(
+        record.answer_source_offer(&AcceptedSourceOffer::of_one_document(
             before,
             OfferedName::from_untrusted(STAGED_NAME).unwrap(),
             None,
@@ -2448,7 +2448,7 @@ fn fixture_acquisition() -> envoix_capabilities::SourceAcquisitionKey {
 fn fixture_record() -> TransferRecord {
     let mut record = fixture_skeleton();
     record.source = crate::SourceLifecycle::Ready {
-        offer: crate::AcceptedSourceOffer::new(
+        offer: crate::AcceptedSourceOffer::of_one_document(
             fixture_acquisition(),
             OfferedName::from_untrusted("a.txt").unwrap(),
             Some(ByteCount::new(10)),
@@ -2509,12 +2509,12 @@ fn product_record_roundtrips() {
 }
 
 #[test]
-fn product_record_v6_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"display_name":"a.txt","reported_size":10},"acquired_retention":"persisted","backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+fn product_record_v7_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired_retention":"persisted","backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&6_u32.to_be_bytes());
+    expected.extend_from_slice(&7_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);

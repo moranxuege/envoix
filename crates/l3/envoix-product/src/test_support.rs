@@ -35,7 +35,7 @@ pub(crate) fn offer(
     name: &str,
     reported: Option<u64>,
 ) -> AcceptedSourceOffer {
-    AcceptedSourceOffer::new(
+    AcceptedSourceOffer::of_one_document(
         SourceAcquisitionKey::of(acquisition(record)),
         OfferedName::from_untrusted(name).expect("a bounded test name"),
         reported.map(ByteCount::new),

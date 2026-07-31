@@ -1343,7 +1343,7 @@ fn the_published_picker_key_is_the_one_the_authority_accepts() {
     };
     let name = OfferedName::from_untrusted("chosen.bin").expect("a bounded name");
     assert_eq!(
-        record.answer_source_offer(&AcceptedSourceOffer::new(
+        record.answer_source_offer(&AcceptedSourceOffer::of_one_document(
             key(&published.request),
             name.clone(),
             None
@@ -1359,7 +1359,11 @@ fn the_published_picker_key_is_the_one_the_authority_accepts() {
     let last = other.pop().expect("a non-empty request");
     other.push(if last == 'f' { '0' } else { 'f' });
     assert_eq!(
-        record.answer_source_offer(&AcceptedSourceOffer::new(key(&other), name, None)),
+        record.answer_source_offer(&AcceptedSourceOffer::of_one_document(
+            key(&other),
+            name,
+            None
+        )),
         SourceOfferAnswer::Stale,
         "the authority accepted an acquisition it never published"
     );

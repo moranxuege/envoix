@@ -381,7 +381,7 @@ fn stage_the_source<S: RecordStore>(
     let provenance = session.record().current_acquisition().provenance();
     session
         .apply(ProductInput::SourceOffered {
-            offer: AcceptedSourceOffer::new(
+            offer: AcceptedSourceOffer::of_one_document(
                 SourceAcquisitionKey::of(provenance),
                 offered_name.clone(),
                 Some(total),

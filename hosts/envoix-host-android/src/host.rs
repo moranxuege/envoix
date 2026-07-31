@@ -682,7 +682,7 @@ impl Host {
             ))
             .unwrap_or_default();
         };
-        let offer = AcceptedSourceOffer::new(
+        let offer = AcceptedSourceOffer::of_one_document(
             SourceAcquisitionKey::of(DutyProvenance {
                 card: spec.card,
                 generation: AttemptGen::new(spec.generation),

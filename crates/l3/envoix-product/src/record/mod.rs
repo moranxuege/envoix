@@ -26,15 +26,15 @@ pub use identifiers::PRODUCT_RECORD_SCHEMA_ID;
 /// for a document it must never have, and a sender defaulted to `NotRequired`
 /// would claim it needs none. A defaulted field that changes what a card IS is
 /// not a migration, it is a fabrication. Nothing has ever been released
-/// (`registry/release-ledger.toml`), so the only pre-v6 records anywhere are on
+/// (`registry/release-ledger.toml`), so the only pre-v7 records anywhere are on
 /// a development device and are quarantined intact rather than reinterpreted.
 ///
 /// An older reader seeing a newer version takes the honest
 /// [`RecordDecode::UnsupportedFuture`] quarantine, never the corrupt path.
-pub const PRODUCT_RECORD_VERSION: u32 = 6;
+pub const PRODUCT_RECORD_VERSION: u32 = 7;
 /// The oldest record version this build still decodes. Equal to
 /// [`PRODUCT_RECORD_VERSION`] because of the fabrication argument above.
-pub const OLDEST_READABLE_RECORD_VERSION: u32 = 6;
+pub const OLDEST_READABLE_RECORD_VERSION: u32 = 7;
 const MAX_RECORD_BODY_BYTES: usize = 1024 * 1024;
 const SCHEMA_LENGTH_BYTES: usize = 2;
 const VERSION_BYTES: usize = 4;

@@ -267,7 +267,7 @@ mod tests {
     fn a_source_that_is_only_held_cannot_be_located() {
         assert_eq!(
             SourceLocator::of(
-                &SourceLifecycle::Acquiring(AcceptedSourceOffer::new(
+                &SourceLifecycle::Acquiring(AcceptedSourceOffer::of_one_document(
                     acquisition(),
                     OfferedName::from_untrusted("payload.bin").expect("a bounded name"),
                     None,

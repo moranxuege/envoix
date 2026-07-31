@@ -25,7 +25,9 @@ use envoix_capabilities::{
     SourceAcquisitionFailure, SourceAcquisitionKey, SourceRetention, SourceSeekability,
 };
 use envoix_protocol::ContentHash;
-use envoix_types::{ArtifactId, ByteCount, Direction, OfferedName};
+use std::collections::BTreeSet;
+
+use envoix_types::{ArchivePath, ArtifactId, ByteCount, Direction, OfferedName, SourceItemId};
 
 /// Why the authority is asking for a source. Carried so a frontend can say
 /// something true without inferring it, and so a repeat is distinguishable
@@ -74,40 +76,273 @@ impl From<SourceAcquisitionFailure> for SourcePromptReason {
     }
 }
 
-/// A document the user chose, bound to exactly one acquisition.
+/// One document in a selection.
 ///
-/// No URI, path or descriptor: the platform registry owns those under the key,
-/// and product state has no scalar that could carry one by mistake.
+/// Carries no URI, path or descriptor: the platform registry owns those under
+/// the acquisition key, and product state has no scalar that could hold one by
+/// mistake. What it carries is where the document sits — which is the same fact
+/// for a lone file and for one member of a directory tree.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SelectedItem {
+    id: SourceItemId,
+    /// Where this document goes inside a produced archive, and — for a lone
+    /// document — what it is called. One field for both, because they are the
+    /// same fact observed at different depths.
+    path: ArchivePath,
+    /// What the provider SAID this item's size was — deliberately not the
+    /// transfer's total. A provider is untrusted about length; the authoritative
+    /// total comes from staging, which counts.
+    reported_size: Option<ByteCount>,
+}
+
+impl SelectedItem {
+    pub const fn new(
+        id: SourceItemId,
+        path: ArchivePath,
+        reported_size: Option<ByteCount>,
+    ) -> Self {
+        Self {
+            id,
+            path,
+            reported_size,
+        }
+    }
+
+    pub const fn id(&self) -> SourceItemId {
+        self.id
+    }
+
+    pub const fn path(&self) -> &ArchivePath {
+        &self.path
+    }
+
+    pub const fn reported_size(&self) -> Option<ByteCount> {
+        self.reported_size
+    }
+}
+
+/// Why a list of picked documents is not a selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(missing_docs)]
+pub enum SelectionError {
+    /// A card sends something. Nothing is not something.
+    Empty,
+    TooManyItems {
+        actual: usize,
+        maximum: usize,
+    },
+    TooLarge {
+        actual: usize,
+        maximum: usize,
+    },
+    /// Two items would land at the same place inside an archive.
+    DuplicatePath,
+}
+
+impl std::fmt::Display for SelectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("a selection names no document"),
+            Self::TooManyItems { actual, maximum } => {
+                write!(formatter, "{actual} items exceeds the maximum of {maximum}")
+            }
+            Self::TooLarge { actual, maximum } => {
+                write!(
+                    formatter,
+                    "{actual} path bytes exceeds the maximum of {maximum}"
+                )
+            }
+            Self::DuplicatePath => formatter.write_str("two items would land at the same place"),
+        }
+    }
+}
+
+/// The documents one acquisition holds, in the order they will be written.
+///
+/// A struct rather than a bare list so the ORDER and the bounds are properties
+/// of the type: the order fixes archive layout and the item ids, and re-ordering
+/// after acceptance would rename every item.
+///
+/// Held inline, and therefore bounded. A directory-scale selection will exceed
+/// these bounds, and the answer then is a separately stored, sealed selection
+/// manifest that this type gains as a second way of naming its items — not
+/// bigger numbers. Callers reach the items through [`Self::items`] precisely so
+/// that change stays local to this type.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "Vec<SelectedItem>", into = "Vec<SelectedItem>")]
+pub struct Selection(Vec<SelectedItem>);
+
+impl Selection {
+    /// The most items one inline selection may name.
+    ///
+    /// A product decision, and stated as one: nothing upstream fixes it. It
+    /// exists because a selection is the first thing a person's choice can make
+    /// a record grow without limit, and a record has to be committable. Generous
+    /// for choosing files, far short of choosing a directory tree — which is the
+    /// case the manifest is for.
+    pub const MAX_ITEMS: usize = 1024;
+
+    /// The most path bytes one inline selection may hold, bounding the record
+    /// even when every path is at its own maximum. Also a product decision.
+    pub const MAX_PATH_BYTES: usize = 64 * 1024;
+
+    /// Accepts a list as a selection, in the order given, numbering the items.
+    ///
+    /// The authority mints the ids here — in inventory order, never reused
+    /// within the acquisition — so nothing outside can name an item that is not
+    /// in this list.
+    pub fn accept(paths: Vec<(ArchivePath, Option<ByteCount>)>) -> Result<Self, SelectionError> {
+        if paths.is_empty() {
+            return Err(SelectionError::Empty);
+        }
+        if paths.len() > Self::MAX_ITEMS {
+            return Err(SelectionError::TooManyItems {
+                actual: paths.len(),
+                maximum: Self::MAX_ITEMS,
+            });
+        }
+        let bytes = paths
+            .iter()
+            .map(|(path, _)| path.to_string().len())
+            .sum::<usize>();
+        if bytes > Self::MAX_PATH_BYTES {
+            return Err(SelectionError::TooLarge {
+                actual: bytes,
+                maximum: Self::MAX_PATH_BYTES,
+            });
+        }
+        // Two documents cannot land at one place inside an archive. Refused
+        // rather than renamed: an archive whose entries silently differ from
+        // what the person chose is worse than one that was not produced.
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for (path, _) in &paths {
+            if !seen.insert(path.to_string()) {
+                return Err(SelectionError::DuplicatePath);
+            }
+        }
+        Ok(Self(
+            paths
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, (path, reported_size))| {
+                    SelectedItem::new(SourceItemId::new(ordinal as u32), path, reported_size)
+                })
+                .collect(),
+        ))
+    }
+
+    /// A selection of exactly one document, chosen on its own.
+    pub fn of_one(name: OfferedName, reported_size: Option<ByteCount>) -> Self {
+        Self(vec![SelectedItem::new(
+            SourceItemId::new(0),
+            ArchivePath::leaf(name),
+            reported_size,
+        )])
+    }
+
+    pub fn items(&self) -> &[SelectedItem] {
+        &self.0
+    }
+
+    pub fn item(&self, id: SourceItemId) -> Option<&SelectedItem> {
+        self.0.iter().find(|item| item.id == id)
+    }
+
+    /// The one item, when there is exactly one.
+    ///
+    /// Streaming is possible only for a single document — you cannot stream two
+    /// as one — so this is what a stream plan asks for, and its `None` is the
+    /// reason a multi-document send must derive.
+    pub fn sole(&self) -> Option<&SelectedItem> {
+        match self.0.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+impl From<Selection> for Vec<SelectedItem> {
+    fn from(selection: Selection) -> Self {
+        selection.0
+    }
+}
+
+impl TryFrom<Vec<SelectedItem>> for Selection {
+    type Error = SelectionError;
+
+    /// Stored bytes face the same bounds a fresh selection does — including the
+    /// ids, which must be the ones the authority would have minted. A record
+    /// that renumbers its items could point a checkpoint at a different
+    /// document.
+    fn try_from(items: Vec<SelectedItem>) -> Result<Self, Self::Error> {
+        let paths = items
+            .iter()
+            .map(|item| (item.path.clone(), item.reported_size))
+            .collect();
+        let accepted = Self::accept(paths)?;
+        if accepted.0 != items {
+            return Err(SelectionError::DuplicatePath);
+        }
+        Ok(accepted)
+    }
+}
+
+/// What the person chose, bound to exactly one acquisition, and what it will be
+/// sent as.
+///
+/// The output name is COMMISSIONED here rather than read off an input later.
+/// For a lone streamed document the two coincide — the output is that document —
+/// but for a produced archive the name is the archive's, and a worker that
+/// inherited the first input's name would call a zip after one of its members.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedSourceOffer {
     key: SourceAcquisitionKey,
-    /// The name as the authority normalized it. Retained because idempotency is
-    /// classified over the WHOLE accepted offer: a retry carrying the same key
-    /// and a different name was never committed, and answering "already
-    /// accepted" would tell the frontend its payload was applied when it was
-    /// not.
-    display_name: OfferedName,
-    /// What the provider SAID the size was — deliberately not the transfer's
-    /// total. A provider is untrusted about length; the authoritative total
-    /// comes from staging, which counted the bytes.
-    reported_size: Option<ByteCount>,
+    selection: Selection,
+    output_name: OfferedName,
 }
 
 impl AcceptedSourceOffer {
     pub const fn new(
         key: SourceAcquisitionKey,
-        display_name: OfferedName,
+        selection: Selection,
+        output_name: OfferedName,
+    ) -> Self {
+        Self {
+            key,
+            selection,
+            output_name,
+        }
+    }
+
+    /// One document, sent as itself. The output name is the document's, which is
+    /// the truth for a stream rather than a shortcut.
+    pub fn of_one_document(
+        key: SourceAcquisitionKey,
+        name: OfferedName,
         reported_size: Option<ByteCount>,
     ) -> Self {
         Self {
             key,
-            display_name,
-            reported_size,
+            selection: Selection::of_one(name.clone(), reported_size),
+            output_name: name,
         }
     }
 
-    pub const fn display_name(&self) -> &OfferedName {
-        &self.display_name
+    /// What this transfer is called — the OUTPUT's name, whatever produced it.
+    pub const fn output_name(&self) -> &OfferedName {
+        &self.output_name
+    }
+
+    pub const fn selection(&self) -> &Selection {
+        &self.selection
     }
 
     /// Whether `candidate` is this same offer in every accepted field.
@@ -121,10 +356,6 @@ impl AcceptedSourceOffer {
 
     pub const fn key(&self) -> &SourceAcquisitionKey {
         &self.key
-    }
-
-    pub const fn reported_size(&self) -> Option<ByteCount> {
-        self.reported_size
     }
 }
 
@@ -567,7 +798,7 @@ impl SourceLifecycle {
         match self {
             Self::NotRequired { peer_content } => peer_content.as_ref().map(TransferContent::name),
             Self::AwaitingSelection(_) => None,
-            Self::Acquiring(offer) | Self::Staging { offer, .. } => Some(offer.display_name()),
+            Self::Acquiring(offer) | Self::Staging { offer, .. } => Some(offer.output_name()),
             Self::Ready { content, .. } => Some(content.name()),
         }
     }
@@ -712,7 +943,7 @@ mod tests {
     }
 
     fn offer(generation: u32) -> AcceptedSourceOffer {
-        AcceptedSourceOffer::new(
+        AcceptedSourceOffer::of_one_document(
             key(generation),
             OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
             Some(ByteCount::new(4096)),
@@ -971,12 +1202,130 @@ mod tests {
         assert_ne!(measured, swapped);
     }
 
+    fn path(name: &str) -> ArchivePath {
+        ArchivePath::from_untrusted([name]).expect("a bounded path")
+    }
+
+    /// A selection numbers its items in the order given, and that order is what
+    /// an archive will be written in.
+    #[test]
+    fn a_selection_numbers_its_items_in_order() {
+        let selection = Selection::accept(vec![
+            (path("b.txt"), None),
+            (path("a.txt"), Some(ByteCount::new(4))),
+        ])
+        .expect("a selection");
+
+        let ids: Vec<u32> = selection
+            .items()
+            .iter()
+            .map(|item| item.id().get())
+            .collect();
+        assert_eq!(ids, [0, 1]);
+        // The order is the person's, not sorted: an archive written in a
+        // different order than they chose is a different archive.
+        assert_eq!(selection.items()[0].path().to_string(), "b.txt");
+        assert_eq!(
+            selection
+                .item(SourceItemId::new(1))
+                .expect("the item")
+                .path()
+                .to_string(),
+            "a.txt"
+        );
+    }
+
+    /// Two documents cannot land at one place inside an archive. Refused rather
+    /// than renamed — an archive whose entries silently differ from what was
+    /// chosen is worse than one that was not produced.
+    #[test]
+    fn a_selection_refuses_two_items_at_one_path() {
+        assert_eq!(
+            Selection::accept(vec![(path("a.txt"), None), (path("a.txt"), None)]),
+            Err(SelectionError::DuplicatePath)
+        );
+    }
+
+    /// A card sends something, so an empty selection is not one — and the bounds
+    /// exist because a selection is the first thing a person's choice can make a
+    /// record grow without limit.
+    #[test]
+    fn a_selection_is_non_empty_and_bounded() {
+        assert_eq!(Selection::accept(Vec::new()), Err(SelectionError::Empty));
+
+        let many: Vec<_> = (0..=Selection::MAX_ITEMS)
+            .map(|index| (path(&format!("f{index}.bin")), None))
+            .collect();
+        assert!(matches!(
+            Selection::accept(many),
+            Err(SelectionError::TooManyItems { .. })
+        ));
+
+        let long: Vec<_> = (0..64)
+            .map(|index| {
+                (
+                    ArchivePath::from_untrusted(
+                        (0..16).map(|d| format!("{index}-{d}-{}", "x".repeat(200))),
+                    )
+                    .expect("a bounded path"),
+                    None,
+                )
+            })
+            .collect();
+        assert!(matches!(
+            Selection::accept(long),
+            Err(SelectionError::TooLarge { .. })
+        ));
+    }
+
+    /// Streaming is possible only for a single document — you cannot stream two
+    /// as one — which is why a multi-document send must derive.
+    #[test]
+    fn only_a_lone_document_can_be_streamed() {
+        let one = Selection::accept(vec![(path("a.txt"), None)]).expect("a selection");
+        assert!(one.sole().is_some());
+
+        let two = Selection::accept(vec![(path("a.txt"), None), (path("b.txt"), None)])
+            .expect("a selection");
+        assert!(
+            two.sole().is_none(),
+            "two documents were offered as one streamable source"
+        );
+    }
+
+    /// Stored bytes face the same bounds a fresh selection does, INCLUDING the
+    /// ids: a record that renumbered its items could point a checkpoint at a
+    /// different document than the one it was taken over.
+    #[test]
+    fn hostile_stored_selections_cannot_renumber_or_widen() {
+        let honest: Selection =
+            serde_json::from_str(r#"[{"id":0,"path":["a.txt"],"reported_size":null}]"#)
+                .expect("an honest selection decodes");
+        assert_eq!(honest.len(), 1);
+
+        for hostile in [
+            // Renumbered.
+            r#"[{"id":9,"path":["a.txt"],"reported_size":null}]"#,
+            // Out of order for its own ids.
+            r#"[{"id":1,"path":["a.txt"],"reported_size":null},{"id":0,"path":["b.txt"],"reported_size":null}]"#,
+            // Empty.
+            r#"[]"#,
+            // Duplicate destination.
+            r#"[{"id":0,"path":["a.txt"],"reported_size":null},{"id":1,"path":["a.txt"],"reported_size":null}]"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Selection>(hostile).is_err(),
+                "a hostile selection decoded: {hostile}"
+            );
+        }
+    }
+
     /// The provider's claim about size and the counted total are different
     /// facts and are stored as different fields, so one cannot be read as the
     /// other. A provider is untrusted about length.
     #[test]
     fn a_reported_size_is_never_the_transfers_total() {
-        let lying = AcceptedSourceOffer::new(
+        let lying = AcceptedSourceOffer::of_one_document(
             key(1),
             OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
             Some(ByteCount::new(10)),
@@ -990,16 +1339,26 @@ mod tests {
         let SourceLifecycle::Ready { offer, content, .. } = &ready else {
             panic!("constructed ready");
         };
-        assert_eq!(offer.reported_size(), Some(ByteCount::new(10)));
+        assert_eq!(
+            offer
+                .selection()
+                .sole()
+                .expect("one document")
+                .reported_size(),
+            Some(ByteCount::new(10))
+        );
         assert_eq!(content.total(), ByteCount::new(4096));
 
         // A provider that reported nothing is normal and is not a failure.
         assert!(
-            AcceptedSourceOffer::new(
+            AcceptedSourceOffer::of_one_document(
                 key(1),
                 OfferedName::from_untrusted("x").expect("a bounded name"),
                 None
             )
+            .selection()
+            .sole()
+            .expect("one document")
             .reported_size()
             .is_none()
         );
@@ -1026,7 +1385,7 @@ mod offer_tests {
     }
 
     fn named_offer(key: SourceAcquisitionKey, name: &str) -> AcceptedSourceOffer {
-        AcceptedSourceOffer::new(
+        AcceptedSourceOffer::of_one_document(
             key,
             OfferedName::from_untrusted(name).expect("a bounded name"),
             None,
@@ -1193,8 +1552,8 @@ pub(crate) struct SourceKeyDto {
 #[serde(deny_unknown_fields)]
 pub(crate) struct OfferDto {
     key: SourceKeyDto,
-    display_name: OfferedName,
-    reported_size: Option<ByteCount>,
+    selection: Selection,
+    output_name: OfferedName,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1281,18 +1640,25 @@ impl core::fmt::Display for SourceDecodeError {
     }
 }
 
-/// An accepted offer whose provider claim is representable.
+/// An accepted offer whose provider claims are representable.
 ///
-/// `reported_size` is the provider's, so hostile bytes can put anything in it.
-/// It is advisory and never becomes a total — but a value this product cannot
-/// carry end to end must not become a live one either, or a frontend would be
-/// handed a size it cannot render.
+/// Each item's `reported_size` is the provider's, so hostile bytes can put
+/// anything in one. It is advisory and never becomes a total — but a value this
+/// product cannot carry end to end must not become a live one either, or a
+/// frontend would be handed a size it cannot render. Checked per ITEM, because
+/// that is where a provider now speaks.
 fn checked_offer(offer: OfferDto) -> Result<AcceptedSourceOffer, SourceDecodeError> {
     let offer: AcceptedSourceOffer = offer.into();
-    match offer.reported_size() {
-        Some(size) if size.get() > MAX_SOURCE_BYTES => Err(SourceDecodeError::SourceTooLarge),
-        _ => Ok(offer),
+    if offer
+        .selection()
+        .items()
+        .iter()
+        .filter_map(SelectedItem::reported_size)
+        .any(|size| size.get() > MAX_SOURCE_BYTES)
+    {
+        return Err(SourceDecodeError::SourceTooLarge);
     }
+    Ok(offer)
 }
 
 impl From<&SourceAcquisitionKey> for SourceKeyDto {
@@ -1320,15 +1686,15 @@ impl From<&AcceptedSourceOffer> for OfferDto {
     fn from(offer: &AcceptedSourceOffer) -> Self {
         Self {
             key: offer.key().into(),
-            display_name: offer.display_name().clone(),
-            reported_size: offer.reported_size(),
+            selection: offer.selection().clone(),
+            output_name: offer.output_name().clone(),
         }
     }
 }
 
 impl From<OfferDto> for AcceptedSourceOffer {
     fn from(dto: OfferDto) -> Self {
-        Self::new(dto.key.into(), dto.display_name, dto.reported_size)
+        Self::new(dto.key.into(), dto.selection, dto.output_name)
     }
 }
 

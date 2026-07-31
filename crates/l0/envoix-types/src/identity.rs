@@ -3,7 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 macro_rules! integer_identity {
-    ($name:ident, $inner:ty) => {
+    ($(#[$doc:meta])* $name:ident, $inner:ty) => {
+        $(#[$doc])*
         #[derive(
             Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
         )]
@@ -62,6 +63,21 @@ macro_rules! opaque_128_identity {
 
 integer_identity!(RecordId, u64);
 integer_identity!(AttemptGen, u32);
+integer_identity!(
+    /// Which item of ONE selection.
+    ///
+    /// An ordinal minted by the authority in inventory order when a selection is
+    /// accepted, and stable only within that acquisition: the accepted inventory
+    /// is committed once and never reordered, so an ordinal names the same
+    /// document for as long as the acquisition exists. A re-pick mints a new
+    /// acquisition and therefore a fresh numbering.
+    ///
+    /// Small rather than opaque because it is not an identity anyone outside the
+    /// acquisition can hold. Nothing looks a document up by it globally; it says
+    /// WHICH of these, and "these" is always one committed list.
+    SourceItemId,
+    u32
+);
 opaque_128_identity!(TransferId);
 opaque_128_identity!(ArtifactId);
 opaque_128_identity!(RequestId);

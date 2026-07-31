@@ -324,7 +324,7 @@ fn stage_the_source(
     let provenance = session.record().current_acquisition().provenance();
     session
         .apply(ProductInput::SourceOffered {
-            offer: AcceptedSourceOffer::new(
+            offer: AcceptedSourceOffer::of_one_document(
                 SourceAcquisitionKey::of(provenance),
                 OfferedName::from_untrusted("payload.bin").unwrap(),
                 Some(ByteCount::new(1024)),

@@ -642,16 +642,17 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
         digest: ContentHash,
         possession: SourcePossession,
     ) -> Option<ProductInput> {
-        // The name staging establishes is the one the accepted offer carried,
-        // normalized by the authority. A worker does not get to rename the
-        // document it read.
+        // The name staging establishes is the OUTPUT's, commissioned when the
+        // offer was accepted. A worker does not get to name what it produced —
+        // and for a derivation the output is not any one input, so inheriting
+        // the first input's name would call an archive after one of its members.
         let SourceLifecycle::Staging { offer, .. } = &self.session().record().source else {
             return None;
         };
         Some(ProductInput::StageComplete {
             stamp,
             content: StagedContent::new(
-                TransferContent::new(offer.display_name().clone(), total),
+                TransferContent::new(offer.output_name().clone(), total),
                 digest,
             ),
             possession,

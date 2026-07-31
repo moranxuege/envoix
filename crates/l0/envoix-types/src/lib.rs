@@ -7,7 +7,9 @@ mod name;
 mod secret;
 mod value;
 
-pub use identity::{ArtifactId, AttemptGen, CommandId, RecordId, RequestId, TransferId};
-pub use name::{LandedName, OfferedName, OfferedNameError};
+pub use identity::{
+    ArtifactId, AttemptGen, CommandId, RecordId, RequestId, SourceItemId, TransferId,
+};
+pub use name::{ArchivePath, ArchivePathError, LandedName, OfferedName, OfferedNameError};
 pub use secret::Secret;
 pub use value::{ByteCount, Direction};

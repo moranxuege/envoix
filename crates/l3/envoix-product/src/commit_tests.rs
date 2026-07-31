@@ -972,7 +972,7 @@ fn an_offer_for_the_asked_acquisition_binds_the_document() {
         crate::SourceLifecycle::AwaitingSelection(_)
     ));
 
-    let offered = crate::AcceptedSourceOffer::new(
+    let offered = crate::AcceptedSourceOffer::of_one_document(
         expected_key(session.record()),
         OfferedName::from_untrusted("report.pdf").expect("a bounded name"),
         Some(ByteCount::new(4096)),
@@ -988,7 +988,7 @@ fn an_offer_for_the_asked_acquisition_binds_the_document() {
     };
     assert_eq!(bound, &offered);
     // And the name the card will show comes from the offer, not from create.
-    assert_eq!(bound.display_name().as_str(), "report.pdf");
+    assert_eq!(bound.output_name().as_str(), "report.pdf");
 }
 
 /// An offer naming a different acquisition changes NOTHING. It is the caller's
@@ -1006,7 +1006,7 @@ fn an_offer_for_another_acquisition_leaves_the_record_alone() {
     .unwrap();
     let before = session.record().source.clone();
 
-    let wrong = crate::AcceptedSourceOffer::new(
+    let wrong = crate::AcceptedSourceOffer::of_one_document(
         envoix_capabilities::SourceAcquisitionKey::of(envoix_capabilities::DutyProvenance {
             card: envoix_types::RecordId::new(0xdead),
             generation: session.record().generation,
