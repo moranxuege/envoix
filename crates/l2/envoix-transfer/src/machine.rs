@@ -591,14 +591,21 @@ impl ReceiverAwaitHeader {
         IngressState::AwaitFileHeader
     }
 
-    pub fn receive_header(
+    /// Validates the header and says what the peer DECLARED. Nothing else.
+    ///
+    /// Split from the rest because everything that used to follow it is
+    /// irreversible or observable: preparing the sink changes durable state, and
+    /// the `ResumeStatus` tells the peer it was accepted. A card that learned
+    /// what was declared only from a fire-and-forget event would be told after
+    /// both had already happened, and could not authorize either.
+    ///
+    /// So this stops at the decision boundary. What follows is `begin_receive`,
+    /// which runs only once the declaration has been durably admitted.
+    pub fn inspect_header(
         self,
         frame: Frame,
         now: MonotonicMillis,
-        data_deadline: Deadline,
-        claim: Option<ClaimedComplete>,
-        sink: &mut impl StagingSink,
-    ) -> Result<(ReceiverReceiving, Frame), MachineFailure> {
+    ) -> Result<(ReceiverHeaderAdmitted, PeerContentDeclaration), MachineFailure> {
         let state = self.0.into_live(now)?;
         let header = match frame {
             Frame::FileHeader(header) => header,
@@ -609,14 +616,73 @@ impl ReceiverAwaitHeader {
                         state: IngressState::AwaitFileHeader,
                         actual: other.kind(),
                     }),
-                    None,
+                    Some(state.transfer),
                     ProtocolReason::ProtocolViolation,
                 ));
             }
         };
         validate_header(&header, state.transfer, state.chunk_size)
             .map_err(|error| MachineFailure::from_engine_error(error, state.transfer))?;
+        let declaration = PeerContentDeclaration {
+            transfer: header.transfer_id,
+            offered_name: header.offered_name.clone(),
+            file_size: header.file_size,
+        };
+        Ok((ReceiverHeaderAdmitted { header }, declaration))
+    }
 
+    /// Validates and begins in one step.
+    ///
+    /// The composition of `inspect_header` and `begin_receive` for callers that
+    /// have nothing to authorize — every test, and any host without a card
+    /// behind it. A real receive goes through the two halves so the declaration
+    /// can be committed between them.
+    pub fn receive_header(
+        self,
+        frame: Frame,
+        now: MonotonicMillis,
+        data_deadline: Deadline,
+        claim: Option<ClaimedComplete>,
+        sink: &mut impl StagingSink,
+    ) -> Result<(ReceiverReceiving, Frame), MachineFailure> {
+        let (admitted, _declaration) = self.inspect_header(frame, now)?;
+        admitted.begin_receive(data_deadline, claim, sink)
+    }
+}
+
+/// What the peer declared it is sending, before anything has acted on it.
+///
+/// Carries the transfer id as well as the content so a card can check the
+/// declaration against the one it commissioned without trusting the channel it
+/// arrived on to have done it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerContentDeclaration {
+    pub transfer: TransferId,
+    pub offered_name: OfferedName,
+    pub file_size: ByteCount,
+}
+
+/// A validated header whose declaration has not yet been acted on.
+///
+/// Holds no sink and has answered no peer. The only thing it can do is begin,
+/// and beginning is what a card authorizes.
+pub struct ReceiverHeaderAdmitted {
+    header: FileHeader,
+}
+
+impl ReceiverHeaderAdmitted {
+    /// Prepares the destination and answers the peer.
+    ///
+    /// Everything irreversible lives here: the sink is opened at its durable
+    /// prefix, and the `ResumeStatus` this returns is the peer being told what
+    /// will be resumed.
+    pub fn begin_receive(
+        self,
+        data_deadline: Deadline,
+        claim: Option<ClaimedComplete>,
+        sink: &mut impl StagingSink,
+    ) -> Result<(ReceiverReceiving, Frame), MachineFailure> {
+        let header = self.header;
         let claim = if matches!(header.resume, ResumeMode::Allowed) {
             claim
         } else {

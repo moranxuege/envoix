@@ -654,6 +654,7 @@ fn exact_ingress_and_resume_validation() {
     disabled_resume_is_refused();
     inconsistent_resume_index_on_the_wire_is_refused();
     a_header_for_another_transfer_is_refused();
+    inspecting_a_header_touches_nothing();
 }
 
 fn completion_order_and_strict_ack() {
@@ -842,6 +843,46 @@ fn inconsistent_resume_index_on_the_wire_is_refused() {
             actual: 2,
             expected: 0,
         })
+    );
+}
+
+/// Inspecting a header decides nothing and changes nothing.
+///
+/// This is the whole point of the split: between validating what the peer
+/// declared and acting on it, a card gets to commit that declaration. If
+/// inspection prepared the sink or answered the peer, the card would be told
+/// after both had already happened and could authorize neither.
+///
+/// The inertness is STRUCTURAL, not something this test holds up:
+/// `inspect_header` takes no sink and returns no frame, so it cannot reach
+/// either however it is edited. What the test pins is the seam being usable —
+/// that a declaration really is available before beginning, and that beginning
+/// is what reaches the destination.
+fn inspecting_a_header_touches_nothing() {
+    let id = transfer_id(14);
+    let bytes = (0_u8..12).collect::<Vec<_>>();
+    let mut sink = MemorySink::default();
+
+    let (sender, hello) = sender_start(request(id, &bytes, 4, ResumeMode::Allowed), DEADLINE);
+    let receiver = receiver_start(id, ByteCount::new(4), DEADLINE).unwrap();
+    let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
+    let (_sender, header) = sender.receive_ready(ready, NOW, DEADLINE).unwrap();
+
+    let (admitted, declaration) = receiver.inspect_header(header, NOW).unwrap();
+    assert_eq!(declaration.transfer, id);
+    assert_eq!(declaration.file_size, ByteCount::new(bytes.len() as u64));
+    assert_eq!(sink.staged.len(), 0, "inspection opened no destination");
+    assert_eq!(sink.prefix, None, "and promised nothing about one");
+
+    // Only beginning does, and only then does the peer hear anything.
+    let (_receiving, answer) = admitted
+        .begin_receive(DEADLINE, None, &mut sink)
+        .expect("an authorized declaration begins");
+    assert!(matches!(answer, Frame::ResumeStatus(_)));
+    assert_eq!(
+        sink.prefix.map(|prefix| prefix.length),
+        Some(ByteCount::new(0)),
+        "beginning is what reaches the destination"
     );
 }
 
