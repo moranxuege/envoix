@@ -645,6 +645,58 @@ mod tests {
         OwnedFd::from(std::fs::File::open("/dev/null").expect("a descriptor"))
     }
 
+    /// Two receives on one card write to different places, and only one writer
+    /// ever holds either.
+    ///
+    /// Both halves matter and neither is obvious from the types. The key is
+    /// DERIVED from the plan rather than carried, so a derivation that collapsed
+    /// two transfers onto one key would silently interleave two files into one
+    /// blob — nothing would fault, and the digests would simply fail at the end.
+    /// And the exclusion is what makes "one writer per incarnation" a fact
+    /// rather than a convention: a second attempt on the same transfer must be
+    /// refused while the first still holds its lease.
+    ///
+    /// Nothing here can be selected by a peer. `open` is called with a key
+    /// computed before any frame arrives, and the opened session is then held by
+    /// value, so there is no API that takes a frame and returns a destination.
+    #[test]
+    fn two_receives_on_one_card_get_distinct_and_exclusive_destinations() {
+        let root = tempfile::TempDir::new().expect("a root");
+        let blobs = BlobStore::new(envoix_blob_local::LocalBlobs::new(
+            root.path().to_path_buf(),
+        ));
+        let sinks = HostSinks::new(blobs);
+
+        let card = RecordId::new(7);
+        let artifact = envoix_types::ArtifactId::from_bytes([3; 16]);
+        let first = BlobKey::new(
+            card,
+            BlobWorkId::of_reception(envoix_types::TransferId::from_bytes([1; 16]), artifact),
+        );
+        let second = BlobKey::new(
+            card,
+            BlobWorkId::of_reception(envoix_types::TransferId::from_bytes([2; 16]), artifact),
+        );
+        assert_ne!(first, second, "two transfers must not share a destination");
+
+        let held = sinks.open(first).expect("the first receive opens");
+        assert!(
+            sinks.open(second).is_ok(),
+            "a different transfer opens while the first is held"
+        );
+        assert_eq!(
+            sinks.open(first).err(),
+            Some(SinkOpenError::Unavailable),
+            "a second writer on a held destination must be refused"
+        );
+
+        drop(held);
+        assert!(
+            sinks.open(first).is_ok(),
+            "the destination reopens once its writer is gone"
+        );
+    }
+
     /// A resume must not close the source the card is about to send from.
     ///
     /// The attempt generation and the ACQUISITION's generation are different
