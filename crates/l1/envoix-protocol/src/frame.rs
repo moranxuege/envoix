@@ -59,6 +59,15 @@ pub enum ProtocolReason {
     ProtocolViolation,
     IntegrityMismatch,
     StorageFault,
+    /// The peer declared a different document for a transfer whose content is
+    /// already final.
+    ///
+    /// Distinct from every other reason because it tells the peer what to DO: a
+    /// different document needs a different transfer, and retrying this one will
+    /// never work. Reporting it as a violation would blame the peer for
+    /// something it did legitimately; reporting it as internal would invite a
+    /// retry that cannot succeed.
+    ContentConflict,
     Internal,
 }
 
@@ -72,6 +81,10 @@ impl ProtocolReason {
             Self::VersionMismatch => Some(OutcomeCode::VersionMismatch),
             Self::StorageFault => Some(OutcomeCode::StorageFault),
             Self::Internal => Some(OutcomeCode::Internal),
+            // No L0 equivalent yet. A peer that hears this must be told to use a
+            // NEW transfer, which is a product affordance rather than an
+            // outcome code, so mapping it to one would say less than nothing.
+            Self::ContentConflict => None,
             Self::ProtocolViolation | Self::IntegrityMismatch => None,
         }
     }

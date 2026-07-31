@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor, EventAdmission,
-    OpenResult, ResumeIntent, RetirementIntent,
+    OpenResult, PeerContentVerdict, ResumeIntent, RetirementIntent,
 };
 use envoix_attempt_iroh::{
     AttemptHandle, AttemptTimeouts, AttemptTransferSpec, SharedAttemptSupervisor,
@@ -654,6 +654,16 @@ async fn start_real_attempt(broker: &EndpointAddr, case: AttemptCase) -> Running
         FixedEntropy::new(case.entropy_seed.wrapping_add(0x80)),
     )
     .expect("spawn receiver");
+    // A receive now waits for an authority before it touches a destination.
+    // This slice drives the MECHANISM, not the card's decision, so it admits —
+    // but it has to say so, because silence refuses.
+    let mut receiver = receiver;
+    let mut declarations = receiver.take_peer_content();
+    tokio::spawn(async move {
+        while let Some(request) = declarations.recv().await {
+            let _ = request.verdict.send(PeerContentVerdict::Admitted);
+        }
+    });
     let sender_link = dial(
         data_endpoint_config(),
         pair.receiver_addr,

@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor, EventAdmission,
-    OpenResult, ResumeIntent, RetirementIntent,
+    OpenResult, PeerContentVerdict, ResumeIntent, RetirementIntent,
 };
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_pairing::{
@@ -435,6 +435,7 @@ async fn attempt_iroh_generation_and_retirement() {
         TestEntropy::new(0x80),
     )
     .unwrap();
+    admit_peer_content(&mut first_receiver);
     assert_eq!(first_sender.open_result(), OpenResult::Opened);
     assert_eq!(first_receiver.open_result(), OpenResult::Opened);
 
@@ -491,6 +492,7 @@ async fn attempt_iroh_generation_and_retirement() {
         TestEntropy::new(0x90),
     )
     .unwrap();
+    admit_peer_content(&mut second_receiver);
     assert_eq!(second_sender.open_result(), OpenResult::Superseded);
     assert_eq!(second_receiver.open_result(), OpenResult::Superseded);
     assert_eq!(
@@ -628,6 +630,7 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         TestEntropy::new(0xa0),
     )
     .unwrap();
+    admit_peer_content(&mut receiver);
 
     let bad_link = dial(
         loopback_config(),
@@ -737,6 +740,7 @@ async fn sender_emits_confirming_between_complete_and_ack() {
         TestEntropy::new(0xa0),
     )
     .unwrap();
+    admit_peer_content(&mut receiver);
     let sender_control = sender.control();
     let receiver_control = receiver.control();
 
@@ -788,4 +792,78 @@ async fn sender_emits_confirming_between_complete_and_ack() {
         .unwrap();
     sender.wait_ack().await.unwrap();
     receiver.wait_ack().await.unwrap();
+}
+
+/// Silence is not consent.
+///
+/// A declaration nobody answers must end the attempt, not hold an authenticated
+/// session and a writer lease open waiting for one. Before the wait was bounded
+/// this hung forever, and every other test in this file hung with it — which is
+/// how the flaw was found.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_unanswered_declaration_refuses_rather_than_waits() {
+    let bytes = (0..2048_u32).map(|index| index as u8).collect::<Vec<_>>();
+    let source = MemorySource {
+        bytes: Arc::new(bytes.clone()),
+    };
+    let sink = MemorySink::default();
+    let (sender_supervisor, receiver_supervisor) = (
+        Arc::new(Mutex::new(AttemptSupervisor::new())) as SharedAttemptSupervisor,
+        Arc::new(Mutex::new(AttemptSupervisor::new())) as SharedAttemptSupervisor,
+    );
+    let links = link_pair(None);
+    let (sender_token, receiver_token) = token_pair();
+
+    // NO authority is wired: the request goes nowhere.
+    let mut receiver = spawn_receiver(
+        plan(Direction::Receive, 1, ResumeIntent::Fresh),
+        spec(&bytes),
+        receiver_token,
+        sink.clone(),
+        links.receiver,
+        receiver_supervisor,
+        TestEntropy::new(0x90),
+    )
+    .expect("spawn receiver");
+    let sender = spawn_sender(
+        plan(Direction::Send, 1, ResumeIntent::Fresh),
+        spec(&bytes),
+        sender_token,
+        source,
+        links.sender,
+        sender_supervisor,
+        TestEntropy::new(0x91),
+    )
+    .expect("spawn sender");
+
+    let terminal = loop {
+        let event = receiver.next_event().await.expect("a terminal");
+        if let AttemptEventKind::Terminal(outcome) = event.kind {
+            break outcome;
+        }
+    };
+    assert_eq!(
+        terminal,
+        OutcomeCode::Internal,
+        "it ends, and does not hang"
+    );
+    assert!(
+        sink.state.lock().unwrap().staged.is_empty(),
+        "an unauthorized declaration never reached the destination"
+    );
+    drop(sender);
+}
+
+/// Answers every declaration with `Admitted`.
+///
+/// These suites are about the transport, not about what a card decides — but a
+/// receive now WAITS for an authority before it touches a destination, so one
+/// has to exist. A test that supplied none would be testing the refusal path.
+fn admit_peer_content(handle: &mut crate::AttemptHandle) {
+    let mut requests = handle.take_peer_content();
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            let _ = request.verdict.send(PeerContentVerdict::Admitted);
+        }
+    });
 }

@@ -17,6 +17,10 @@ pub enum AttemptError {
     Session(SessionError),
     ProtocolEnvelope,
     RetirementHandshake,
+    /// The authority would not answer for the peer's declaration, or its answer
+    /// never arrived. Never treated as admission — a silent channel says nothing
+    /// about whether a declaration was accepted.
+    PeerContentRefused,
     TaskStopped,
 }
 
@@ -32,6 +36,7 @@ impl AttemptError {
             | Self::InvalidTimeout
             | Self::ProtocolEnvelope
             | Self::RetirementHandshake
+            | Self::PeerContentRefused
             | Self::TaskStopped => OutcomeCode::Internal,
         }
     }
@@ -52,6 +57,9 @@ impl fmt::Display for AttemptError {
             Self::ProtocolEnvelope => formatter.write_str("attempt received an invalid frame"),
             Self::RetirementHandshake => {
                 formatter.write_str("attempt retirement handshake is inconsistent")
+            }
+            Self::PeerContentRefused => {
+                formatter.write_str("no authority answered for what the peer declared")
             }
             Self::TaskStopped => formatter.write_str("attempt executor task stopped"),
         }

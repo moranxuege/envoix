@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor,
-    CommitOperationResult, OpenResult, RetirementAck, RetirementAckResult, RetirementIntent,
-    RetirementRequestResult, TerminalResolutionResult,
+    CommitOperationResult, OpenResult, PeerContentRequest, PeerContentVerdict, RetirementAck,
+    RetirementAckResult, RetirementIntent, RetirementRequestResult, TerminalResolutionResult,
 };
 use envoix_auth::{
     self, AuthError, ExportedKeyingMaterial, MAX_AUTH_PAYLOAD, MonotonicMillis as AuthMillis,
@@ -23,8 +23,8 @@ use envoix_transfer::{
     self, ClaimedComplete, MachineFailure, MonotonicMillis as TransferMillis, ReceiverStep,
     SenderRequest, SenderStep, SourceReader, StagingSink, TransferError,
 };
-use envoix_types::{ByteCount, Direction, OfferedName};
-use tokio::sync::{Notify, mpsc};
+use envoix_types::{ByteCount, Direction, OfferedName, PeerContentDeclaration};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
@@ -125,6 +125,14 @@ pub struct AttemptHandle {
     open_result: OpenResult,
     control: AttemptControl,
     events: mpsc::UnboundedReceiver<AttemptEvent>,
+    /// Requests that BLOCK the attempt until answered, unlike `events`.
+    ///
+    /// A separate channel because the two have opposite contracts: an event may
+    /// be dropped without stopping anything, and a request that is dropped
+    /// stops the receive. Putting a reply channel inside the event enum would
+    /// have made every consumer of an observation responsible for noticing it
+    /// had to answer one.
+    peer_content: mpsc::UnboundedReceiver<PeerContentRequest>,
     paths: mpsc::UnboundedReceiver<PathObservation>,
     task: Option<JoinHandle<Result<RetirementAck, AttemptError>>>,
 }
@@ -140,6 +148,15 @@ impl AttemptHandle {
 
     pub async fn next_event(&mut self) -> Option<AttemptEvent> {
         self.events.recv().await
+    }
+
+    /// Takes the declaration channel, so whoever authorizes can own it.
+    ///
+    /// Once: a second caller gets an empty channel that yields nothing, and a
+    /// receive whose declarations reach nobody refuses rather than proceeds.
+    pub fn take_peer_content(&mut self) -> mpsc::UnboundedReceiver<PeerContentRequest> {
+        let (_, empty) = mpsc::unbounded_channel();
+        std::mem::replace(&mut self.peer_content, empty)
     }
 
     pub async fn next_path(&mut self) -> Option<PathObservation> {
@@ -180,6 +197,7 @@ where
     let open_result = open_attempt(&supervisor, plan)?;
     let paths = link.take_path_observations();
     let (events_sender, events) = mpsc::unbounded_channel();
+    let (peer_content_sender, peer_content) = mpsc::unbounded_channel();
     let (stop_sender, stop_receiver) = mpsc::unbounded_channel();
     let retirement_changed = Arc::new(Notify::new());
     let control = AttemptControl {
@@ -189,6 +207,10 @@ where
         retirement_changed: retirement_changed.clone(),
     };
     let task = tokio::spawn(async move {
+        // A send declares its own content; it never asks. The handle still
+        // carries the channel so both directions have one shape, and a sender's
+        // simply never yields.
+        drop(peer_content_sender);
         execute_sender(
             plan,
             spec,
@@ -207,6 +229,7 @@ where
         open_result,
         control,
         events,
+        peer_content,
         paths,
         task: Some(task),
     })
@@ -232,6 +255,7 @@ where
     let open_result = open_attempt(&supervisor, plan)?;
     let paths = link.take_path_observations();
     let (events_sender, events) = mpsc::unbounded_channel();
+    let (peer_content_sender, peer_content) = mpsc::unbounded_channel();
     let (stop_sender, stop_receiver) = mpsc::unbounded_channel();
     let retirement_changed = Arc::new(Notify::new());
     let control = AttemptControl {
@@ -250,6 +274,7 @@ where
             entropy,
             supervisor,
             events_sender,
+            peer_content_sender,
             stop_receiver,
             retirement_changed,
         )
@@ -259,6 +284,7 @@ where
         open_result,
         control,
         events,
+        peer_content,
         paths,
         task: Some(task),
     })
@@ -285,6 +311,7 @@ where
     let open_result = open_attempt(&supervisor, plan)?;
     let (paths_sender, paths) = mpsc::unbounded_channel();
     let (events_sender, events) = mpsc::unbounded_channel();
+    let (peer_content_sender, peer_content) = mpsc::unbounded_channel();
     let (stop_sender, stop_receiver) = mpsc::unbounded_channel();
     let retirement_changed = Arc::new(Notify::new());
     let control = AttemptControl {
@@ -304,6 +331,7 @@ where
             entropy,
             supervisor,
             events_sender,
+            peer_content_sender,
             paths_sender,
             stop_receiver,
             retirement_changed,
@@ -314,6 +342,7 @@ where
         open_result,
         control,
         events,
+        peer_content,
         paths,
         task: Some(task),
     })
@@ -412,6 +441,7 @@ async fn execute_receiver<S, E>(
     mut entropy: E,
     supervisor: SharedAttemptSupervisor,
     events: mpsc::UnboundedSender<AttemptEvent>,
+    peer_content: mpsc::UnboundedSender<PeerContentRequest>,
     mut stop: mpsc::UnboundedReceiver<RetirementIntent>,
     retirement_changed: Arc<Notify>,
 ) -> Result<RetirementAck, AttemptError>
@@ -449,6 +479,7 @@ where
                 &clock,
                 &supervisor,
                 &events,
+                &peer_content,
                 &mut stop,
             )
             .await
@@ -481,6 +512,7 @@ async fn execute_iroh_receiver<S, E>(
     mut entropy: E,
     supervisor: SharedAttemptSupervisor,
     events: mpsc::UnboundedSender<AttemptEvent>,
+    peer_content: mpsc::UnboundedSender<PeerContentRequest>,
     paths: mpsc::UnboundedSender<PathObservation>,
     mut stop: mpsc::UnboundedReceiver<RetirementIntent>,
     retirement_changed: Arc<Notify>,
@@ -625,6 +657,7 @@ where
         &clock,
         &supervisor,
         &events,
+        &peer_content,
         &mut stop,
     )
     .await;
@@ -1035,6 +1068,7 @@ async fn transfer_receiver(
     clock: &AttemptClock,
     supervisor: &SharedAttemptSupervisor,
     events: &mpsc::UnboundedSender<AttemptEvent>,
+    peer_content: &mpsc::UnboundedSender<PeerContentRequest>,
     stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
 ) -> Terminal {
     let hello_deadline = transfer_deadline(clock, spec.timeouts.transfer_idle());
@@ -1088,16 +1122,37 @@ async fn transfer_receiver(
         Err(exit) => return receiver_wait_exit(await_header, exit, clock),
     };
     let data_deadline = transfer_deadline(clock, spec.timeouts.transfer_idle());
-    let (mut receiving, resume) = match await_header.receive_header(
-        header,
-        clock.transfer_now(),
-        data_deadline,
-        spec.claimed_complete,
-        sink,
-    ) {
+    // VALIDATE, then ask, then act. Everything after this point is irreversible
+    // or visible to the peer, so the authority answers first.
+    let (admitted, declaration) = match await_header.inspect_header(header, clock.transfer_now()) {
         Ok(next) => next,
         Err(failure) => return Terminal::from_machine(failure),
     };
+    match authorize_peer_content(
+        peer_content,
+        plan.stamp,
+        declaration,
+        stop,
+        clock.remaining(data_deadline.instant().0),
+    )
+    .await
+    {
+        PeerContentVerdict::Admitted => {}
+        // The peer is told which of the two it is, because they call for
+        // different things: a different document needs a new transfer, while a
+        // refusal here is this side's problem and says nothing about the peer.
+        PeerContentVerdict::FinalContentConflict => {
+            return Terminal::content_conflict(plan);
+        }
+        PeerContentVerdict::Refused => {
+            return Terminal::from_error(AttemptError::PeerContentRefused);
+        }
+    }
+    let (mut receiving, resume) =
+        match admitted.begin_receive(data_deadline, spec.claimed_complete, sink) {
+            Ok(next) => next,
+            Err(failure) => return Terminal::from_machine(failure),
+        };
     if let Err(exit) = send_frame_interruptible(
         link,
         &resume,
@@ -1263,6 +1318,20 @@ impl Terminal {
         }
     }
 
+    /// The peer declared a different document for a transfer whose content is
+    /// final. Its own attempt is over, but the abort tells it what to do about
+    /// that — start a new transfer — rather than leaving it to retry this one.
+    fn content_conflict(plan: AttemptPlan) -> Self {
+        Self {
+            outcome: OutcomeCode::Internal,
+            close: CloseOrdering::Active,
+            outbound: Some(Frame::Abort(Abort {
+                transfer_id: Some(plan.transfer),
+                reason: ProtocolReason::ContentConflict,
+            })),
+        }
+    }
+
     fn protocol_violation(plan: AttemptPlan) -> Self {
         Self {
             outcome: OutcomeCode::Internal,
@@ -1370,6 +1439,49 @@ fn channel_binding(link: &dyn SessionLink) -> Result<ExportedKeyingMaterial, Att
 
 fn emit(events: &mpsc::UnboundedSender<AttemptEvent>, stamp: AttemptStamp, kind: AttemptEventKind) {
     let _ = events.send(AttemptEvent { stamp, kind });
+}
+
+/// Asks the authority about a declaration and waits for its answer — BOUNDED.
+///
+/// A dropped request, a dropped reply, a retirement, or a deadline is
+/// `Refused`, never `Admitted`. Nothing about silence says a declaration was
+/// accepted, and proceeding on it is exactly the fire-and-forget this seam
+/// exists to replace.
+///
+/// The bound is not defensive tidiness. Without it an unanswered declaration
+/// holds an authenticated session and a writer lease open forever, which is a
+/// worse failure than refusing: the attempt cannot be retired, and nothing
+/// reports why. Found by running it — every existing test hung here before the
+/// timeout went in.
+async fn authorize_peer_content(
+    requests: &mpsc::UnboundedSender<PeerContentRequest>,
+    stamp: AttemptStamp,
+    declaration: PeerContentDeclaration,
+    stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
+    wait: Duration,
+) -> PeerContentVerdict {
+    let (verdict, answer) = oneshot::channel();
+    if requests
+        .send(PeerContentRequest {
+            stamp,
+            declaration,
+            verdict,
+        })
+        .is_err()
+    {
+        return PeerContentVerdict::Refused;
+    }
+    tokio::select! {
+        // BIASED, stop first, for the same reason the launch rendezvous is: a
+        // retirement that arrives with an answer must win, or the attempt begins
+        // writing for a card that has already ended it.
+        biased;
+        _ = stop.recv() => PeerContentVerdict::Refused,
+        answered = timeout(wait, answer) => match answered {
+            Ok(Ok(verdict)) => verdict,
+            Ok(Err(_)) | Err(_) => PeerContentVerdict::Refused,
+        },
+    }
 }
 
 /// Reports the settled resume offset exactly once.

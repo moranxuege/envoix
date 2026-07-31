@@ -527,6 +527,7 @@ const fn encode_reason(reason: ProtocolReason) -> u8 {
         ProtocolReason::IntegrityMismatch => 6,
         ProtocolReason::StorageFault => 7,
         ProtocolReason::Internal => 8,
+        ProtocolReason::ContentConflict => 9,
     }
 }
 
@@ -540,6 +541,7 @@ const fn decode_reason(wire_id: u8) -> Result<ProtocolReason, DecodeError> {
         6 => Ok(ProtocolReason::IntegrityMismatch),
         7 => Ok(ProtocolReason::StorageFault),
         8 => Ok(ProtocolReason::Internal),
+        9 => Ok(ProtocolReason::ContentConflict),
         wire_id => Err(DecodeError::UnknownProtocolReason { wire_id }),
     }
 }
