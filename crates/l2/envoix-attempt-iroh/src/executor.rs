@@ -1038,10 +1038,11 @@ async fn transfer_receiver(
     stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
 ) -> Terminal {
     let hello_deadline = transfer_deadline(clock, spec.timeouts.transfer_idle());
-    let await_hello = match envoix_transfer::receiver_start(spec.chunk_size, hello_deadline) {
-        Ok(state) => state,
-        Err(error) => return Terminal::from_transfer_error(error),
-    };
+    let await_hello =
+        match envoix_transfer::receiver_start(plan.transfer, spec.chunk_size, hello_deadline) {
+            Ok(state) => state,
+            Err(error) => return Terminal::from_transfer_error(error),
+        };
     let hello = match receive_interruptible(
         link,
         MAX_FRAME_SIZE,

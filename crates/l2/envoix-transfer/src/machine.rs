@@ -201,22 +201,24 @@ impl WaitIdentity for SenderAckState {
 }
 
 struct ReceiverHelloState {
+    transfer: TransferId,
     chunk_size: ByteCount,
 }
 
 impl WaitIdentity for ReceiverHelloState {
     fn transfer_id(&self) -> Option<TransferId> {
-        None
+        Some(self.transfer)
     }
 }
 
 struct ReceiverHeaderState {
+    transfer: TransferId,
     chunk_size: ByteCount,
 }
 
 impl WaitIdentity for ReceiverHeaderState {
     fn transfer_id(&self) -> Option<TransferId> {
-        None
+        Some(self.transfer)
     }
 }
 
@@ -233,13 +235,24 @@ pub fn sender_start(request: SenderRequest, ready_deadline: Deadline) -> (Sender
     )
 }
 
+/// Starts a receiver for ONE commissioned transfer.
+///
+/// The transfer id is taken here rather than learned from the header. A receiver
+/// that adopted whatever id arrived could be told it was receiving a different
+/// transfer than the card commissioned — and every later frame would then be
+/// consistent with that header, because consistency is all the frame checks
+/// test. The id is a fact about what this attempt IS, so it comes from the plan.
 pub fn receiver_start(
+    transfer: TransferId,
     chunk_size: ByteCount,
     hello_deadline: Deadline,
 ) -> Result<ReceiverAwaitHello, TransferError> {
     validate_chunk_size(chunk_size.get()).map_err(TransferError::Protocol)?;
     Ok(ReceiverAwaitHello(Wait::new(
-        ReceiverHelloState { chunk_size },
+        ReceiverHelloState {
+            transfer,
+            chunk_size,
+        },
         hello_deadline,
     )))
 }
@@ -553,6 +566,7 @@ impl ReceiverAwaitHello {
             Frame::Hello(_) => Ok((
                 ReceiverAwaitHeader(Wait::new(
                     ReceiverHeaderState {
+                        transfer: state.transfer,
                         chunk_size: state.chunk_size,
                     },
                     header_deadline,
@@ -600,8 +614,8 @@ impl ReceiverAwaitHeader {
                 ));
             }
         };
-        validate_header(&header, state.chunk_size)
-            .map_err(|error| MachineFailure::from_engine_error(error, header.transfer_id))?;
+        validate_header(&header, state.transfer, state.chunk_size)
+            .map_err(|error| MachineFailure::from_engine_error(error, state.transfer))?;
 
         let claim = if matches!(header.resume, ResumeMode::Allowed) {
             claim
@@ -1151,8 +1165,14 @@ fn fresh_staging(
 
 fn validate_header(
     header: &FileHeader,
+    expected_transfer: TransferId,
     receiver_chunk_size: ByteCount,
 ) -> Result<(), TransferError> {
+    if header.transfer_id != expected_transfer {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::TransferIdMismatch,
+        ));
+    }
     validate_chunk_size(receiver_chunk_size.get()).map_err(TransferError::Protocol)?;
     validate_chunk_size(header.chunk_size.get()).map_err(TransferError::Protocol)?;
     if header.chunk_size != receiver_chunk_size {

@@ -183,8 +183,9 @@ fn begin(
     claim: Option<ClaimedComplete>,
 ) -> Result<(SenderSending, ReceiverReceiving), MachineFailure> {
     let chunk_size = request.chunk_size();
+    let transfer = request.transfer_id();
     let (sender, hello) = sender_start(request, DEADLINE);
-    let receiver = receiver_start(chunk_size, DEADLINE).unwrap();
+    let receiver = receiver_start(transfer, chunk_size, DEADLINE).unwrap();
     let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE)?;
     let (sender, header) = sender.receive_ready(ready, NOW, DEADLINE)?;
     let (receiver, status) = receiver.receive_header(header, NOW, DEADLINE, claim, sink)?;
@@ -513,7 +514,7 @@ fn claim_complete_redelivers_ack_without_chunks() {
     // over bytes it never sent and the peer never had.
     let mut honest_source = MemorySource::new(bytes.clone());
     let (sender, hello) = sender_start(request(id, &bytes, 4, ResumeMode::Allowed), DEADLINE);
-    let receiver = receiver_start(ByteCount::new(4), DEADLINE).unwrap();
+    let receiver = receiver_start(id, ByteCount::new(4), DEADLINE).unwrap();
     let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
     let (sender, header) = sender.receive_ready(ready, NOW, DEADLINE).unwrap();
     let (_receiver, honest) = receiver
@@ -652,6 +653,7 @@ fn exact_ingress_and_resume_validation() {
     oversized_resume_is_refused();
     disabled_resume_is_refused();
     inconsistent_resume_index_on_the_wire_is_refused();
+    a_header_for_another_transfer_is_refused();
 }
 
 fn completion_order_and_strict_ack() {
@@ -746,7 +748,7 @@ fn chunk_size_mismatch_is_refused() {
     let id = transfer_id(7);
     let request = request(id, &[0_u8; 8], 4, ResumeMode::Allowed);
     let (sender, hello) = sender_start(request, DEADLINE);
-    let receiver = receiver_start(ByteCount::new(8), DEADLINE).unwrap();
+    let receiver = receiver_start(id, ByteCount::new(8), DEADLINE).unwrap();
     let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
     let (_sender, header) = sender.receive_ready(ready, NOW, DEADLINE).unwrap();
     let failure =
@@ -819,7 +821,7 @@ fn inconsistent_resume_index_on_the_wire_is_refused() {
     let mut sink = MemorySink::default();
 
     let (sender, hello) = sender_start(request, DEADLINE);
-    let receiver = receiver_start(ByteCount::new(4), DEADLINE).unwrap();
+    let receiver = receiver_start(id, ByteCount::new(4), DEADLINE).unwrap();
     let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
     let (sender, header) = sender.receive_ready(ready, NOW, DEADLINE).unwrap();
     let (_receiver, honest) = receiver
@@ -841,6 +843,37 @@ fn inconsistent_resume_index_on_the_wire_is_refused() {
             expected: 0,
         })
     );
+}
+
+/// A receiver is commissioned for ONE transfer and will not be told otherwise.
+///
+/// Every later frame is checked against the header, so a receiver that adopted
+/// whatever id arrived would be perfectly self-consistent while writing another
+/// transfer's bytes into this card's destination. Consistency is not identity.
+fn a_header_for_another_transfer_is_refused() {
+    let commissioned = transfer_id(12);
+    let bytes = b"abcd".to_vec();
+    let mut sink = MemorySink::default();
+
+    let (sender, hello) = sender_start(
+        request(transfer_id(13), &bytes, 4, ResumeMode::Allowed),
+        DEADLINE,
+    );
+    let receiver = receiver_start(commissioned, ByteCount::new(4), DEADLINE).unwrap();
+    let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
+    let (_sender, header) = sender.receive_ready(ready, NOW, DEADLINE).unwrap();
+
+    let refused = failure(receiver.receive_header(header, NOW, DEADLINE, None, &mut sink));
+    assert_eq!(
+        refused.error(),
+        TransferError::Protocol(ProtocolViolation::TransferIdMismatch)
+    );
+    assert_eq!(
+        sink.staged.len(),
+        0,
+        "a header that was refused must not have touched the destination"
+    );
+    assert_eq!(sink.prefix, None, "nor promised anything about it");
 }
 
 fn one_sender_chunk(sender: SenderSending, source: &mut MemorySource) -> (SenderSending, Frame) {
@@ -950,14 +983,14 @@ fn transfer_wait_closure() {
         ProtocolReason::Paused,
     );
 
-    let receiver = receiver_start(ByteCount::new(4), DEADLINE).unwrap();
+    let receiver = receiver_start(id, ByteCount::new(4), DEADLINE).unwrap();
     assert_eq!(
         failure(receiver.deadline_exceeded(EXPIRED)).error(),
         TransferError::Timeout
     );
-    let receiver = receiver_start(ByteCount::new(4), DEADLINE).unwrap();
+    let receiver = receiver_start(id, ByteCount::new(4), DEADLINE).unwrap();
     assert_abort(receiver.cancelled(), ProtocolReason::Cancelled);
-    let receiver = receiver_start(ByteCount::new(4), DEADLINE).unwrap();
+    let receiver = receiver_start(id, ByteCount::new(4), DEADLINE).unwrap();
     let (header, ready_frame) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
     assert_eq!(
         failure(header.deadline_exceeded(EXPIRED)).error(),
@@ -1020,7 +1053,7 @@ fn errors_do_not_echo_peer_payloads() {
     assert!(display.contains("Chunk"));
     assert!(!display.contains("payload"));
 
-    let receiver = receiver_start(ByteCount::new(4), DEADLINE).unwrap();
+    let receiver = receiver_start(transfer_id(1), ByteCount::new(4), DEADLINE).unwrap();
     let rejected =
         failure(receiver.receive_hello(Frame::Ready(envoix_protocol::Ready), NOW, DEADLINE));
     assert_eq!(
