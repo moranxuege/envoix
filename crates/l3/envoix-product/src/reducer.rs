@@ -14,8 +14,8 @@ use crate::{
     AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
     PauseOrigin, ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState,
     Quiescence, SelectionGate, SourceLifecycle, SourceOfferAnswer, SourcePossession,
-    SourceStagingPlan, StagedContent, StagingPlan, StorageAction, TransferContent, TransferRecord,
-    WorkerKind,
+    SourceStagingPlan, StagedContent, StagingPlan, StagingWork, StorageAction, TransferContent,
+    TransferRecord, WorkerKind,
 };
 
 /// The domain tag that separates a card's source-duty request identity from its
@@ -518,6 +518,7 @@ impl TransferRecord {
                     return Vec::new();
                 };
                 let acquired = acquired.clone();
+                let offer_for_work = offer.clone();
                 self.source = SourceLifecycle::staging(offer, acquired, plan);
                 self.quiescence = Quiescence::Running {
                     worker: WorkerKind::Staging,
@@ -525,14 +526,24 @@ impl TransferRecord {
                 // The staging worker owns the card from here, and this is what
                 // starts it — post-commit, so the card is durably `Staging`
                 // before anything touches the document.
+                // What the worker is handed, derived from what the card just
+                // committed. The artifact and the fingerprint are not stored a
+                // second time: both follow from the record, so carrying them
+                // here is the reducer telling the worker rather than the record
+                // holding two copies that could drift.
+                let work = match plan {
+                    StagingPlan::ProviderStream { item } => StagingWork::Stream { item },
+                    StagingPlan::ProduceOwnedArtifact { derivation } => StagingWork::Produce {
+                        artifact: self.identity.artifact,
+                        derivation,
+                        fingerprint: derivation.fingerprint(&offer_for_work),
+                    },
+                };
                 return vec![ProductEffect::StartSourceStaging {
                     plan: SourceStagingPlan {
                         stamp: self.stamp(),
                         acquisition: result.acquisition(),
-                        plan,
-                        // A stream has no durable prefix; a copy resuming one is
-                        // the restore path, which supplies its own offset.
-                        resume_from: ByteCount::new(0),
+                        work,
                     },
                 }];
             }

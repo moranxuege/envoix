@@ -576,6 +576,117 @@ fn a_source_offer_reaches_the_authority_and_moves_the_card() {
     host.shutdown();
 }
 
+/// A source that cannot be streamed is PRODUCED, and the card rests on bytes
+/// this app now owns.
+///
+/// The other three products of the platform's two answers. A grant a restart
+/// would lose, or a source resume cannot re-read, has to become an artifact of
+/// ours before it can be sent — and until this worker existed, that plan was
+/// refused outright, so no card could reach `Ready` by producing anything.
+///
+/// The whole round trip runs: the duty reports a sequential source, the reducer
+/// commissions `VerbatimV1`, the worker copies through the real blob store and
+/// seals, and the card rests at `Ready` over that seal. What proves the bytes
+/// exist is that they read back — a `SealFact` in a record is just data, so the
+/// test asks the store rather than trusting the record.
+#[test]
+fn a_source_that_cannot_be_streamed_is_produced_into_an_owned_artifact() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let contents: Vec<u8> = (0..300_000_u32).map(|byte| byte as u8).collect();
+    let document = root.path().join("chosen.bin");
+    std::fs::write(&document, &contents).expect("the source is written");
+
+    let host = Host::boot(root.path()).expect("the host boots");
+    host.intent(
+        &encode_command_frame(&CommandFrame {
+            body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+                intent: CreateIntentView::MintRoom(MintRoomView {
+                    local_direction: LocalDirectionView::Send,
+                }),
+                request_id: "44".repeat(16),
+            })),
+        })
+        .expect("the create encodes"),
+    )
+    .expect("the authority answers the create");
+
+    let token = host.open_lane();
+    let acquisition = published_acquisition(&host, token);
+    let key = SourceAcquisitionKey::of(DutyProvenance {
+        card: RecordId::new(u64::from_str_radix(&acquisition.card, 16).expect("hex card")),
+        generation: AttemptGen::new(acquisition.generation),
+        request: RequestId::from_bytes(
+            u128::from_str_radix(&acquisition.request, 16)
+                .expect("hex request")
+                .to_be_bytes(),
+        ),
+    });
+    host.sources().bind(key, document);
+    host.intent(&offer_bytes(&acquisition, "chosen.bin", None))
+        .expect("the authority answers the offer");
+
+    let order = poll_work(&host).expect("an accepted offer dispatches the handle duty");
+    let order = WorkOrder::decode(&order).expect("the order decodes");
+    // SEQUENTIAL: resume cannot re-read it from an offset, so it must be copied
+    // before it can be sent. One of the three answers that force production.
+    let report = WorkReport::source(
+        order.provenance.to_provenance(),
+        SourceReport::Acquired(AcquiredSelection::of_one(
+            SourceRetention::Persisted,
+            SourceSeekability::SequentialOnly,
+        )),
+    );
+    assert!(host.report_duty(&report.encode().expect("the report encodes")));
+
+    drain_until_source(&host, token, |source| {
+        matches!(source, SourceLifecycleView::Ready(_))
+    });
+
+    let card = order.provenance.to_provenance().card;
+    host.shutdown();
+    let record = durable_record(root.path(), card);
+    let SourceLifecycle::Ready {
+        content, backing, ..
+    } = &record.source
+    else {
+        panic!("the card did not reach ready: {:?}", record.source);
+    };
+    let SourceBacking::OwnedArtifact { seal } = backing else {
+        panic!("a sequential source was not produced: {backing:?}");
+    };
+
+    // Counted and identified by the worker that wrote them, and the record's
+    // content is the SEAL's — one value, nothing to disagree.
+    assert_eq!(content.total().get(), contents.len() as u64);
+    assert_eq!(seal.length, content.total());
+    assert_eq!(seal.digest, content.content_hash());
+    assert_eq!(
+        content.content_hash(),
+        envoix_product::ContentHash::from_bytes(*blake3::hash(&contents).as_bytes())
+    );
+
+    // And the bytes are THERE. A `SealFact` in a record is data anyone could
+    // write down, so the proof is asking the store to read them back.
+    let blobs = envoix_blob_api::BlobStore::new(envoix_blob_local::LocalBlobs::new(root.path()));
+    let mut produced = vec![0_u8; contents.len()];
+    let mut read = 0_usize;
+    while read < produced.len() {
+        let got = blobs
+            .read_at(
+                seal.blob,
+                envoix_types::ByteCount::new(read as u64),
+                &mut produced[read..],
+            )
+            .expect("the sealed artifact reads back");
+        assert_ne!(got, 0, "the sealed artifact ended early");
+        read += got;
+    }
+    assert_eq!(
+        produced, contents,
+        "the produced artifact is not the source"
+    );
+}
+
 /// The platform's answer moves the card out of `Acquiring`.
 ///
 /// The edge that had no producer at all: the duty lane could carry an outcome

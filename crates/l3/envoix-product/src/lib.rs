@@ -27,7 +27,7 @@ pub use identity::{IdentityError, IdentitySource, ProductIdentity, SystemIdentit
 pub use model::{
     AppliedCommand, CapabilityAction, CommandLedger, Facts, LedgerHit, NewTransfer, PauseOrigin,
     ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, SourceStagingPlan,
-    StorageAction, TransferRecord, WorkerKind,
+    StagingWork, StorageAction, TransferRecord, WorkerKind,
 };
 pub use pairing::PairingChannel;
 pub use participation::RoomParticipation;

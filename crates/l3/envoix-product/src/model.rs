@@ -3,12 +3,14 @@ use envoix_attempt_api::{
 };
 use envoix_capabilities::{AdmittedDutyResult, AdmittedSourceResult, Duty, SourceAcquisitionKey};
 use envoix_outcomes::{Outcome, Phase};
-use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, RequestId};
+use envoix_types::{
+    ArtifactId, AttemptGen, ByteCount, CommandId, Direction, RequestId, SourceItemId,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedSourceOffer, PairingChannel, ProductIdentity, RoomParticipation, SourceLifecycle,
-    SourcePossession, StagedContent, StagingPlan,
+    AcceptedSourceOffer, ContentHash, DerivationSpec, PairingChannel, ProductIdentity,
+    RoomParticipation, SourceLifecycle, SourcePossession, StagedContent,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -225,19 +227,49 @@ pub enum StorageAction {
 /// Shaped like [`AttemptPlan`] and for the same reason: the authority states
 /// which work this is, and the executor resolves how. Nothing here is a handle,
 /// a path or a URI — the platform holds those under the acquisition.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Not serialized. An effect is a live instruction to a worker in THIS process,
+/// never a durable fact — the durable half is the record it was derived from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceStagingPlan {
     pub stamp: AttemptStamp,
     pub acquisition: SourceAcquisitionKey,
-    /// Stream from the provider, or copy into app-private bytes first. DERIVED
-    /// by the reducer from what the platform reported, never chosen by a worker.
-    pub plan: StagingPlan,
-    /// Where a copy left off. Zero for a stream, which has no durable prefix.
-    pub resume_from: ByteCount,
+    /// What to do, and everything the worker needs to do it. DERIVED by the
+    /// reducer from what the platform reported and what the card commissioned,
+    /// never chosen by a worker.
+    pub work: StagingWork,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "effect")]
+/// One commissioned piece of staging work.
+///
+/// Mirrors [`StagingPlan`] and is deliberately not it: the plan is what the
+/// RECORD keeps, and this is what a worker is handed. They differ by exactly the
+/// values a worker needs and a record must not duplicate — the artifact it
+/// produces into, and the fingerprint of the commissioning, both derivable from
+/// the record and therefore stored once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StagingWork {
+    /// Read the one chosen document through, where it lies, and say what it
+    /// contains. Writes nothing.
+    Stream { item: SourceItemId },
+    /// Produce an owned artifact by applying `derivation` to the selection.
+    ///
+    /// There is no `resume_from`. Where a partial left off is the BLOB STORE's
+    /// to say — it is the only thing that knows which prefix it made durable —
+    /// and an offset carried here would be the authority guessing at that.
+    Produce {
+        artifact: ArtifactId,
+        derivation: DerivationSpec,
+        /// What was commissioned, folded. A partial produced under a different
+        /// commissioning is ineligible however usable its offset looks.
+        fingerprint: ContentHash,
+    },
+}
+
+/// Not serialized, for the same reason [`SourceStagingPlan`] is not: an effect
+/// is what the authority tells a worker to do now, and the durable half is the
+/// record that produced it. Anything that must survive a restart is a fact, and
+/// facts live in the record or in the outbox.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProductEffect {
     StartAttempt {
         plan: AttemptPlan,

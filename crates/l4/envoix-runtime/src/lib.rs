@@ -69,12 +69,13 @@ pub use envoix_attempt_api::RetirementIntent;
 pub use envoix_capabilities::{Duty, DutyKind, DutyProvenance};
 pub use envoix_evidence::{EvidenceSink, EvidenceSinkError};
 pub use envoix_product::{
-    AcceptedSourceOffer, CapabilityAction, CommandLedger, ContentHash, MAX_BROKER_LENGTH,
-    MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_RELAY_LENGTH, MAX_ROOM_CODE_LENGTH,
-    NewTransfer, PairingChannel, PauseOrigin, ProductCommand, ProductIdentity, ProductState,
-    QrMatrix, Quiescence, RoomParticipation, SelectionGate, SourceAcquisitionKey, SourceLifecycle,
-    SourceOfferAnswer, SourcePossession, SourcePromptReason, SourceStagingPlan, StagingPlan,
-    SystemIdentitySource, TransferContent, TransferRecord, WorkerKind,
+    AcceptedSourceOffer, CapabilityAction, CommandLedger, ContentHash, DerivationSpec,
+    MAX_BROKER_LENGTH, MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_RELAY_LENGTH,
+    MAX_ROOM_CODE_LENGTH, NewTransfer, PairingChannel, PauseOrigin, ProductCommand,
+    ProductIdentity, ProductState, QrMatrix, Quiescence, RoomParticipation, SelectionGate,
+    SourceAcquisitionKey, SourceLifecycle, SourceOfferAnswer, SourcePossession, SourcePromptReason,
+    SourceStagingPlan, StagingPlan, StagingWork, SystemIdentitySource, TransferContent,
+    TransferRecord, WorkerKind,
 };
 pub use error::{AcquireError, CommandRejected};
 pub use launch::{

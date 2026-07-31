@@ -167,6 +167,23 @@ impl<B: BlobBackend> BlobStore<B> {
         })
     }
 
+    /// The store's word for a blob it ALREADY sealed.
+    ///
+    /// Adoption, not forgery. A witness says "this store sealed these bytes and
+    /// made them durable", and that is exactly what is checked here — so a blob
+    /// that was sealed before a crash can still produce one, which is what stops
+    /// a card re-deriving gigabytes it already owns.
+    ///
+    /// It does not weaken the witness: what a caller gets is a true statement
+    /// about bytes that exist. What it cannot do is mint one for a partial, or
+    /// for a blob that is not there.
+    pub fn adopt(&self, blob: BlobKey) -> Result<Option<SealedArtifact>, BlobError> {
+        Ok(match self.backend.state(blob)? {
+            BlobState::Sealed(fact) => Some(SealedArtifact::new(fact)),
+            BlobState::Absent | BlobState::Partial { .. } => None,
+        })
+    }
+
     /// The seal of a sealed blob. `None` for anything else — including a
     /// complete-looking partial, which is the whole point.
     pub fn sealed(&self, blob: BlobKey) -> Result<Option<SealFact>, BlobError> {

@@ -23,11 +23,12 @@ use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use envoix_blob_api::{BlobBackend, BlobKey, BlobState, BlobStore, DerivationWorkId};
 use envoix_capabilities::{SourceReadError, SourceSession};
 use envoix_runtime::{
-    ContentHash, PreparedSource, PreparedSourceResolver, SourceAcquisitionKey, SourceLocator,
-    SourceResolveError, SourceStagingExecution, SourceStagingExecutor, SourceStagingPlan,
-    SourceStagingSignal, StagedIdentity, StagingPlan, StopToken, stop_channel,
+    ContentHash, DerivationSpec, PreparedSource, PreparedSourceResolver, SourceAcquisitionKey,
+    SourceLocator, SourceResolveError, SourceStagingExecution, SourceStagingExecutor,
+    SourceStagingPlan, SourceStagingSignal, StagedIdentity, StagingWork, StopToken, stop_channel,
 };
 use envoix_types::{AttemptGen, ByteCount};
 use tokio::sync::mpsc;
@@ -38,6 +39,14 @@ use tokio::sync::mpsc;
 /// newest count and the lane coalesces, so this trades report frequency against
 /// syscalls rather than against correctness.
 const READ_CHUNK_BYTES: usize = 256 * 1024;
+
+/// How much is copied between durable checkpoints.
+///
+/// A checkpoint costs a sync, and what it buys is how much a crash re-copies.
+/// Far coarser than the read chunk, deliberately: syncing every 256 KiB would
+/// make a copy fsync-bound, and re-copying at most this much after a crash is
+/// cheaper than paying for the promise continuously.
+const CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// How this host can open the bytes for one acquisition.
 ///
@@ -185,62 +194,311 @@ impl SourceSession for BoundSourceReader {
     }
 }
 
-impl PreparedSourceResolver for BoundSourceRegistry {
+/// One sealed artifact, opened for one attempt to read positionally.
+struct SealedArtifactReader<B> {
+    blobs: BlobStore<B>,
+    blob: BlobKey,
+}
+
+impl<B: BlobBackend> SourceSession for SealedArtifactReader<B> {
+    fn read_at(
+        &mut self,
+        offset: ByteCount,
+        destination: &mut [u8],
+    ) -> Result<usize, SourceReadError> {
+        self.blobs
+            .read_at(self.blob, offset, destination)
+            .map_err(|_| SourceReadError)
+    }
+}
+
+/// Where this host finds the bytes of an established source.
+///
+/// Two places, because there are two backings: a provider source is a descriptor
+/// the platform lent, and an owned one is bytes this app produced and sealed.
+/// The card names which — it is the authority on what its own record says — and
+/// this only opens what it was told to.
+#[derive(Clone)]
+pub struct HostSources<B> {
+    registry: BoundSourceRegistry,
+    blobs: BlobStore<B>,
+}
+
+impl<B> HostSources<B> {
+    pub const fn new(registry: BoundSourceRegistry, blobs: BlobStore<B>) -> Self {
+        Self { registry, blobs }
+    }
+}
+
+impl<B: BlobBackend + Clone> PreparedSourceResolver for HostSources<B> {
     fn resolve(
         &self,
         locator: SourceLocator,
         identity: StagedIdentity,
     ) -> Result<PreparedSource, SourceResolveError> {
-        let SourceLocator::PersistedProvider { acquisition } = locator else {
-            // An owned artifact is resolved from the bulk store, which does not
-            // exist. Nothing can currently reach this: the only plan that
-            // produces that backing is the copy plan, and the staging worker
-            // refuses it rather than establishing a source it did not write.
-            return Err(SourceResolveError::Unsupported);
-        };
-        // Absent, not unsupported: this host DOES resolve provider sources, and
-        // the card's own record says this one was established. What is missing
-        // is the process-local session — a descriptor does not outlive the
-        // process that opened it — so a restart lands here until something
-        // rebinds the persisted grant.
-        let source = self.open(&acquisition).ok_or(SourceResolveError::Absent)?;
-        Ok(PreparedSource::new(
-            Box::new(BoundSourceReader(source)),
-            identity,
-        ))
+        match locator {
+            // Absent, not unsupported: this host DOES resolve provider sources,
+            // and the card's own record says this one was established. What is
+            // missing is the process-local session — a descriptor does not
+            // outlive the process that opened it — so a restart lands here until
+            // something rebinds the persisted grant.
+            SourceLocator::PersistedProvider { acquisition } => {
+                let source = self
+                    .registry
+                    .open(&acquisition)
+                    .ok_or(SourceResolveError::Absent)?;
+                Ok(PreparedSource::new(
+                    Box::new(BoundSourceReader(source)),
+                    identity,
+                ))
+            }
+            // A sealed artifact outlives the process that wrote it, so `Absent`
+            // here means the bytes are genuinely gone rather than merely not
+            // reopened — and the store refuses anything unsealed, so a partial
+            // cannot be mistaken for one.
+            SourceLocator::OwnedArtifact { blob } => match self.blobs.sealed(blob) {
+                Ok(Some(_)) => Ok(PreparedSource::new(
+                    Box::new(SealedArtifactReader {
+                        blobs: self.blobs.clone(),
+                        blob,
+                    }),
+                    identity,
+                )),
+                Ok(None) => Err(SourceResolveError::Absent),
+                Err(_) => Err(SourceResolveError::Absent),
+            },
+        }
     }
 }
 
-/// Reads the bound source through and reports what it contains.
-#[derive(Clone, Default)]
-pub struct BoundSourceStaging {
+/// Reads the bound source through, and produces owned artifacts from it.
+///
+/// Two commissions, one worker: a stream establishes what a document contains
+/// without writing anything, and a derivation writes the bytes it establishes.
+/// They share the registry that reaches the source and differ in where the
+/// result goes.
+#[derive(Clone)]
+pub struct BoundSourceStaging<B> {
     registry: BoundSourceRegistry,
+    blobs: BlobStore<B>,
 }
 
-impl BoundSourceStaging {
-    pub fn new(registry: BoundSourceRegistry) -> Self {
-        Self { registry }
+impl<B> BoundSourceStaging<B> {
+    pub const fn new(registry: BoundSourceRegistry, blobs: BlobStore<B>) -> Self {
+        Self { registry, blobs }
     }
 }
 
-impl SourceStagingExecutor for BoundSourceStaging {
+impl<B: BlobBackend + Clone> SourceStagingExecutor for BoundSourceStaging<B> {
     fn start(&self, plan: SourceStagingPlan) -> SourceStagingExecution {
         let (signals_tx, signals) = mpsc::channel(32);
         let (stop, token) = stop_channel();
         // Opened HERE, on the runtime's thread, so a card whose acquisition this
         // host does not hold fails immediately rather than after a task hop.
-        //
-        // A copy plan opens nothing. This worker reads through and writes
-        // nothing, so it cannot produce the artifact a copy establishes, and it
-        // does not claim one. Failing is the honest answer until the copy sink
-        // exists; the alternative is what the possession split removed, a card
-        // resting at `Ready` over an owned artifact that was never written.
-        let source = match plan.plan {
-            StagingPlan::ProviderStream { .. } => self.registry.open(&plan.acquisition),
-            StagingPlan::ProduceOwnedArtifact { .. } => None,
-        };
-        tokio::task::spawn_blocking(move || read_through(source, &signals_tx, token));
+        let source = self.registry.open(&plan.acquisition);
+        let blobs = self.blobs.clone();
+        let card = plan.stamp.card;
+        let generation = plan.stamp.generation;
+        match plan.work {
+            StagingWork::Stream { .. } => {
+                tokio::task::spawn_blocking(move || read_through(source, &signals_tx, token));
+            }
+            StagingWork::Produce {
+                artifact,
+                derivation,
+                fingerprint,
+            } => {
+                let blob = BlobKey::new(card, DerivationWorkId::of(generation, artifact));
+                tokio::task::spawn_blocking(move || {
+                    produce(
+                        source,
+                        &blobs,
+                        blob,
+                        derivation,
+                        fingerprint,
+                        &signals_tx,
+                        token,
+                    );
+                });
+            }
+        }
         SourceStagingExecution { signals, stop }
+    }
+}
+
+/// Produces an owned artifact, then says so with the store's own witness.
+///
+/// The whole point of the seal is that it is earned here and nowhere else: this
+/// function is what a worker "having a copy sink" means, and a host without one
+/// simply has no way to reach `SourceStagingSignal::Derived`.
+fn produce<B: BlobBackend>(
+    source: Option<File>,
+    blobs: &BlobStore<B>,
+    blob: BlobKey,
+    derivation: DerivationSpec,
+    fingerprint: ContentHash,
+    signals: &mpsc::Sender<SourceStagingSignal>,
+    mut token: StopToken,
+) {
+    let outcome = produce_inner(
+        source,
+        blobs,
+        blob,
+        derivation,
+        fingerprint,
+        signals,
+        &mut token,
+    );
+    let _ = signals.blocking_send(outcome);
+    let _ = signals.blocking_send(SourceStagingSignal::Stopped);
+}
+
+fn produce_inner<B: BlobBackend>(
+    source: Option<File>,
+    blobs: &BlobStore<B>,
+    blob: BlobKey,
+    derivation: DerivationSpec,
+    fingerprint: ContentHash,
+    signals: &mpsc::Sender<SourceStagingSignal>,
+    token: &mut StopToken,
+) -> SourceStagingSignal {
+    // Only the identity derivation exists, and it reads exactly one document.
+    // An archive would read the selection instead, which is why they are
+    // different derivations rather than one with a flag.
+    let DerivationSpec::VerbatimV1 { .. } = derivation;
+    let Some(source) = source else {
+        return SourceStagingSignal::Failed;
+    };
+    // A seal already here for THIS work is the crash-between-seal-and-`Ready`
+    // case. Adopting it is right and re-deriving would be absurd: the bytes are
+    // durable, immutable, and were produced under this exact commissioning.
+    match blobs.inspect(blob) {
+        Ok(BlobState::Sealed(fact)) if fact.fingerprint == fingerprint => {
+            return match blobs.adopt(blob) {
+                Ok(Some(sealed)) => SourceStagingSignal::Derived(sealed),
+                _ => SourceStagingSignal::Failed,
+            };
+        }
+        // A seal from OTHER work under this key cannot happen — the key carries
+        // the incarnation — but if the medium says otherwise, nothing here may
+        // overwrite it.
+        Ok(BlobState::Sealed(_)) => return SourceStagingSignal::Failed,
+        Ok(_) => {}
+        Err(_) => return SourceStagingSignal::Failed,
+    }
+
+    let Ok(mut lease) = blobs.begin(blob, fingerprint) else {
+        return SourceStagingSignal::Failed;
+    };
+    let mut hasher = blake3::Hasher::new();
+    // A verbatim copy's output offset IS its input offset, so a resumed run
+    // rebuilds its hasher by re-reading the input prefix — no opaque hasher
+    // state is persisted, and a future library version cannot fail to
+    // understand what was never written down.
+    //
+    // Re-reading it also RE-VERIFIES it. If the document changed while we were
+    // gone the prefix will not hash to what the checkpoint promised, and
+    // continuing would splice two documents together. Starting over is the only
+    // honest answer, and it is available because the store owns the offset.
+    let resume = lease.offset();
+    if resume.get() > 0 {
+        match hash_prefix(&source, resume, &mut hasher, token) {
+            Some(digest) if Some(digest) == checkpoint_digest(blobs, blob) => {}
+            Some(_) | None => {
+                drop(lease);
+                // The prefix is not the one that was promised. Nothing about it
+                // is usable, so it goes rather than being appended to.
+                if blobs.delete(blob).is_err() {
+                    return SourceStagingSignal::Failed;
+                }
+                let Ok(fresh) = blobs.begin(blob, fingerprint) else {
+                    return SourceStagingSignal::Failed;
+                };
+                lease = fresh;
+                hasher = blake3::Hasher::new();
+            }
+        }
+    }
+
+    let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
+    let mut total = lease.offset().get();
+    let mut since_checkpoint = 0_u64;
+    loop {
+        if token.requested().is_some() {
+            // A stop mid-copy establishes nothing. What it leaves is a partial
+            // at its last durable checkpoint, which is exactly what a later run
+            // resumes from.
+            return SourceStagingSignal::Failed;
+        }
+        let read = match source.read_at(&mut buffer, total) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return SourceStagingSignal::Failed,
+        };
+        if lease
+            .append(ByteCount::new(total), &buffer[..read])
+            .is_err()
+        {
+            return SourceStagingSignal::Failed;
+        }
+        hasher.update(&buffer[..read]);
+        total = total.saturating_add(read as u64);
+        since_checkpoint = since_checkpoint.saturating_add(read as u64);
+        if since_checkpoint >= CHECKPOINT_BYTES {
+            if lease
+                .checkpoint(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
+                .is_err()
+            {
+                return SourceStagingSignal::Failed;
+            }
+            since_checkpoint = 0;
+        }
+        let _ = signals.blocking_send(SourceStagingSignal::Progress(ByteCount::new(total)));
+    }
+    match lease.seal(ContentHash::from_bytes(*hasher.finalize().as_bytes())) {
+        Ok(sealed) => SourceStagingSignal::Derived(sealed),
+        Err(_) => SourceStagingSignal::Failed,
+    }
+}
+
+/// Hashes `length` bytes of the input, so a resumed run can rebuild the output
+/// hasher over a prefix it did not write in this process.
+fn hash_prefix(
+    source: &File,
+    length: ByteCount,
+    hasher: &mut blake3::Hasher,
+    token: &mut StopToken,
+) -> Option<ContentHash> {
+    let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
+    let mut read_so_far = 0_u64;
+    while read_so_far < length.get() {
+        if token.requested().is_some() {
+            return None;
+        }
+        let want = usize::try_from((length.get() - read_so_far).min(READ_CHUNK_BYTES as u64))
+            .unwrap_or(READ_CHUNK_BYTES);
+        match source.read_at(&mut buffer[..want], read_so_far) {
+            // The input is SHORTER than the prefix it is supposed to have
+            // produced, so it is not the same document.
+            Ok(0) => return None,
+            Ok(read) => {
+                hasher.update(&buffer[..read]);
+                read_so_far = read_so_far.saturating_add(read as u64);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    Some(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+fn checkpoint_digest<B: BlobBackend>(blobs: &BlobStore<B>, blob: BlobKey) -> Option<ContentHash> {
+    match blobs.inspect(blob) {
+        Ok(BlobState::Partial {
+            durable_checkpoint: Some(checkpoint),
+        }) => Some(checkpoint.prefix_digest),
+        _ => None,
     }
 }
 

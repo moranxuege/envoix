@@ -1028,6 +1028,8 @@ dependencies = [
  "envoix-attempt-api",
  "envoix-attempt-iroh",
  "envoix-bindings",
+ "envoix-blob-api",
+ "envoix-blob-local",
  "envoix-capabilities",
  "envoix-deployment",
  "envoix-evidence",

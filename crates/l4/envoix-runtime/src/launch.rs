@@ -15,9 +15,10 @@
 //! leaves it nothing to look up.
 
 use envoix_attempt_api::AttemptPlan;
+use envoix_blob_api::BlobKey;
 use envoix_capabilities::{SourceAcquisitionKey, SourceSession};
 use envoix_product::{ContentHash, SourceBacking, SourceLifecycle};
-use envoix_types::{ArtifactId, ByteCount, Direction};
+use envoix_types::{ByteCount, Direction};
 
 /// Which established source to open. Derived inside the card from the committed
 /// lifecycle; it reaches no executor, no wire frame and no durable record.
@@ -25,8 +26,12 @@ use envoix_types::{ArtifactId, ByteCount, Direction};
 pub enum SourceLocator {
     /// The provider, reopened through the grant that acquisition took.
     PersistedProvider { acquisition: SourceAcquisitionKey },
-    /// An artifact this app owns outright.
-    OwnedArtifact { artifact: ArtifactId },
+    /// An artifact this app owns outright, named by the SEAL that made it.
+    ///
+    /// The blob key, not a bare artifact id: an id is a name and a key is an
+    /// incarnation, and a re-derivation produces a new incarnation of the same
+    /// id. Opening by id alone could reach the previous run's bytes.
+    OwnedArtifact { blob: BlobKey },
 }
 
 impl SourceLocator {
@@ -48,9 +53,7 @@ impl SourceLocator {
             // the reducer refuses a seal that names a different one — but
             // reading the seal is what makes that agreement load-bearing rather
             // than a coincidence two fields happen to share.
-            SourceBacking::OwnedArtifact { seal } => Self::OwnedArtifact {
-                artifact: seal.blob.artifact(),
-            },
+            SourceBacking::OwnedArtifact { seal } => Self::OwnedArtifact { blob: seal.blob },
         })
     }
 }
@@ -198,7 +201,7 @@ mod tests {
     use envoix_attempt_api::ResumeIntent;
     use envoix_capabilities::{DutyProvenance, SourceReadError};
     use envoix_product::AcceptedSourceOffer;
-    use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId, TransferId};
+    use envoix_types::{ArtifactId, AttemptGen, OfferedName, RecordId, RequestId, TransferId};
 
     use super::*;
 

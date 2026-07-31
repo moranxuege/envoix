@@ -38,7 +38,7 @@ use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, Rec
 use crate::create;
 use crate::executor::PreparedIrohExecutor;
 use crate::provider::HostProvider;
-use crate::staging::{BoundSourceRegistry, BoundSourceStaging};
+use crate::staging::{BoundSourceRegistry, BoundSourceStaging, HostSources};
 use crate::store::HostStore;
 use crate::stores::CardStores;
 
@@ -339,6 +339,11 @@ impl Host {
         let provider = HostProvider::new(stores.clone(), NonZeroUsize::new(3).expect("nonzero"));
         let evidence = Arc::new(Evidence::new());
         let sources = BoundSourceRegistry::default();
+        // Bulk bytes live beside the operation store, never inside it: an
+        // artifact carried forward by every record commit would be rewritten
+        // thousands of times in one send.
+        let blobs =
+            envoix_blob_api::BlobStore::new(envoix_blob_local::LocalBlobs::new(root.to_path_buf()));
         let runtime = {
             let _guard = tokio.enter();
             Arc::new(Runtime::start_with_evidence(
@@ -350,12 +355,12 @@ impl Host {
                 // descriptor Android lent — because both resolve to a
                 // readable file and the difference is the platform's, not the
                 // design's.
-                BoundSourceStaging::new(sources.clone()),
+                BoundSourceStaging::new(sources.clone(), blobs.clone()),
                 // The SAME registry answers both: staging reads the bound source
                 // through to establish what it contains, and the attempt reads it
                 // again to send it. One binding, two readers, and the second one
                 // cannot name a source the first did not.
-                sources.clone(),
+                HostSources::new(sources.clone(), blobs.clone()),
                 EvidenceIntake(Arc::clone(&evidence)),
             ))
         };
