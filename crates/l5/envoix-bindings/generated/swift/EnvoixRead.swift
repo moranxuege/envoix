@@ -10,7 +10,7 @@ import Foundation
 
 public enum EnvoixRead {
 
-public static let readSchemaId = "envoix/binding/read/9"
+public static let readSchemaId = "envoix/binding/read/10"
 public static let readMaxFrameBytes = 1048576
 private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -70,6 +70,7 @@ public enum OutcomeCodeView: String, Equatable {
     case unauthenticated = "unauthenticated"
     case versionMismatch = "version_mismatch"
     case storageFault = "storage_fault"
+    case storageFull = "storage_full"
     case publishFailed = "publish_failed"
     case sourceUnreadable = "source_unreadable"
     case networkUnreachable = "network_unreachable"

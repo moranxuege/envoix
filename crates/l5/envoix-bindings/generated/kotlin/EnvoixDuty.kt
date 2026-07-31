@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val DUTY_SCHEMA_ID: String = "envoix/binding/duty/3"
+const val DUTY_SCHEMA_ID: String = "envoix/binding/duty/4"
 const val DUTY_MAX_FRAME_BYTES: Int = 131072
 
 enum class DutyErrorKind {
@@ -48,6 +48,7 @@ enum class OutcomeCodeView {
     UNAUTHENTICATED,
     VERSION_MISMATCH,
     STORAGE_FAULT,
+    STORAGE_FULL,
     PUBLISH_FAILED,
     SOURCE_UNREADABLE,
     NETWORK_UNREACHABLE,
@@ -343,6 +344,7 @@ object EnvoixDutyCodec {
         "unauthenticated" -> OutcomeCodeView.UNAUTHENTICATED
         "version_mismatch" -> OutcomeCodeView.VERSION_MISMATCH
         "storage_fault" -> OutcomeCodeView.STORAGE_FAULT
+        "storage_full" -> OutcomeCodeView.STORAGE_FULL
         "publish_failed" -> OutcomeCodeView.PUBLISH_FAILED
         "source_unreadable" -> OutcomeCodeView.SOURCE_UNREADABLE
         "network_unreachable" -> OutcomeCodeView.NETWORK_UNREACHABLE
@@ -360,6 +362,7 @@ object EnvoixDutyCodec {
         OutcomeCodeView.UNAUTHENTICATED -> "unauthenticated"
         OutcomeCodeView.VERSION_MISMATCH -> "version_mismatch"
         OutcomeCodeView.STORAGE_FAULT -> "storage_fault"
+        OutcomeCodeView.STORAGE_FULL -> "storage_full"
         OutcomeCodeView.PUBLISH_FAILED -> "publish_failed"
         OutcomeCodeView.SOURCE_UNREADABLE -> "source_unreadable"
         OutcomeCodeView.NETWORK_UNREACHABLE -> "network_unreachable"

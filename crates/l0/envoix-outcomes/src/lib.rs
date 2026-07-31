@@ -17,6 +17,14 @@ pub enum OutcomeCode {
     Unauthenticated,
     VersionMismatch,
     StorageFault,
+    /// The volume is full.
+    ///
+    /// Apart from `StorageFault` because it is the one storage failure a person
+    /// can act on, and because re-choosing a document does not fix it — so its
+    /// recovery is never `RePickSource`. The bulk store has drawn this
+    /// distinction since it was written; this is where it stops being erased on
+    /// the way out.
+    StorageFull,
     PublishFailed,
     SourceUnreadable,
     NetworkUnreachable,

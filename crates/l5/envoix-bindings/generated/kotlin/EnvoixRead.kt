@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/9"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/10"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -62,6 +62,7 @@ enum class OutcomeCodeView {
     UNAUTHENTICATED,
     VERSION_MISMATCH,
     STORAGE_FAULT,
+    STORAGE_FULL,
     PUBLISH_FAILED,
     SOURCE_UNREADABLE,
     NETWORK_UNREACHABLE,
@@ -652,6 +653,7 @@ object EnvoixReadCodec {
         "unauthenticated" -> OutcomeCodeView.UNAUTHENTICATED
         "version_mismatch" -> OutcomeCodeView.VERSION_MISMATCH
         "storage_fault" -> OutcomeCodeView.STORAGE_FAULT
+        "storage_full" -> OutcomeCodeView.STORAGE_FULL
         "publish_failed" -> OutcomeCodeView.PUBLISH_FAILED
         "source_unreadable" -> OutcomeCodeView.SOURCE_UNREADABLE
         "network_unreachable" -> OutcomeCodeView.NETWORK_UNREACHABLE

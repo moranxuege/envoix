@@ -44,7 +44,7 @@
 # contract. Artifact bytes and source handles cannot be spelled here at all —
 # which is why a duty report can carry an outcome and never a file.
 
-id = "envoix/binding/duty/3"
+id = "envoix/binding/duty/4"
 root = "DutyFrame"
 direction = "bidirectional"
 
@@ -82,6 +82,7 @@ variants = [
   "unauthenticated",
   "version_mismatch",
   "storage_fault",
+  "storage_full",
   "publish_failed",
   "source_unreadable",
   "network_unreachable",

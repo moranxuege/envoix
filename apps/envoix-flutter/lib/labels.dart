@@ -88,6 +88,7 @@ String outcomeCodeLabel(OutcomeCodeView code) => switch (code) {
       OutcomeCodeView.unauthenticated => 'The peer could not be authenticated',
       OutcomeCodeView.versionMismatch => 'The two sides speak different versions',
       OutcomeCodeView.storageFault => 'Storage fault',
+      OutcomeCodeView.storageFull => 'Not enough free space',
       OutcomeCodeView.publishFailed => 'The file could not be published',
       OutcomeCodeView.sourceUnreadable => 'The source could not be read',
       OutcomeCodeView.networkUnreachable => 'The network was unreachable',

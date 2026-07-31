@@ -492,7 +492,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/10");
+        value["schema"] = serde_json::json!("envoix/binding/read/11");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {

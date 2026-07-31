@@ -1645,6 +1645,15 @@ fn outcome_for(code: OutcomeCode, phase: Phase) -> Outcome {
             Some(Recovery::RetryLater),
             "Private storage is unavailable",
         ),
+        // NeedsUser, and deliberately NOT `RePickSource`: choosing a different
+        // document does not create space, and offering that would send someone
+        // round a loop that cannot succeed. Retrying is meaningful only after
+        // they have acted, which is what `NeedsUser` says.
+        OutcomeCode::StorageFull => (
+            Retryability::NeedsUser,
+            Some(Recovery::RetryLater),
+            "Not enough free space",
+        ),
         OutcomeCode::PublishFailed => (
             Retryability::Retryable,
             Some(Recovery::RetryLater),

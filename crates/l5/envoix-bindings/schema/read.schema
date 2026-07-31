@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/9"
+id = "envoix/binding/read/10"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -55,6 +55,7 @@ variants = [
   "unauthenticated",
   "version_mismatch",
   "storage_fault",
+  "storage_full",
   "publish_failed",
   "source_unreadable",
   "network_unreachable",

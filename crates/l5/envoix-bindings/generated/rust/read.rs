@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/9";
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/10";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -70,6 +70,7 @@ pub enum OutcomeCodeView {
     Unauthenticated,
     VersionMismatch,
     StorageFault,
+    StorageFull,
     PublishFailed,
     SourceUnreadable,
     NetworkUnreachable,
@@ -77,7 +78,7 @@ pub enum OutcomeCodeView {
 }
 
 impl OutcomeCodeView {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Completed,
         Self::Cancelled,
         Self::Paused,
@@ -86,6 +87,7 @@ impl OutcomeCodeView {
         Self::Unauthenticated,
         Self::VersionMismatch,
         Self::StorageFault,
+        Self::StorageFull,
         Self::PublishFailed,
         Self::SourceUnreadable,
         Self::NetworkUnreachable,
@@ -944,6 +946,7 @@ fn decode_outcome_code_view_value(value: &Value, context: &'static str) -> Resul
         "unauthenticated" => Ok(OutcomeCodeView::Unauthenticated),
         "version_mismatch" => Ok(OutcomeCodeView::VersionMismatch),
         "storage_fault" => Ok(OutcomeCodeView::StorageFault),
+        "storage_full" => Ok(OutcomeCodeView::StorageFull),
         "publish_failed" => Ok(OutcomeCodeView::PublishFailed),
         "source_unreadable" => Ok(OutcomeCodeView::SourceUnreadable),
         "network_unreachable" => Ok(OutcomeCodeView::NetworkUnreachable),
@@ -962,6 +965,7 @@ fn encode_outcome_code_view_value(value: &OutcomeCodeView) -> Value {
         OutcomeCodeView::Unauthenticated => "unauthenticated",
         OutcomeCodeView::VersionMismatch => "version_mismatch",
         OutcomeCodeView::StorageFault => "storage_fault",
+        OutcomeCodeView::StorageFull => "storage_full",
         OutcomeCodeView::PublishFailed => "publish_failed",
         OutcomeCodeView::SourceUnreadable => "source_unreadable",
         OutcomeCodeView::NetworkUnreachable => "network_unreachable",

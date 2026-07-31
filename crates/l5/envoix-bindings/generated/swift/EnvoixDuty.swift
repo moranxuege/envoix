@@ -17,7 +17,7 @@ import Foundation
 
 public enum EnvoixDuty {
 
-public static let dutySchemaId = "envoix/binding/duty/3"
+public static let dutySchemaId = "envoix/binding/duty/4"
 public static let dutyMaxFrameBytes = 131072
 private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -47,6 +47,7 @@ public enum OutcomeCodeView: String, Equatable {
     case unauthenticated = "unauthenticated"
     case versionMismatch = "version_mismatch"
     case storageFault = "storage_fault"
+    case storageFull = "storage_full"
     case publishFailed = "publish_failed"
     case sourceUnreadable = "source_unreadable"
     case networkUnreachable = "network_unreachable"

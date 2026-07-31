@@ -677,15 +677,11 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                     // This build cannot receive at all. A card should never have
                     // been asked, so it is ours, not the disk's.
                     SinkOpenError::Unsupported => OutcomeCode::Internal,
-                    // THE ONE PLACE the out-of-space distinction is lost, and
-                    // only because no outcome code can yet carry it: this
-                    // resolves to `RetryLater` when it should ask the person to
-                    // free space. Everything below here keeps the two apart, so
-                    // the fix is one `OutcomeCode` arm and its policy — not a
-                    // boundary to re-plumb.
-                    SinkOpenError::OutOfSpace | SinkOpenError::Unavailable => {
-                        OutcomeCode::StorageFault
-                    }
+                    // Carried all the way out now: the person is told to free
+                    // space rather than to retry something that cannot succeed
+                    // until they do.
+                    SinkOpenError::OutOfSpace => OutcomeCode::StorageFull,
+                    SinkOpenError::Unavailable => OutcomeCode::StorageFault,
                 }
             })?;
             return AttemptLaunch::receiving(plan, sink).ok_or(OutcomeCode::Internal);

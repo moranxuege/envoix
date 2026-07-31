@@ -499,6 +499,7 @@ fn code_view(code: OutcomeCode) -> crate::read::OutcomeCodeView {
         OutcomeCode::Unauthenticated => View::Unauthenticated,
         OutcomeCode::VersionMismatch => View::VersionMismatch,
         OutcomeCode::StorageFault => View::StorageFault,
+        OutcomeCode::StorageFull => View::StorageFull,
         OutcomeCode::PublishFailed => View::PublishFailed,
         OutcomeCode::SourceUnreadable => View::SourceUnreadable,
         OutcomeCode::NetworkUnreachable => View::NetworkUnreachable,

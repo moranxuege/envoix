@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/9';
+const String readSchemaId = 'envoix/binding/read/10';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -70,6 +70,7 @@ enum OutcomeCodeView {
   unauthenticated,
   versionMismatch,
   storageFault,
+  storageFull,
   publishFailed,
   sourceUnreadable,
   networkUnreachable,
@@ -1062,6 +1063,7 @@ OutcomeCodeView _decodeOutcomeCodeView(Object? value, String context) {
     'unauthenticated' => OutcomeCodeView.unauthenticated,
     'version_mismatch' => OutcomeCodeView.versionMismatch,
     'storage_fault' => OutcomeCodeView.storageFault,
+    'storage_full' => OutcomeCodeView.storageFull,
     'publish_failed' => OutcomeCodeView.publishFailed,
     'source_unreadable' => OutcomeCodeView.sourceUnreadable,
     'network_unreachable' => OutcomeCodeView.networkUnreachable,

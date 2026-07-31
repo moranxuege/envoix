@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String dutySchemaId = 'envoix/binding/duty/3';
+const String dutySchemaId = 'envoix/binding/duty/4';
 const int dutyMaxFrameBytes = 131072;
 const int _u63Max = 9223372036854775807;
 
@@ -46,6 +46,7 @@ enum OutcomeCodeView {
   unauthenticated,
   versionMismatch,
   storageFault,
+  storageFull,
   publishFailed,
   sourceUnreadable,
   networkUnreachable,
@@ -463,6 +464,7 @@ OutcomeCodeView _decodeOutcomeCodeView(Object? value, String context) {
     'unauthenticated' => OutcomeCodeView.unauthenticated,
     'version_mismatch' => OutcomeCodeView.versionMismatch,
     'storage_fault' => OutcomeCodeView.storageFault,
+    'storage_full' => OutcomeCodeView.storageFull,
     'publish_failed' => OutcomeCodeView.publishFailed,
     'source_unreadable' => OutcomeCodeView.sourceUnreadable,
     'network_unreachable' => OutcomeCodeView.networkUnreachable,
@@ -483,6 +485,7 @@ String _encodeOutcomeCodeView(OutcomeCodeView value) {
     OutcomeCodeView.unauthenticated => 'unauthenticated',
     OutcomeCodeView.versionMismatch => 'version_mismatch',
     OutcomeCodeView.storageFault => 'storage_fault',
+    OutcomeCodeView.storageFull => 'storage_full',
     OutcomeCodeView.publishFailed => 'publish_failed',
     OutcomeCodeView.sourceUnreadable => 'source_unreadable',
     OutcomeCodeView.networkUnreachable => 'network_unreachable',
