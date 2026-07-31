@@ -64,6 +64,7 @@ targets:
       - package: EnvoixCore
       - target: EnvoixShare
         embed: true
+      - sdk: CoreNFC.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios
@@ -85,6 +86,7 @@ targets:
         INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
         INFOPLIST_KEY_CFBundleDisplayName: Envoix
         INFOPLIST_KEY_NSCameraUsageDescription: "Envoix uses the camera to scan invite QR codes from receiving devices."
+        INFOPLIST_KEY_NFCReaderUsageDescription: "Envoix reads invitations from nearby Envoix phones."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Envoix connects to nearby devices on your local network to transfer files."
         OTHER_LDFLAGS:
           - "-framework"
@@ -137,6 +139,7 @@ targets:
     dependencies:
       - target: Envoix-iOS
       - package: EnvoixCore
+      - sdk: CoreNFC.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.uitests
