@@ -932,17 +932,27 @@ impl ReceiverReadyToCommit {
     ///
     /// The attempt executor must arbitrate retirement immediately before this
     /// synchronous call and send no completion acknowledgement unless it succeeds.
-    pub fn commit(self, sink: &mut impl StagingSink) -> Result<ReceiverCompleted, MachineFailure> {
-        if !self.completed.claimed_existing {
-            sink.seal(self.completed.file_size, self.completed.file_hash)
-                .map_err(|fault| {
-                    MachineFailure::from_engine_error(
-                        TransferError::Storage(fault),
-                        self.completed.transfer_id,
-                    )
-                })?;
+    pub fn commit<S: StagingSink>(
+        self,
+        sink: &mut S,
+    ) -> Result<ReceiveCommit<S::Seal>, MachineFailure> {
+        if self.completed.claimed_existing {
+            return Ok(ReceiveCommit::AlreadyHeld {
+                completed: self.completed,
+            });
         }
-        Ok(self.completed)
+        let seal = sink
+            .seal(self.completed.file_size, self.completed.file_hash)
+            .map_err(|fault| {
+                MachineFailure::from_engine_error(
+                    TransferError::Storage(fault),
+                    self.completed.transfer_id,
+                )
+            })?;
+        Ok(ReceiveCommit::Sealed {
+            completed: self.completed,
+            seal,
+        })
     }
 
     pub fn cancelled(self) -> MachineFailure {
@@ -959,6 +969,37 @@ impl ReceiverReadyToCommit {
             Some(self.completed.transfer_id),
             ProtocolReason::Paused,
         )
+    }
+}
+
+/// What crossing the commit boundary established.
+///
+/// The seal used to be discarded here. That put the card back to trusting a
+/// worker's word about bytes it never saw — the same thing the send side stopped
+/// doing when possession became witnessed. A sink's seal is the strongest
+/// statement anything in this system makes, and dropping it at the one boundary
+/// that produces it meant "the file is complete" had to be re-derived from
+/// storage every time it was asked.
+///
+/// Two arms rather than an `Option`, because the absence has a reason and the
+/// card acts differently on it: a claimed file was never written by this run, so
+/// there is nothing for it to witness and whatever durable reference exists came
+/// from before.
+pub enum ReceiveCommit<S> {
+    Sealed {
+        completed: ReceiverCompleted,
+        seal: S,
+    },
+    AlreadyHeld {
+        completed: ReceiverCompleted,
+    },
+}
+
+impl<S> ReceiveCommit<S> {
+    pub const fn completed(&self) -> ReceiverCompleted {
+        match self {
+            Self::Sealed { completed, .. } | Self::AlreadyHeld { completed } => *completed,
+        }
     }
 }
 

@@ -18,10 +18,13 @@ pub trait StagingSink {
     /// What sealing produces. Production returns the blob store's non-forgeable
     /// witness; a test double may return its own token.
     ///
+    /// `Send` because a seal outlives the commit that produced it: it crosses
+    /// out of the attempt task to whatever records what this receive now holds.
+    ///
     /// Associated rather than `()` so the machine stays storage-neutral WITHOUT
     /// discarding the witness at the one boundary that earns it — throwing it
     /// away would put the card back to trusting a worker-authored id.
-    type Seal;
+    type Seal: Send;
 
     /// The durable prefix this sink resumes at. Zero length when there is none.
     fn resume(&mut self) -> Result<DurablePrefix, StorageFault>;

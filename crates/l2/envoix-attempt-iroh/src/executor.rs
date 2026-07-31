@@ -1164,7 +1164,13 @@ async fn transfer_receiver(
                     })
                 };
                 let completed = match decision {
-                    CommitOperationResult::Crossed(completed) => completed,
+                    // The seal is DROPPED here, and only here, for now. Carrying
+                    // it to the card is step 5: `SealedArtifact` is deliberately
+                    // not `Deserialize`, so it cannot ride an `AttemptEvent` and
+                    // needs the same typed channel the derive path uses for its
+                    // own witness. What matters is that it is no longer destroyed
+                    // at the boundary that produces it.
+                    CommitOperationResult::Crossed(commit) => commit.completed(),
                     CommitOperationResult::OperationFailed(failure) => {
                         return Terminal::from_machine(failure);
                     }

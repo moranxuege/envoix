@@ -7,9 +7,9 @@ use envoix_types::{ByteCount, OfferedName, TransferId};
 
 use crate::{
     CHECKPOINT_INTERVAL, ClaimedComplete, Deadline, DurablePrefix, MachineFailure, MonotonicMillis,
-    ProtocolViolation, ReceiverCompleted, ReceiverReceiving, ReceiverStep, SenderRequest,
-    SenderSending, SenderStep, SourceReader, StagingSink, StorageFault, StorageOperation,
-    TransferError, next_chunk_index, receiver_start, sender_start,
+    ProtocolViolation, ReceiveCommit, ReceiverCompleted, ReceiverReceiving, ReceiverStep,
+    SenderRequest, SenderSending, SenderStep, SourceReader, StagingSink, StorageFault,
+    StorageOperation, TransferError, next_chunk_index, receiver_start, sender_start,
 };
 
 const NOW: MonotonicMillis = MonotonicMillis(10);
@@ -222,7 +222,7 @@ fn drive(
             }
             SenderStep::Complete { state, frame } => {
                 let completed = match receiver.receive(frame, NOW, DEADLINE, sink)? {
-                    ReceiverStep::ReadyToCommit(ready) => ready.commit(sink)?,
+                    ReceiverStep::ReadyToCommit(ready) => ready.commit(sink)?.completed(),
                     ReceiverStep::Continue { .. } => panic!("complete frame did not complete"),
                 };
                 let sender = state.receive_ack(completed.acknowledgement(), NOW)?;
@@ -453,7 +453,12 @@ fn claim_complete_redelivers_ack_without_chunks() {
     else {
         panic!("claim-complete did not complete");
     };
-    let completed = ready.commit(&mut sink).unwrap();
+    let commit = ready.commit(&mut sink).unwrap();
+    assert!(
+        matches!(commit, ReceiveCommit::AlreadyHeld { .. }),
+        "a claimed file was not written by this run, so there is nothing to witness"
+    );
+    let completed = commit.completed();
     assert!(completed.claimed_existing);
     let _lost_ack = state;
 
@@ -634,7 +639,8 @@ fn completion_order_and_strict_ack() {
                     sink.sealed.is_none(),
                     "verification must not seal before the attempt commit gate"
                 );
-                let completed = ready.commit(&mut sink).unwrap();
+                let commit = ready.commit(&mut sink).unwrap();
+                let completed = commit.completed();
                 break (state, completed);
             }
         }
