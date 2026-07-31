@@ -427,7 +427,16 @@ impl<B: BlobBackend> SinkSession for BlobLease<B> {
         Self::reset(self)
     }
 
-    fn seal(self: Box<Self>, digest: ContentHash) -> Result<SealedArtifact, BlobError> {
+    fn seal(
+        self: Box<Self>,
+        expected_size: ByteCount,
+        digest: ContentHash,
+    ) -> Result<SealedArtifact, BlobError> {
+        if expected_size != self.offset {
+            return Err(BlobError::OffsetMismatch {
+                expected: self.offset,
+            });
+        }
         Self::seal(*self, digest)
     }
 }

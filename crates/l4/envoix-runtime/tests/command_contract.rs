@@ -792,6 +792,7 @@ impl envoix_blob_api::SinkSession for EmptySink {
 
     fn seal(
         self: Box<Self>,
+        _expected_size: envoix_types::ByteCount,
         _digest: envoix_types::ContentHash,
     ) -> Result<envoix_blob_api::SealedArtifact, envoix_blob_api::BlobError> {
         unimplemented!("only the real store can mint a witness")

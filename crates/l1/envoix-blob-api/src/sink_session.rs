@@ -62,5 +62,17 @@ pub trait SinkSession: Send {
 
     /// Makes the bytes complete and immutable, and returns the store's own word
     /// for it.
-    fn seal(self: Box<Self>, digest: ContentHash) -> Result<SealedArtifact, BlobError>;
+    ///
+    /// Takes the expected length as well as the digest, for the same reason
+    /// `checkpoint` takes both: the caller's accepted count and this session's
+    /// are maintained independently and must agree. Without it an adapter could
+    /// only seal first and discover the disagreement from the returned witness —
+    /// after an irreversible publication had already made the wrong incarnation
+    /// unopenable — or keep a second counter, which is the drift this port
+    /// exists to prevent.
+    fn seal(
+        self: Box<Self>,
+        expected_size: ByteCount,
+        digest: ContentHash,
+    ) -> Result<SealedArtifact, BlobError>;
 }

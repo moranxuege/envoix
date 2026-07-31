@@ -245,10 +245,15 @@ impl<B: BlobBackend + Clone> PreparedSinkResolver for HostSinks<B> {
             // — retrying it would never help.
             BlobWorkId::Derivation { .. } => return Err(SinkOpenError::Unsupported),
         };
-        let lease = self
-            .blobs
-            .begin(blob, fingerprint)
-            .map_err(|_| SinkOpenError::Unavailable)?;
+        let lease = self.blobs.begin(blob, fingerprint).map_err(|error| {
+            match error {
+                envoix_blob_api::BlobError::OutOfSpace => SinkOpenError::OutOfSpace,
+                // Already leased, sealed, or a backend fault. All three mean
+                // "not now" rather than "not ever", and none is the person's to
+                // fix.
+                _ => SinkOpenError::Unavailable,
+            }
+        })?;
         Ok(PreparedReceiveSink::new(Box::new(lease)))
     }
 }

@@ -400,7 +400,17 @@ pub struct TransferRecord {
     pub generation: AttemptGen,
     pub phase: Phase,
     pub bytes: ByteCount,
-    pub bytes_resumed: ByteCount,
+    /// How much of this file the peers SETTLED on not sending again, or `None`
+    /// while that is still unknown.
+    ///
+    /// An `Option` rather than a number, because the number used to be a guess:
+    /// entering `Transferring` copied this card's remembered progress in as
+    /// though the peer had agreed to it, and nothing ever corrected it. The
+    /// peer's storage is the authority, so until it answers there is no honest
+    /// value — and `None` is also what makes the answer arrive exactly once. A
+    /// card that has already settled refuses a second establishment rather than
+    /// letting an untrusted executor rewrite its progress at will.
+    pub bytes_resumed: Option<ByteCount>,
     pub outcome: Option<Outcome>,
     pub facts: Facts,
     /// Where this card's SEND source is in its acquisition, or that it needs

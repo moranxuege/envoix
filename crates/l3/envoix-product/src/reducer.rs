@@ -100,7 +100,7 @@ impl TransferRecord {
             generation,
             phase,
             bytes: ByteCount::new(0),
-            bytes_resumed: ByteCount::new(0),
+            bytes_resumed: None,
             outcome: None,
             facts: Facts::default(),
             pairing: transfer.pairing,
@@ -1034,7 +1034,6 @@ impl TransferRecord {
             {
                 self.state = ProductState::Transferring;
                 self.phase = phase;
-                self.bytes_resumed = self.bytes;
                 Vec::new()
             }
             Phase::Confirming
@@ -1075,11 +1074,16 @@ impl TransferRecord {
     /// is more trusted than the others, not trusted absolutely.
     fn on_resume_established(&mut self, offset: ByteCount) -> Vec<ProductEffect> {
         if self.state != ProductState::Transferring
+            // ONCE. This is the only input allowed to move progress down, so a
+            // repeatable one would let an untrusted executor drag the bar
+            // wherever it liked for the life of the attempt. `None` is the state
+            // that permits it and settling is what leaves that state.
+            || self.bytes_resumed.is_some()
             || (self.total().get() != 0 && offset.get() > self.total().get())
         {
             return Vec::new();
         }
-        self.bytes_resumed = offset;
+        self.bytes_resumed = Some(offset);
         self.bytes = offset;
         Vec::new()
     }
@@ -1437,7 +1441,7 @@ impl TransferRecord {
 
     fn clear_progress(&mut self) {
         self.bytes = ByteCount::new(0);
-        self.bytes_resumed = ByteCount::new(0);
+        self.bytes_resumed = None;
     }
 
     fn request_attempt_retirement(&mut self, intent: RetirementIntent) {

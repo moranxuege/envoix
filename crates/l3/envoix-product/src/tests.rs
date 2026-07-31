@@ -821,7 +821,7 @@ fn cancel_clears_progress_and_the_fresh_resume_inherits_it() {
         }
     )));
     assert_eq!(record.bytes, ByteCount::new(0));
-    assert_eq!(record.bytes_resumed, ByteCount::new(0));
+    assert_eq!(record.bytes_resumed, None);
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
@@ -854,9 +854,14 @@ fn paused_resume_keeps_progress_until_phase_corrects_it() {
     record
         .reduce(event(&record, AttemptEventKind::Phase(Phase::Transferring)))
         .unwrap();
-    // A GUESS, taken from what this card last saw. It is what the person is
-    // shown until the peers settle the real answer.
-    assert_eq!(record.bytes_resumed, ByteCount::new(50));
+    // UNSETTLED. Entering the phase used to copy this card's remembered
+    // progress in as though the peer had agreed to it; only the peer can say.
+    assert_eq!(record.bytes_resumed, None);
+    assert_eq!(
+        record.bytes,
+        ByteCount::new(50),
+        "the memory itself survives"
+    );
 }
 
 /// The card's remembered progress is a guess in BOTH directions, and only the
@@ -895,7 +900,7 @@ fn a_settled_resume_corrects_the_card_in_either_direction() {
             .unwrap();
         assert_eq!(
             record.bytes_resumed,
-            ByteCount::new(settled),
+            Some(ByteCount::new(settled)),
             "the settled offset is what was actually resumed"
         );
         assert_eq!(
@@ -904,6 +909,78 @@ fn a_settled_resume_corrects_the_card_in_either_direction() {
             "progress follows the settled offset, downward included"
         );
     }
+}
+
+/// Settled ONCE. Otherwise the one input allowed to move progress down could be
+/// replayed, and an untrusted executor could drag the bar wherever it liked for
+/// the life of the attempt — emit 80, let progress run, then emit 5, repeatedly.
+///
+/// The executor has a latch of its own, but a latch inside the thing being
+/// distrusted is not an invariant. This is where it has to hold.
+#[test]
+fn a_settled_resume_cannot_be_replayed() {
+    let mut record = transfer(Direction::Send);
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::ResumeEstablished {
+                offset: ByteCount::new(40),
+            },
+        ))
+        .unwrap();
+    assert_eq!(record.bytes_resumed, Some(ByteCount::new(40)));
+
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::Progress {
+                transferred: ByteCount::new(70),
+            },
+        ))
+        .unwrap();
+
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::ResumeEstablished {
+                offset: ByteCount::new(5),
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        record.bytes_resumed,
+        Some(ByteCount::new(40)),
+        "a second establishment must not rewrite the first"
+    );
+    assert_eq!(
+        record.bytes,
+        ByteCount::new(70),
+        "and must not drag progress backwards"
+    );
+}
+
+/// A new attempt has not settled anything yet, whatever the last one settled.
+#[test]
+fn a_new_generation_starts_unsettled() {
+    let mut record = transfer(Direction::Send);
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::ResumeEstablished {
+                offset: ByteCount::new(40),
+            },
+        ))
+        .unwrap();
+    assert_eq!(record.bytes_resumed, Some(ByteCount::new(40)));
+
+    record
+        .reduce(ProductInput::Command(ProductCommand::Cancel))
+        .unwrap();
+    quiesce(&mut record, RetirementIntent::Cancel);
+    assert_eq!(
+        record.bytes_resumed, None,
+        "a discarded attempt leaves nothing settled behind it"
+    );
 }
 
 /// More trusted than the other executor events, not trusted absolutely. An
@@ -921,7 +998,7 @@ fn a_settled_resume_past_the_total_is_ignored() {
         ))
         .unwrap();
     assert_eq!(record.bytes, before);
-    assert_eq!(record.bytes_resumed, ByteCount::new(0));
+    assert_eq!(record.bytes_resumed, None);
 }
 
 #[test]
@@ -2585,7 +2662,7 @@ fn fixture_skeleton() -> TransferRecord {
         generation: AttemptGen::new(7),
         phase: Phase::Transferring,
         bytes: ByteCount::new(4),
-        bytes_resumed: ByteCount::new(2),
+        bytes_resumed: Some(ByteCount::new(2)),
         outcome: None,
         facts: crate::Facts {
             complete_sent: false,
@@ -2663,12 +2740,12 @@ fn a_plan_naming_an_item_outside_the_selection_is_refused() {
 }
 
 #[test]
-fn product_record_v10_has_a_byte_exact_fixture() {
+fn product_record_v11_has_a_byte_exact_fixture() {
     let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired":[{"item":0,"retention":"persisted","seekability":"seekable"}],"backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&10_u32.to_be_bytes());
+    expected.extend_from_slice(&11_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);

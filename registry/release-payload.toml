@@ -8,27 +8,27 @@
 
 [payload]
 build_manifest_sha256 = "60d17a09410f59b239e944dc8ccc120272af33986e8f8163e4388cc794ace65c"
-sources_sha256 = "3d7bbe521a6f457be46194a9cbf1b5e35eb1bce9ec9f61b4c7af4f1782bbc50e"
+sources_sha256 = "29153059668287054388b73e968ffc560a4fb9f0cb70665697f2929042a274b7"
 
 [[payload.library]]
 build_type = "debug"
 abi = "arm64-v8a"
-sha256 = "fc35c0e812dcaec4b5c948864d2f184ab04cd97cdf00b3c8c504f56fc8070e7c"
+sha256 = "4b6809201c34aba95530997b8620f790140d4a230702cf25e2e584ca65c911c9"
 
 [[payload.library]]
 build_type = "debug"
 abi = "x86_64"
-sha256 = "ac481e0f0f1f44eeda097de79aab043d3fa0d45f4243e4809f34fc40a07d9fd8"
+sha256 = "6e34d299c50378c2875139ecc41059e047c6723a45c04de9b4206aed8e126fda"
 
 [[payload.library]]
 build_type = "release"
 abi = "arm64-v8a"
-sha256 = "ce8bc77dd541cea37fdd16baf4c94a8e4e22c21c2841b2494cffb9044f499a4a"
+sha256 = "c61268b96a5654a92e979792c1844a6d8ce57fefb33f1c36b2024836cbfcd6bb"
 
 [[payload.library]]
 build_type = "release"
 abi = "x86_64"
-sha256 = "1bb0dd8d68e8784d10447e91313e28e68904de01a2da5d411edee9990b978bfc"
+sha256 = "af88eb90bec05fe2aba5e84d745faef14c3026cc0e73ddb59444b4a3fef8d3ce"
 
 [[payload.bundled]]
 soname = "libapp.so"

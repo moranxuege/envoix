@@ -187,6 +187,14 @@ pub enum SinkOpenError {
     /// answers this for everything, and it means a card should never have been
     /// asked to receive — not that the disk failed.
     Unsupported,
+    /// The volume is full.
+    ///
+    /// Kept apart from `Unavailable` because it is the one a person can act on,
+    /// and because re-choosing a document does not fix it — so it must never
+    /// become a re-pick. The store already draws this distinction for the same
+    /// reason; collapsing it here would have spent it at the first boundary it
+    /// crossed.
+    OutOfSpace,
     /// The store refused: it is already leased to another writer, or it faulted.
     /// Retrying is meaningful; choosing something else is not.
     Unavailable,
@@ -384,6 +392,7 @@ mod tests {
 
         fn seal(
             self: Box<Self>,
+            _expected_size: ByteCount,
             _digest: ContentHash,
         ) -> Result<envoix_blob_api::SealedArtifact, envoix_blob_api::BlobError> {
             unimplemented!("no case here writes")

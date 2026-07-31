@@ -210,7 +210,9 @@ fn card_view(record: &TransferRecord) -> CardView {
         generation: record.generation.get(),
         phase: phase_view(record.phase),
         bytes: u63(record.bytes.get()),
-        bytes_resumed: u63(record.bytes_resumed.get()),
+        // Zero while unsettled. The projection cannot say "unknown", and zero
+        // is the honest stand-in: nothing is yet KNOWN to have been skipped.
+        bytes_resumed: u63(record.bytes_resumed.unwrap_or(ByteCount::new(0)).get()),
         outcome: record.outcome.as_ref().map(outcome_view),
         // Legality is the reducer's, not the observer's: this publishes
         // `allowed_commands` verbatim so a frontend renders the authority's
