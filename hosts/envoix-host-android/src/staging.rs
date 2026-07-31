@@ -23,12 +23,15 @@ use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use envoix_blob_api::{BlobBackend, BlobKey, BlobState, BlobStore, BlobWorkId};
+use envoix_blob_api::{
+    BlobBackend, BlobKey, BlobState, BlobStore, BlobWorkId, reception_fingerprint,
+};
 use envoix_capabilities::{SourceReadError, SourceSession};
 use envoix_runtime::{
-    ContentHash, DerivationSpec, PreparedSource, PreparedSourceResolver, SourceAcquisitionKey,
-    SourceLocator, SourceResolveError, SourceStagingExecution, SourceStagingExecutor,
-    SourceStagingPlan, SourceStagingSignal, StagedIdentity, StagingWork, StopToken, stop_channel,
+    ContentHash, DerivationSpec, PreparedReceiveSink, PreparedSinkResolver, PreparedSource,
+    PreparedSourceResolver, SinkOpenError, SourceAcquisitionKey, SourceLocator, SourceResolveError,
+    SourceStagingExecution, SourceStagingExecutor, SourceStagingPlan, SourceStagingSignal,
+    StagedIdentity, StagingWork, StopToken, stop_channel,
 };
 use envoix_types::{AttemptGen, ByteCount};
 use tokio::sync::mpsc;
@@ -209,6 +212,44 @@ impl<B: BlobBackend> SourceSession for SealedArtifactReader<B> {
         self.blobs
             .read_at(self.blob, offset, destination)
             .map_err(|_| SourceReadError)
+    }
+}
+
+/// Where this host puts the bytes of a receive.
+///
+/// One place, because there is one backing: bytes this app writes into its own
+/// bulk store. The card names WHICH blob — it derives the key from the plan it
+/// is dispatching — and this only opens what it was told to, exactly as
+/// [`HostSources`] does for the other direction.
+#[derive(Clone)]
+pub struct HostSinks<B> {
+    blobs: BlobStore<B>,
+}
+
+impl<B> HostSinks<B> {
+    pub const fn new(blobs: BlobStore<B>) -> Self {
+        Self { blobs }
+    }
+}
+
+impl<B: BlobBackend + Clone> PreparedSinkResolver for HostSinks<B> {
+    fn open(&self, blob: BlobKey) -> Result<PreparedReceiveSink, SinkOpenError> {
+        // A reception's commissioning IS its key, so the fingerprint is derived
+        // from it rather than carried. See `reception_fingerprint`.
+        let fingerprint = match blob.work() {
+            BlobWorkId::Reception { transfer, artifact } => {
+                reception_fingerprint(transfer, artifact)
+            }
+            // A derivation key reaching the RECEIVE resolver is this composition
+            // wiring itself wrong, not a disk that failed. `Unsupported` says so
+            // — retrying it would never help.
+            BlobWorkId::Derivation { .. } => return Err(SinkOpenError::Unsupported),
+        };
+        let lease = self
+            .blobs
+            .begin(blob, fingerprint)
+            .map_err(|_| SinkOpenError::Unavailable)?;
+        Ok(PreparedReceiveSink::new(Box::new(lease)))
     }
 }
 

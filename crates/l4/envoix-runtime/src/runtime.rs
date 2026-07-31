@@ -20,8 +20,8 @@ use crate::command::{CommandTicket, CommandVerdict, FrontendVerdict};
 use crate::config::RuntimeConfig;
 use crate::error::{AcquireError, CommandRejected};
 use crate::evidence::EvidencePublisher;
-use crate::launch::PreparedSourceResolver;
-use crate::port::{AttemptExecutor, SessionProvider, SourceStagingExecutor};
+use crate::launch::PlatformPorts;
+use crate::port::{AttemptExecutor, SessionProvider};
 use crate::subscription::{
     CardSubscription, RecordUpdateKind, SubscribeError, SubscriptionEpoch, SubscriptionPublisher,
     subscription_channel,
@@ -267,11 +267,7 @@ pub struct Runtime<P: SessionProvider, E: AttemptExecutor> {
     shared: Arc<Shared>,
     provider: Arc<P>,
     executor: Arc<E>,
-    /// Injected as `dyn` rather than a third generic — see `CardActor`.
-    staging: Arc<dyn SourceStagingExecutor>,
-    /// How a card opens the source it is about to send. Same reasoning as
-    /// `staging`, and the same layer: what a source IS is a platform fact.
-    sources: Arc<dyn PreparedSourceResolver>,
+    ports: PlatformPorts,
 }
 
 impl<P: SessionProvider, E: AttemptExecutor> Clone for Runtime<P, E> {
@@ -280,8 +276,7 @@ impl<P: SessionProvider, E: AttemptExecutor> Clone for Runtime<P, E> {
             shared: self.shared.clone(),
             provider: self.provider.clone(),
             executor: self.executor.clone(),
-            staging: self.staging.clone(),
-            sources: self.sources.clone(),
+            ports: self.ports.clone(),
         }
     }
 }
@@ -289,19 +284,12 @@ impl<P: SessionProvider, E: AttemptExecutor> Clone for Runtime<P, E> {
 impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
     /// Builds the runtime. Must be called within a Tokio runtime; the host owns
     /// the reactor and RT1 holds its handle.
-    pub fn start(
-        config: RuntimeConfig,
-        provider: P,
-        executor: E,
-        staging: impl SourceStagingExecutor,
-        sources: impl PreparedSourceResolver,
-    ) -> Self {
+    pub fn start(config: RuntimeConfig, provider: P, executor: E, ports: PlatformPorts) -> Self {
         Self::start_inner(
             config,
             provider,
             executor,
-            Arc::new(staging),
-            Arc::new(sources),
+            ports,
             EvidencePublisher::default(),
         )
     }
@@ -315,16 +303,14 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         config: RuntimeConfig,
         provider: P,
         executor: E,
-        staging: impl SourceStagingExecutor,
-        sources: impl PreparedSourceResolver,
+        ports: PlatformPorts,
         sink: S,
     ) -> Self {
         Self::start_inner(
             config,
             provider,
             executor,
-            Arc::new(staging),
-            Arc::new(sources),
+            ports,
             EvidencePublisher::new(sink),
         )
     }
@@ -333,8 +319,7 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         config: RuntimeConfig,
         provider: P,
         executor: E,
-        staging: Arc<dyn SourceStagingExecutor>,
-        sources: Arc<dyn PreparedSourceResolver>,
+        ports: PlatformPorts,
         evidence: EvidencePublisher,
     ) -> Self {
         let admission = Arc::new(Semaphore::new(config.max_live_cards.get()));
@@ -353,8 +338,7 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
             }),
             provider: Arc::new(provider),
             executor: Arc::new(executor),
-            staging,
-            sources,
+            ports,
         }
     }
 
@@ -828,8 +812,7 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         let actor = CardActor::new(
             self.shared.clone(),
             self.executor.clone(),
-            self.staging.clone(),
-            self.sources.clone(),
+            self.ports.clone(),
             card,
             permit,
             session,

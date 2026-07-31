@@ -12,4 +12,4 @@ pub use identity::{
 };
 pub use name::{ArchivePath, ArchivePathError, LandedName, OfferedName, OfferedNameError};
 pub use secret::Secret;
-pub use value::{ByteCount, ContentHash, Direction};
+pub use value::{ByteCount, ContentHash, Direction, DurablePrefix};

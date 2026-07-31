@@ -7,10 +7,10 @@
 //! may do for itself. A backend hands up bytes and durability; whether they
 //! amount to a sealed artifact is this crate's decision.
 
-use envoix_types::{ByteCount, ContentHash, RecordId};
+use envoix_types::{ByteCount, ContentHash, DurablePrefix, RecordId};
 
 use crate::seal::SealedArtifact;
-use crate::{BlobKey, CopyCheckpoint, SealFact};
+use crate::{BlobKey, CopyCheckpoint, SealFact, SinkSession};
 
 /// What a blob is, as the store can honestly say after any crash.
 ///
@@ -380,6 +380,55 @@ impl<B: BlobBackend> BlobLease<B> {
         self.released = true;
         self.store.backend.release(self.blob);
         Ok(SealedArtifact::new(fact))
+    }
+}
+
+/// A lease IS the port. Nothing wraps it, because everything the port asks for
+/// is something the lease already promises — and a wrapper would be a second
+/// place for the two to drift.
+///
+/// The two counters are cross-checked rather than trusted: the lease tracks the
+/// bytes IT accepted (`append` advances it only on success) and the caller
+/// passes the bytes ITS engine accepted. They are maintained independently and
+/// must agree, so a checkpoint that promises more than was written is refused
+/// here rather than published and discovered on the next resume.
+impl<B: BlobBackend> SinkSession for BlobLease<B> {
+    fn resume(&mut self) -> Result<DurablePrefix, BlobError> {
+        Ok(DurablePrefix {
+            length: self.opened_at,
+            digest: self
+                .opened_checkpoint()
+                .map_or_else(empty_digest, |checkpoint| checkpoint.prefix_digest),
+        })
+    }
+
+    fn read_partial_at(
+        &mut self,
+        offset: ByteCount,
+        destination: &mut [u8],
+    ) -> Result<usize, BlobError> {
+        Self::read_partial_at(self, offset, destination)
+    }
+
+    fn append(&mut self, offset: ByteCount, bytes: &[u8]) -> Result<(), BlobError> {
+        Self::append(self, offset, bytes)
+    }
+
+    fn checkpoint(&mut self, prefix: DurablePrefix) -> Result<(), BlobError> {
+        if prefix.length != self.offset {
+            return Err(BlobError::OffsetMismatch {
+                expected: self.offset,
+            });
+        }
+        Self::checkpoint(self, prefix.digest).map(|_| ())
+    }
+
+    fn reset(&mut self) -> Result<(), BlobError> {
+        Self::reset(self)
+    }
+
+    fn seal(self: Box<Self>, digest: ContentHash) -> Result<SealedArtifact, BlobError> {
+        Self::seal(*self, digest)
     }
 }
 

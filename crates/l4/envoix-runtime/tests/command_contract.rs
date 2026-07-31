@@ -16,9 +16,9 @@ use envoix_product::{
 };
 use envoix_runtime::{
     AttemptExecution, AttemptExecutor, AttemptLaunch, CommandCompletion, CommandRejected,
-    CommandVerdict, NoSourceStaging, PreparedSource, PreparedSourceResolver, Runtime,
-    RuntimeConfig, SessionProvider, SourceLocator, SourceResolveError, StagedIdentity,
-    stop_channel,
+    CommandVerdict, NoSourceStaging, PlatformPorts, PreparedReceiveSink, PreparedSinkResolver,
+    PreparedSource, PreparedSourceResolver, Runtime, RuntimeConfig, SessionProvider, SinkOpenError,
+    SourceLocator, SourceResolveError, StagedIdentity, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -290,8 +290,7 @@ async fn mutating_hot_restart_exactly_once() {
             script: script.clone(),
         },
         InertExecutor,
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -323,8 +322,7 @@ async fn mutating_hot_restart_exactly_once() {
             script: script.clone(),
         },
         InertExecutor,
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     runtime.restore(card).unwrap();
     let commander = runtime.subscribe(card, CAPACITY).unwrap();
@@ -385,8 +383,7 @@ async fn mutating_hot_restart_exactly_once() {
             script: script.clone(),
         },
         InertExecutor,
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     runtime.restore(second).unwrap();
     let commander = runtime.subscribe(second, CAPACITY).unwrap();
@@ -429,8 +426,7 @@ async fn stale_epoch_commands_are_inert() {
             script: script.clone(),
         },
         InertExecutor,
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -515,8 +511,7 @@ async fn acceptance_is_not_completion() {
             script: script.clone(),
         },
         InertExecutor,
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     let (session, outcome) = create_card(root, &script, 0x10);
     let card = session.record().identity.card;
@@ -587,8 +582,7 @@ async fn reused_identity_with_different_command_conflicts() {
             script: script.clone(),
         },
         InertExecutor,
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     let (session, outcome) = create_card(root, &script, 0x70);
     let card = session.record().identity.card;
@@ -662,8 +656,7 @@ async fn interrupted_command_disambiguates_after_restore() {
             script: script.clone(),
         },
         InertExecutor,
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     let (session, outcome) = create_card(root, &script, 0x80);
     let card = session.record().identity.card;
@@ -738,5 +731,69 @@ impl PreparedSourceResolver for MemorySources {
         identity: StagedIdentity,
     ) -> Result<PreparedSource, SourceResolveError> {
         Ok(PreparedSource::new(Box::new(EmptySource), identity))
+    }
+}
+
+/// A resolver that always opens an empty in-memory destination.
+///
+/// The same reasoning as `MemorySources`, for the other direction: these suites
+/// drive the LIFECYCLE, and a receiving card is the one that reaches a live
+/// attempt at creation. Answering `Unsupported` would fail every receive before
+/// it began — correct behaviour for a build with no bulk storage, and the wrong
+/// thing to be testing here.
+#[derive(Clone, Copy, Debug, Default)]
+struct MemorySinks;
+
+impl PreparedSinkResolver for MemorySinks {
+    fn open(&self, _blob: envoix_blob_api::BlobKey) -> Result<PreparedReceiveSink, SinkOpenError> {
+        Ok(PreparedReceiveSink::new(Box::new(EmptySink)))
+    }
+}
+
+/// Accepts nothing, and CANNOT seal.
+///
+/// Not an omission: `SealedArtifact` has no public constructor, so only the real
+/// store can mint one. A double that could would let a test prove a card owns
+/// bytes that were never written — which is exactly the property the witness
+/// exists to hold. Nothing in these suites writes, so the gap is honest.
+struct EmptySink;
+
+impl envoix_blob_api::SinkSession for EmptySink {
+    fn resume(&mut self) -> Result<envoix_types::DurablePrefix, envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn read_partial_at(
+        &mut self,
+        _offset: envoix_types::ByteCount,
+        _destination: &mut [u8],
+    ) -> Result<usize, envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn append(
+        &mut self,
+        _offset: envoix_types::ByteCount,
+        _bytes: &[u8],
+    ) -> Result<(), envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn checkpoint(
+        &mut self,
+        _prefix: envoix_types::DurablePrefix,
+    ) -> Result<(), envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn reset(&mut self) -> Result<(), envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn seal(
+        self: Box<Self>,
+        _digest: envoix_types::ContentHash,
+    ) -> Result<envoix_blob_api::SealedArtifact, envoix_blob_api::BlobError> {
+        unimplemented!("only the real store can mint a witness")
     }
 }

@@ -470,7 +470,7 @@ async fn attempt_iroh_generation_and_retirement() {
         order: order.clone(),
     };
     let (sender_token, receiver_token) = token_pair();
-    let resume = ResumeIntent::ResumeFrom { offset };
+    let resume = ResumeIntent::Allowed;
     let mut second_sender = spawn_sender(
         plan(Direction::Send, 2, resume),
         spec(&bytes),

@@ -79,8 +79,9 @@ pub use envoix_product::{
 };
 pub use error::{AcquireError, CommandRejected};
 pub use launch::{
-    AttemptLaunch, NoSourceSessions, PreparedAttemptIo, PreparedSource, PreparedSourceResolver,
-    SourceLocator, SourceResolveError, StagedIdentity,
+    AttemptLaunch, NoBulkStorage, NoSourceSessions, PlatformPorts, PreparedAttemptIo,
+    PreparedReceiveSink, PreparedSinkResolver, PreparedSource, PreparedSourceResolver,
+    SinkOpenError, SourceLocator, SourceResolveError, StagedIdentity, receive_blob,
 };
 pub use port::{
     AttemptExecution, AttemptExecutor, ExecutorSignal, NoSourceStaging, SessionProvider,

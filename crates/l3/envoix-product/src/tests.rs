@@ -788,12 +788,7 @@ fn resume_after_completed_staging_goes_to_the_wire() {
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
     assert_eq!(record.state, ProductState::Connecting);
-    assert_eq!(
-        start_plan(&effects).resume,
-        ResumeIntent::ResumeFrom {
-            offset: ByteCount::new(0)
-        }
-    );
+    assert_eq!(start_plan(&effects).resume, ResumeIntent::Allowed);
 }
 
 #[test]
@@ -855,16 +850,78 @@ fn paused_resume_keeps_progress_until_phase_corrects_it() {
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
     assert_eq!(record.bytes, ByteCount::new(50));
-    assert_eq!(
-        start_plan(&effects).resume,
-        ResumeIntent::ResumeFrom {
-            offset: ByteCount::new(50)
-        }
-    );
+    assert_eq!(start_plan(&effects).resume, ResumeIntent::Allowed);
     record
         .reduce(event(&record, AttemptEventKind::Phase(Phase::Transferring)))
         .unwrap();
+    // A GUESS, taken from what this card last saw. It is what the person is
+    // shown until the peers settle the real answer.
     assert_eq!(record.bytes_resumed, ByteCount::new(50));
+}
+
+/// The card's remembered progress is a guess in BOTH directions, and only the
+/// peers can settle it.
+///
+/// Downward: the receiver's durable prefix failed its own digest, so nothing is
+/// resumed and a card still showing 50 would be showing bytes that will be sent
+/// again. Upward: the receiver checkpointed bytes whose progress event never
+/// reached this card, so it resumes past what this card remembers.
+///
+/// This is why the attempt plan stopped carrying an offset: the executor used to
+/// refuse a peer that disagreed with the guess, which made the second case a
+/// protocol violation and the "I already hold this whole file" recovery
+/// unreachable.
+#[test]
+fn a_settled_resume_corrects_the_card_in_either_direction() {
+    for settled in [0, 20, 80] {
+        let mut record = transfer(Direction::Send);
+        record
+            .reduce(event(
+                &record,
+                AttemptEventKind::Progress {
+                    transferred: ByteCount::new(50),
+                },
+            ))
+            .unwrap();
+        assert_eq!(record.bytes, ByteCount::new(50));
+
+        record
+            .reduce(event(
+                &record,
+                AttemptEventKind::ResumeEstablished {
+                    offset: ByteCount::new(settled),
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            record.bytes_resumed,
+            ByteCount::new(settled),
+            "the settled offset is what was actually resumed"
+        );
+        assert_eq!(
+            record.bytes,
+            ByteCount::new(settled),
+            "progress follows the settled offset, downward included"
+        );
+    }
+}
+
+/// More trusted than the other executor events, not trusted absolutely. An
+/// offset past the total would let an untrusted attempt declare a card finished.
+#[test]
+fn a_settled_resume_past_the_total_is_ignored() {
+    let mut record = transfer(Direction::Send);
+    let before = record.bytes;
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::ResumeEstablished {
+                offset: ByteCount::new(record.total().get() + 1),
+            },
+        ))
+        .unwrap();
+    assert_eq!(record.bytes, before);
+    assert_eq!(record.bytes_resumed, ByteCount::new(0));
 }
 
 #[test]
@@ -1321,14 +1378,10 @@ fn resume_from_resting_retryable_states_uses_resume_semantics() {
         // A genuinely at-rest paused card: its worker has retired (Quiescent),
         // which is the precondition for a fresh attempt to launch.
         record.quiescence = crate::Quiescence::Quiescent;
-        let offset = record.bytes;
         let effects = record
             .reduce(ProductInput::Command(ProductCommand::Resume))
             .unwrap();
-        assert_eq!(
-            start_plan(&effects).resume,
-            ResumeIntent::ResumeFrom { offset }
-        );
+        assert_eq!(start_plan(&effects).resume, ResumeIntent::Allowed);
     }
 
     let mut record = confirming_send();
@@ -1349,7 +1402,7 @@ fn resume_from_resting_retryable_states_uses_resume_semantics() {
             ProductEffect::StopMailboxPoll { .. },
             ProductEffect::StartAttempt {
                 plan: AttemptPlan {
-                    resume: ResumeIntent::ResumeFrom { .. },
+                    resume: ResumeIntent::Allowed,
                     ..
                 }
             }
@@ -1629,9 +1682,10 @@ fn stage_complete_refuses_a_total_below_the_progress_it_already_reported() {
 
 #[test]
 fn admitted_progress_is_monotone_within_a_generation() {
-    // An untrusted executor event must not move the bar — and thus the next
-    // ResumeFrom offset — backward, which would make a valid larger durable peer
-    // prefix look like a protocol violation on resume.
+    // An untrusted executor event must not move what the person is shown
+    // backward. This no longer guards a resume decision — the plan carries no
+    // offset — but a progress bar that jumps back on a stale event is its own
+    // defect, and `ResumeEstablished` is the one event allowed to correct it.
     let mut record = transfer(Direction::Send);
     record
         .reduce(event(
@@ -1663,12 +1717,7 @@ fn admitted_progress_is_monotone_within_a_generation() {
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
-    assert_eq!(
-        start_plan(&effects).resume,
-        ResumeIntent::ResumeFrom {
-            offset: ByteCount::new(80)
-        }
-    );
+    assert_eq!(start_plan(&effects).resume, ResumeIntent::Allowed);
 }
 
 #[test]
@@ -2255,12 +2304,7 @@ fn product_model_scenario_trace() {
     let effects = send
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
-    assert_eq!(
-        start_plan(&effects).resume,
-        ResumeIntent::ResumeFrom {
-            offset: ByteCount::new(60),
-        }
-    );
+    assert_eq!(start_plan(&effects).resume, ResumeIntent::Allowed);
     send.reduce(event(&send, AttemptEventKind::Phase(Phase::Transferring)))
         .unwrap();
     let effects = send

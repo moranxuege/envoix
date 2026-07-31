@@ -63,3 +63,24 @@ impl ContentHash {
         &self.0
     }
 }
+
+/// A prefix of some bytes that has been promised durable, and which bytes it is.
+///
+/// L0 because it is a pair of L0 values with a meaning, and because two crates
+/// on different sides need to speak it: the transfer engine, which promises a
+/// prefix it has accepted, and the bulk store, which makes that promise durable.
+/// Putting it in either one would make the other depend on it for a two-field
+/// value type.
+///
+/// No chunk index. It is `length.div_ceil(chunk_size)` and the chunk size is
+/// negotiated per transfer, so keeping it here would store a conclusion beside
+/// its premise — and let the two disagree.
+///
+/// The digest is LOCAL evidence: it says the durable prefix is the one that was
+/// promised, which is a different question from whether it matches what a remote
+/// peer holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurablePrefix {
+    pub length: ByteCount,
+    pub digest: ContentHash,
+}

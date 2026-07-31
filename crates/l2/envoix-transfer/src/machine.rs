@@ -741,6 +741,7 @@ impl ReceiverReceiving {
                     self.header.file_size,
                     claim.file_hash,
                     true,
+                    ByteCount::new(self.resumed_bytes),
                 )))
             }
             Frame::Chunk(chunk) => {
@@ -842,6 +843,7 @@ impl ReceiverReceiving {
             self.header.file_size,
             actual_hash,
             false,
+            ByteCount::new(self.resumed_bytes),
         )))
     }
 
@@ -891,6 +893,7 @@ pub enum ReceiverStep {
 
 pub struct ReceiverReadyToCommit {
     completed: ReceiverCompleted,
+    resumed_bytes: ByteCount,
 }
 
 impl ReceiverReadyToCommit {
@@ -899,10 +902,22 @@ impl ReceiverReadyToCommit {
         file_size: ByteCount,
         file_hash: ContentHash,
         claimed_existing: bool,
+        resumed_bytes: ByteCount,
     ) -> Self {
         Self {
             completed: ReceiverCompleted::new(transfer_id, file_size, file_hash, claimed_existing),
+            resumed_bytes,
         }
+    }
+
+    /// How much of this file was NOT transferred in this attempt.
+    ///
+    /// Carried here as well as on `ReceiverProgress` because a transfer can
+    /// reach completion without a single chunk — a resumed prefix that already
+    /// covered the file, or a receiver that claimed to hold it — and those are
+    /// exactly the runs whose resumed count nothing else would ever report.
+    pub const fn resumed_bytes(&self) -> ByteCount {
+        self.resumed_bytes
     }
 
     pub const fn transfer_id(&self) -> TransferId {

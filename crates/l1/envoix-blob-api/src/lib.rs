@@ -36,8 +36,10 @@
 
 mod key;
 mod seal;
+mod sink_session;
 mod store;
 
-pub use key::{BlobKey, BlobWorkId};
+pub use key::{BlobKey, BlobWorkId, reception_fingerprint};
 pub use seal::{CopyCheckpoint, SealFact, SealedArtifact};
+pub use sink_session::SinkSession;
 pub use store::{BlobBackend, BlobError, BlobLease, BlobState, BlobStore};

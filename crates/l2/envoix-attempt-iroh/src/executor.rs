@@ -911,6 +911,16 @@ async fn transfer_sender(
             Ok(sending) => sending,
             Err(failure) => return Terminal::from_machine(failure),
         };
+    // The sender settles this: it hashed its own source prefix and either
+    // accepted the receiver's claim or restarted at zero. Reported BEFORE the
+    // first progress so the card never shows a bar built on its own guess.
+    emit(
+        events,
+        plan.stamp,
+        AttemptEventKind::ResumeEstablished {
+            offset: sending.progress().resumed_bytes,
+        },
+    );
 
     loop {
         match sending.next_frame(source) {
@@ -1098,6 +1108,7 @@ async fn transfer_receiver(
         return receiver_receiving_exit(receiving, exit, clock, sink);
     }
 
+    let mut established = ResumeReport::default();
     loop {
         let packet = match receive_interruptible(
             link,
@@ -1118,6 +1129,12 @@ async fn transfer_receiver(
         match receiving.receive(frame, clock.transfer_now(), next_deadline, sink) {
             Ok(ReceiverStep::Continue { state, progress }) => {
                 receiving = state;
+                // The receiver PROPOSED a prefix; the sender decided. A restart
+                // at zero reaches the machine as an index-zero chunk and resets
+                // this, so it is only true once a frame has been applied — which
+                // is why it is not reported at negotiation time like the
+                // sender's.
+                established.report(events, plan.stamp, progress.resumed_bytes);
                 emit(
                     events,
                     plan.stamp,
@@ -1127,6 +1144,10 @@ async fn transfer_receiver(
                 );
             }
             Ok(ReceiverStep::ReadyToCommit(ready)) => {
+                // A run can finish without one chunk — a resumed prefix that
+                // already covered the file, or a claim on bytes already held —
+                // and those are exactly the runs nothing else would report.
+                established.report(events, plan.stamp, ready.resumed_bytes());
                 let mut ready = Some(ready);
                 let decision = {
                     let mut supervisor = match supervisor.lock() {
@@ -1344,31 +1365,63 @@ fn emit(events: &mpsc::UnboundedSender<AttemptEvent>, stamp: AttemptStamp, kind:
     let _ = events.send(AttemptEvent { stamp, kind });
 }
 
-fn resume_mode(plan: AttemptPlan) -> ResumeMode {
-    match plan.resume {
-        envoix_attempt_api::ResumeIntent::Fresh => ResumeMode::Disabled,
-        envoix_attempt_api::ResumeIntent::ResumeFrom { .. } => ResumeMode::Allowed,
+/// Reports the settled resume offset exactly once.
+///
+/// A latch rather than a flag at each call site: the receiver learns the answer
+/// at whichever of two places it reaches first, and a second report would be a
+/// later, equal value that the product would have to recognise as redundant.
+#[derive(Default)]
+struct ResumeReport {
+    reported: bool,
+}
+
+impl ResumeReport {
+    fn report(
+        &mut self,
+        events: &mpsc::UnboundedSender<AttemptEvent>,
+        stamp: AttemptStamp,
+        offset: ByteCount,
+    ) {
+        if self.reported {
+            return;
+        }
+        self.reported = true;
+        emit(
+            events,
+            stamp,
+            AttemptEventKind::ResumeEstablished { offset },
+        );
     }
 }
 
-/// The plan's offset is a HINT — it came from a checkpoint observed earlier, and
-/// the receiver's own storage is the authority on what survives there now. A
-/// receiver may legitimately hold LESS: its durable prefix failed its own digest
-/// check, or a torn tail was discarded on open. Resending those bytes is the
-/// correct response and costs only bandwidth.
+fn resume_mode(plan: AttemptPlan) -> ResumeMode {
+    match plan.resume {
+        envoix_attempt_api::ResumeIntent::Fresh => ResumeMode::Disabled,
+        envoix_attempt_api::ResumeIntent::Allowed => ResumeMode::Allowed,
+    }
+}
+
+/// A plan that FORBADE resuming must not be answered with one.
 ///
-/// More than planned is the suspicious direction, and that is what this refuses.
-/// Correctness of whatever IS resumed stays with the prefix-hash comparison on
-/// the wire, which this check never stood in for.
+/// That is the whole check. It used to also compare the reported prefix against
+/// an offset carried in the plan, which no local value can support: the peer's
+/// storage is the authority on what survives there, and it may hold less than
+/// this card last saw (a failed digest, a discarded tail) or more (a checkpoint
+/// whose progress event never arrived, or the entire file, which a receiver
+/// holding it already reports as a completion claim). Under that comparison the
+/// last of those — the recovery that exists to avoid resending a file the peer
+/// already has — was a protocol violation.
+///
+/// Whether the resumed bytes are the RIGHT bytes is not this question. The
+/// sender hashes its own source prefix and refuses to skip anything that does
+/// not match, which is a check on content rather than on a remembered number.
 fn resume_matches_plan(frame: &Frame, plan: AttemptPlan) -> bool {
     let Frame::ResumeStatus(status) = frame else {
         return true;
     };
     match plan.resume {
         envoix_attempt_api::ResumeIntent::Fresh => status.bytes_received.get() == 0,
-        envoix_attempt_api::ResumeIntent::ResumeFrom { offset } => {
-            status.bytes_received.get() <= offset.get()
-        }
+        envoix_attempt_api::ResumeIntent::Allowed => true,
     }
 }
 

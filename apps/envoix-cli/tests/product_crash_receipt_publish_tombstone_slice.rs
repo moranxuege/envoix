@@ -673,12 +673,7 @@ async fn product_crash_receipt_publish_tombstone_slice() {
         .unwrap();
     assert_eq!(resumed.commit, CommitStatus::Committed { attempts: 1 });
     let resume_plan = start_plan(&resumed);
-    assert_eq!(
-        resume_plan.resume,
-        ResumeIntent::ResumeFrom {
-            offset: ByteCount::new(PARTIAL_BYTES)
-        }
-    );
+    assert_eq!(resume_plan.resume, ResumeIntent::Allowed);
     assert!(resume_plan.stamp.generation > initial_plan.stamp.generation);
     assert_eq!(resume_plan.transfer, transfer_id);
     assert_eq!(resume_plan.artifact, artifact_id);

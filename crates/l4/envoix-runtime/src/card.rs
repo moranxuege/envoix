@@ -20,10 +20,12 @@ use tokio::task::AbortHandle;
 
 use crate::command::{CommandCompletion, FrontendVerdict};
 use crate::error::CommandRejected;
-use crate::launch::{AttemptLaunch, PreparedSourceResolver, SourceLocator, StagedIdentity};
+use crate::launch::{
+    AttemptLaunch, PlatformPorts, SinkOpenError, SourceLocator, StagedIdentity, receive_blob,
+};
 use crate::port::{
-    AttemptExecution, AttemptExecutor, ExecutorSignal, SourceStagingExecution,
-    SourceStagingExecutor, SourceStagingSignal, StopHandle,
+    AttemptExecution, AttemptExecutor, ExecutorSignal, SourceStagingExecution, SourceStagingSignal,
+    StopHandle,
 };
 use crate::runtime::Shared;
 use crate::subscription::{RecordUpdateKind, SubscriptionEpoch};
@@ -125,13 +127,11 @@ impl Drop for AttemptMeta {
 pub(crate) struct CardActor<R: RecordStore, E: AttemptExecutor> {
     shared: Arc<Shared>,
     executor: Arc<E>,
-    /// Injected as `dyn` rather than a third generic: the trait is object-safe,
-    /// starting one worker per card is not a hot path, and a generic here would
+    /// Injected as `dyn` rather than more generics: the traits are object-safe,
+    /// starting one worker per card is not a hot path, and generics here would
     /// have rippled through every `Runtime<..>` signature in the workspace for
     /// no property the compiler was not already giving us.
-    staging_executor: Arc<dyn SourceStagingExecutor>,
-    /// How this card opens the source it is about to send.
-    sources: Arc<dyn PreparedSourceResolver>,
+    ports: PlatformPorts,
     card: RecordId,
     // `Option` so `Drop` can free the admission permit BEFORE the registry
     // entry is removed — see the `Drop` impl.
@@ -177,8 +177,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
     pub(crate) fn new(
         shared: Arc<Shared>,
         executor: Arc<E>,
-        staging_executor: Arc<dyn SourceStagingExecutor>,
-        sources: Arc<dyn PreparedSourceResolver>,
+        ports: PlatformPorts,
         card: RecordId,
         permit: OwnedSemaphorePermit,
         session: CommittedSession<R>,
@@ -189,8 +188,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
         Self {
             shared,
             executor,
-            staging_executor,
-            sources,
+            ports,
             card,
             permit: Some(permit),
             session: Some(session),
@@ -529,7 +527,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 }
             }
             ProductEffect::StartSourceStaging { plan } => {
-                let SourceStagingExecution { signals, stop } = self.staging_executor.start(plan);
+                let SourceStagingExecution { signals, stop } = self.ports.staging.start(plan);
                 let pump = spawn_staging_pump(
                     &self.shared.handle,
                     self.inbox.clone(),
@@ -670,7 +668,19 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
     /// this dispatch.
     fn launch(&self, plan: AttemptPlan) -> Result<AttemptLaunch, OutcomeCode> {
         if plan.direction == Direction::Receive {
-            return AttemptLaunch::receiving(plan).ok_or(OutcomeCode::Internal);
+            // The card names the destination for the same reason it names the
+            // source: it is the authority, and this is the one step that both
+            // observes the committed record and starts the attempt. The key is
+            // DERIVED from the plan, so nothing durable has to agree with it.
+            let sink = self.ports.sinks.open(receive_blob(plan)).map_err(|error| {
+                match error {
+                    // This build cannot receive at all. A card should never have
+                    // been asked, so it is ours, not the disk's.
+                    SinkOpenError::Unsupported => OutcomeCode::Internal,
+                    SinkOpenError::Unavailable => OutcomeCode::StorageFault,
+                }
+            })?;
+            return AttemptLaunch::receiving(plan, sink).ok_or(OutcomeCode::Internal);
         }
         let record = self.session().record();
         let SourceLifecycle::Ready { content, .. } = &record.source else {
@@ -694,6 +704,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             SourceLocator::OwnedArtifact { .. } => OutcomeCode::StorageFault,
         };
         let source = self
+            .ports
             .sources
             .resolve(locator, identity)
             .map_err(|_| unreachable)?;

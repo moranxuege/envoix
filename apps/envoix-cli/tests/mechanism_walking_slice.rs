@@ -153,6 +153,14 @@ impl FileSink {
         fs::read(self.sealed_path()).expect("read sealed file")
     }
 
+    fn physical_length(&self) -> Result<u64, StorageFault> {
+        match fs::metadata(self.staged_path()) {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(_) => Err(StorageFault::new(StorageOperation::ReadStaging)),
+        }
+    }
+
     fn sync_root(&self) -> Result<(), StorageFault> {
         File::open(&self.root)
             .and_then(|directory| directory.sync_all())
@@ -172,6 +180,12 @@ impl StagingSink for FileSink {
             },
             Err(_) => return Err(StorageFault::new(StorageOperation::LoadResume)),
         };
+        // A promise longer than the file is a store that lost bytes it said were
+        // durable. `set_len` would EXTEND to meet it — zero-filling a hole and
+        // calling it a resumable prefix — so it is refused rather than met.
+        if prefix.length.get() > self.physical_length()? {
+            return Err(StorageFault::new(StorageOperation::LoadResume));
+        }
         // Opening discards any tail past the promised prefix. A torn append can
         // leave bytes on disk the engine never accepted, and no reader may ever
         // see them.
@@ -229,6 +243,17 @@ impl StagingSink for FileSink {
     }
 
     fn checkpoint(&mut self, prefix: DurablePrefix) -> Result<(), StorageFault> {
+        // The engine supplies the length because only it knows what it ACCEPTED,
+        // but a sink still corroborates: it cannot make durable what it was
+        // never given. The two counters are maintained independently, so this
+        // catches them diverging rather than publishing the disagreement.
+        //
+        // Physical length rather than exact equality, because this double writes
+        // a real file and a torn append leaves a longer one. The production
+        // lease tracks its own accepted offset and requires equality.
+        if prefix.length.get() > self.physical_length()? {
+            return Err(StorageFault::new(StorageOperation::Checkpoint));
+        }
         // `create` because `reset` publishes the zero prefix BEFORE any byte is
         // written — a promise of nothing is still a promise, and it has to be
         // durable before the bytes it supersedes are gone.
@@ -650,26 +675,58 @@ async fn start_real_attempt(broker: &EndpointAddr, case: AttemptCase) -> Running
     RunningAttempts { sender, receiver }
 }
 
-async fn terminal_and_first_progress(
-    handle: &mut AttemptHandle,
-) -> (OutcomeCode, Option<ByteCount>) {
+/// What one side reported over its whole life.
+struct AttemptOutcome {
+    outcome: OutcomeCode,
+    first_progress: Option<ByteCount>,
+    /// The offset the peers SETTLED on, which is the only honest answer to
+    /// "how much did this resume skip" — the plan carries no offset, and this
+    /// is what the product records.
+    established: Option<ByteCount>,
+}
+
+async fn terminal_and_first_progress(handle: &mut AttemptHandle) -> AttemptOutcome {
     let mut first_progress = None;
+    let mut established = None;
     loop {
         let event = handle.next_event().await.expect("attempt emits terminal");
         match event.kind {
             AttemptEventKind::Progress { transferred } => {
                 first_progress.get_or_insert(transferred);
             }
-            AttemptEventKind::Terminal(outcome) => return (outcome, first_progress),
+            AttemptEventKind::ResumeEstablished { offset } => {
+                assert!(
+                    established.replace(offset).is_none(),
+                    "the settled resume offset is reported once per attempt"
+                );
+                assert!(
+                    first_progress.is_none(),
+                    "a card must learn what was resumed before it is shown progress"
+                );
+            }
+            AttemptEventKind::Terminal(outcome) => {
+                return AttemptOutcome {
+                    outcome,
+                    first_progress,
+                    established,
+                };
+            }
             AttemptEventKind::Phase(_) => {}
         }
     }
 }
 
-async fn complete_attempts(mut running: RunningAttempts) -> ByteCount {
+/// The settled resume offset both sides agreed on, and the sender's first
+/// progress.
+struct Completion {
+    first_progress: ByteCount,
+    established: ByteCount,
+}
+
+async fn complete_attempts(mut running: RunningAttempts) -> Completion {
     let sender_control = running.sender.control();
     let receiver_control = running.receiver.control();
-    let ((sender_outcome, first_progress), (receiver_outcome, _)) = timeout(TEST_TIMEOUT, async {
+    let (sender, receiver) = timeout(TEST_TIMEOUT, async {
         tokio::join!(
             terminal_and_first_progress(&mut running.sender),
             terminal_and_first_progress(&mut running.receiver)
@@ -677,8 +734,15 @@ async fn complete_attempts(mut running: RunningAttempts) -> ByteCount {
     })
     .await
     .expect("transfer completion deadline");
-    assert_eq!(sender_outcome, OutcomeCode::Completed);
-    assert_eq!(receiver_outcome, OutcomeCode::Completed);
+    assert_eq!(sender.outcome, OutcomeCode::Completed);
+    assert_eq!(receiver.outcome, OutcomeCode::Completed);
+    // Both sides settle on the SAME number. They compute it independently — the
+    // sender from its own prefix comparison, the receiver from what the sender
+    // then sent it — so agreement is a real check rather than an echo.
+    assert_eq!(
+        sender.established, receiver.established,
+        "the two sides disagree about what was resumed"
+    );
     sender_control.request(RetirementIntent::Finalize).unwrap();
     receiver_control
         .request(RetirementIntent::Finalize)
@@ -690,7 +754,12 @@ async fn complete_attempts(mut running: RunningAttempts) -> ByteCount {
     .expect("retirement acknowledgement deadline");
     assert_eq!(sender_ack.unwrap().outcome(), OutcomeCode::Completed);
     assert_eq!(receiver_ack.unwrap().outcome(), OutcomeCode::Completed);
-    first_progress.expect("non-empty transfer emits progress")
+    Completion {
+        first_progress: sender
+            .first_progress
+            .expect("non-empty transfer emits progress"),
+        established: sender.established.expect("every attempt settles a resume"),
+    }
 }
 
 async fn cancel_after_checkpoint(
@@ -720,7 +789,7 @@ async fn cancel_after_checkpoint(
         .control()
         .request(RetirementIntent::Cancel)
         .unwrap();
-    let ((sender_outcome, _), (receiver_outcome, _)) = timeout(TEST_TIMEOUT, async {
+    let (sender, receiver) = timeout(TEST_TIMEOUT, async {
         tokio::join!(
             terminal_and_first_progress(&mut running.sender),
             terminal_and_first_progress(&mut running.receiver)
@@ -728,8 +797,8 @@ async fn cancel_after_checkpoint(
     })
     .await
     .expect("cancelled transfer terminal deadline");
-    assert_eq!(sender_outcome, OutcomeCode::Cancelled);
-    assert_eq!(receiver_outcome, OutcomeCode::Cancelled);
+    assert_eq!(sender.outcome, OutcomeCode::Cancelled);
+    assert_eq!(receiver.outcome, OutcomeCode::Cancelled);
     let (sender_ack, receiver_ack) = timeout(TEST_TIMEOUT, async {
         tokio::join!(running.sender.wait_ack(), running.receiver.wait_ack())
     })
@@ -857,7 +926,12 @@ async fn headless_end_to_end_transfer_and_resume() {
     .await;
     assert_eq!(clean.sender.open_result(), OpenResult::Opened);
     assert_eq!(clean.receiver.open_result(), OpenResult::Opened);
-    complete_attempts(clean).await;
+    let clean_completion = complete_attempts(clean).await;
+    assert_eq!(
+        clean_completion.established,
+        ByteCount::new(0),
+        "a fresh transfer settles on resuming nothing"
+    );
     assert_same_file(&source_bytes, &clean_sink.sealed_bytes());
 
     let resume_transfer = TransferId::from_bytes([0x12; 16]);
@@ -887,9 +961,7 @@ async fn headless_end_to_end_transfer_and_resume() {
     )
     .await;
     let (resume_prefix, stale_event) = cancel_after_checkpoint(gen1, &resume_sink).await;
-    let resume = ResumeIntent::ResumeFrom {
-        offset: resume_prefix.length,
-    };
+    let resume = ResumeIntent::Allowed;
     let (sender_gen2, receiver_gen2) = plan_pair(101, 2, resume_transfer, resume_artifact, resume);
     let gen2 = start_real_attempt(
         &broker,
@@ -915,13 +987,20 @@ async fn headless_end_to_end_transfer_and_resume() {
             .observe(stale_event),
         EventAdmission::Stale
     );
-    let resumed_first_progress = complete_attempts(gen2).await;
+    let resumed = complete_attempts(gen2).await;
+    // An INTACT prefix is adopted, so the settled offset is exactly what the
+    // previous run made durable — no longer inferred from where progress
+    // happened to start.
+    assert_eq!(
+        resumed.established, resume_prefix.length,
+        "an intact durable prefix must be resumed in full"
+    );
     assert!(
-        resumed_first_progress.get() > resume_prefix.length.get(),
+        resumed.first_progress.get() > resume_prefix.length.get(),
         "gen-2 must start after the verified prefix"
     );
     assert!(
-        resumed_first_progress.get() <= resume_prefix.length.get() + CHUNK_SIZE,
+        resumed.first_progress.get() <= resume_prefix.length.get() + CHUNK_SIZE,
         "the first gen-2 progress must account for only one tail chunk"
     );
     assert_same_file(&source_bytes, &resume_sink.sealed_bytes());
@@ -954,9 +1033,7 @@ async fn headless_end_to_end_transfer_and_resume() {
     .await;
     let (corrupt_prefix, _) = cancel_after_checkpoint(corrupt_gen1, &corrupt_sink).await;
     corrupt_sink.corrupt_prefix();
-    let corrupt_resume = ResumeIntent::ResumeFrom {
-        offset: corrupt_prefix.length,
-    };
+    let corrupt_resume = ResumeIntent::Allowed;
     let (corrupt_sender_gen2, corrupt_receiver_gen2) =
         plan_pair(102, 2, corrupt_transfer, corrupt_artifact, corrupt_resume);
     let corrupt_gen2 = start_real_attempt(
@@ -974,9 +1051,21 @@ async fn headless_end_to_end_transfer_and_resume() {
         },
     )
     .await;
-    let restarted_first_progress = complete_attempts(corrupt_gen2).await;
+    let restarted = complete_attempts(corrupt_gen2).await;
+    // The card asked to resume and a nonzero prefix WAS durable, but it failed
+    // its own digest — so the settled answer is zero and the card is told so.
+    // Under the old plan-offset comparison this run was a protocol violation.
+    assert_eq!(
+        restarted.established,
+        ByteCount::new(0),
+        "a divergent prefix must settle on resuming nothing"
+    );
     assert!(
-        restarted_first_progress.get() <= CHUNK_SIZE,
+        corrupt_prefix.length.get() > 0,
+        "the case needs a prefix to diverge from"
+    );
+    assert!(
+        restarted.first_progress.get() <= CHUNK_SIZE,
         "a divergent prefix must restart sender progress at zero"
     );
     assert_same_file(&source_bytes, &corrupt_sink.sealed_bytes());

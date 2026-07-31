@@ -28,9 +28,10 @@ use envoix_product::{
 use envoix_runtime::{
     AcquireError, AttemptExecution, AttemptExecutor, AttemptLaunch, CardUpdateKind,
     CommandCompletion, CommandVerdict, DutyKind, EvidenceSink, EvidenceSinkError, ExecutorSignal,
-    LosslessUpdateKind, NoSourceStaging, PreparedSource, PreparedSourceResolver, Runtime,
-    RuntimeConfig, SessionProvider, ShutdownReport, SourceLocator, SourceResolveError,
-    StagedIdentity, StopSignal, SubscribeError, TryRecvError, stop_channel,
+    LosslessUpdateKind, NoSourceStaging, PlatformPorts, PreparedReceiveSink, PreparedSinkResolver,
+    PreparedSource, PreparedSourceResolver, Runtime, RuntimeConfig, SessionProvider,
+    ShutdownReport, SinkOpenError, SourceLocator, SourceResolveError, StagedIdentity, StopSignal,
+    SubscribeError, TryRecvError, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -468,8 +469,7 @@ async fn evidence_failure_is_non_authoritative() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
         evidence.clone(),
     );
 
@@ -538,8 +538,7 @@ async fn runtime_lease_shutdown_hibernate_restore() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
 
     // --- exclusive lease + shared handle (idempotent bootstrap) ---
@@ -577,8 +576,7 @@ async fn runtime_lease_shutdown_hibernate_restore() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     runtime.restore(card).unwrap();
     // Restore reconciles + commits, then the quiescent card hibernates (owns no
@@ -621,8 +619,7 @@ async fn supervision_panic_does_not_wedge_runtime() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -660,8 +657,7 @@ async fn admission_rejects_over_cap() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
 
     let (first, first_outcome) = create_session(root, Direction::Send, 0x10);
@@ -715,8 +711,7 @@ async fn detach_reattach_epoch_backpressure() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -799,8 +794,7 @@ async fn terminal_events_and_duties_never_dropped() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
 
     let (session, outcome) = create_session(root, Direction::Receive, 0x60);
@@ -914,8 +908,7 @@ async fn an_outstanding_source_duty_is_replayed_to_every_attachment() {
         config(8),
         OpStoreProvider { root: root.into() },
         ScriptedExecutor::new(Script::RunUntilStop),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
     let (session, initial) = create_awaiting_session(root, 0x2b);
     let card = session.record().identity.card;
@@ -998,8 +991,7 @@ async fn removed_card_evicts_projection() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -1042,8 +1034,7 @@ async fn reissued_duty_supersedes_not_accumulates() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
 
     let (session, outcome) = create_session(root, Direction::Receive, 0x60);
@@ -1146,8 +1137,7 @@ async fn stop_intent_reaches_the_executor() {
                 root: root.to_path_buf(),
             },
             executor.clone(),
-            NoSourceStaging,
-            MemorySources,
+            PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
         );
 
         let (session, outcome) = create_session(root, Direction::Send, 0x10);
@@ -1184,8 +1174,7 @@ async fn teardown_reaches_the_executor_as_detached_not_cancel() {
             root: root.to_path_buf(),
         },
         executor.clone(),
-        NoSourceStaging,
-        MemorySources,
+        PlatformPorts::new(NoSourceStaging, MemorySources, MemorySinks),
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x11);
@@ -1265,8 +1254,7 @@ async fn a_send_that_cannot_open_its_source_fails_instead_of_connecting() {
         },
         // The executor must never be reached: nothing should start.
         CapturingExecutor::new(),
-        NoSourceStaging,
-        sources.clone(),
+        PlatformPorts::new(NoSourceStaging, sources.clone(), MemorySinks),
     );
 
     let (session, outcome) = create_session(root, Direction::Send, 0x70);
@@ -1298,4 +1286,68 @@ async fn a_send_that_cannot_open_its_source_fails_instead_of_connecting() {
         record.outcome.as_ref().and_then(|outcome| outcome.recovery),
         Some(envoix_outcomes::Recovery::RePickSource)
     );
+}
+
+/// A resolver that always opens an empty in-memory destination.
+///
+/// The same reasoning as `MemorySources`, for the other direction: these suites
+/// drive the LIFECYCLE, and a receiving card is the one that reaches a live
+/// attempt at creation. Answering `Unsupported` would fail every receive before
+/// it began — correct behaviour for a build with no bulk storage, and the wrong
+/// thing to be testing here.
+#[derive(Clone, Copy, Debug, Default)]
+struct MemorySinks;
+
+impl PreparedSinkResolver for MemorySinks {
+    fn open(&self, _blob: envoix_blob_api::BlobKey) -> Result<PreparedReceiveSink, SinkOpenError> {
+        Ok(PreparedReceiveSink::new(Box::new(EmptySink)))
+    }
+}
+
+/// Accepts nothing, and CANNOT seal.
+///
+/// Not an omission: `SealedArtifact` has no public constructor, so only the real
+/// store can mint one. A double that could would let a test prove a card owns
+/// bytes that were never written — which is exactly the property the witness
+/// exists to hold. Nothing in these suites writes, so the gap is honest.
+struct EmptySink;
+
+impl envoix_blob_api::SinkSession for EmptySink {
+    fn resume(&mut self) -> Result<envoix_types::DurablePrefix, envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn read_partial_at(
+        &mut self,
+        _offset: envoix_types::ByteCount,
+        _destination: &mut [u8],
+    ) -> Result<usize, envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn append(
+        &mut self,
+        _offset: envoix_types::ByteCount,
+        _bytes: &[u8],
+    ) -> Result<(), envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn checkpoint(
+        &mut self,
+        _prefix: envoix_types::DurablePrefix,
+    ) -> Result<(), envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn reset(&mut self) -> Result<(), envoix_blob_api::BlobError> {
+        unimplemented!("no lifecycle case here writes bytes")
+    }
+
+    fn seal(
+        self: Box<Self>,
+        _digest: envoix_types::ContentHash,
+    ) -> Result<envoix_blob_api::SealedArtifact, envoix_blob_api::BlobError> {
+        unimplemented!("only the real store can mint a witness")
+    }
 }

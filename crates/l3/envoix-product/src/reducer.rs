@@ -1009,6 +1009,7 @@ impl TransferRecord {
         match event.kind {
             AttemptEventKind::Phase(phase) => self.on_phase(phase),
             AttemptEventKind::Progress { transferred } => self.on_progress(transferred),
+            AttemptEventKind::ResumeEstablished { offset } => self.on_resume_established(offset),
             AttemptEventKind::Terminal(code) if self.state.is_active() => {
                 self.classify_terminal(code)
             }
@@ -1059,11 +1060,35 @@ impl TransferRecord {
         }
     }
 
+    /// What the peers actually agreed not to send again.
+    ///
+    /// The one place progress may move DOWN, and it is not an exception to the
+    /// monotone rule so much as the thing that rule was protecting: `bytes` was
+    /// carried across a pause as this card's memory of a previous run, and
+    /// `Phase::Transferring` copied it into `bytes_resumed` as if it were
+    /// settled. It is a guess. The peer's storage decides, and it can hold less
+    /// (a prefix that failed its own digest) or more (bytes checkpointed after
+    /// the last progress event this card saw), so a card that never hears the
+    /// answer projects a resumed count that was never true.
+    ///
+    /// Bounded by the total for the same reason every other event is: this one
+    /// is more trusted than the others, not trusted absolutely.
+    fn on_resume_established(&mut self, offset: ByteCount) -> Vec<ProductEffect> {
+        if self.state != ProductState::Transferring
+            || (self.total().get() != 0 && offset.get() > self.total().get())
+        {
+            return Vec::new();
+        }
+        self.bytes_resumed = offset;
+        self.bytes = offset;
+        Vec::new()
+    }
+
     fn on_progress(&mut self, transferred: ByteCount) -> Vec<ProductEffect> {
         // Progress is monotone within a generation: an untrusted executor event
-        // must not move the bar (and therefore the next `ResumeFrom` offset)
-        // backward, which would make a valid larger durable peer prefix look like
-        // a protocol violation on resume.
+        // must not move the bar backward. The plan no longer carries an offset, so
+        // this no longer guards a resume decision — it guards what the person is
+        // shown, which must not run backwards for an untrusted event.
         if self.state != ProductState::Transferring
             || transferred.get() < self.bytes.get()
             || (self.total().get() != 0 && transferred.get() > self.total().get())
@@ -1443,7 +1468,7 @@ impl TransferRecord {
 
     fn start_attempt(&self, resume: bool) -> ProductEffect {
         let resume = if resume {
-            ResumeIntent::ResumeFrom { offset: self.bytes }
+            ResumeIntent::Allowed
         } else {
             ResumeIntent::Fresh
         };

@@ -14,11 +14,15 @@
 //! resolving a source the authority did not name. Handing down an opened session
 //! leaves it nothing to look up.
 
+use std::sync::Arc;
+
 use envoix_attempt_api::AttemptPlan;
-use envoix_blob_api::BlobKey;
+use envoix_blob_api::{BlobKey, BlobWorkId, SinkSession};
 use envoix_capabilities::{SourceAcquisitionKey, SourceSession};
 use envoix_product::{ContentHash, SourceBacking, SourceLifecycle};
 use envoix_types::{ByteCount, Direction};
+
+use crate::port::SourceStagingExecutor;
 
 /// Which established source to open. Derived inside the card from the committed
 /// lifecycle; it reaches no executor, no wire frame and no durable record.
@@ -147,15 +151,128 @@ impl PreparedSourceResolver for NoSourceSessions {
     }
 }
 
+/// Where one receive puts its bytes: the blob it will write, opened.
+///
+/// The mirror of [`PreparedSource`], and move-only for the same reason. Two
+/// attempts holding one session would be two attempts writing one artifact,
+/// which no card can ask for.
+pub struct PreparedReceiveSink {
+    session: Box<dyn SinkSession>,
+}
+
+impl PreparedReceiveSink {
+    pub fn new(session: Box<dyn SinkSession>) -> Self {
+        Self { session }
+    }
+
+    /// Takes the session, consuming this. The attempt that calls it is the one
+    /// that writes the bytes.
+    pub fn into_session(self) -> Box<dyn SinkSession> {
+        self.session
+    }
+}
+
+impl std::fmt::Debug for PreparedReceiveSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedReceiveSink")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a receive destination could not be opened.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SinkOpenError {
+    /// This composition writes no bulk bytes at all. A host with no store
+    /// answers this for everything, and it means a card should never have been
+    /// asked to receive — not that the disk failed.
+    Unsupported,
+    /// The store refused: it is already leased to another writer, or it faulted.
+    /// Retrying is meaningful; choosing something else is not.
+    Unavailable,
+}
+
+/// Opens the destination a receive writes into.
+///
+/// The port the card asks, for the same reason as [`PreparedSourceResolver`]:
+/// what a destination IS — a file under an app-private root, a lease on a bulk
+/// store — is a platform fact, and the runtime holds none of them.
+pub trait PreparedSinkResolver: Send + Sync + 'static {
+    fn open(&self, blob: BlobKey) -> Result<PreparedReceiveSink, SinkOpenError>;
+}
+
+/// The resolver for a composition that stores no bulk bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoBulkStorage;
+
+impl PreparedSinkResolver for NoBulkStorage {
+    fn open(&self, _blob: BlobKey) -> Result<PreparedReceiveSink, SinkOpenError> {
+        Err(SinkOpenError::Unsupported)
+    }
+}
+
+/// Which blob one receive writes into.
+///
+/// DERIVED from the plan, never stored, and derived by one function so the two
+/// callers that need it — the card opening the sink, and whoever later checks
+/// that a seal names what was asked for — cannot compute two different answers.
+///
+/// Keyed by the TRANSFER, not the attempt generation: a resume mints a new
+/// generation against the same transfer, and a receive keyed on the generation
+/// would abandon its partial at every resume. That is the opposite of the
+/// derivation key, where the generation is exactly what identifies the work.
+pub fn receive_blob(plan: AttemptPlan) -> BlobKey {
+    BlobKey::new(
+        plan.stamp.card,
+        BlobWorkId::of_reception(plan.transfer, plan.artifact),
+    )
+}
+
+/// The platform capabilities a composition supplies to the runtime.
+///
+/// One value rather than three constructor arguments, because they already
+/// travel as a group: each is an `Arc<dyn>` port whose implementation is the
+/// composition root's, each is cloned into every card actor, and none is ever
+/// supplied without the others. Passing them positionally meant every new port
+/// edited every call site in the workspace, which is a cost paid to keep a
+/// grouping implicit.
+#[derive(Clone)]
+pub struct PlatformPorts {
+    /// How a card stages the source it was given.
+    pub staging: Arc<dyn SourceStagingExecutor>,
+    /// How a card opens the source it is about to send.
+    pub sources: Arc<dyn PreparedSourceResolver>,
+    /// How a card opens the destination it is about to receive into.
+    pub sinks: Arc<dyn PreparedSinkResolver>,
+}
+
+impl PlatformPorts {
+    pub fn new(
+        staging: impl SourceStagingExecutor,
+        sources: impl PreparedSourceResolver,
+        sinks: impl PreparedSinkResolver,
+    ) -> Self {
+        Self {
+            staging: Arc::new(staging),
+            sources: Arc::new(sources),
+            sinks: Arc::new(sinks),
+        }
+    }
+}
+
+impl std::fmt::Debug for PlatformPorts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlatformPorts")
+            .finish_non_exhaustive()
+    }
+}
+
 /// The I/O one attempt performs.
 #[derive(Debug)]
 pub enum PreparedAttemptIo {
     Send(PreparedSource),
-    /// A receive attempt's staging sink belongs here. It carries nothing yet
-    /// because no production `StagingSink` exists — every implementation in the
-    /// tree is a test double — and naming a capability this arm cannot supply
-    /// would be the same lie as an unwritten artifact.
-    Receive,
+    Receive(PreparedReceiveSink),
 }
 
 /// One attempt, with the I/O its direction requires.
@@ -179,11 +296,12 @@ impl AttemptLaunch {
         })
     }
 
-    /// A receive. `None` if the plan is not a receive.
-    pub fn receiving(plan: AttemptPlan) -> Option<Self> {
+    /// A receive, over the destination it will write. `None` if the plan is not
+    /// a receive.
+    pub fn receiving(plan: AttemptPlan, sink: PreparedReceiveSink) -> Option<Self> {
         (plan.direction == Direction::Receive).then_some(Self {
             plan,
-            io: PreparedAttemptIo::Receive,
+            io: PreparedAttemptIo::Receive(sink),
         })
     }
 
@@ -228,6 +346,54 @@ mod tests {
         PreparedSource::new(Box::new(EmptySource), identity())
     }
 
+    /// A destination that accepts nothing. These cases are about which I/O may
+    /// accompany which direction, so the bytes never matter.
+    struct EmptySink;
+
+    impl envoix_blob_api::SinkSession for EmptySink {
+        fn resume(&mut self) -> Result<envoix_types::DurablePrefix, envoix_blob_api::BlobError> {
+            unimplemented!("no case here writes")
+        }
+
+        fn read_partial_at(
+            &mut self,
+            _offset: ByteCount,
+            _destination: &mut [u8],
+        ) -> Result<usize, envoix_blob_api::BlobError> {
+            unimplemented!("no case here writes")
+        }
+
+        fn append(
+            &mut self,
+            _offset: ByteCount,
+            _bytes: &[u8],
+        ) -> Result<(), envoix_blob_api::BlobError> {
+            unimplemented!("no case here writes")
+        }
+
+        fn checkpoint(
+            &mut self,
+            _prefix: envoix_types::DurablePrefix,
+        ) -> Result<(), envoix_blob_api::BlobError> {
+            unimplemented!("no case here writes")
+        }
+
+        fn reset(&mut self) -> Result<(), envoix_blob_api::BlobError> {
+            unimplemented!("no case here writes")
+        }
+
+        fn seal(
+            self: Box<Self>,
+            _digest: ContentHash,
+        ) -> Result<envoix_blob_api::SealedArtifact, envoix_blob_api::BlobError> {
+            unimplemented!("no case here writes")
+        }
+    }
+
+    fn sink() -> PreparedReceiveSink {
+        PreparedReceiveSink::new(Box::new(EmptySink))
+    }
+
     fn plan(direction: Direction) -> AttemptPlan {
         AttemptPlan {
             stamp: envoix_attempt_api::AttemptStamp {
@@ -257,15 +423,41 @@ mod tests {
     #[test]
     fn a_launch_cannot_carry_the_wrong_io_for_its_direction() {
         assert!(AttemptLaunch::sending(plan(Direction::Send), source()).is_some());
-        assert!(AttemptLaunch::receiving(plan(Direction::Receive)).is_some());
+        assert!(AttemptLaunch::receiving(plan(Direction::Receive), sink()).is_some());
 
         assert!(
             AttemptLaunch::sending(plan(Direction::Receive), source()).is_none(),
             "a receive was launched with a source to send"
         );
         assert!(
-            AttemptLaunch::receiving(plan(Direction::Send)).is_none(),
-            "a send was launched with nothing to send"
+            AttemptLaunch::receiving(plan(Direction::Send), sink()).is_none(),
+            "a send was launched with somewhere to receive"
+        );
+    }
+
+    /// A receive keeps its partial across a resume, so its blob may not be keyed
+    /// by the attempt generation — which a resume advances on purpose.
+    ///
+    /// This is the same distinction the DERIVATION key resolves the other way:
+    /// there the generation is exactly what identifies the work, because a
+    /// re-derivation must not adopt the previous run's bytes. Written down here
+    /// because getting it backwards is silent — the receive would simply lose
+    /// its partial at every resume and nothing would report a fault.
+    #[test]
+    fn a_receive_blob_survives_a_new_attempt_generation() {
+        let first = plan(Direction::Receive);
+        let mut resumed = first;
+        resumed.stamp.generation = AttemptGen::new(2);
+        resumed.resume = ResumeIntent::Allowed;
+
+        assert_eq!(receive_blob(first), receive_blob(resumed));
+
+        let mut other_transfer = first;
+        other_transfer.transfer = TransferId::from_bytes([9; 16]);
+        assert_ne!(
+            receive_blob(first),
+            receive_blob(other_transfer),
+            "two transfers on one card must not share a destination"
         );
     }
 

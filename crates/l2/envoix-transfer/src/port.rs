@@ -1,4 +1,4 @@
-use envoix_types::{ByteCount, ContentHash};
+use envoix_types::{ByteCount, ContentHash, DurablePrefix};
 
 use crate::StorageFault;
 
@@ -6,28 +6,6 @@ pub trait SourceReader {
     /// Positional reads may be short; returning zero means end of source.
     fn read_at(&mut self, offset: ByteCount, destination: &mut [u8])
     -> Result<usize, StorageFault>;
-}
-
-/// A prefix the sink has promised is durable, and which bytes it is.
-///
-/// No chunk index. It is `bytes.div_ceil(chunk_size)` and the chunk size is
-/// negotiated in the header, so storing it beside the length was storing a
-/// conclusion beside its premise — and the codebase had already paid for that
-/// with a `validate_resume_fact` whose only job was to catch the two
-/// disagreeing. The engine derives it once it has the header.
-///
-/// `ProtocolViolation::ResumeIndexInconsistent` remains, and correctly so: the
-/// SENDER still checks the index a peer sends against the offset beside it. That
-/// is a claim from another machine, not a conclusion this one stored.
-///
-/// The digest is LOCAL evidence: it says the durable prefix is the one this sink
-/// promised, which is a different question from the one the peer asks on the
-/// wire. A resumed receiver still re-reads the prefix and sends the peer what it
-/// recomputed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DurablePrefix {
-    pub length: ByteCount,
-    pub digest: ContentHash,
 }
 
 /// Where one receive puts its bytes.

@@ -21,9 +21,7 @@ fn plan(card: u64, generation: u32) -> AttemptPlan {
         direction: Direction::Receive,
         transfer: TransferId::from_bytes([card as u8; 16]),
         artifact: ArtifactId::from_bytes([generation as u8; 16]),
-        resume: ResumeIntent::ResumeFrom {
-            offset: ByteCount::new(4096),
-        },
+        resume: ResumeIntent::Allowed,
     }
 }
 

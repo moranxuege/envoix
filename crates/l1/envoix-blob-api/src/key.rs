@@ -1,6 +1,6 @@
 //! Which blob, and which incarnation of it.
 
-use envoix_types::{ArtifactId, AttemptGen, RecordId, TransferId};
+use envoix_types::{ArtifactId, AttemptGen, ContentHash, RecordId, TransferId};
 use serde::{Deserialize, Serialize};
 
 /// One incarnation of one card's bulk bytes, and what makes it one.
@@ -82,4 +82,26 @@ impl BlobKey {
     pub const fn artifact(self) -> ArtifactId {
         self.work.artifact()
     }
+}
+
+/// What commissioned a RECEPTION, for checkpoint eligibility.
+///
+/// A derivation's commissioning is its spec and its selection, neither of which
+/// the key carries — so a re-derivation under the same key with a different spec
+/// must not adopt the old prefix, and the fingerprint is what says so.
+///
+/// A reception has no such second axis. What commissions it is the transfer
+/// itself, which the key already carries, so the fingerprint is a function of
+/// the key. That is the honest answer rather than a placeholder: two receptions
+/// under one key cannot differ in anything a fingerprint could distinguish.
+///
+/// A function rather than a constant so that a reception which one day DOES gain
+/// a second axis has exactly one place to grow, and so that a resumed receive in
+/// a later process computes the same answer without storing it.
+pub fn reception_fingerprint(transfer: TransferId, artifact: ArtifactId) -> ContentHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"envoix.reception.commissioning.v1");
+    hasher.update(&transfer.to_bytes());
+    hasher.update(&artifact.to_bytes());
+    ContentHash::from_bytes(*hasher.finalize().as_bytes())
 }

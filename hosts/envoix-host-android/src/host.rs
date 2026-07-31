@@ -30,7 +30,8 @@ use envoix_product::{
 };
 use envoix_runtime::{
     AcceptedSourceOffer, CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict,
-    Runtime, RuntimeConfig, SourceOfferAnswer, SubscribeError, TransferRecord, TryRecvError,
+    PlatformPorts, Runtime, RuntimeConfig, SourceOfferAnswer, SubscribeError, TransferRecord,
+    TryRecvError,
 };
 use envoix_storage_local::LocalStorage;
 use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId, RequestId};
@@ -41,7 +42,7 @@ use crate::provider::HostProvider;
 use envoix_blob_api::BlobStore;
 use envoix_blob_local::LocalBlobs;
 
-use crate::staging::{BoundSourceRegistry, BoundSourceStaging, HostSources};
+use crate::staging::{BoundSourceRegistry, BoundSourceStaging, HostSinks, HostSources};
 use crate::store::HostStore;
 use crate::stores::CardStores;
 
@@ -362,12 +363,19 @@ impl Host {
                 // descriptor Android lent — because both resolve to a
                 // readable file and the difference is the platform's, not the
                 // design's.
-                BoundSourceStaging::new(sources.clone(), blobs.clone()),
-                // The SAME registry answers both: staging reads the bound source
-                // through to establish what it contains, and the attempt reads it
-                // again to send it. One binding, two readers, and the second one
-                // cannot name a source the first did not.
-                HostSources::new(sources.clone(), blobs.clone()),
+                PlatformPorts::new(
+                    BoundSourceStaging::new(sources.clone(), blobs.clone()),
+                    // The SAME registry answers both: staging reads the bound
+                    // source through to establish what it contains, and the
+                    // attempt reads it again to send it. One binding, two
+                    // readers, and the second one cannot name a source the first
+                    // did not.
+                    HostSources::new(sources.clone(), blobs.clone()),
+                    // And the SAME store on the other side: what a receive
+                    // writes is an incarnation of this card's bulk bytes, which
+                    // is the one thing this store holds.
+                    HostSinks::new(blobs.clone()),
+                ),
                 EvidenceIntake(Arc::clone(&evidence)),
             ))
         };

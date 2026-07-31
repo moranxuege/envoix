@@ -9,11 +9,32 @@ pub struct AttemptStamp {
     pub generation: AttemptGen,
 }
 
+/// Whether an attempt may resume — never from WHERE.
+///
+/// The offset used to travel here, taken from the local card's last observed
+/// progress, and the executor refused a peer whose reported prefix disagreed
+/// with it. That was wrong in both directions. A card's progress is its own
+/// memory of a previous run; the peer's storage is the authority on what
+/// survives there now, and it can legitimately hold LESS (a failed digest, a
+/// discarded tail) or MORE (it checkpointed bytes whose progress event never
+/// reached this card, or it already holds the whole file and says so).
+///
+/// The product reducer had already written that conclusion down — progress is
+/// kept monotone precisely so a "valid larger durable peer prefix" is not made
+/// to look like a violation — while the executor was enforcing the opposite.
+///
+/// So the offset is gone rather than merely unenforced: it had exactly one
+/// reader, and that reader was making a decision no local value can support.
+/// What the peer actually resumed from comes back as `ResumeEstablished`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeIntent {
+    /// Start over. A peer reporting anything but a zero prefix IS a violation:
+    /// the sender disabled resume on the wire, so a nonzero answer is a peer
+    /// ignoring what it was told.
     Fresh,
-    ResumeFrom { offset: ByteCount },
+    /// Resume from whatever the receiver actually holds.
+    Allowed,
 }
 
 /// Product-resolved input for one transport-independent attempt.
@@ -32,6 +53,19 @@ pub enum AttemptEventKind {
     Phase(Phase),
     Progress {
         transferred: ByteCount,
+    },
+    /// How much of this file the peers agreed NOT to transfer again.
+    ///
+    /// The only event that may move a card's progress DOWN. Everything else is
+    /// monotone, because an untrusted executor must not be able to make a
+    /// progress bar run backwards — but the resumed prefix is settled by
+    /// negotiation with the peer, and the card's prior guess can be wrong in
+    /// either direction. Without this, a card projects the offset it HOPED to
+    /// resume from and never learns what actually happened.
+    ///
+    /// Emitted once per attempt, after the negotiation and before any progress.
+    ResumeEstablished {
+        offset: ByteCount,
     },
     /// A terminal observation is not proof that the attempt is quiescent.
     Terminal(OutcomeCode),
