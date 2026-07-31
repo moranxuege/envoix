@@ -1351,13 +1351,24 @@ fn resume_mode(plan: AttemptPlan) -> ResumeMode {
     }
 }
 
+/// The plan's offset is a HINT — it came from a checkpoint observed earlier, and
+/// the receiver's own storage is the authority on what survives there now. A
+/// receiver may legitimately hold LESS: its durable prefix failed its own digest
+/// check, or a torn tail was discarded on open. Resending those bytes is the
+/// correct response and costs only bandwidth.
+///
+/// More than planned is the suspicious direction, and that is what this refuses.
+/// Correctness of whatever IS resumed stays with the prefix-hash comparison on
+/// the wire, which this check never stood in for.
 fn resume_matches_plan(frame: &Frame, plan: AttemptPlan) -> bool {
     let Frame::ResumeStatus(status) = frame else {
         return true;
     };
     match plan.resume {
         envoix_attempt_api::ResumeIntent::Fresh => status.bytes_received.get() == 0,
-        envoix_attempt_api::ResumeIntent::ResumeFrom { offset } => status.bytes_received == offset,
+        envoix_attempt_api::ResumeIntent::ResumeFrom { offset } => {
+            status.bytes_received.get() <= offset.get()
+        }
     }
 }
 

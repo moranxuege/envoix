@@ -14,7 +14,7 @@ pub use machine::{
     SenderCompleted, SenderProgress, SenderRequest, SenderSending, SenderStep, next_chunk_index,
     receiver_start, sender_start,
 };
-pub use port::{ResumeFact, SourceReader, StagingSink};
+pub use port::{DurablePrefix, SourceReader, StagingSink};
 
 #[cfg(test)]
 mod tests;

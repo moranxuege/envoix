@@ -1,5 +1,4 @@
-use envoix_protocol::ContentHash;
-use envoix_types::{ByteCount, TransferId};
+use envoix_types::{ByteCount, ContentHash};
 
 use crate::StorageFault;
 
@@ -9,45 +8,83 @@ pub trait SourceReader {
     -> Result<usize, StorageFault>;
 }
 
+/// A prefix the sink has promised is durable, and which bytes it is.
+///
+/// No chunk index. It is `bytes.div_ceil(chunk_size)` and the chunk size is
+/// negotiated in the header, so storing it beside the length was storing a
+/// conclusion beside its premise — and the codebase had already paid for that
+/// with a `validate_resume_fact` whose only job was to catch the two
+/// disagreeing. The engine derives it once it has the header.
+///
+/// `ProtocolViolation::ResumeIndexInconsistent` remains, and correctly so: the
+/// SENDER still checks the index a peer sends against the offset beside it. That
+/// is a claim from another machine, not a conclusion this one stored.
+///
+/// The digest is LOCAL evidence: it says the durable prefix is the one this sink
+/// promised, which is a different question from the one the peer asks on the
+/// wire. A resumed receiver still re-reads the prefix and sends the peer what it
+/// recomputed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResumeFact {
-    /// Durable staged prefix length. Hash checkpoints are deliberately absent.
-    pub bytes_staged: ByteCount,
-    pub next_chunk_index: u64,
+pub struct DurablePrefix {
+    pub length: ByteCount,
+    pub digest: ContentHash,
 }
 
+/// Where one receive puts its bytes.
+///
+/// Bound to ONE artifact before any peer frame arrives, which is why no method
+/// names a transfer. The old shape took a `TransferId` everywhere, so a peer
+/// frame could in principle choose which local file an operation opened; an
+/// attempt owns one sink, and the sink knows which.
 pub trait StagingSink {
-    /// Loads only a fact whose staged prefix was made durable first.
-    fn load_resume(&mut self, transfer_id: TransferId) -> Result<Option<ResumeFact>, StorageFault>;
+    /// What sealing produces. Production returns the blob store's non-forgeable
+    /// witness; a test double may return its own token.
+    ///
+    /// Associated rather than `()` so the machine stays storage-neutral WITHOUT
+    /// discarding the witness at the one boundary that earns it — throwing it
+    /// away would put the card back to trusting a worker-authored id.
+    type Seal;
 
-    /// Reads staged bytes back so the engine can recompute the prefix hash.
-    fn read_staged(
+    /// The durable prefix this sink resumes at. Zero length when there is none.
+    fn resume(&mut self) -> Result<DurablePrefix, StorageFault>;
+
+    /// Reads back what this sink has staged, so the engine can recompute the
+    /// prefix hash rather than persist an opaque hasher state.
+    fn read_partial_at(
         &mut self,
-        transfer_id: TransferId,
         offset: ByteCount,
         destination: &mut [u8],
     ) -> Result<usize, StorageFault>;
 
-    /// Appends at the exact engine-owned offset. Durability is established by checkpoint.
-    fn append(
-        &mut self,
-        transfer_id: TransferId,
-        offset: ByteCount,
-        bytes: &[u8],
-    ) -> Result<(), StorageFault>;
+    /// Appends at the exact engine-owned offset. Durability is established by
+    /// checkpoint.
+    fn append(&mut self, offset: ByteCount, bytes: &[u8]) -> Result<(), StorageFault>;
 
-    /// Removes uncheckpointed tail bytes or resets staging to zero.
-    fn truncate(&mut self, transfer_id: TransferId, length: ByteCount) -> Result<(), StorageFault>;
+    /// Promises that `prefix` is durable, and makes it so. Every byte is durable
+    /// BEFORE the prefix that names them becomes readable.
+    ///
+    /// The engine passes BOTH numbers because they are one fact and it is the
+    /// engine's fact: `length` is what the engine has ACCEPTED, and the digest
+    /// covers exactly those bytes. A sink cannot infer the length from its own
+    /// file — a torn append leaves bytes on disk the engine never accepted, and
+    /// inferring would publish a length and a digest describing different
+    /// ranges. A sink may hold MORE bytes than it promises; `resume` discards
+    /// that tail.
+    fn checkpoint(&mut self, prefix: DurablePrefix) -> Result<(), StorageFault>;
 
-    /// Makes the stated prefix durable before publishing this resume fact.
-    fn checkpoint(&mut self, transfer_id: TransferId, fact: ResumeFact)
-    -> Result<(), StorageFault>;
+    /// Discards everything and starts over.
+    ///
+    /// ONE operation, because the two it replaces have an order — publish the
+    /// zero prefix, then truncate — and a caller doing them itself has no way to
+    /// notice it got them backwards. Backwards leaves a promise about bytes that
+    /// are no longer there.
+    fn reset(&mut self) -> Result<(), StorageFault>;
 
-    /// Makes the verified staged bytes durable. Success is the completion fact.
+    /// Makes the verified staged bytes durable and immutable. Success is the
+    /// completion fact, and what it returns is the proof of it.
     fn seal(
         &mut self,
-        transfer_id: TransferId,
-        file_size: ByteCount,
-        file_hash: ContentHash,
-    ) -> Result<(), StorageFault>;
+        expected_size: ByteCount,
+        digest: ContentHash,
+    ) -> Result<Self::Seal, StorageFault>;
 }

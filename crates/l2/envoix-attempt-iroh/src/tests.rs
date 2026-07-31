@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +19,7 @@ use envoix_session_iroh::{
     IrohListener, PathObservation, SessionCancellation, SessionEndpointConfig, SessionError,
     SessionLink, SessionTimeouts, SessionTransportConfig, dial,
 };
-use envoix_transfer::{ResumeFact, SourceReader, StagingSink, StorageFault, StorageOperation};
+use envoix_transfer::{DurablePrefix, SourceReader, StagingSink, StorageFault, StorageOperation};
 use envoix_types::{
     ArtifactId, AttemptGen, ByteCount, Direction, OfferedName, RecordId, TransferId,
 };
@@ -73,11 +72,14 @@ impl SourceReader for MemorySource {
     }
 }
 
+/// One artifact's staging bytes. Shared by `Arc` across generations on purpose:
+/// a receive partial is keyed by the TRANSFER, so it must survive a generation
+/// bump — which is the whole point of the resume this file exercises.
 #[derive(Default)]
 struct SinkState {
-    staged: HashMap<TransferId, Vec<u8>>,
-    resume: HashMap<TransferId, ResumeFact>,
-    sealed: HashMap<TransferId, Vec<u8>>,
+    staged: Vec<u8>,
+    prefix: Option<DurablePrefix>,
+    sealed: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Default)]
@@ -87,101 +89,97 @@ struct MemorySink {
 }
 
 impl MemorySink {
-    fn resume_offset(&self, transfer: TransferId) -> ByteCount {
+    fn resume_offset(&self) -> ByteCount {
         self.state
             .lock()
             .unwrap()
-            .resume
-            .get(&transfer)
-            .expect("cancelled receiver checkpoints a resume fact")
-            .bytes_staged
+            .prefix
+            .expect("cancelled receiver checkpoints a durable prefix")
+            .length
     }
 
-    fn sealed(&self, transfer: TransferId) -> Vec<u8> {
+    fn sealed(&self) -> Vec<u8> {
         self.state
             .lock()
             .unwrap()
             .sealed
-            .get(&transfer)
-            .cloned()
+            .clone()
             .expect("completed receiver seals bytes")
     }
 }
 
 impl StagingSink for MemorySink {
-    fn load_resume(&mut self, transfer_id: TransferId) -> Result<Option<ResumeFact>, StorageFault> {
-        Ok(self.state.lock().unwrap().resume.get(&transfer_id).copied())
+    type Seal = ();
+
+    fn resume(&mut self) -> Result<DurablePrefix, StorageFault> {
+        let mut state = self.state.lock().unwrap();
+        let prefix = state.prefix.unwrap_or(DurablePrefix {
+            length: ByteCount::new(0),
+            digest: ContentHash::from_bytes(*blake3::hash(&[]).as_bytes()),
+        });
+        let length = prefix.length.get() as usize;
+        state.staged.truncate(length);
+        Ok(prefix)
     }
 
-    fn read_staged(
+    fn read_partial_at(
         &mut self,
-        transfer_id: TransferId,
         offset: ByteCount,
         destination: &mut [u8],
     ) -> Result<usize, StorageFault> {
         let state = self.state.lock().unwrap();
-        let Some(staged) = state.staged.get(&transfer_id) else {
-            return Ok(0);
-        };
         let offset = offset.get() as usize;
-        if offset >= staged.len() {
+        if offset >= state.staged.len() {
             return Ok(0);
         }
-        let count = destination.len().min(staged.len() - offset);
-        destination[..count].copy_from_slice(&staged[offset..offset + count]);
+        let count = destination.len().min(state.staged.len() - offset);
+        destination[..count].copy_from_slice(&state.staged[offset..offset + count]);
         Ok(count)
     }
 
-    fn append(
-        &mut self,
-        transfer_id: TransferId,
-        offset: ByteCount,
-        bytes: &[u8],
-    ) -> Result<(), StorageFault> {
+    fn append(&mut self, offset: ByteCount, bytes: &[u8]) -> Result<(), StorageFault> {
         let mut state = self.state.lock().unwrap();
-        let staged = state.staged.entry(transfer_id).or_default();
-        if staged.len() != offset.get() as usize {
+        if state.staged.len() != offset.get() as usize {
             return Err(StorageFault::new(StorageOperation::AppendStaging));
         }
-        staged.extend_from_slice(bytes);
+        state.staged.extend_from_slice(bytes);
         Ok(())
     }
 
-    fn truncate(&mut self, transfer_id: TransferId, length: ByteCount) -> Result<(), StorageFault> {
+    fn checkpoint(&mut self, prefix: DurablePrefix) -> Result<(), StorageFault> {
         let mut state = self.state.lock().unwrap();
-        let staged = state.staged.entry(transfer_id).or_default();
-        if length.get() as usize > staged.len() {
-            return Err(StorageFault::new(StorageOperation::TruncateStaging));
-        }
-        staged.truncate(length.get() as usize);
+        assert!(
+            prefix.length.get() as usize <= state.staged.len(),
+            "a sink cannot promise bytes it was never given"
+        );
+        state.prefix = Some(prefix);
         Ok(())
     }
 
-    fn checkpoint(
-        &mut self,
-        transfer_id: TransferId,
-        fact: ResumeFact,
-    ) -> Result<(), StorageFault> {
-        self.state.lock().unwrap().resume.insert(transfer_id, fact);
+    fn reset(&mut self) -> Result<(), StorageFault> {
+        let mut state = self.state.lock().unwrap();
+        state.prefix = Some(DurablePrefix {
+            length: ByteCount::new(0),
+            digest: ContentHash::from_bytes(*blake3::hash(&[]).as_bytes()),
+        });
+        state.staged.clear();
         Ok(())
     }
 
     fn seal(
         &mut self,
-        transfer_id: TransferId,
-        file_size: ByteCount,
-        file_hash: ContentHash,
-    ) -> Result<(), StorageFault> {
+        expected_size: ByteCount,
+        digest: ContentHash,
+    ) -> Result<Self::Seal, StorageFault> {
         let mut state = self.state.lock().unwrap();
-        let staged = state.staged.get(&transfer_id).cloned().unwrap_or_default();
-        if staged.len() as u64 != file_size.get()
-            || ContentHash::from_bytes(*blake3::hash(&staged).as_bytes()) != file_hash
+        if state.staged.len() as u64 != expected_size.get()
+            || ContentHash::from_bytes(*blake3::hash(&state.staged).as_bytes()) != digest
         {
             return Err(StorageFault::new(StorageOperation::Seal));
         }
         self.order.lock().unwrap().push("receiver_seal");
-        state.sealed.insert(transfer_id, staged);
-        state.resume.remove(&transfer_id);
+        state.sealed = Some(state.staged.clone());
+        state.prefix = None;
         Ok(())
     }
 }
@@ -460,7 +458,7 @@ async fn attempt_iroh_generation_and_retirement() {
     assert!(first_sender.next_event().await.is_none());
     assert!(first_receiver.next_event().await.is_none());
 
-    let offset = sink.resume_offset(plan(Direction::Receive, 1, ResumeIntent::Fresh).transfer);
+    let offset = sink.resume_offset();
     assert!(offset.get() > 0);
     assert!(offset.get() < bytes.len() as u64);
 
@@ -535,10 +533,7 @@ async fn attempt_iroh_generation_and_retirement() {
     let receiver_ack = second_receiver.wait_ack().await.unwrap();
     assert_eq!(sender_ack.outcome(), OutcomeCode::Completed);
     assert_eq!(receiver_ack.outcome(), OutcomeCode::Completed);
-    assert_eq!(
-        sink.sealed(plan(Direction::Receive, 2, resume).transfer),
-        bytes
-    );
+    assert_eq!(sink.sealed(), bytes);
 
     let expected_tail_chunks = (bytes.len() as u64 - offset.get()).div_ceil(1024) as usize;
     assert_eq!(
@@ -705,10 +700,7 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         receiver.wait_ack().await.unwrap().outcome(),
         OutcomeCode::Completed
     );
-    assert_eq!(
-        sink.sealed(plan(Direction::Receive, 1, ResumeIntent::Fresh).transfer),
-        bytes
-    );
+    assert_eq!(sink.sealed(), bytes);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

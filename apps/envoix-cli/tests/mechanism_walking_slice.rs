@@ -29,7 +29,7 @@ use envoix_session_iroh::{
     AuthFailureBudget, BindAddresses, CongestionControl, FlowWindow, IrohListener,
     SessionCancellation, SessionEndpointConfig, SessionTimeouts, SessionTransportConfig, dial,
 };
-use envoix_transfer::{ResumeFact, SourceReader, StagingSink, StorageFault, StorageOperation};
+use envoix_transfer::{DurablePrefix, SourceReader, StagingSink, StorageFault, StorageOperation};
 use envoix_types::{
     ArtifactId, AttemptGen, ByteCount, Direction, OfferedName, RecordId, TransferId,
 };
@@ -98,6 +98,9 @@ impl SourceReader for FileSource {
     }
 }
 
+/// A real on-disk sink for ONE artifact, with the crash orderings the production
+/// store owes: sync bytes before publishing the prefix that names them, publish
+/// the prefix by atomic rename, and sync the directory after.
 #[derive(Clone)]
 struct FileSink {
     root: PathBuf,
@@ -115,28 +118,28 @@ impl FileSink {
         }
     }
 
-    fn staged_path(&self, transfer: TransferId) -> PathBuf {
-        self.root.join(format!("{transfer}.part"))
+    fn staged_path(&self) -> PathBuf {
+        self.root.join("artifact.part")
     }
 
-    fn resume_path(&self, transfer: TransferId) -> PathBuf {
-        self.root.join(format!("{transfer}.resume"))
+    fn resume_path(&self) -> PathBuf {
+        self.root.join("artifact.resume")
     }
 
-    fn sealed_path(&self, transfer: TransferId) -> PathBuf {
-        self.root.join(format!("{transfer}.sealed"))
+    fn sealed_path(&self) -> PathBuf {
+        self.root.join("artifact.sealed")
     }
 
-    fn read_resume(&self, transfer: TransferId) -> ResumeFact {
-        let bytes = fs::read(self.resume_path(transfer)).expect("read resume fact");
-        decode_resume(&bytes).expect("valid resume fact")
+    fn read_prefix(&self) -> DurablePrefix {
+        let bytes = fs::read(self.resume_path()).expect("read durable prefix");
+        decode_prefix(&bytes).expect("valid durable prefix")
     }
 
-    fn corrupt_prefix(&self, transfer: TransferId) {
+    fn corrupt_prefix(&self) {
         let mut staged = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(self.staged_path(transfer))
+            .open(self.staged_path())
             .expect("open staged prefix");
         let mut byte = [0; 1];
         staged.read_exact(&mut byte).expect("read staged byte");
@@ -146,8 +149,8 @@ impl FileSink {
         staged.sync_all().expect("sync corrupted prefix");
     }
 
-    fn sealed_bytes(&self, transfer: TransferId) -> Vec<u8> {
-        fs::read(self.sealed_path(transfer)).expect("read sealed file")
+    fn sealed_bytes(&self) -> Vec<u8> {
+        fs::read(self.sealed_path()).expect("read sealed file")
     }
 
     fn sync_root(&self) -> Result<(), StorageFault> {
@@ -158,21 +161,40 @@ impl FileSink {
 }
 
 impl StagingSink for FileSink {
-    fn load_resume(&mut self, transfer_id: TransferId) -> Result<Option<ResumeFact>, StorageFault> {
-        match fs::read(self.resume_path(transfer_id)) {
-            Ok(bytes) => decode_resume(&bytes).map(Some),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(StorageFault::new(StorageOperation::LoadResume)),
+    type Seal = ();
+
+    fn resume(&mut self) -> Result<DurablePrefix, StorageFault> {
+        let prefix = match fs::read(self.resume_path()) {
+            Ok(bytes) => decode_prefix(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => DurablePrefix {
+                length: ByteCount::new(0),
+                digest: ContentHash::from_bytes(*blake3::hash(&[]).as_bytes()),
+            },
+            Err(_) => return Err(StorageFault::new(StorageOperation::LoadResume)),
+        };
+        // Opening discards any tail past the promised prefix. A torn append can
+        // leave bytes on disk the engine never accepted, and no reader may ever
+        // see them.
+        match OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.staged_path())
+            .and_then(|staged| staged.set_len(prefix.length.get()).map(|()| staged))
+            .and_then(|staged| staged.sync_all())
+        {
+            Ok(()) => {}
+            Err(_) => return Err(StorageFault::new(StorageOperation::TruncateStaging)),
         }
+        Ok(prefix)
     }
 
-    fn read_staged(
+    fn read_partial_at(
         &mut self,
-        transfer_id: TransferId,
         offset: ByteCount,
         destination: &mut [u8],
     ) -> Result<usize, StorageFault> {
-        let mut staged = match File::open(self.staged_path(transfer_id)) {
+        let mut staged = match File::open(self.staged_path()) {
             Ok(staged) => staged,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(_) => return Err(StorageFault::new(StorageOperation::ReadStaging)),
@@ -183,18 +205,13 @@ impl StagingSink for FileSink {
             .map_err(|_| StorageFault::new(StorageOperation::ReadStaging))
     }
 
-    fn append(
-        &mut self,
-        transfer_id: TransferId,
-        offset: ByteCount,
-        bytes: &[u8],
-    ) -> Result<(), StorageFault> {
+    fn append(&mut self, offset: ByteCount, bytes: &[u8]) -> Result<(), StorageFault> {
         let mut staged = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.staged_path(transfer_id))
+            .open(self.staged_path())
             .map_err(|_| StorageFault::new(StorageOperation::AppendStaging))?;
         let length = staged
             .metadata()
@@ -211,29 +228,20 @@ impl StagingSink for FileSink {
         Ok(())
     }
 
-    fn truncate(&mut self, transfer_id: TransferId, length: ByteCount) -> Result<(), StorageFault> {
+    fn checkpoint(&mut self, prefix: DurablePrefix) -> Result<(), StorageFault> {
+        // `create` because `reset` publishes the zero prefix BEFORE any byte is
+        // written — a promise of nothing is still a promise, and it has to be
+        // durable before the bytes it supersedes are gone.
         OpenOptions::new()
             .create(true)
             .truncate(false)
-            .write(true)
-            .open(self.staged_path(transfer_id))
-            .and_then(|staged| staged.set_len(length.get()))
-            .map_err(|_| StorageFault::new(StorageOperation::TruncateStaging))
-    }
-
-    fn checkpoint(
-        &mut self,
-        transfer_id: TransferId,
-        fact: ResumeFact,
-    ) -> Result<(), StorageFault> {
-        OpenOptions::new()
             .read(true)
             .write(true)
-            .open(self.staged_path(transfer_id))
+            .open(self.staged_path())
             .and_then(|staged| staged.sync_all())
             .map_err(|_| StorageFault::new(StorageOperation::Checkpoint))?;
 
-        let destination = self.resume_path(transfer_id);
+        let destination = self.resume_path();
         let temporary = destination.with_extension("resume.tmp");
         let mut resume = OpenOptions::new()
             .create(true)
@@ -242,25 +250,42 @@ impl StagingSink for FileSink {
             .open(&temporary)
             .map_err(|_| StorageFault::new(StorageOperation::Checkpoint))?;
         resume
-            .write_all(&encode_resume(fact))
+            .write_all(&encode_prefix(prefix))
             .and_then(|_| resume.sync_all())
             .map_err(|_| StorageFault::new(StorageOperation::Checkpoint))?;
         fs::rename(temporary, destination)
             .map_err(|_| StorageFault::new(StorageOperation::Checkpoint))?;
         self.sync_root()?;
-        if fact.bytes_staged.get() > 0 {
+        if prefix.length.get() > 0 {
             self.checkpointed.notify_one();
         }
         Ok(())
     }
 
+    fn reset(&mut self) -> Result<(), StorageFault> {
+        // Publish the zero prefix FIRST, then truncate. A crash after the
+        // publication leaves an ignorable tail; the other order leaves a promise
+        // about bytes that are gone.
+        self.checkpoint(DurablePrefix {
+            length: ByteCount::new(0),
+            digest: ContentHash::from_bytes(*blake3::hash(&[]).as_bytes()),
+        })?;
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.staged_path())
+            .and_then(|staged| staged.set_len(0).map(|()| staged))
+            .and_then(|staged| staged.sync_all())
+            .map_err(|_| StorageFault::new(StorageOperation::TruncateStaging))
+    }
+
     fn seal(
         &mut self,
-        transfer_id: TransferId,
-        file_size: ByteCount,
-        file_hash: ContentHash,
-    ) -> Result<(), StorageFault> {
-        let staged_path = self.staged_path(transfer_id);
+        expected_size: ByteCount,
+        digest: ContentHash,
+    ) -> Result<Self::Seal, StorageFault> {
+        let staged_path = self.staged_path();
         let mut staged = OpenOptions::new()
             .read(true)
             .write(true)
@@ -270,7 +295,7 @@ impl StagingSink for FileSink {
             .metadata()
             .map_err(|_| StorageFault::new(StorageOperation::Seal))?
             .len()
-            != file_size.get()
+            != expected_size.get()
         {
             return Err(StorageFault::new(StorageOperation::Seal));
         }
@@ -285,37 +310,37 @@ impl StagingSink for FileSink {
             }
             hasher.update(&buffer[..read]);
         }
-        if ContentHash::from_bytes(*hasher.finalize().as_bytes()) != file_hash {
+        if ContentHash::from_bytes(*hasher.finalize().as_bytes()) != digest {
             return Err(StorageFault::new(StorageOperation::Seal));
         }
         staged
             .sync_all()
             .map_err(|_| StorageFault::new(StorageOperation::Seal))?;
         drop(staged);
-        fs::rename(staged_path, self.sealed_path(transfer_id))
+        fs::rename(staged_path, self.sealed_path())
             .map_err(|_| StorageFault::new(StorageOperation::Seal))?;
-        let _ = fs::remove_file(self.resume_path(transfer_id));
+        let _ = fs::remove_file(self.resume_path());
         self.sync_root()
             .map_err(|_| StorageFault::new(StorageOperation::Seal))
     }
 }
 
-fn encode_resume(fact: ResumeFact) -> [u8; 16] {
-    let mut encoded = [0; 16];
-    encoded[..8].copy_from_slice(&fact.bytes_staged.get().to_be_bytes());
-    encoded[8..].copy_from_slice(&fact.next_chunk_index.to_be_bytes());
+fn encode_prefix(prefix: DurablePrefix) -> [u8; 40] {
+    let mut encoded = [0; 40];
+    encoded[..8].copy_from_slice(&prefix.length.get().to_be_bytes());
+    encoded[8..].copy_from_slice(prefix.digest.as_bytes());
     encoded
 }
 
-fn decode_resume(encoded: &[u8]) -> Result<ResumeFact, StorageFault> {
-    if encoded.len() != 16 {
+fn decode_prefix(encoded: &[u8]) -> Result<DurablePrefix, StorageFault> {
+    if encoded.len() != 40 {
         return Err(StorageFault::new(StorageOperation::LoadResume));
     }
-    let bytes_staged = u64::from_be_bytes(encoded[..8].try_into().unwrap());
-    let next_chunk_index = u64::from_be_bytes(encoded[8..].try_into().unwrap());
-    Ok(ResumeFact {
-        bytes_staged: ByteCount::new(bytes_staged),
-        next_chunk_index,
+    let length = u64::from_be_bytes(encoded[..8].try_into().unwrap());
+    let digest = ContentHash::from_bytes(encoded[8..].try_into().unwrap());
+    Ok(DurablePrefix {
+        length: ByteCount::new(length),
+        digest,
     })
 }
 
@@ -671,8 +696,7 @@ async fn complete_attempts(mut running: RunningAttempts) -> ByteCount {
 async fn cancel_after_checkpoint(
     mut running: RunningAttempts,
     sink: &FileSink,
-    transfer: TransferId,
-) -> (ResumeFact, AttemptEvent) {
+) -> (DurablePrefix, AttemptEvent) {
     timeout(TEST_TIMEOUT, sink.checkpointed.notified())
         .await
         .expect("receiver checkpoints before completion");
@@ -713,10 +737,10 @@ async fn cancel_after_checkpoint(
     .expect("cancel retirement deadline");
     assert_eq!(sender_ack.unwrap().outcome(), OutcomeCode::Cancelled);
     assert_eq!(receiver_ack.unwrap().outcome(), OutcomeCode::Cancelled);
-    let fact = sink.read_resume(transfer);
-    assert!(fact.bytes_staged.get() > 0);
-    assert!(fact.bytes_staged.get() < SOURCE_SIZE as u64);
-    (fact, stale_event)
+    let prefix = sink.read_prefix();
+    assert!(prefix.length.get() > 0);
+    assert!(prefix.length.get() < SOURCE_SIZE as u64);
+    (prefix, stale_event)
 }
 
 fn plan_pair(
@@ -834,7 +858,7 @@ async fn headless_end_to_end_transfer_and_resume() {
     assert_eq!(clean.sender.open_result(), OpenResult::Opened);
     assert_eq!(clean.receiver.open_result(), OpenResult::Opened);
     complete_attempts(clean).await;
-    assert_same_file(&source_bytes, &clean_sink.sealed_bytes(clean_transfer));
+    assert_same_file(&source_bytes, &clean_sink.sealed_bytes());
 
     let resume_transfer = TransferId::from_bytes([0x12; 16]);
     let resume_artifact = ArtifactId::from_bytes([0x22; 16]);
@@ -862,10 +886,9 @@ async fn headless_end_to_end_transfer_and_resume() {
         },
     )
     .await;
-    let (resume_fact, stale_event) =
-        cancel_after_checkpoint(gen1, &resume_sink, resume_transfer).await;
+    let (resume_prefix, stale_event) = cancel_after_checkpoint(gen1, &resume_sink).await;
     let resume = ResumeIntent::ResumeFrom {
-        offset: resume_fact.bytes_staged,
+        offset: resume_prefix.length,
     };
     let (sender_gen2, receiver_gen2) = plan_pair(101, 2, resume_transfer, resume_artifact, resume);
     let gen2 = start_real_attempt(
@@ -894,14 +917,14 @@ async fn headless_end_to_end_transfer_and_resume() {
     );
     let resumed_first_progress = complete_attempts(gen2).await;
     assert!(
-        resumed_first_progress.get() > resume_fact.bytes_staged.get(),
+        resumed_first_progress.get() > resume_prefix.length.get(),
         "gen-2 must start after the verified prefix"
     );
     assert!(
-        resumed_first_progress.get() <= resume_fact.bytes_staged.get() + CHUNK_SIZE,
+        resumed_first_progress.get() <= resume_prefix.length.get() + CHUNK_SIZE,
         "the first gen-2 progress must account for only one tail chunk"
     );
-    assert_same_file(&source_bytes, &resume_sink.sealed_bytes(resume_transfer));
+    assert_same_file(&source_bytes, &resume_sink.sealed_bytes());
 
     let corrupt_transfer = TransferId::from_bytes([0x13; 16]);
     let corrupt_artifact = ArtifactId::from_bytes([0x23; 16]);
@@ -929,11 +952,10 @@ async fn headless_end_to_end_transfer_and_resume() {
         },
     )
     .await;
-    let (corrupt_fact, _) =
-        cancel_after_checkpoint(corrupt_gen1, &corrupt_sink, corrupt_transfer).await;
-    corrupt_sink.corrupt_prefix(corrupt_transfer);
+    let (corrupt_prefix, _) = cancel_after_checkpoint(corrupt_gen1, &corrupt_sink).await;
+    corrupt_sink.corrupt_prefix();
     let corrupt_resume = ResumeIntent::ResumeFrom {
-        offset: corrupt_fact.bytes_staged,
+        offset: corrupt_prefix.length,
     };
     let (corrupt_sender_gen2, corrupt_receiver_gen2) =
         plan_pair(102, 2, corrupt_transfer, corrupt_artifact, corrupt_resume);
@@ -957,7 +979,7 @@ async fn headless_end_to_end_transfer_and_resume() {
         restarted_first_progress.get() <= CHUNK_SIZE,
         "a divergent prefix must restart sender progress at zero"
     );
-    assert_same_file(&source_bytes, &corrupt_sink.sealed_bytes(corrupt_transfer));
+    assert_same_file(&source_bytes, &corrupt_sink.sealed_bytes());
 
     server.shutdown().await.unwrap();
 }

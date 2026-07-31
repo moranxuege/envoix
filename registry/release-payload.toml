@@ -8,7 +8,7 @@
 
 [payload]
 build_manifest_sha256 = "60d17a09410f59b239e944dc8ccc120272af33986e8f8163e4388cc794ace65c"
-sources_sha256 = "1da4d019df6f1b0c834a2474dcda59f299b94c0661d1d533a014aae1345f85bb"
+sources_sha256 = "d80e7504ee28889304d7a9f8a5e0c398bf72e38a6449727f751ea2edb3c34b4c"
 
 [[payload.library]]
 build_type = "debug"

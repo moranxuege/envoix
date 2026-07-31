@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use envoix_outcomes::OutcomeCode;
 use envoix_protocol::{
     Abort, Chunk, Complete, ContentHash, Frame, FrameKind, IngressState, ProtocolReason,
@@ -8,10 +6,10 @@ use envoix_protocol::{
 use envoix_types::{ByteCount, OfferedName, TransferId};
 
 use crate::{
-    CHECKPOINT_INTERVAL, ClaimedComplete, Deadline, MachineFailure, MonotonicMillis,
-    ProtocolViolation, ReceiverCompleted, ReceiverReceiving, ReceiverStep, ResumeFact,
-    SenderRequest, SenderSending, SenderStep, SourceReader, StagingSink, StorageFault,
-    StorageOperation, TransferError, next_chunk_index, receiver_start, sender_start,
+    CHECKPOINT_INTERVAL, ClaimedComplete, Deadline, DurablePrefix, MachineFailure, MonotonicMillis,
+    ProtocolViolation, ReceiverCompleted, ReceiverReceiving, ReceiverStep, SenderRequest,
+    SenderSending, SenderStep, SourceReader, StagingSink, StorageFault, StorageOperation,
+    TransferError, next_chunk_index, receiver_start, sender_start,
 };
 
 const NOW: MonotonicMillis = MonotonicMillis(10);
@@ -79,108 +77,101 @@ impl SourceReader for MemorySource {
     }
 }
 
+/// One bound artifact, in memory. The sink is per-artifact now, so the double
+/// holds one buffer rather than a table keyed by whatever the caller passed.
 #[derive(Default)]
 struct MemorySink {
-    staged: HashMap<TransferId, Vec<u8>>,
-    resume: HashMap<TransferId, ResumeFact>,
-    sealed: HashMap<TransferId, Vec<u8>>,
-    sealed_hash: HashMap<TransferId, ContentHash>,
+    staged: Vec<u8>,
+    prefix: Option<DurablePrefix>,
+    sealed: Option<Vec<u8>>,
+    sealed_hash: Option<ContentHash>,
     append_calls: usize,
     fail_append_at: Option<usize>,
     partial_write_on_failure: usize,
     fail_seal: bool,
 }
 
-impl MemorySink {
-    fn staged_mut(&mut self, id: TransferId) -> &mut Vec<u8> {
-        self.staged.entry(id).or_default()
-    }
-}
-
 impl StagingSink for MemorySink {
-    fn load_resume(&mut self, transfer_id: TransferId) -> Result<Option<ResumeFact>, StorageFault> {
-        Ok(self.resume.get(&transfer_id).copied())
+    type Seal = ();
+
+    fn resume(&mut self) -> Result<DurablePrefix, StorageFault> {
+        let prefix = self.prefix.unwrap_or(DurablePrefix {
+            length: ByteCount::new(0),
+            digest: ContentHash::from_bytes(*blake3::hash(&[]).as_bytes()),
+        });
+        // Opening discards any tail past the promised prefix, exactly as a real
+        // lease does. `prepare_staging` relies on this and no longer truncates.
+        self.staged.truncate(prefix.length.get() as usize);
+        Ok(prefix)
     }
 
-    fn read_staged(
+    fn read_partial_at(
         &mut self,
-        transfer_id: TransferId,
         offset: ByteCount,
         destination: &mut [u8],
     ) -> Result<usize, StorageFault> {
-        let Some(bytes) = self.staged.get(&transfer_id) else {
-            return Ok(0);
-        };
         let offset = offset.get() as usize;
-        if offset >= bytes.len() {
+        if offset >= self.staged.len() {
             return Ok(0);
         }
-        let count = destination.len().min(bytes.len() - offset);
-        destination[..count].copy_from_slice(&bytes[offset..offset + count]);
+        let count = destination.len().min(self.staged.len() - offset);
+        destination[..count].copy_from_slice(&self.staged[offset..offset + count]);
         Ok(count)
     }
 
-    fn append(
-        &mut self,
-        transfer_id: TransferId,
-        offset: ByteCount,
-        bytes: &[u8],
-    ) -> Result<(), StorageFault> {
+    fn append(&mut self, offset: ByteCount, bytes: &[u8]) -> Result<(), StorageFault> {
         let call = self.append_calls;
         self.append_calls += 1;
         if self.fail_append_at == Some(call) {
             self.fail_append_at = None;
             let count = self.partial_write_on_failure.min(bytes.len());
-            let staged = self.staged_mut(transfer_id);
-            if staged.len() == offset.get() as usize {
-                staged.extend_from_slice(&bytes[..count]);
+            if self.staged.len() == offset.get() as usize {
+                self.staged.extend_from_slice(&bytes[..count]);
             }
             return Err(StorageFault::new(StorageOperation::AppendStaging));
         }
-        let staged = self.staged_mut(transfer_id);
-        if staged.len() != offset.get() as usize {
+        if self.staged.len() != offset.get() as usize {
             return Err(StorageFault::new(StorageOperation::AppendStaging));
         }
-        staged.extend_from_slice(bytes);
+        self.staged.extend_from_slice(bytes);
         Ok(())
     }
 
-    fn truncate(&mut self, transfer_id: TransferId, length: ByteCount) -> Result<(), StorageFault> {
-        let staged = self.staged_mut(transfer_id);
-        if length.get() as usize > staged.len() {
-            return Err(StorageFault::new(StorageOperation::TruncateStaging));
-        }
-        staged.truncate(length.get() as usize);
+    fn checkpoint(&mut self, prefix: DurablePrefix) -> Result<(), StorageFault> {
+        assert!(
+            prefix.length.get() as usize <= self.staged.len(),
+            "a sink cannot promise bytes it was never given"
+        );
+        self.prefix = Some(prefix);
         Ok(())
     }
 
-    fn checkpoint(
-        &mut self,
-        transfer_id: TransferId,
-        fact: ResumeFact,
-    ) -> Result<(), StorageFault> {
-        self.resume.insert(transfer_id, fact);
+    fn reset(&mut self) -> Result<(), StorageFault> {
+        // Publish first, then truncate — the order the real store enforces.
+        self.prefix = Some(DurablePrefix {
+            length: ByteCount::new(0),
+            digest: ContentHash::from_bytes(*blake3::hash(&[]).as_bytes()),
+        });
+        self.staged.clear();
         Ok(())
     }
 
     fn seal(
         &mut self,
-        transfer_id: TransferId,
-        file_size: ByteCount,
-        file_hash: ContentHash,
-    ) -> Result<(), StorageFault> {
+        expected_size: ByteCount,
+        digest: ContentHash,
+    ) -> Result<Self::Seal, StorageFault> {
         if self.fail_seal {
             return Err(StorageFault::new(StorageOperation::Seal));
         }
-        let bytes = self.staged.get(&transfer_id).cloned().unwrap_or_default();
-        if bytes.len() as u64 != file_size.get()
-            || ContentHash::from_bytes(*blake3::hash(&bytes).as_bytes()) != file_hash
+        if self.staged.len() as u64 != expected_size.get()
+            || ContentHash::from_bytes(*blake3::hash(&self.staged).as_bytes()) != digest
         {
             return Err(StorageFault::new(StorageOperation::Seal));
         }
-        self.sealed.insert(transfer_id, bytes);
-        self.sealed_hash.insert(transfer_id, file_hash);
-        self.resume.remove(&transfer_id);
+        self.sealed = Some(self.staged.clone());
+        self.sealed_hash = Some(digest);
+        self.prefix = None;
         Ok(())
     }
 }
@@ -307,6 +298,7 @@ fn transfer_resume_hash_characterization() {
     full_transfer_and_short_reads();
     matching_resume_sends_only_tail();
     corrupted_prefix_restarts_both_sides();
+    self_consistent_prefix_from_another_source_restarts();
     claim_complete_redelivers_ack_without_chunks();
     fresh_offer_ignores_claim_complete();
     exact_ingress_and_resume_validation();
@@ -325,7 +317,7 @@ fn full_transfer_and_short_reads() {
 
     assert_eq!(driven.chunks, 3);
     assert_eq!(driven.chunk_bytes, bytes.len());
-    assert_eq!(sink.sealed.get(&id), Some(&bytes));
+    assert_eq!(sink.sealed.as_ref(), Some(&bytes));
     assert_eq!(
         driven.sender.file_hash,
         ContentHash::from_bytes(*blake3::hash(&bytes).as_bytes())
@@ -350,18 +342,15 @@ fn matching_resume_sends_only_tail() {
     let stopped = receiver.peer_closed(&mut sink);
     assert_eq!(stopped.error(), TransferError::PeerClosed);
     assert_eq!(
-        sink.resume.get(&id),
-        Some(&ResumeFact {
-            bytes_staged: ByteCount::new(8),
-            next_chunk_index: 2,
-        })
+        sink.prefix.map(|prefix| prefix.length),
+        Some(ByteCount::new(8))
     );
 
     let (sender, receiver) = begin(request, &mut source, &mut sink, None).unwrap();
     assert_eq!(sender.progress().resumed_bytes, ByteCount::new(8));
     let driven = drive(sender, receiver, &mut source, &mut sink).unwrap();
     assert_eq!(driven.chunk_bytes, bytes.len() - 8);
-    assert_eq!(sink.sealed.get(&id), Some(&bytes));
+    assert_eq!(sink.sealed.as_ref(), Some(&bytes));
 }
 
 fn corrupted_prefix_restarts_both_sides() {
@@ -378,7 +367,7 @@ fn corrupted_prefix_restarts_both_sides() {
     drop(sender);
     let paused = receiver.paused(&mut sink);
     assert_eq!(paused.error(), TransferError::Paused);
-    sink.staged_mut(id)[0] ^= 0xff;
+    sink.staged[0] ^= 0xff;
 
     let (sender, receiver) = begin(request, &mut source, &mut sink, None).unwrap();
     assert_eq!(sender.progress().resumed_bytes, ByteCount::new(0));
@@ -392,7 +381,49 @@ fn corrupted_prefix_restarts_both_sides() {
     assert_eq!(receiver.progress().resumed_bytes, ByteCount::new(0));
     let driven = drive(sender, receiver, &mut source, &mut sink).unwrap();
     assert_eq!(driven.chunk_bytes + 4, bytes.len());
-    assert_eq!(sink.sealed.get(&id), Some(&bytes));
+    assert_eq!(sink.sealed.as_ref(), Some(&bytes));
+}
+
+/// The receiver's local digest check catches a TORN prefix. It cannot catch a
+/// prefix that is internally consistent but came from different content — the
+/// receiver has no way to know what the sender holds. That is what the wire
+/// comparison is for, and only this case reaches it.
+///
+/// Written when the local check landed: without it, the sender's prefix-hash
+/// path lost its only coverage, because every corruption test now stops one
+/// step earlier.
+fn self_consistent_prefix_from_another_source_restarts() {
+    let id = transfer_id(11);
+    let bytes = (60_u8..80).collect::<Vec<_>>();
+    let mut sink = MemorySink::default();
+
+    // Stage eight bytes of SOMETHING ELSE, checkpointed honestly: the digest
+    // names exactly the bytes on disk, so the receiver's own check is satisfied.
+    let other = (200_u8..208).collect::<Vec<_>>();
+    sink.append(ByteCount::new(0), &other).unwrap();
+    sink.checkpoint(DurablePrefix {
+        length: ByteCount::new(other.len() as u64),
+        digest: ContentHash::from_bytes(*blake3::hash(&other).as_bytes()),
+    })
+    .unwrap();
+
+    let mut source = MemorySource::new(bytes.clone());
+    let request = request(id, &bytes, 4, ResumeMode::Allowed);
+    let (sender, receiver) = begin(request, &mut source, &mut sink, None).unwrap();
+
+    // The receiver offered its prefix in good faith; the sender rejected it.
+    assert_eq!(receiver.progress().resumed_bytes, ByteCount::new(8));
+    assert_eq!(sender.progress().resumed_bytes, ByteCount::new(0));
+
+    let (sender, restart) = one_sender_chunk(sender, &mut source);
+    let Frame::Chunk(restart_chunk) = &restart else {
+        panic!("expected restart chunk");
+    };
+    assert_eq!(restart_chunk.offset, ByteCount::new(0));
+    let receiver = continue_receiver(receiver, restart, &mut sink);
+    let driven = drive(sender, receiver, &mut source, &mut sink).unwrap();
+    assert_eq!(driven.chunk_bytes + 4, bytes.len());
+    assert_eq!(sink.sealed.as_ref(), Some(&bytes));
 }
 
 fn claim_complete_redelivers_ack_without_chunks() {
@@ -475,7 +506,7 @@ fn fresh_offer_ignores_claim_complete() {
     let driven = drive(sender, receiver, &mut source, &mut sink).unwrap();
     assert!(driven.chunks > 0);
     assert_eq!(driven.chunk_bytes, bytes.len());
-    assert_eq!(sink.sealed.get(&id), Some(&bytes));
+    assert_eq!(sink.sealed.as_ref(), Some(&bytes));
 }
 
 fn exact_ingress_and_resume_validation() {
@@ -540,7 +571,7 @@ fn exact_ingress_and_resume_validation() {
     chunk_size_mismatch_is_refused();
     oversized_resume_is_refused();
     disabled_resume_is_refused();
-    inconsistent_resume_fact_is_refused();
+    inconsistent_resume_index_on_the_wire_is_refused();
 }
 
 fn completion_order_and_strict_ack() {
@@ -565,7 +596,7 @@ fn completion_order_and_strict_ack() {
         mismatch.abort().map(|abort| abort.reason),
         Some(ProtocolReason::IntegrityMismatch)
     );
-    assert!(!sink.sealed.contains_key(&id));
+    assert!(sink.sealed.is_none());
 
     let mut source = MemorySource::new(bytes.clone());
     let mut sink = MemorySink {
@@ -582,7 +613,7 @@ fn completion_order_and_strict_ack() {
         seal_failure.abort().map(|abort| abort.reason),
         Some(ProtocolReason::StorageFault)
     );
-    assert!(!sink.sealed.contains_key(&id));
+    assert!(sink.sealed.is_none());
 
     let mut source = MemorySource::new(bytes);
     let mut sink = MemorySink::default();
@@ -600,7 +631,7 @@ fn completion_order_and_strict_ack() {
                     panic!("receiver did not complete");
                 };
                 assert!(
-                    !sink.sealed.contains_key(&id),
+                    sink.sealed.is_none(),
                     "verification must not seal before the attempt commit gate"
                 );
                 let completed = ready.commit(&mut sink).unwrap();
@@ -608,7 +639,7 @@ fn completion_order_and_strict_ack() {
             }
         }
     };
-    assert_eq!(sink.sealed.get(&id).map(Vec::len), Some(18));
+    assert_eq!(sink.sealed.as_ref().map(Vec::len), Some(18));
     drop(completed.acknowledgement());
     let timed_out = failure(await_ack.deadline_exceeded(EXPIRED));
     assert_eq!(timed_out.error(), TransferError::Timeout);
@@ -694,24 +725,39 @@ fn disabled_resume_is_refused() {
     );
 }
 
-fn inconsistent_resume_fact_is_refused() {
+/// The receiver no longer STORES an index to disagree with its own offset — it
+/// derives one. But a peer can still send an index that disagrees with the
+/// offset beside it, and that claim comes from another machine, so the sender
+/// still checks it. This test moved here from the sink side when the stored
+/// field went away; the violation did not.
+fn inconsistent_resume_index_on_the_wire_is_refused() {
     let id = transfer_id(9);
-    let request = request(id, &[0_u8; 8], 4, ResumeMode::Allowed);
-    let mut source = MemorySource::new(vec![0; 8]);
+    let bytes = vec![0_u8; 8];
+    let request = request(id, &bytes, 4, ResumeMode::Allowed);
+    let mut source = MemorySource::new(bytes);
     let mut sink = MemorySink::default();
-    sink.staged.insert(id, vec![0; 4]);
-    sink.resume.insert(
-        id,
-        ResumeFact {
-            bytes_staged: ByteCount::new(4),
-            next_chunk_index: 2,
-        },
-    );
+
+    let (sender, hello) = sender_start(request, DEADLINE);
+    let receiver = receiver_start(ByteCount::new(4), DEADLINE).unwrap();
+    let (receiver, ready) = receiver.receive_hello(hello, NOW, DEADLINE).unwrap();
+    let (sender, header) = sender.receive_ready(ready, NOW, DEADLINE).unwrap();
+    let (_receiver, honest) = receiver
+        .receive_header(header, NOW, DEADLINE, None, &mut sink)
+        .unwrap();
+
+    // An honest receiver at offset 0 is at index 0. Claim otherwise.
+    let Frame::ResumeStatus(mut status) = honest else {
+        panic!("expected a resume status");
+    };
+    assert_eq!(status.next_chunk_index, 0);
+    status.next_chunk_index = 2;
+
     assert_eq!(
-        failure(begin(request, &mut source, &mut sink, None)).error(),
+        failure(sender.receive_resume(Frame::ResumeStatus(status), NOW, DEADLINE, &mut source))
+            .error(),
         TransferError::Protocol(ProtocolViolation::ResumeIndexInconsistent {
             actual: 2,
-            expected: 1,
+            expected: 0,
         })
     );
 }
@@ -756,7 +802,7 @@ fn storage_injected_fault_resume() {
         receiver = continue_receiver(receiver, frame, &mut sink);
     }
     assert_eq!(
-        sink.resume.get(&id).map(|fact| fact.bytes_staged),
+        sink.prefix.map(|prefix| prefix.length),
         Some(ByteCount::new(CHECKPOINT_INTERVAL))
     );
     let (_sender, failed_frame) = one_sender_chunk(sender, &mut source);
@@ -770,11 +816,11 @@ fn storage_injected_fault_resume() {
         Some(ProtocolReason::StorageFault)
     );
     assert_eq!(
-        sink.resume.get(&id).map(|fact| fact.bytes_staged),
+        sink.prefix.map(|prefix| prefix.length),
         Some(ByteCount::new(CHECKPOINT_INTERVAL))
     );
     assert_eq!(
-        sink.staged.get(&id).map(Vec::len),
+        Some(sink.staged.len()),
         Some(CHECKPOINT_INTERVAL as usize + 257)
     );
 
@@ -783,19 +829,16 @@ fn storage_injected_fault_resume() {
         sender.progress().resumed_bytes,
         ByteCount::new(CHECKPOINT_INTERVAL)
     );
-    assert_eq!(
-        sink.staged.get(&id).map(Vec::len),
-        Some(CHECKPOINT_INTERVAL as usize)
-    );
+    assert_eq!(Some(sink.staged.len()), Some(CHECKPOINT_INTERVAL as usize));
     let driven = drive(sender, receiver, &mut source, &mut sink).unwrap();
     assert_eq!(
         driven.chunk_bytes,
         bytes.len() - CHECKPOINT_INTERVAL as usize
     );
-    assert_eq!(sink.sealed.get(&id), Some(&bytes));
+    assert_eq!(sink.sealed.as_ref(), Some(&bytes));
     assert_eq!(
-        sink.sealed_hash.get(&id),
-        Some(&ContentHash::from_bytes(*blake3::hash(&bytes).as_bytes()))
+        sink.sealed_hash,
+        Some(ContentHash::from_bytes(*blake3::hash(&bytes).as_bytes()))
     );
 }
 

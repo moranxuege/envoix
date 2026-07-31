@@ -6,7 +6,7 @@ use envoix_protocol::{
 use envoix_types::{ByteCount, OfferedName, TransferId};
 
 use crate::{
-    MachineFailure, ProtocolViolation, ResumeFact, SourceReader, StagingSink, StorageFault,
+    DurablePrefix, MachineFailure, ProtocolViolation, SourceReader, StagingSink, StorageFault,
     TransferError,
 };
 
@@ -568,7 +568,7 @@ impl ReceiverAwaitHeader {
         } else {
             None
         };
-        let (mode, resume_fact, hasher, prefix_hash) = match claim {
+        let (mode, staged, hasher, prefix_hash) = match claim {
             Some(claim) => {
                 if claim.file_size != header.file_size {
                     return Err(MachineFailure::from_engine_error(
@@ -576,16 +576,9 @@ impl ReceiverAwaitHeader {
                         header.transfer_id,
                     ));
                 }
-                let fact = ResumeFact {
-                    bytes_staged: claim.file_size,
-                    next_chunk_index: validated_next_index(
-                        claim.file_size.get(),
-                        header.chunk_size.get(),
-                    ),
-                };
                 (
                     ReceiveMode::Claim(claim),
-                    fact,
+                    claim.file_size,
                     Box::new(Hasher::new()),
                     claim.file_hash,
                 )
@@ -594,26 +587,32 @@ impl ReceiverAwaitHeader {
                 let prepared = prepare_staging(&header, sink)?;
                 (
                     ReceiveMode::Staging,
-                    prepared.fact,
+                    prepared.prefix.length,
                     prepared.hasher,
                     prepared.prefix_hash,
                 )
             }
         };
 
+        // DERIVED, here, from the length and the chunk size the header
+        // negotiated. It used to be stored beside the length and re-validated
+        // against it on every resume, which is a conclusion kept next to its own
+        // premise — and a whole protocol violation existed for when the two
+        // disagreed.
+        let next_chunk_index = validated_next_index(staged.get(), header.chunk_size.get());
         let status = ResumeStatus {
             transfer_id: header.transfer_id,
-            next_chunk_index: resume_fact.next_chunk_index,
-            bytes_received: resume_fact.bytes_staged,
+            next_chunk_index,
+            bytes_received: staged,
             prefix_hash: Some(prefix_hash),
         };
         let receiving = ReceiverReceiving {
             header,
             mode,
-            expected_offset: resume_fact.bytes_staged.get(),
-            expected_index: resume_fact.next_chunk_index,
-            resumed_bytes: resume_fact.bytes_staged.get(),
-            last_checkpoint: resume_fact.bytes_staged.get(),
+            expected_offset: staged.get(),
+            expected_index: next_chunk_index,
+            resumed_bytes: staged.get(),
+            last_checkpoint: staged.get(),
             hasher,
             deadline: data_deadline,
         };
@@ -779,11 +778,7 @@ impl ReceiverReceiving {
             MachineFailure::from_engine_error(error, self.header.transfer_id)
         })?;
 
-        if let Err(fault) = sink.append(
-            self.header.transfer_id,
-            ByteCount::new(self.expected_offset),
-            &chunk.bytes,
-        ) {
+        if let Err(fault) = sink.append(ByteCount::new(self.expected_offset), &chunk.bytes) {
             self.best_effort_checkpoint(sink);
             return Err(MachineFailure::from_engine_error(
                 TransferError::Storage(fault),
@@ -795,8 +790,7 @@ impl ReceiverReceiving {
         self.expected_index += 1;
 
         if self.expected_offset.saturating_sub(self.last_checkpoint) >= CHECKPOINT_INTERVAL {
-            let fact = self.resume_fact();
-            if let Err(fault) = sink.checkpoint(self.header.transfer_id, fact) {
+            if let Err(fault) = sink.checkpoint(self.accepted_prefix()) {
                 return Err(MachineFailure::from_engine_error(
                     TransferError::Storage(fault),
                     self.header.transfer_id,
@@ -837,13 +831,12 @@ impl ReceiverReceiving {
             ));
         }
 
-        sink.checkpoint(self.header.transfer_id, self.resume_fact())
-            .map_err(|fault| {
-                MachineFailure::from_engine_error(
-                    TransferError::Storage(fault),
-                    self.header.transfer_id,
-                )
-            })?;
+        sink.checkpoint(self.accepted_prefix()).map_err(|fault| {
+            MachineFailure::from_engine_error(
+                TransferError::Storage(fault),
+                self.header.transfer_id,
+            )
+        })?;
         Ok(ReceiverStep::ReadyToCommit(ReceiverReadyToCommit::new(
             self.header.transfer_id,
             self.header.file_size,
@@ -853,24 +846,15 @@ impl ReceiverReceiving {
     }
 
     fn reset_staging(&mut self, sink: &mut impl StagingSink) -> Result<(), MachineFailure> {
-        sink.truncate(self.header.transfer_id, ByteCount::new(0))
-            .map_err(|fault| {
-                MachineFailure::from_engine_error(
-                    TransferError::Storage(fault),
-                    self.header.transfer_id,
-                )
-            })?;
-        let fact = ResumeFact {
-            bytes_staged: ByteCount::new(0),
-            next_chunk_index: 0,
-        };
-        sink.checkpoint(self.header.transfer_id, fact)
-            .map_err(|fault| {
-                MachineFailure::from_engine_error(
-                    TransferError::Storage(fault),
-                    self.header.transfer_id,
-                )
-            })?;
+        // ONE call. The sink owns the order — publish the zero prefix, then
+        // truncate — because doing it here left a durable prefix naming bytes
+        // that had already been shortened if a crash landed between the two.
+        sink.reset().map_err(|fault| {
+            MachineFailure::from_engine_error(
+                TransferError::Storage(fault),
+                self.header.transfer_id,
+            )
+        })?;
         self.expected_offset = 0;
         self.expected_index = 0;
         self.resumed_bytes = 0;
@@ -879,16 +863,19 @@ impl ReceiverReceiving {
         Ok(())
     }
 
-    fn resume_fact(&self) -> ResumeFact {
-        ResumeFact {
-            bytes_staged: ByteCount::new(self.expected_offset),
-            next_chunk_index: self.expected_index,
+    fn best_effort_checkpoint(&self, sink: &mut impl StagingSink) {
+        if matches!(self.mode, ReceiveMode::Staging) {
+            let _ = sink.checkpoint(self.accepted_prefix());
         }
     }
 
-    fn best_effort_checkpoint(&self, sink: &mut impl StagingSink) {
-        if matches!(self.mode, ReceiveMode::Staging) {
-            let _ = sink.checkpoint(self.header.transfer_id, self.resume_fact());
+    /// The prefix this machine has ACCEPTED — never what the sink happens to
+    /// hold. After a torn append those differ by the partial tail, and that is
+    /// precisely the moment a checkpoint gets published.
+    fn accepted_prefix(&self) -> DurablePrefix {
+        DurablePrefix {
+            length: ByteCount::new(self.expected_offset),
+            digest: content_hash(&self.hasher),
         }
     }
 }
@@ -932,17 +919,13 @@ impl ReceiverReadyToCommit {
     /// synchronous call and send no completion acknowledgement unless it succeeds.
     pub fn commit(self, sink: &mut impl StagingSink) -> Result<ReceiverCompleted, MachineFailure> {
         if !self.completed.claimed_existing {
-            sink.seal(
-                self.completed.transfer_id,
-                self.completed.file_size,
-                self.completed.file_hash,
-            )
-            .map_err(|fault| {
-                MachineFailure::from_engine_error(
-                    TransferError::Storage(fault),
-                    self.completed.transfer_id,
-                )
-            })?;
+            sink.seal(self.completed.file_size, self.completed.file_hash)
+                .map_err(|fault| {
+                    MachineFailure::from_engine_error(
+                        TransferError::Storage(fault),
+                        self.completed.transfer_id,
+                    )
+                })?;
         }
         Ok(self.completed)
     }
@@ -996,7 +979,7 @@ impl ReceiverCompleted {
 }
 
 struct PreparedStaging {
-    fact: ResumeFact,
+    prefix: DurablePrefix,
     hasher: Box<Hasher>,
     prefix_hash: ContentHash,
 }
@@ -1009,38 +992,45 @@ fn prepare_staging(
         return fresh_staging(header, sink);
     }
 
-    let Some(fact) = sink.load_resume(header.transfer_id).map_err(|fault| {
+    let prefix = sink.resume().map_err(|fault| {
         MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
-    })?
-    else {
+    })?;
+    if prefix.length.get() == 0 {
         return fresh_staging(header, sink);
-    };
-    validate_resume_fact(header, fact)
-        .map_err(|error| MachineFailure::from_engine_error(error, header.transfer_id))?;
+    }
+    if prefix.length.get() > header.file_size.get() {
+        return Err(MachineFailure::from_engine_error(
+            TransferError::Protocol(ProtocolViolation::ResumeOffsetExceedsFile {
+                offset: prefix.length.get(),
+                file_size: header.file_size.get(),
+            }),
+            header.transfer_id,
+        ));
+    }
 
+    // Re-read the prefix rather than persist a hasher, and get a second answer
+    // for free: the sink's own digest says these are the bytes it promised. That
+    // is LOCAL evidence — the peer still gets what was recomputed here.
     let mut hasher = Box::new(Hasher::new());
     let complete = hash_staged_prefix(
         sink,
-        header.transfer_id,
-        fact.bytes_staged.get(),
+        prefix.length.get(),
         header.chunk_size.get() as usize,
         &mut hasher,
     )
     .map_err(|fault| {
         MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
     })?;
-    if !complete {
+    let recomputed = content_hash(&hasher);
+    if !complete || recomputed != prefix.digest {
         return fresh_staging(header, sink);
     }
-
-    // Discard bytes appended after the last durable checkpoint.
-    sink.truncate(header.transfer_id, fact.bytes_staged)
-        .map_err(|fault| {
-            MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
-        })?;
+    // No truncate: the sink opened at its own durable prefix and the tail is
+    // already gone. Doing it here was the caller re-deciding something the sink
+    // had settled.
     Ok(PreparedStaging {
-        fact,
-        prefix_hash: content_hash(&hasher),
+        prefix,
+        prefix_hash: recomputed,
         hasher,
     })
 }
@@ -1049,20 +1039,15 @@ fn fresh_staging(
     header: &FileHeader,
     sink: &mut impl StagingSink,
 ) -> Result<PreparedStaging, MachineFailure> {
-    sink.truncate(header.transfer_id, ByteCount::new(0))
-        .map_err(|fault| {
-            MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
-        })?;
-    let fact = ResumeFact {
-        bytes_staged: ByteCount::new(0),
-        next_chunk_index: 0,
-    };
-    sink.checkpoint(header.transfer_id, fact).map_err(|fault| {
+    sink.reset().map_err(|fault| {
         MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
     })?;
     let hasher = Box::new(Hasher::new());
     Ok(PreparedStaging {
-        fact,
+        prefix: DurablePrefix {
+            length: ByteCount::new(0),
+            digest: content_hash(&hasher),
+        },
         prefix_hash: content_hash(&hasher),
         hasher,
     })
@@ -1114,27 +1099,6 @@ fn validate_resume_status(
         return Err(TransferError::Protocol(
             ProtocolViolation::ResumeIndexInconsistent {
                 actual: status.next_chunk_index,
-                expected,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn validate_resume_fact(header: &FileHeader, fact: ResumeFact) -> Result<(), TransferError> {
-    if fact.bytes_staged.get() > header.file_size.get() {
-        return Err(TransferError::Protocol(
-            ProtocolViolation::ResumeOffsetExceedsFile {
-                offset: fact.bytes_staged.get(),
-                file_size: header.file_size.get(),
-            },
-        ));
-    }
-    let expected = validated_next_index(fact.bytes_staged.get(), header.chunk_size.get());
-    if fact.next_chunk_index != expected {
-        return Err(TransferError::Protocol(
-            ProtocolViolation::ResumeIndexInconsistent {
-                actual: fact.next_chunk_index,
                 expected,
             },
         ));
@@ -1245,7 +1209,6 @@ fn read_source_exact(
 
 fn hash_staged_prefix(
     sink: &mut impl StagingSink,
-    transfer_id: TransferId,
     bytes_to_hash: u64,
     buffer_size: usize,
     hasher: &mut Hasher,
@@ -1254,7 +1217,7 @@ fn hash_staged_prefix(
     let mut buffer = vec![0_u8; buffer_size.max(1)];
     while offset < bytes_to_hash {
         let count = (bytes_to_hash - offset).min(buffer.len() as u64) as usize;
-        let read = sink.read_staged(transfer_id, ByteCount::new(offset), &mut buffer[..count])?;
+        let read = sink.read_partial_at(ByteCount::new(offset), &mut buffer[..count])?;
         if read == 0 {
             return Ok(false);
         }
