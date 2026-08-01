@@ -60,8 +60,15 @@ struct TransferStatusView: View {
                     ProgressBar(value: viewModel.progressFraction)
                     transferProgressLine
                 }
-                if progress == .active || progress == .retained,
-                   let path = currentDataPathText {
+                TransferPerformanceLine(
+                    currentBytesPerSecond: progress == .active ? viewModel.bytesPerSec : 0,
+                    averageBytesPerSecond: viewModel.averageBytesPerSec,
+                    etaSeconds: progress == .active ? viewModel.etaSeconds : nil,
+                    currentSampleDate: viewModel.currentRateUpdatedAt,
+                    font: .caption,
+                    accessibilityPrefix: "transfer"
+                )
+                if let path = currentDataPathText {
                     pathLine(path)
                 }
                 if state == .delivered {
@@ -302,32 +309,19 @@ struct TransferStatusView: View {
     }
 
     private var transferProgressLine: some View {
-        HStack(spacing: 6) {
-            Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
-            if viewModel.presentationState == .transferring, viewModel.bytesPerSec > 0 {
-                Text("·")
-                Text(rateString(viewModel.bytesPerSec))
-            }
-            if viewModel.presentationState == .transferring, let eta = viewModel.etaSeconds {
-                Text("·")
-                Text(etaString(eta))
-            }
-        }
+        Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
         .font(.body.monospacedDigit())
         .foregroundStyle(Theme.muted)
+        .accessibilityIdentifier("transfer_byte_progress")
     }
 
     private func pathLine(_ path: String) -> some View {
-        HStack(spacing: 6) {
-            Text(AppText.value("Path", "链路", language: language))
-                .fontWeight(.semibold)
-            Text("·")
-            Text(path)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
+        Text(path)
+            .lineLimit(1)
+            .truncationMode(.middle)
         .font(.body.monospacedDigit())
         .foregroundStyle(Theme.muted)
+        .accessibilityIdentifier("transfer_data_path")
     }
 
     private var currentDataPathText: String? {
@@ -657,5 +651,103 @@ struct TransferStatusView: View {
         Button(AppText.value("Copy Path", "复制路径", language: language)) {
             copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language), language: language)
         }
+    }
+}
+
+struct TransferPerformanceLine: View {
+    @Environment(\.appLanguage) private var language
+
+    let currentBytesPerSecond: Double
+    let averageBytesPerSecond: Double
+    let etaSeconds: Double?
+    let currentSampleDate: Date?
+    var font: Font = .caption
+    let accessibilityPrefix: String
+
+    var body: some View {
+        if needsFreshnessRefresh {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                content(now: context.date)
+            }
+        } else {
+            content(now: Date())
+        }
+    }
+
+    @ViewBuilder
+    private func content(now: Date) -> some View {
+        let showCurrentMetrics = TransferMetricFreshnessPolicy.isFresh(
+            sampledAt: currentSampleDate,
+            now: now
+        )
+        if hasMetrics(showCurrentMetrics: showCurrentMetrics) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { metrics(showCurrentMetrics: showCurrentMetrics) }
+                VStack(alignment: .leading, spacing: 5) {
+                    metrics(showCurrentMetrics: showCurrentMetrics)
+                }
+            }
+            .font(font.monospacedDigit())
+            .foregroundStyle(Theme.muted)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("\(accessibilityPrefix)_performance")
+        }
+    }
+
+    private var needsFreshnessRefresh: Bool {
+        bounded(currentBytesPerSecond) != nil || boundedETA != nil
+    }
+
+    private func hasMetrics(showCurrentMetrics: Bool) -> Bool {
+        bounded(averageBytesPerSecond) != nil
+            || (showCurrentMetrics && (
+                bounded(currentBytesPerSecond) != nil || boundedETA != nil
+            ))
+    }
+
+    @ViewBuilder
+    private func metrics(showCurrentMetrics: Bool) -> some View {
+        if showCurrentMetrics, let current = bounded(currentBytesPerSecond) {
+            metric(
+                AppText.value("Now", "当前", language: language),
+                value: rateString(current),
+                systemImage: "speedometer",
+                identifier: "\(accessibilityPrefix)_speed_current"
+            )
+        }
+        if let average = bounded(averageBytesPerSecond) {
+            metric(
+                AppText.value("Average", "平均", language: language),
+                value: rateString(average),
+                systemImage: "chart.line.uptrend.xyaxis",
+                identifier: "\(accessibilityPrefix)_speed_average"
+            )
+        }
+        if showCurrentMetrics, let eta = boundedETA {
+            Label(etaString(eta), systemImage: "clock")
+                .lineLimit(1)
+                .accessibilityIdentifier("\(accessibilityPrefix)_eta")
+        }
+    }
+
+    private func metric(
+        _ label: String,
+        value: String,
+        systemImage: String,
+        identifier: String
+    ) -> some View {
+        Label("\(label) \(value)", systemImage: systemImage)
+            .lineLimit(1)
+            .accessibilityIdentifier(identifier)
+    }
+
+    private func bounded(_ value: Double) -> Double? {
+        guard value.isFinite, value > 0 else { return nil }
+        return min(value, Double(Int64.max))
+    }
+
+    private var boundedETA: Double? {
+        guard let etaSeconds, etaSeconds.isFinite, etaSeconds >= 0 else { return nil }
+        return min(etaSeconds, Double(Int.max).nextDown)
     }
 }

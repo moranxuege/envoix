@@ -7,16 +7,19 @@ invitation context, and BLAKE3 verifies transferred content.
 ## InviteV2
 
 InviteV2 uses the existing Ed25519 SPAKE2 implementation under the explicit
-suite name `spake2-ed25519-sha256-hkdf-hmac`. The full-ticket, Room control, and
-data authentication passwords are separately derived with HKDF-SHA256. The
-ticket and Room Code are never sent as plaintext protocol fields.
+suite name `spake2-ed25519-sha256-hkdf-hmac`. The full-ticket, foreground Room
+Control, and data authentication passwords are separately derived with
+HKDF-SHA256. The ticket and Room-Control code are never sent as plaintext
+protocol fields.
 
-For Room-Code bootstrap, the invitation joiner initiates a control SPAKE2 and
-the creator responds. HMAC-SHA256 key confirmation binds the selected
-bootstrap, room locator, creator/joiner roles, both nonces, and both SPAKE
-messages. The resulting key seals the creator's JCS public context and endpoint
-descriptor. A Room joiner authenticates the context before creating an output
-or data endpoint.
+For foreground Room Control, the joiner initiates a control SPAKE2 and the
+creator responds. HMAC-SHA256 key confirmation binds the selected bootstrap,
+room locator, creator/joiner roles, both nonces, and both SPAKE messages. The
+resulting key seals the creator's JCS public context and endpoint descriptor. A
+Room joiner authenticates the context before creating an output or data
+endpoint. This v5 path uses an unprefixed canonical code and the `c2_` locator
+namespace. External InviteV2 joins accept only complete
+`envoix://invite/v2/...` URIs; they do not reinterpret a naked code.
 
 Both bootstrap paths finish with data-plane SPAKE2 over the live QUIC
 connection. The InviteV2 exporter call uses:
@@ -61,7 +64,7 @@ control exchange is bound into a fresh data-plane password. Successful
 authentication advances to generation `n + 1`; one previous generation is
 retained for bounded crash recovery.
 
-Invitation tickets, Room Codes, and developer shared tokens remain
+Invitation tickets, Room-Control codes, and developer shared tokens remain
 process-only. Serialized peer sources and active-session records contain only
 random references, never those raw values.
 

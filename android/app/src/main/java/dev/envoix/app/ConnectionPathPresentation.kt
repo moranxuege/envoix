@@ -40,9 +40,9 @@ internal fun connectionPathLabel(
     language: String,
 ): String? =
     when (ConnectionPathKind.fromWireOrLegacy(value)) {
-        ConnectionPathKind.Direct -> AppText.value("Direct path", "直连路径", language)
-        ConnectionPathKind.Relay -> AppText.value("Relay path", "中继路径", language)
-        ConnectionPathKind.WifiAware -> AppText.value("Wi-Fi Aware path", "Wi-Fi Aware 路径", language)
-        ConnectionPathKind.Other -> AppText.value("Other path", "其他路径", language)
+        ConnectionPathKind.Direct -> AppText.value("Direct", "直连", language)
+        ConnectionPathKind.Relay -> AppText.value("Relay", "中继", language)
+        ConnectionPathKind.WifiAware -> AppText.value("Wi-Fi Aware", "Wi-Fi Aware", language)
+        ConnectionPathKind.Other -> AppText.value("Other", "其他", language)
         null -> null
     }

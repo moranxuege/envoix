@@ -3,6 +3,288 @@ import EnvoixCore
 @testable import Envoix_iOS
 
 final class TransferPresentationPolicyTests: XCTestCase {
+    func testRateTrackerFirstSampleOnlyEstablishesBaseline() {
+        var tracker = RateTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        XCTAssertEqual(tracker.update(bytes: 512, now: start), 0)
+        XCTAssertEqual(tracker.samples, 0)
+        XCTAssertFalse(tracker.isStable)
+        XCTAssertEqual(tracker.averageBytesPerSecond, 0)
+    }
+
+    func testRateTrackerSmoothsCurrentRateAndBecomesStableAfterTwoIntervals() {
+        var tracker = RateTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        _ = tracker.update(bytes: 0, now: start)
+
+        XCTAssertEqual(
+            tracker.update(bytes: 100, now: start.addingTimeInterval(1)),
+            100,
+            accuracy: 0.000_001
+        )
+        XCTAssertFalse(tracker.isStable)
+        XCTAssertEqual(
+            tracker.update(bytes: 300, now: start.addingTimeInterval(2)),
+            130,
+            accuracy: 0.000_001
+        )
+        XCTAssertTrue(tracker.isStable)
+        XCTAssertEqual(tracker.averageBytesPerSecond, 150, accuracy: 0.000_001)
+    }
+
+    func testRateTrackerCoalescesShortIntervalsWithoutLosingBytes() {
+        var tracker = RateTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        _ = tracker.update(bytes: 0, now: start)
+
+        XCTAssertEqual(
+            tracker.update(bytes: 50, now: start.addingTimeInterval(0.05)),
+            0
+        )
+        XCTAssertEqual(tracker.samples, 0)
+        XCTAssertEqual(tracker.averageBytesPerSecond, 0)
+        XCTAssertEqual(
+            tracker.update(bytes: 150, now: start.addingTimeInterval(1.05)),
+            150.0 / 1.05,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            tracker.averageBytesPerSecond,
+            150.0 / 1.05,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testRateTrackerForceSamplesFastCompletion() {
+        var tracker = RateTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        _ = tracker.update(bytes: 0, now: start)
+
+        XCTAssertEqual(
+            tracker.update(
+                bytes: 100,
+                now: start.addingTimeInterval(0.05),
+                forceSample: true
+            ),
+            2_000,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(tracker.samples, 1)
+        XCTAssertEqual(tracker.averageBytesPerSecond, 2_000, accuracy: 0.000_001)
+    }
+
+    func testRateTrackerByteRollbackResetsBaselineWithoutNegativeThroughput() {
+        var tracker = RateTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        _ = tracker.update(bytes: 100, now: start)
+        _ = tracker.update(bytes: 200, now: start.addingTimeInterval(1))
+
+        XCTAssertEqual(tracker.update(bytes: 50, now: start.addingTimeInterval(2)), 0)
+        XCTAssertEqual(tracker.samples, 0)
+        XCTAssertEqual(tracker.averageBytesPerSecond, 0)
+        XCTAssertEqual(
+            tracker.update(bytes: 150, now: start.addingTimeInterval(3)),
+            100,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(tracker.samples, 1)
+        XCTAssertEqual(tracker.averageBytesPerSecond, 100, accuracy: 0.000_001)
+    }
+
+    func testRateTrackerAverageIncludesZeroByteStallIntervals() {
+        var tracker = RateTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        _ = tracker.update(bytes: 0, now: start)
+        _ = tracker.update(bytes: 100, now: start.addingTimeInterval(1))
+
+        XCTAssertEqual(
+            tracker.update(bytes: 100, now: start.addingTimeInterval(3)),
+            70,
+            accuracy: 0.000_001
+        )
+        XCTAssertFalse(tracker.isStable)
+        XCTAssertEqual(tracker.averageBytesPerSecond, 100.0 / 3.0, accuracy: 0.000_001)
+    }
+
+    func testEstimatedRemainingSecondsRejectsUnstableAndInvalidBoundaries() {
+        XCTAssertNil(estimatedRemainingSeconds(
+            total: 100,
+            transferred: 50,
+            bytesPerSecond: 10,
+            isStable: false
+        ))
+        XCTAssertNil(estimatedRemainingSeconds(
+            total: 100,
+            transferred: 100,
+            bytesPerSecond: 10,
+            isStable: true
+        ))
+        XCTAssertNil(estimatedRemainingSeconds(
+            total: 100,
+            transferred: 50,
+            bytesPerSecond: 0,
+            isStable: true
+        ))
+        XCTAssertNil(estimatedRemainingSeconds(
+            total: 100,
+            transferred: 50,
+            bytesPerSecond: .infinity,
+            isStable: true
+        ))
+        XCTAssertNil(estimatedRemainingSeconds(
+            total: UInt64.max,
+            transferred: 0,
+            bytesPerSecond: .leastNonzeroMagnitude,
+            isStable: true
+        ))
+        XCTAssertEqual(
+            estimatedRemainingSeconds(
+                total: 100,
+                transferred: 25,
+                bytesPerSecond: 15,
+                isStable: true
+            ),
+            5
+        )
+    }
+
+    func testByteAndRateFormattingClampInvalidAndExtremeInputs() {
+        XCTAssertFalse(byteString(UInt64.max).isEmpty)
+        XCTAssertEqual(rateString(.infinity), byteString(0) + "/s")
+        XCTAssertEqual(rateString(.nan), byteString(0) + "/s")
+    }
+
+    func testCurrentTransferMetricsExpireAfterAStall() {
+        let sampledAt = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        XCTAssertTrue(TransferMetricFreshnessPolicy.isFresh(
+            sampledAt: sampledAt,
+            now: sampledAt.addingTimeInterval(2.5)
+        ))
+        XCTAssertFalse(TransferMetricFreshnessPolicy.isFresh(
+            sampledAt: sampledAt,
+            now: sampledAt.addingTimeInterval(2.501)
+        ))
+        XCTAssertFalse(TransferMetricFreshnessPolicy.isFresh(
+            sampledAt: nil,
+            now: sampledAt
+        ))
+    }
+
+    func testStageTimingProjectionPreservesTypedFieldsAndStableFormat() {
+        let sample = ActivityStageTimingSample(FfiTransferStageTiming(
+            stage: .firstPayload,
+            direction: .receive,
+            attemptId: 7,
+            transferId: "job-1",
+            elapsedUs: 42_000,
+            deltaUs: 9_000
+        ))
+
+        XCTAssertEqual(sample.stage, .firstPayload)
+        XCTAssertEqual(sample.direction, .receive)
+        XCTAssertEqual(sample.attemptID, 7)
+        XCTAssertEqual(sample.transferID, "job-1")
+        XCTAssertEqual(sample.elapsedMicroseconds, 42_000)
+        XCTAssertEqual(sample.deltaMicroseconds, 9_000)
+        XCTAssertEqual(
+            sample.diagnosticLine,
+            "stage_timing stage=first_payload direction=receive attempt_id=7 " +
+                "transfer_id=job-1 elapsed_us=42000 delta_us=9000"
+        )
+        XCTAssertFalse(sample.diagnosticLine.contains("\n"))
+    }
+
+    func testStageTimingProjectionRetainsNewestAttemptsInCanonicalOrder() {
+        var samples: [ActivityStageTimingSample] = []
+        for attemptID in UInt64(0)..<66 {
+            let sample = ActivityStageTimingSample(FfiTransferStageTiming(
+                stage: .sessionStarted,
+                direction: .send,
+                attemptId: attemptID,
+                transferId: nil,
+                elapsedUs: attemptID,
+                deltaUs: 1
+            ))
+            samples = ActivityStageTimingProjection.appending(sample, to: samples)
+        }
+
+        XCTAssertEqual(samples.count, ActivityStageTimingProjection.maximumSamplesPerActivity)
+        XCTAssertEqual(samples.first?.attemptID, 2)
+        XCTAssertEqual(samples.last?.attemptID, 65)
+    }
+
+    func testStageTimingProjectionReordersLateCallbacksAndDeduplicatesStages() {
+        let later = ActivityStageTimingSample(FfiTransferStageTiming(
+            stage: .authenticationComplete,
+            direction: .send,
+            attemptId: 9,
+            transferId: nil,
+            elapsedUs: 40,
+            deltaUs: 10
+        ))
+        let earlier = ActivityStageTimingSample(FfiTransferStageTiming(
+            stage: .authenticationStarted,
+            direction: .send,
+            attemptId: 9,
+            transferId: nil,
+            elapsedUs: 30,
+            deltaUs: 20
+        ))
+
+        var samples = ActivityStageTimingProjection.appending(later, to: [])
+        samples = ActivityStageTimingProjection.appending(earlier, to: samples)
+        samples = ActivityStageTimingProjection.appending(earlier, to: samples)
+
+        XCTAssertEqual(samples.map(\.stage), [.authenticationStarted, .authenticationComplete])
+        XCTAssertEqual(
+            earlier.diagnosticLine,
+            "stage_timing stage=authentication_started direction=send attempt_id=9 " +
+                "transfer_id=- elapsed_us=30 delta_us=20"
+        )
+    }
+
+    func testStageTimingPresentationUsesOnlyLatestAttemptInElapsedOrder() {
+        let samples = [
+            stageTiming(.deliveryComplete, attemptID: 4, elapsedMicroseconds: 3_000_000),
+            stageTiming(.firstPayload, attemptID: 3, elapsedMicroseconds: 900_000),
+            stageTiming(.connectionReady, attemptID: 4, elapsedMicroseconds: 125_000),
+        ]
+
+        let latest = ActivityStageTimingPresentationPolicy.latestAttempt(from: samples)
+
+        XCTAssertEqual(latest.map(\.attemptID), [4, 4])
+        XCTAssertEqual(latest.map(\.stage), [.connectionReady, .deliveryComplete])
+    }
+
+    func testStageTimingElapsedFormattingCoversDisplayBoundaries() {
+        XCTAssertEqual(
+            ActivityStageTimingPresentationPolicy.elapsedString(microseconds: 0),
+            "<1 ms"
+        )
+        XCTAssertEqual(
+            ActivityStageTimingPresentationPolicy.elapsedString(microseconds: 1_000),
+            "1 ms"
+        )
+        XCTAssertEqual(
+            ActivityStageTimingPresentationPolicy.elapsedString(microseconds: 1_500),
+            "2 ms"
+        )
+        XCTAssertEqual(
+            ActivityStageTimingPresentationPolicy.elapsedString(microseconds: 1_234_000),
+            "1.23 s"
+        )
+        XCTAssertEqual(
+            ActivityStageTimingPresentationPolicy.elapsedString(microseconds: 12_340_000),
+            "12.3 s"
+        )
+        XCTAssertEqual(
+            ActivityStageTimingPresentationPolicy.elapsedString(microseconds: 61_000_000),
+            "1m 1s"
+        )
+    }
+
     func testNativeDeliveryIsDeferredUntilTheOwningFutureReturns() {
         XCTAssertFalse(NativeTerminalDeliveryPolicy.shouldForwardPhase(
             .delivered,
@@ -168,6 +450,147 @@ final class TransferPresentationPolicyTests: XCTestCase {
         ))
     }
 
+    func testActivityGroupsOnlyStableGroupIDsAndKeepsDirectTransfersSeparate() throws {
+        let date = Date(timeIntervalSince1970: 100)
+        let groups = activityRoomGroups([
+            activity("room-b", state: .delivered, date: date, groupID: "stable-room"),
+            activity("direct-b", state: .delivered, date: date),
+            activity("room-a", state: .transferring, date: date, groupID: "stable-room"),
+            activity("direct-a", state: .delivered, date: date),
+        ])
+
+        XCTAssertEqual(groups.count, 3)
+        let room = try XCTUnwrap(groups.first { $0.activityGroupID == "stable-room" })
+        XCTAssertEqual(room.records.map(\.activityId), ["room-a", "room-b"])
+        XCTAssertEqual(
+            groups.filter { $0.activityGroupID == nil }.flatMap(\.records).map(\.activityId).sorted(),
+            ["direct-a", "direct-b"]
+        )
+    }
+
+    func testActivityGroupSummaryPrefersCurrentWorkOverHistoricalFailure() throws {
+        let group = try XCTUnwrap(ActivityRoomGroup(
+            id: "group:stable-room",
+            activityGroupID: "stable-room",
+            records: [
+                activity("old-failure", state: .failed, date: Date(timeIntervalSince1970: 200)),
+                activity("current", state: .transferring, date: Date(timeIntervalSince1970: 100)),
+            ]
+        ))
+
+        XCTAssertEqual(group.summaryRecord.activityId, "current")
+        XCTAssertEqual(group.summaryRecord.state, .transferring)
+    }
+
+    func testActivityGroupSummaryUsesNewestRecordWhenNoWorkIsPending() throws {
+        let group = try XCTUnwrap(ActivityRoomGroup(
+            id: "group:stable-room",
+            activityGroupID: "stable-room",
+            records: [
+                activity("old-failure", state: .failed, date: Date(timeIntervalSince1970: 100)),
+                activity("new-success", state: .delivered, date: Date(timeIntervalSince1970: 200)),
+            ]
+        ))
+
+        XCTAssertEqual(group.summaryRecord.activityId, "new-success")
+        XCTAssertEqual(group.summaryRecord.state, .delivered)
+    }
+
+    func testActivityGroupProgressUsesOnlyCurrentActiveRecords() throws {
+        let group = try XCTUnwrap(ActivityRoomGroup(
+            id: "group:stable-room",
+            activityGroupID: "stable-room",
+            records: [
+                activity(
+                    "active",
+                    state: .transferring,
+                    date: Date(timeIntervalSince1970: 300),
+                    bytes: 40,
+                    total: 100
+                ),
+                activity(
+                    "waiting",
+                    state: .waitingForPeer,
+                    date: Date(timeIntervalSince1970: 200),
+                    bytes: 0,
+                    total: 1_000
+                ),
+                activity(
+                    "delivered",
+                    state: .delivered,
+                    date: Date(timeIntervalSince1970: 100),
+                    bytes: 2_000,
+                    total: 2_000
+                ),
+            ]
+        ))
+
+        XCTAssertEqual(group.progressRecords.map(\.activityId), ["active"])
+        XCTAssertEqual(group.progressBytesTransferred, 40)
+        XCTAssertEqual(group.progressTotalBytes, 100)
+    }
+
+    func testActivityGroupByteAggregationSaturates() throws {
+        let group = try XCTUnwrap(ActivityRoomGroup(
+            id: "group:stable-room",
+            activityGroupID: "stable-room",
+            records: [
+                activity(
+                    "maximum",
+                    state: .paused,
+                    date: Date(timeIntervalSince1970: 200),
+                    bytes: UInt64.max,
+                    total: UInt64.max
+                ),
+                activity(
+                    "overflow",
+                    state: .paused,
+                    date: Date(timeIntervalSince1970: 100),
+                    bytes: 1,
+                    total: 1
+                ),
+            ]
+        ))
+
+        XCTAssertEqual(group.totalBytes, UInt64.max)
+        XCTAssertEqual(group.progressTotalBytes, UInt64.max)
+        XCTAssertEqual(group.progressBytesTransferred, UInt64.max)
+    }
+
+    func testActivityGroupProgressHidesWaitingAndTerminalHistory() throws {
+        let waiting = try XCTUnwrap(ActivityRoomGroup(
+            id: "group:waiting",
+            activityGroupID: "waiting",
+            records: [
+                activity(
+                    "waiting",
+                    state: .waitingForPeer,
+                    date: Date(timeIntervalSince1970: 100),
+                    bytes: 0,
+                    total: 100
+                ),
+            ]
+        ))
+        let delivered = try XCTUnwrap(ActivityRoomGroup(
+            id: "group:delivered",
+            activityGroupID: "delivered",
+            records: [
+                activity(
+                    "delivered",
+                    state: .delivered,
+                    date: Date(timeIntervalSince1970: 100),
+                    bytes: 100,
+                    total: 100
+                ),
+            ]
+        ))
+
+        XCTAssertTrue(waiting.progressRecords.isEmpty)
+        XCTAssertEqual(waiting.progressTotalBytes, 0)
+        XCTAssertTrue(delivered.progressRecords.isEmpty)
+        XCTAssertEqual(delivered.progressTotalBytes, 0)
+    }
+
     private func actions(
         pause: Bool = false,
         resume: Bool = false,
@@ -200,6 +623,48 @@ final class TransferPresentationPolicyTests: XCTestCase {
             recoveryAction: recoveryAction ?? (retryable ? .resume : .none),
             userMessageKey: "transfer.network_lost",
             diagnosticMessage: "test"
+        )
+    }
+
+    private func stageTiming(
+        _ stage: FfiTransferStage,
+        attemptID: UInt64,
+        elapsedMicroseconds: UInt64
+    ) -> ActivityStageTimingSample {
+        ActivityStageTimingSample(FfiTransferStageTiming(
+            stage: stage,
+            direction: .send,
+            attemptId: attemptID,
+            transferId: nil,
+            elapsedUs: elapsedMicroseconds,
+            deltaUs: elapsedMicroseconds
+        ))
+    }
+
+    private func activity(
+        _ id: String,
+        state: TransferActivityState,
+        date: Date,
+        groupID: String? = nil,
+        bytes: UInt64 = 0,
+        total: UInt64 = 0
+    ) -> TransferActivityRecord {
+        TransferActivityRecord(
+            activityId: id,
+            direction: .send,
+            mode: .invite,
+            itemCount: 1,
+            totalBytes: total,
+            bytesTransferred: bytes,
+            state: state,
+            diagnosticMessage: "",
+            failure: nil,
+            savedPaths: [],
+            roomID: "diagnostic-only",
+            connectionPath: nil,
+            updatedAt: date,
+            activityGroupID: groupID,
+            activityGroupLabel: nil
         )
     }
 }

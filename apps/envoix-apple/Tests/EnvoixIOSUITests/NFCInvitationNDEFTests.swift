@@ -36,7 +36,7 @@ final class NFCInvitationNDEFTests: XCTestCase {
 
     func testRoomInvitationRoundTripsWithoutNormalization() throws {
         let invitation =
-            "envoix://room/R123456-a1b2-c3d4?broker=https%3A%2F%2Fexample.test%2Froom&expires=9999999999"
+            "envoix://room/123456-a1b2-c3d4?broker=https%3A%2F%2Fexample.test%2Froom&expires=9999999999"
         let message = try NFCInvitationNDEFCodec.message(for: invitation)
         let carrier = try NFCInvitationNDEFCodec.carrierURL(for: invitation)
 
@@ -51,8 +51,8 @@ final class NFCInvitationNDEFTests: XCTestCase {
         )
     }
 
-    func testDecodeStillAcceptsLegacyDirectEnvoixURIRecord() throws {
-        let invitation = "envoix://room/R123456-legacy-tag"
+    func testDecodeStillAcceptsDirectEnvoixURIRecord() throws {
+        let invitation = "envoix://room/123456-a1b2-c3d4"
 
         XCTAssertEqual(
             try NFCInvitationNDEFCodec.invitation(
@@ -128,7 +128,7 @@ final class NFCInvitationNDEFTests: XCTestCase {
         XCTAssertThrowsError(
             try NFCInvitationNDEFCodec.invitation(
                 fromDirectURL: XCTUnwrap(
-                    URL(string: "Envoix://room/R123456-wrong-case")
+                    URL(string: "Envoix://room/123456-a1b2-c3d4")
                 )
             )
         ) { error in
@@ -141,7 +141,7 @@ final class NFCInvitationNDEFTests: XCTestCase {
 
     func testDecodeRejectsMultipleMessagesAndMultipleRecords() throws {
         let message = try NFCInvitationNDEFCodec.message(
-            for: "envoix://room/R123456-test-room"
+            for: "envoix://room/123456-a1b2-c3d4"
         )
         XCTAssertThrowsError(
             try NFCInvitationNDEFCodec.invitation(from: [message, message])
@@ -159,7 +159,7 @@ final class NFCInvitationNDEFTests: XCTestCase {
     }
 
     func testDecodeRejectsWrongTypeIdentifierAndURIPrefixCode() {
-        let invitation = "envoix://room/R123456-test-room"
+        let invitation = "envoix://room/123456-a1b2-c3d4"
         let bytes = Data(invitation.utf8)
         let wrongType = NFCNDEFPayload(
             format: .nfcWellKnown,
@@ -193,11 +193,11 @@ final class NFCInvitationNDEFTests: XCTestCase {
 
     func testContractRejectsWhitespaceControlsNonASCIIAndWrongCase() {
         for invitation in [
-            "envoix://room/R123 456-test-room",
-            "envoix://room/R123456-\ttest-room",
-            "envoix://room/R123456-test-\nroom",
-            "envoix://room/R123456-café",
-            "Envoix://room/R123456-test-room"
+            "envoix://room/123 456-a1b2-c3d4",
+            "envoix://room/123456-\ta1b2-c3d4",
+            "envoix://room/123456-a1b2-\nc3d4",
+            "envoix://room/123456-a1b2-café",
+            "Envoix://room/123456-a1b2-c3d4"
         ] {
             XCTAssertThrowsError(
                 try NFCInvitationNDEFCodec.message(for: invitation),
@@ -208,9 +208,9 @@ final class NFCInvitationNDEFTests: XCTestCase {
 
     func testDecodeRejectsEmbeddedSpaceTabAndNewline() {
         for invitation in [
-            "envoix://room/R123 456-test-room",
-            "envoix://room/R123456-\ttest-room",
-            "envoix://room/R123456-test-\nroom"
+            "envoix://room/123 456-a1b2-c3d4",
+            "envoix://room/123456-\ta1b2-c3d4",
+            "envoix://room/123456-a1b2-\nc3d4"
         ] {
             let record = NFCNDEFPayload(
                 format: .nfcWellKnown,
@@ -228,7 +228,7 @@ final class NFCInvitationNDEFTests: XCTestCase {
     }
 
     func testCarrierRejectsWrongOriginPathAndNonInvitationPayload() {
-        let invitation = "envoix://room/R123456-test-room"
+        let invitation = "envoix://room/123456-a1b2-c3d4"
         let encoded = base64URLString(for: Data(invitation.utf8))
         let invalidURLs = [
             "http://ece4410j-nuub.github.io/nfc/v1/#\(encoded)",
@@ -501,7 +501,7 @@ final class NFCInvitationNDEFTests: XCTestCase {
     }
 
     func testPrivateAIDRawMessageUsesExistingStrictInvitationCodec() throws {
-        let invitation = "envoix://room/R123456-private-aid"
+        let invitation = "envoix://room/123456-a1b2-c3d4"
         let uriPayload = Data([0x00]) + Data(invitation.utf8)
         let rawMessage = Data([
             0xd1,
@@ -520,7 +520,7 @@ final class NFCInvitationNDEFTests: XCTestCase {
     }
 
     func testPrivateAIDRawEnvelopeRejectsMalformedFraming() {
-        let invitation = "envoix://room/R123456-private-aid"
+        let invitation = "envoix://room/123456-a1b2-c3d4"
         let uriPayload = Data([0x00]) + Data(invitation.utf8)
         let rawMessage = Data([
             0xd1,

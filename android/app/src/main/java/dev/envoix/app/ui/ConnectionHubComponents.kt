@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,15 +24,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Nfc
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -51,16 +58,27 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.InviteCodec
+import dev.envoix.app.NfcPhoneHostingState
+import dev.envoix.app.NfcPhoneHostingStatus
+import dev.envoix.app.NfcPhoneReaderState
+import dev.envoix.app.NfcPhoneReaderStatus
 import dev.envoix.app.discovery.DiscoveredPeer
+import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyVisibility
+import dev.envoix.app.discovery.ProviderAvailability
+import dev.envoix.app.discovery.ProviderStatus
 
 @Composable
 internal fun ConnectionHubAppBar(
@@ -131,9 +149,43 @@ private fun HubUtilityButton(
     }
 }
 
+private val HiddenRoomQrSide = 148.dp
+private val RevealedRoomQrSide = 168.dp
+private val RoomInviteHorizontalGap = 12.dp
+private val RoomInviteActionsMinimumWidth = 120.dp
+private val RoomCodeInlineActionsWidth = 100.dp
+private val RoomCodeInlineTextWidth = 156.dp
+
+internal data class MainRoomInviteQrLayout(
+    val side: Dp,
+    val stackActions: Boolean,
+)
+
+internal fun resolveMainRoomInviteQrLayout(
+    maxWidth: Dp,
+    revealed: Boolean,
+): MainRoomInviteQrLayout {
+    val preferredSide = if (revealed) RevealedRoomQrSide else HiddenRoomQrSide
+    val side = if (maxWidth < preferredSide) maxWidth else preferredSide
+    return MainRoomInviteQrLayout(
+        side = side,
+        stackActions = maxWidth < side + RoomInviteHorizontalGap + RoomInviteActionsMinimumWidth,
+    )
+}
+
+internal fun shouldStackRoomCodeActions(
+    maxWidth: Dp,
+    fontScale: Float,
+): Boolean {
+    val scaledTextWidth = RoomCodeInlineTextWidth * fontScale.coerceAtLeast(1f)
+    return maxWidth < RoomCodeInlineActionsWidth + scaledTextWidth
+}
+
 @Composable
 internal fun MainRoomInviteCard(
     control: RoomControlUiState,
+    onScan: () -> Unit,
+    onEnterCode: () -> Unit,
     onReveal: () -> Unit,
     onHide: () -> Unit,
     onRefresh: () -> Unit,
@@ -186,6 +238,10 @@ internal fun MainRoomInviteCard(
             control.inviteRevealed &&
             control.invite != null
     val joining = control.phase == RoomControlPhase.Joining
+    val creating =
+        control.phase == RoomControlPhase.Hosting &&
+            control.inviteRevealed &&
+            control.invite == null
     Column(
         Modifier
             .testTag("hub_room_invite")
@@ -193,76 +249,115 @@ internal fun MainRoomInviteCard(
             .clip(RoundedCornerShape(22.dp))
             .background(colors.surface)
             .border(1.dp, colors.line, RoundedCornerShape(22.dp))
-            .clickable(enabled = !revealed && !joining, onClick = onReveal)
             .padding(horizontal = 16.dp, vertical = 18.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(Modifier.size(190.dp), contentAlignment = Alignment.Center) {
-            when {
-                revealed -> QrCode(requireNotNull(control.invite).payload, side = 190.dp)
-                joining ->
-                    CircularProgressIndicator(
-                        color = colors.accent,
-                        modifier = Modifier.size(34.dp),
-                    )
-                control.phase == RoomControlPhase.Hosting && control.inviteRevealed ->
-                    CircularProgressIndicator(color = colors.accent, modifier = Modifier.size(34.dp))
-                else -> BlurredQrPlaceholder()
-            }
-        }
-        Spacer(Modifier.height(13.dp))
-        if (revealed) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    requireNotNull(control.invite).code,
-                    color = colors.text,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
-                )
-                Spacer(Modifier.width(4.dp))
-                IconButton(
-                    onClick = {
-                        clipboard.setText(AnnotatedString(requireNotNull(control.invite).code))
-                    },
-                    modifier = Modifier.testTag("hub_copy_room_code"),
-                ) {
-                    Icon(
-                        Icons.Default.ContentCopy,
-                        appText("Copy room code", "复制房间码"),
-                        tint = colors.muted,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-                IconButton(
-                    onClick = onHide,
-                    modifier = Modifier.testTag("hub_hide_room_code"),
-                ) {
-                    Icon(
-                        Icons.Default.VisibilityOff,
-                        appText("Hide room code", "隐藏房间码"),
-                        tint = colors.muted,
-                        modifier = Modifier.size(19.dp),
-                    )
-                }
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                appText("ROOM", "房间"),
+                color = colors.muted,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.7.sp,
+                modifier = Modifier.weight(1f),
+            )
+            if (control.phase == RoomControlPhase.Hosting && control.invite != null) {
                 IconButton(
                     onClick = onRefresh,
                     modifier = Modifier.testTag("hub_refresh_room_code"),
                 ) {
                     Icon(
                         Icons.Default.Refresh,
-                        appText("Refresh room code", "刷新房间码"),
+                        appText("Renew room invitation", "续期房间邀请"),
                         tint = colors.accent,
                         modifier = Modifier.size(19.dp),
                     )
                 }
             }
+            if (control.phase == RoomControlPhase.Hosting || joining) {
+                IconButton(
+                    onClick = onEndWaiting,
+                    modifier = Modifier.testTag("hub_end_waiting_room"),
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        if (joining) {
+                            appText("Cancel joining room", "取消加入房间")
+                        } else {
+                            appText("Close room", "关闭房间")
+                        },
+                        tint = colors.danger,
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val layout = resolveMainRoomInviteQrLayout(maxWidth, revealed)
+            if (layout.stackActions) {
+                Column(
+                    Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    MainRoomQrToggle(
+                        control = control,
+                        revealed = revealed,
+                        joining = joining,
+                        creating = creating,
+                        side = layout.side,
+                        onReveal = onReveal,
+                        onHide = onHide,
+                    )
+                    Spacer(Modifier.height(RoomInviteHorizontalGap))
+                    MainRoomInviteActions(
+                        onScan = onScan,
+                        onEnterCode = onEnterCode,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            } else {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    MainRoomQrToggle(
+                        control = control,
+                        revealed = revealed,
+                        joining = joining,
+                        creating = creating,
+                        side = layout.side,
+                        onReveal = onReveal,
+                        onHide = onHide,
+                    )
+                    Spacer(Modifier.width(RoomInviteHorizontalGap))
+                    MainRoomInviteActions(
+                        onScan = onScan,
+                        onEnterCode = onEnterCode,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(13.dp))
+        if (revealed) {
+            val roomCode = requireNotNull(control.invite).code
+            RevealedRoomCode(
+                code = roomCode,
+                onCopy = {
+                    clipboard.setText(AnnotatedString(roomCode))
+                },
+                onHide = onHide,
+            )
         } else {
             Text(
                 if (joining) {
                     appText("Joining room…", "正在加入房间…")
                 } else {
-                    "R••••••-••••-••••"
+                    "••••••-••••-••••"
                 },
                 color = colors.muted,
                 fontSize = 15.sp,
@@ -290,38 +385,182 @@ internal fun MainRoomInviteCard(
             Spacer(Modifier.height(8.dp))
             Text(it, color = colors.danger, fontSize = 12.sp, textAlign = TextAlign.Center)
         }
-        if (control.phase == RoomControlPhase.Hosting || joining) {
-            Spacer(Modifier.height(6.dp))
-            TextButton(
-                onClick = onEndWaiting,
-                modifier = Modifier.testTag("hub_end_waiting_room"),
+    }
+}
+
+@Composable
+private fun RevealedRoomCode(
+    code: String,
+    onCopy: () -> Unit,
+    onHide: () -> Unit,
+) {
+    val fontScale = LocalDensity.current.fontScale
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val stackActions = shouldStackRoomCodeActions(maxWidth, fontScale)
+        if (stackActions) {
+            Column(
+                Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Icon(
-                    Icons.Default.Close,
-                    null,
-                    tint = colors.danger,
-                    modifier = Modifier.size(17.dp),
-                )
-                Spacer(Modifier.width(5.dp))
-                Text(
-                    if (joining) {
-                        appText("Cancel", "取消")
-                    } else {
-                        appText("Stop waiting", "停止等待")
-                    },
-                    color = colors.danger,
-                )
+                RoomCodeLabel(code, Modifier.fillMaxWidth())
+                RoomCodeActionButtons(onCopy = onCopy, onHide = onHide)
+            }
+        } else {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RoomCodeLabel(code)
+                Spacer(Modifier.width(4.dp))
+                RoomCodeActionButtons(onCopy = onCopy, onHide = onHide)
             }
         }
     }
 }
 
 @Composable
-private fun BlurredQrPlaceholder() {
+private fun RoomCodeLabel(
+    code: String,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        code,
+        color = Envoix.colors.text,
+        fontSize = 16.sp,
+        fontWeight = FontWeight.Bold,
+        fontFamily = FontFamily.Monospace,
+        textAlign = TextAlign.Center,
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun RoomCodeActionButtons(
+    onCopy: () -> Unit,
+    onHide: () -> Unit,
+) {
+    val colors = Envoix.colors
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(
+            onClick = onCopy,
+            modifier = Modifier.testTag("hub_copy_room_code"),
+        ) {
+            Icon(
+                Icons.Default.ContentCopy,
+                appText("Copy room code", "复制房间码"),
+                tint = colors.muted,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        IconButton(
+            onClick = onHide,
+            modifier = Modifier.testTag("hub_hide_room_code"),
+        ) {
+            Icon(
+                Icons.Default.VisibilityOff,
+                appText("Hide room code", "隐藏房间码"),
+                tint = colors.muted,
+                modifier = Modifier.size(19.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MainRoomQrToggle(
+    control: RoomControlUiState,
+    revealed: Boolean,
+    joining: Boolean,
+    creating: Boolean,
+    side: Dp,
+    onReveal: () -> Unit,
+    onHide: () -> Unit,
+) {
     val colors = Envoix.colors
     Box(
         Modifier
-            .size(190.dp)
+            .size(side)
+            .testTag("hub_room_qr_toggle")
+            .then(
+                when {
+                    revealed ->
+                        Modifier.clickable(
+                            onClickLabel = appText("Hide room QR", "隐藏房间二维码"),
+                            role = Role.Button,
+                            onClick = onHide,
+                        )
+                    !joining && !creating ->
+                        Modifier.clickable(
+                            onClickLabel = appText("Show room QR", "显示房间二维码"),
+                            role = Role.Button,
+                            onClick = onReveal,
+                        )
+                    else -> Modifier
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            revealed -> QrCode(requireNotNull(control.invite).payload, side = side)
+            joining ->
+                CircularProgressIndicator(
+                    color = colors.accent,
+                    modifier = Modifier.size(34.dp),
+                )
+            control.phase == RoomControlPhase.Hosting && control.inviteRevealed ->
+                CircularProgressIndicator(
+                    color = colors.accent,
+                    modifier = Modifier.size(34.dp),
+                )
+            else -> BlurredQrPlaceholder(side = side)
+        }
+    }
+}
+
+@Composable
+private fun MainRoomInviteActions(
+    onScan: () -> Unit,
+    onEnterCode: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        OutlinedButton(
+            onClick = onScan,
+            modifier = Modifier.fillMaxWidth().testTag("hub_scan_qr"),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+        ) {
+            Icon(Icons.Default.QrCodeScanner, null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                appText("Scan QR", "扫描"),
+                textAlign = TextAlign.Center,
+            )
+        }
+        OutlinedButton(
+            onClick = onEnterCode,
+            modifier = Modifier.fillMaxWidth().testTag("hub_enter_code"),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+        ) {
+            Icon(Icons.Default.Keyboard, null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                appText("Enter code", "输入码"),
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+@Composable
+private fun BlurredQrPlaceholder(side: Dp) {
+    val colors = Envoix.colors
+    Box(
+        Modifier
+            .size(side)
             .clip(RoundedCornerShape(14.dp))
             .background(Color.White)
             .padding(10.dp),
@@ -341,33 +580,6 @@ private fun BlurredQrPlaceholder() {
                 }
             }
             drawRect(Color.White.copy(alpha = 0.62f))
-        }
-    }
-}
-
-@Composable
-internal fun ConnectionMethodActions(
-    onScan: () -> Unit,
-    onEnterCode: () -> Unit,
-) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedButton(
-            onClick = onScan,
-            modifier = Modifier.weight(1f).testTag("hub_scan_qr"),
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
-        ) {
-            Icon(Icons.Default.QrCodeScanner, null, modifier = Modifier.size(19.dp))
-            Spacer(Modifier.width(7.dp))
-            Text(appText("Scan QR", "扫描二维码"), maxLines = 1)
-        }
-        OutlinedButton(
-            onClick = onEnterCode,
-            modifier = Modifier.weight(1f).testTag("hub_enter_code"),
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
-        ) {
-            Icon(Icons.Default.Keyboard, null, modifier = Modifier.size(19.dp))
-            Spacer(Modifier.width(7.dp))
-            Text(appText("Enter code", "输入房间码"), maxLines = 1)
         }
     }
 }
@@ -468,9 +680,294 @@ private fun NearbyVisibility.label(): String =
         NearbyVisibility.Foreground -> appText("While open", "打开时可见")
     }
 
+internal enum class WifiAwareDiscoveryUiState {
+    Active,
+    Starting,
+    Unavailable,
+}
+
+internal fun wifiAwareDiscoveryUiState(status: ProviderStatus?): WifiAwareDiscoveryUiState =
+    when (status?.availability) {
+        ProviderAvailability.Ready -> WifiAwareDiscoveryUiState.Active
+        ProviderAvailability.Starting -> WifiAwareDiscoveryUiState.Starting
+        else -> WifiAwareDiscoveryUiState.Unavailable
+    }
+
+internal fun canShareRoomViaNfc(phase: RoomControlPhase): Boolean =
+    phase == RoomControlPhase.None ||
+        phase == RoomControlPhase.Hosting ||
+        phase == RoomControlPhase.Closed ||
+        phase == RoomControlPhase.Failed
+
+@Composable
+internal fun NearbySectionHeader(
+    listExpanded: Boolean,
+    wifiAwareStatus: ProviderStatus?,
+    nfcPhoneHosting: NfcPhoneHostingState,
+    nfcPhoneReader: NfcPhoneReaderState,
+    onWifiAware: () -> Unit,
+    onNfc: () -> Unit,
+    onToggleList: () -> Unit,
+) {
+    val colors = Envoix.colors
+    val wifiAwareActive =
+        wifiAwareDiscoveryUiState(wifiAwareStatus) == WifiAwareDiscoveryUiState.Active
+    val nfcActive = nfcPhoneHosting.armed || nfcPhoneReader.scanning
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            appText("NEARBY DEVICES", "附近设备"),
+            color = colors.muted,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.8.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = onWifiAware,
+            modifier =
+                Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("hub_wifi_aware"),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+        ) {
+            Icon(
+                Icons.Default.WifiTethering,
+                appText("Wi-Fi Aware", "Wi-Fi Aware"),
+                tint = if (wifiAwareActive) colors.accent else colors.muted,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(3.dp))
+            Text(
+                appText("Aware", "Aware"),
+                color = if (wifiAwareActive) colors.accent else colors.muted,
+                fontSize = 12.sp,
+            )
+        }
+        TextButton(
+            onClick = onNfc,
+            modifier =
+                Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("hub_nfc"),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+        ) {
+            Icon(
+                Icons.Default.Nfc,
+                appText("NFC nearby room", "NFC 附近房间"),
+                tint = if (nfcActive) colors.accent else colors.muted,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(3.dp))
+            Text(
+                "NFC",
+                color = if (nfcActive) colors.accent else colors.muted,
+                fontSize = 12.sp,
+            )
+        }
+        IconButton(
+            onClick = onToggleList,
+            modifier =
+                Modifier
+                    .size(40.dp)
+                    .testTag("hub_toggle_nearby_list"),
+        ) {
+            Icon(
+                if (listExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                if (listExpanded) {
+                    appText("Hide nearby devices", "隐藏附近设备")
+                } else {
+                    appText("Show nearby devices", "显示附近设备")
+                },
+                tint = colors.muted,
+                modifier = Modifier.size(19.dp),
+            )
+        }
+    }
+}
+
+@Composable
+internal fun NfcNearbyActionsDialog(
+    roomPhase: RoomControlPhase,
+    hosting: NfcPhoneHostingState,
+    reader: NfcPhoneReaderState,
+    onDismiss: () -> Unit,
+    onScan: () -> Unit,
+    onShare: () -> Unit,
+    onStopSharing: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(appText("NFC nearby room", "NFC 附近房间")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    appText(
+                        "NFC carries a short-lived room invitation. The room still authenticates the connection, and file data uses the selected network path.",
+                        "NFC 只携带短时房间邀请。房间仍会验证连接，文件数据通过自动选定的网络路径传输。",
+                    ),
+                    color = Envoix.colors.muted,
+                    fontSize = 13.sp,
+                )
+                Text(
+                    nfcHostingStatusLabel(hosting.status),
+                    color = if (hosting.armed) Envoix.colors.accentStrong else Envoix.colors.muted,
+                    fontSize = 12.sp,
+                )
+                Text(
+                    nfcReaderStatusLabel(reader),
+                    color = if (reader.scanning) Envoix.colors.accentStrong else Envoix.colors.muted,
+                    fontSize = 12.sp,
+                )
+                OutlinedButton(
+                    onClick = onScan,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .testTag("hub_scan_nfc"),
+                ) {
+                    Icon(Icons.Default.Nfc, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        if (reader.scanning) {
+                            appText("Stop NFC scan", "停止 NFC 扫描")
+                        } else {
+                            appText("Scan another phone", "扫描另一台手机")
+                        },
+                    )
+                }
+                OutlinedButton(
+                    onClick = if (hosting.armed) onStopSharing else onShare,
+                    enabled = hosting.armed || canShareRoomViaNfc(roomPhase),
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .testTag(
+                                if (hosting.armed) {
+                                    "hub_stop_nfc_share"
+                                } else {
+                                    "hub_share_room_via_nfc"
+                                },
+                            ),
+                ) {
+                    Icon(Icons.Default.Nfc, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        if (hosting.armed) {
+                            appText("Stop sharing by NFC", "停止通过 NFC 分享")
+                        } else {
+                            appText("Create or share this room", "创建或分享此房间")
+                        },
+                    )
+                }
+                if (!hosting.armed && !canShareRoomViaNfc(roomPhase)) {
+                    Text(
+                        appText(
+                            "End or leave the current room before sharing a new NFC invitation.",
+                            "请先结束或离开当前房间，再分享新的 NFC 邀请。",
+                        ),
+                        color = Envoix.colors.muted,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(appText("Done", "完成"))
+            }
+        },
+        containerColor = Envoix.colors.surface,
+    )
+}
+
+@Composable
+private fun nfcHostingStatusLabel(status: NfcPhoneHostingStatus): String =
+    when (status) {
+        NfcPhoneHostingStatus.Idle -> appText("Sharing: off", "分享：已关闭")
+        NfcPhoneHostingStatus.Armed ->
+            appText("Sharing: ready — hold the phones together", "分享：已就绪，请将两台手机靠近")
+        NfcPhoneHostingStatus.RequiresAndroid15 ->
+            appText("Sharing requires Android 15 or later", "分享需要 Android 15 或更高版本")
+        NfcPhoneHostingStatus.NfcUnavailable ->
+            appText("This phone does not provide NFC", "此手机不支持 NFC")
+        NfcPhoneHostingStatus.NfcDisabled ->
+            appText("Turn on NFC to share", "请打开 NFC 后分享")
+        NfcPhoneHostingStatus.HceUnavailable ->
+            appText("NFC phone sharing is unavailable", "NFC 手机分享不可用")
+        NfcPhoneHostingStatus.ListenOnlyUnavailable ->
+            appText("Safe NFC sharing mode is unavailable", "安全 NFC 分享模式不可用")
+        NfcPhoneHostingStatus.HceActivationFailed ->
+            appText("NFC sharing could not start", "无法启动 NFC 分享")
+        NfcPhoneHostingStatus.InvalidInvitation ->
+            appText("The room invitation is not ready", "房间邀请尚未就绪")
+    }
+
+@Composable
+private fun nfcReaderStatusLabel(state: NfcPhoneReaderState): String =
+    when (state.status) {
+        NfcPhoneReaderStatus.Idle -> appText("Scanning: off", "扫描：已关闭")
+        NfcPhoneReaderStatus.Scanning ->
+            if (state.automatic) {
+                appText("Scanning: nearby phone detected", "扫描：已检测到附近手机")
+            } else {
+                appText("Scanning: hold the phones together", "扫描：请将两台手机靠近")
+            }
+        NfcPhoneReaderStatus.NfcUnavailable ->
+            appText("This phone does not provide NFC scanning", "此手机不支持 NFC 扫描")
+        NfcPhoneReaderStatus.NfcDisabled ->
+            appText("Turn on NFC to scan", "请打开 NFC 后扫描")
+        NfcPhoneReaderStatus.ReaderUnavailable ->
+            appText("NFC scanning could not start", "无法启动 NFC 扫描")
+    }
+
+@Composable
+internal fun WifiAwareDiscoveryDialog(
+    status: ProviderStatus?,
+    onDismiss: () -> Unit,
+) {
+    val state = wifiAwareDiscoveryUiState(status)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Wi-Fi Aware") },
+        text = {
+            Text(
+                when (state) {
+                    WifiAwareDiscoveryUiState.Active ->
+                        appText(
+                            "Wi-Fi Aware discovery is active. Envoix still chooses the data path automatically for each transfer.",
+                            "Wi-Fi Aware 发现已启用。Envoix 仍会为每次传输自动选择数据路径。",
+                        )
+                    WifiAwareDiscoveryUiState.Starting ->
+                        appText(
+                            "Wi-Fi Aware discovery is starting.",
+                            "Wi-Fi Aware 发现正在启动。",
+                        )
+                    WifiAwareDiscoveryUiState.Unavailable ->
+                        appText(
+                            "Wi-Fi Aware discovery is not connected in this Android build yet. Nearby continues over Bluetooth and local-network discovery.",
+                            "此 Android 版本尚未接入 Wi-Fi Aware 发现。附近发现仍会通过蓝牙和局域网继续工作。",
+                        )
+                },
+                color = Envoix.colors.muted,
+                fontSize = 13.sp,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(appText("Done", "完成"))
+            }
+        },
+        containerColor = Envoix.colors.surface,
+    )
+}
+
 @Composable
 internal fun NearbyDeviceCard(
     peer: DiscoveredPeer,
+    peers: List<DiscoveredPeer>,
     onClick: () -> Unit,
 ) {
     val colors = Envoix.colors
@@ -488,12 +985,16 @@ internal fun NearbyDeviceCard(
             Modifier.size(38.dp).clip(CircleShape).background(colors.accentSoft),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Default.Smartphone, null, tint = colors.accent, modifier = Modifier.size(20.dp))
+            Icon(Icons.Default.Devices, null, tint = colors.accent, modifier = Modifier.size(20.dp))
         }
         Spacer(Modifier.width(11.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                peer.displayName ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
+                nearbyPeerDisplayName(
+                    peer,
+                    peers,
+                    appText("Nearby Envoix device", "附近的 Envoix 设备"),
+                ),
                 color = colors.text,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
@@ -501,7 +1002,9 @@ internal fun NearbyDeviceCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                appText("Nearby · Unverified", "附近 · 未验证"),
+                "${
+                    nearbyDiscoverySourceLabel(peer.sources, LocalAppLanguage.current)
+                } · ${appText("Unverified", "未验证")}",
                 color = colors.muted,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -515,27 +1018,83 @@ internal fun NearbyDeviceCard(
     }
 }
 
+internal fun nearbyPeerDisplayName(
+    peer: DiscoveredPeer,
+    peers: List<DiscoveredPeer>,
+    fallback: String,
+): String {
+    fun baseName(candidate: DiscoveredPeer): String = candidate.displayName?.trim()?.takeIf(String::isNotEmpty) ?: fallback
+
+    val name = baseName(peer)
+    val duplicateCount = peers.count { baseName(it).equals(name, ignoreCase = true) }
+    if (duplicateCount <= 1) return name
+    return "$name · ${peer.peerKey.takeLast(4).uppercase()}"
+}
+
+internal fun nearbyDiscoverySourceLabel(
+    sources: Set<DiscoverySource>,
+    language: String,
+): String {
+    val labels =
+        listOf(
+            DiscoverySource.Bluetooth to AppText.value("BLE", "BLE", language),
+            DiscoverySource.Mdns to AppText.value("Local network", "局域网", language),
+            DiscoverySource.WifiAware to AppText.value("Wi-Fi Aware", "Wi-Fi Aware", language),
+        ).mapNotNull { (source, label) -> label.takeIf { source in sources } }
+    return labels.joinToString(" · ").ifEmpty {
+        AppText.value("Nearby", "附近", language)
+    }
+}
+
 @Composable
 internal fun EnterRoomCodeDialog(
     error: String?,
     onDismiss: () -> Unit,
     onContinue: (String) -> Unit,
 ) {
+    val clipboard = LocalClipboardManager.current
+    val emptyClipboardMessage = appText("Clipboard is empty", "剪贴板为空")
     var typed by remember { mutableStateOf("") }
+    var inlineError by remember(error) { mutableStateOf(error) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Enter room code", "输入房间码")) },
+        title = { Text(appText("Room code or invite link", "房间码或邀请链接")) },
         text = {
             Column {
                 OutlinedTextField(
                     value = typed,
-                    onValueChange = { typed = it },
+                    onValueChange = {
+                        typed = InviteCodec.formatRoomCode(it)
+                        inlineError = null
+                    },
                     singleLine = true,
-                    label = { Text(appText("Room code", "房间码")) },
-                    placeholder = { Text("R123456-a1b2-c3d4") },
+                    label = { Text(appText("Room code or invite link", "房间码或邀请链接")) },
+                    placeholder = { Text("123456-a1b2-c3d4") },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                error?.let {
+                TextButton(
+                    onClick = {
+                        val pasted =
+                            clipboard
+                                .getText()
+                                ?.text
+                                ?.trim()
+                                .orEmpty()
+                        if (pasted.isEmpty()) {
+                            inlineError = emptyClipboardMessage
+                        } else {
+                            typed = pasted
+                            inlineError = null
+                        }
+                    },
+                    modifier =
+                        Modifier
+                            .align(Alignment.End)
+                            .testTag("room_code_paste"),
+                ) {
+                    Text(appText("Paste", "粘贴"))
+                }
+                inlineError?.let {
                     Spacer(Modifier.height(8.dp))
                     Text(it, color = Envoix.colors.danger, fontSize = 12.sp)
                 }
@@ -546,7 +1105,7 @@ internal fun EnterRoomCodeDialog(
                 onClick = { onContinue(typed.trim()) },
                 enabled = typed.isNotBlank(),
             ) {
-                Text(appText("Connect", "连接"))
+                Text(appText("Continue", "继续"))
             }
         },
         dismissButton = {

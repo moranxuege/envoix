@@ -98,24 +98,61 @@ class NfcInvitationHostingLifecycleTest {
     @Test
     fun `raw custom scheme views require canonical bytes and native validation`() {
         val fileInvite = "envoix://invite/v2/abc_DEF-123"
+        val malformedRoomInvite =
+            "envoix://room/123456-a1b2-c3d4" +
+                "?broker=broker.example&expires=not-a-number"
 
         assertEquals(
             INVITATION,
-            validatedRawNfcViewInvitation(INVITATION) {
-                throw AssertionError("room URI entered the InviteV2 validator")
-            },
+            validatedRawNfcViewInvitation(
+                value = INVITATION,
+                validateRoomInvite = { true },
+                validateTransferInvite = {
+                    throw AssertionError("room URI entered the InviteV2 validator")
+                },
+            ),
         )
         assertEquals(
             fileInvite,
-            validatedRawNfcViewInvitation(fileInvite) { true },
+            validatedRawNfcViewInvitation(
+                value = fileInvite,
+                validateRoomInvite = {
+                    throw AssertionError("InviteV2 entered the room validator")
+                },
+                validateTransferInvite = { true },
+            ),
         )
-        assertNull(validatedRawNfcViewInvitation(fileInvite) { false })
-        assertNull(validatedRawNfcViewInvitation("envoix://room/") { true })
         assertNull(
             validatedRawNfcViewInvitation(
-                requireNotNull(NfcInvitationContract.encode(INVITATION))
-                    .toString(Charsets.US_ASCII),
-            ) { true },
+                value = fileInvite,
+                validateRoomInvite = { true },
+                validateTransferInvite = { false },
+            ),
+        )
+        assertNull(
+            validatedRawNfcViewInvitation(
+                value = malformedRoomInvite,
+                validateRoomInvite = { false },
+                validateTransferInvite = {
+                    throw AssertionError("room URI entered the InviteV2 validator")
+                },
+            ),
+        )
+        assertNull(
+            validatedRawNfcViewInvitation(
+                value = "envoix://room/",
+                validateRoomInvite = { true },
+                validateTransferInvite = { true },
+            ),
+        )
+        assertNull(
+            validatedRawNfcViewInvitation(
+                value =
+                    requireNotNull(NfcInvitationContract.encode(INVITATION))
+                        .toString(Charsets.US_ASCII),
+                validateRoomInvite = { true },
+                validateTransferInvite = { true },
+            ),
         )
     }
 
@@ -127,7 +164,7 @@ class NfcInvitationHostingLifecycleTest {
                     phase = RoomControlPhase.Hosting,
                     invite =
                         RoomControlInvite(
-                            code = "R123456-a1b2-c3d4",
+                            code = "123456-a1b2-c3d4",
                             payload = INVITATION,
                             endpoint = RoomControlEndpoint("broker.example", ""),
                             expiresAtEpochMs = Long.MAX_VALUE,
@@ -138,7 +175,7 @@ class NfcInvitationHostingLifecycleTest {
 
     private companion object {
         const val INVITATION =
-            "envoix://room/R123456-a1b2-c3d4" +
+            "envoix://room/123456-a1b2-c3d4" +
                 "?broker=broker.example&expires=18446744073709551615"
     }
 }

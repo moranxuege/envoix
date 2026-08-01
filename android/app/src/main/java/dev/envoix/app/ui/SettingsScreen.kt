@@ -150,7 +150,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             onReset = { SettingsStore.setSaveTree(context, null) },
         )
         Spacer(Modifier.height(18.dp))
-        LabeledControl(appText("Default role for a new code", "新配对码的默认角色")) {
+        LabeledControl(appText("Default role for a new transfer", "新传输的默认角色")) {
             RoleToggle(settings.defaultRole) { SettingsStore.update { s -> s.copy(defaultRole = it) } }
         }
         Spacer(Modifier.height(18.dp))

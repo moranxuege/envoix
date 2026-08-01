@@ -35,10 +35,18 @@ enum TransferDraftLifecyclePolicy {
 enum ConnectionPathPresentationPolicy {
     static func label(for path: FfiDataPathKind, language: String) -> String {
         switch path {
-        case .direct: return AppText.value("Direct path", "直连链路", language: language)
-        case .relay: return AppText.value("Relay path", "中继链路", language: language)
-        case .wifiAware: return AppText.value("Wi-Fi Aware path", "Wi-Fi Aware 链路", language: language)
-        case .other: return AppText.value("Other path", "其他链路", language: language)
+        case .direct:
+            return AppText.value("Data path · Direct", "数据路径 · 直连", language: language)
+        case .relay:
+            return AppText.value("Data path · Relay", "数据路径 · 中继", language: language)
+        case .wifiAware:
+            return AppText.value(
+                "Data path · Wi‑Fi Aware",
+                "数据路径 · Wi‑Fi Aware",
+                language: language
+            )
+        case .other:
+            return AppText.value("Data path · Other", "数据路径 · 其他", language: language)
         }
     }
 
@@ -50,6 +58,57 @@ enum ConnectionPathPresentationPolicy {
             "\(path) · 已切换",
             language: language
         )
+    }
+}
+
+enum ActivityStageTimingPresentationPolicy {
+    private static let microsecondsPerMillisecond: UInt64 = 1_000
+    private static let microsecondsPerSecond: UInt64 = 1_000_000
+    private static let secondsPerMinute: UInt64 = 60
+
+    static func latestAttempt(
+        from samples: [ActivityStageTimingSample]
+    ) -> [ActivityStageTimingSample] {
+        guard let latestAttemptID = samples.map(\.attemptID).max() else { return [] }
+        return samples.filter { $0.attemptID == latestAttemptID }.sorted {
+            if $0.elapsedMicroseconds != $1.elapsedMicroseconds {
+                return $0.elapsedMicroseconds < $1.elapsedMicroseconds
+            }
+            return $0.diagnosticLine < $1.diagnosticLine
+        }
+    }
+
+    static func elapsedString(microseconds: UInt64) -> String {
+        if microseconds < microsecondsPerMillisecond {
+            return "<1 ms"
+        }
+        if microseconds < microsecondsPerSecond {
+            let roundedMilliseconds =
+                (microseconds + microsecondsPerMillisecond / 2)
+                / microsecondsPerMillisecond
+            return "\(roundedMilliseconds) ms"
+        }
+
+        let wholeSeconds = microseconds / microsecondsPerSecond
+        if wholeSeconds >= secondsPerMinute {
+            return "\(wholeSeconds / secondsPerMinute)m "
+                + "\(wholeSeconds % secondsPerMinute)s"
+        }
+
+        let seconds = Double(microseconds) / Double(microsecondsPerSecond)
+        return seconds < 10
+            ? String(format: "%.2f s", locale: Locale(identifier: "en_US_POSIX"), seconds)
+            : String(format: "%.1f s", locale: Locale(identifier: "en_US_POSIX"), seconds)
+    }
+}
+
+enum TransferMetricFreshnessPolicy {
+    static let maximumCurrentMetricAge: TimeInterval = 2.5
+
+    static func isFresh(sampledAt: Date?, now: Date) -> Bool {
+        guard let sampledAt else { return false }
+        let age = now.timeIntervalSince(sampledAt)
+        return age >= 0 && age <= maximumCurrentMetricAge
     }
 }
 

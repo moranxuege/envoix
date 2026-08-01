@@ -25,7 +25,7 @@ class NfcInvitationContractTest {
     }
 
     @Test
-    fun `legacy direct canonical carriers remain readable`() {
+    fun `direct supported invitations remain readable`() {
         for (invitation in listOf(INVITE, ROOM)) {
             assertEquals(
                 invitation,
@@ -126,6 +126,6 @@ class NfcInvitationContractTest {
     private companion object {
         const val INVITE = "envoix://invite/v2/abc_DEF-123"
         const val ROOM =
-            "envoix://room/R123456-a1b2-c3d4?broker=example.test&expires=9999999999"
+            "envoix://room/123456-a1b2-c3d4?broker=example.test&expires=9999999999"
     }
 }

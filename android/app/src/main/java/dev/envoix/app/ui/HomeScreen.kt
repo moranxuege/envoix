@@ -91,6 +91,8 @@ import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.TransferPresentationPolicy
 import dev.envoix.app.TransferProgressPresentation
+import dev.envoix.app.TransferStage
+import dev.envoix.app.TransferStageTiming
 import dev.envoix.app.connectionPathLabel
 import dev.envoix.app.humanBytes
 import dev.envoix.app.isTerminal
@@ -461,16 +463,7 @@ internal fun TransferCard(
                 .clip(RoundedCornerShape(16.dp))
                 .background(if (canceled) colors.line else colors.surface)
                 .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-                .clickable {
-                    if (t.status == Status.Delivered &&
-                        t.direction == Direction.Receive &&
-                        t.savedUri != null
-                    ) {
-                        onOpen(t)
-                    } else {
-                        onToggleDetail(t.id)
-                    }
-                },
+                .clickable { onToggleDetail(t.id) },
         ) {
             if (t.status == Status.WaitingForPeer && t.qrPayload != null) {
                 WaitingBody(t, onPauseResume, onCancel)
@@ -596,7 +589,7 @@ private fun CardControls(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (actions.canApprove) {
-            CircleBtn(Icons.Default.PlayArrow, appText("Accept transfer", "接收传输"), filled = true) {
+            CircleBtn(Icons.Default.PlayArrow, appText("Receive transfer", "接收传输"), filled = true) {
                 onApproveReceive(t.id)
             }
         }
@@ -719,33 +712,30 @@ private fun WaitingBody(
         Spacer(Modifier.height(10.dp))
         val clip = LocalClipboardManager.current
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier
+                .fillMaxWidth()
+                .clickable {
+                    clip.setText(AnnotatedString(checkNotNull(t.qrPayload)))
+                },
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                t.room,
-                color = colors.text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = FontFamily.Monospace,
+                appText("Copy invite link", "复制邀请链接"),
+                color = colors.muted,
+                fontSize = 13.sp,
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
             Icon(
                 Icons.Default.ContentCopy,
-                appText("Copy code", "复制配对码"),
+                contentDescription = null,
                 tint = colors.muted,
-                modifier =
-                    Modifier
-                        .clip(CircleShape)
-                        .clickable { clip.setText(AnnotatedString(t.room)) }
-                        .padding(6.dp)
-                        .size(18.dp),
+                modifier = Modifier.size(18.dp),
             )
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            appText("Scan or enter this code", "扫描或输入此配对码"),
+            appText("Scan this QR or paste the invite link", "扫描此二维码或粘贴邀请链接"),
             color = colors.muted,
             fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth(),
@@ -754,7 +744,75 @@ private fun WaitingBody(
     }
 }
 
-/** Expanded on long-press: speed history, key details, and this transfer's log. */
+internal data class TransferStageTimelineEntry(
+    val stage: TransferStage,
+    val elapsedFromSessionUs: Long,
+)
+
+internal fun latestTransferStageTimeline(
+    samples: List<TransferStageTiming>,
+): List<TransferStageTimelineEntry> {
+    val latestAttemptId = samples.maxOfOrNull(TransferStageTiming::attemptId) ?: return emptyList()
+    val latestAttempt = samples.filter { it.attemptId == latestAttemptId }
+    val sessionStartedAt =
+        latestAttempt
+            .filter { it.stage == TransferStage.SessionStarted }
+            .minOfOrNull(TransferStageTiming::elapsedUs)
+            ?: return emptyList()
+    return latestAttempt
+        .asSequence()
+        .filter { it.elapsedUs >= sessionStartedAt }
+        .sortedWith(compareBy<TransferStageTiming> { it.elapsedUs }.thenBy { it.stage.order })
+        .distinctBy(TransferStageTiming::stage)
+        .map {
+            TransferStageTimelineEntry(
+                stage = it.stage,
+                elapsedFromSessionUs = it.elapsedUs - sessionStartedAt,
+            )
+        }.toList()
+}
+
+internal fun formatTransferStageElapsed(elapsedUs: Long): String {
+    val safeElapsedUs = elapsedUs.coerceAtLeast(0L)
+    return when {
+        safeElapsedUs < 1_000L -> "$safeElapsedUs µs"
+        safeElapsedUs < 1_000_000L -> "${formatTenths(safeElapsedUs / 100L)} ms"
+        safeElapsedUs < 60_000_000L -> "${formatTenths(safeElapsedUs / 100_000L)} s"
+        else -> {
+            val totalSeconds = safeElapsedUs / 1_000_000L
+            val minutes = totalSeconds / 60L
+            val seconds = totalSeconds % 60L
+            "${minutes}m ${seconds.toString().padStart(2, '0')}s"
+        }
+    }
+}
+
+private fun formatTenths(value: Long): String =
+    if (value % 10L == 0L) {
+        (value / 10L).toString()
+    } else {
+        "${value / 10L}.${value % 10L}"
+    }
+
+internal fun transferStageTimelineTitle(
+    stage: TransferStage,
+    language: String,
+): String =
+    when (stage) {
+        TransferStage.SessionStarted -> AppText.value("Started", "已开始", language)
+        TransferStage.ConnectionReady -> AppText.value("Connected", "已连接", language)
+        TransferStage.AuthenticationStarted -> AppText.value("Authenticating", "正在认证", language)
+        TransferStage.AuthenticationComplete -> AppText.value("Authenticated", "已认证", language)
+        TransferStage.ManifestOffer -> AppText.value("File list ready", "文件清单已就绪", language)
+        TransferStage.ManifestAccepted -> AppText.value("File list accepted", "文件清单已接受", language)
+        TransferStage.FirstPayload -> AppText.value("First byte", "首字节", language)
+        TransferStage.PayloadComplete -> AppText.value("Payload complete", "数据传输完成", language)
+        TransferStage.DeliveryComplete -> AppText.value("Delivered", "已送达", language)
+        TransferStage.Canceled -> AppText.value("Canceled", "已取消", language)
+        TransferStage.Failed -> AppText.value("Failed", "失败", language)
+    }
+
+/** Expanded on tap: speed history, user-facing stage timing, details, and developer logs. */
 @Composable
 private fun DetailDrawer(t: Transfer) {
     val colors = Envoix.colors
@@ -791,9 +849,10 @@ private fun DetailDrawer(t: Transfer) {
         Spacer(Modifier.height(4.dp))
         DetailRow(appText("Transfer", "传输"), "#${t.id}")
         connectionPathLabel(t.pathAddr, LocalAppLanguage.current)?.let { path ->
-            DetailRow(appText("Path", "连接路径"), path)
+            DetailRow(appText("Data path", "数据路径"), path)
         }
         DetailRow(appText("Transferred", "已传输"), "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
+        TransferStageTimeline(t)
         if (t.rootCount > 0) {
             DetailRow(
                 appText("Inventory", "清单"),
@@ -869,6 +928,48 @@ private fun DetailDrawer(t: Transfer) {
             }
             Spacer(Modifier.height(6.dp))
             LogBox(t.log)
+        }
+    }
+}
+
+@Composable
+private fun TransferStageTimeline(t: Transfer) {
+    val entries = latestTransferStageTimeline(t.stageTimings)
+    if (entries.isEmpty()) return
+    val colors = Envoix.colors
+    val language = LocalAppLanguage.current
+    DrawerLabel(appText("Timeline · from start", "时间线 · 从开始计时"))
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .testTag("transfer_stage_timing_${t.id}"),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        entries.forEach { entry ->
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(colors.accent),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    transferStageTimelineTitle(entry.stage, language),
+                    color = colors.text,
+                    fontSize = 12.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    formatTransferStageElapsed(entry.elapsedFromSessionUs),
+                    color = colors.muted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
         }
     }
 }
@@ -1089,8 +1190,8 @@ internal fun savedDestinationSubtitle(
 ): String {
     val destination = destinationLabel.trim().ifEmpty { "Downloads" }
     return AppText.value(
-        "Saved to $destination · tap to open",
-        "已保存到 $destination · 点击打开",
+        "Saved to $destination · tap for details",
+        "已保存到 $destination · 点击查看详情",
         language,
     )
 }

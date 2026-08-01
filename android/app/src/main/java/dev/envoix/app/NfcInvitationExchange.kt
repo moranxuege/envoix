@@ -48,7 +48,9 @@ internal data class NfcInvitationUiState(
     val failure: NfcInvitationFailure? = null,
 )
 
-internal class NfcInvitationController {
+internal class NfcInvitationController(
+    private val validateInvitation: (String) -> Boolean,
+) {
     private val _state = MutableStateFlow(NfcInvitationUiState())
 
     val state: StateFlow<NfcInvitationUiState> = _state.asStateFlow()
@@ -99,7 +101,7 @@ internal class NfcInvitationController {
     fun close() = stop()
 
     private fun acceptInvitation(invitation: String?) {
-        if (invitation == null) {
+        if (invitation == null || !validateInvitation(invitation)) {
             showFailure(NfcInvitationFailure.InvalidTag)
             return
         }

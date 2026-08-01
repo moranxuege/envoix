@@ -175,9 +175,9 @@ private class ExplicitHostingGateway : RoomControlGateway {
 
 private val TEST_INVITATION =
     RoomControlInvite(
-        code = "R123456-amber-comet",
+        code = "123456-abcd-efgh",
         payload =
-            "envoix://room/R123456-amber-comet" +
+            "envoix://room/123456-abcd-efgh" +
                 "?broker=broker.example&expires=18446744073709551615",
         endpoint =
             RoomControlEndpoint(

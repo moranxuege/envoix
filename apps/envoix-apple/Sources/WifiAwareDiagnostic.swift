@@ -160,6 +160,8 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
     @Published private(set) var snapshot = WifiAwareProbeSnapshot.idle
     @Published private(set) var pairedDevices: [WifiAwareProbeDeviceChoice] = []
     @Published private(set) var selectedDeviceID: WAPairedDevice.ID?
+    @Published private(set) var serviceAccessAvailable = false
+    @Published private(set) var diagnosticNetworkOperationActive = false
 
     private static let logger = Logger(subsystem: "com.envoix.app.ios", category: "wifi-aware-probe")
     private static let operationTimeout: Duration = .seconds(30)
@@ -177,9 +179,64 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
     }
 
     private var operation: Task<Void, Never>?
+    private var operationGeneration: WifiAwareProbeAttemptGate.Token?
     private var attemptGate = WifiAwareProbeAttemptGate()
     private var pairedDeviceSnapshot: WAPairedDevice.Devices = [:]
     private var refreshGeneration: UInt64 = 0
+    private var serviceAccessGeneration: UInt64 = 0
+    private var serviceLease: AppleWifiAwareServiceCoordinator.Lease?
+
+    func activateServiceAccess() async {
+        guard serviceLease == nil else {
+            serviceAccessAvailable = true
+            return
+        }
+
+        serviceAccessGeneration &+= 1
+        let generation = serviceAccessGeneration
+        update(phase: .idle, detail: "waiting_for_service_access")
+        do {
+            let lease = try await AppleWifiAwareServiceCoordinator.shared.acquire(
+                .diagnostic
+            )
+            guard generation == serviceAccessGeneration,
+                  !Task.isCancelled else {
+                await AppleWifiAwareServiceCoordinator.shared.release(lease)
+                return
+            }
+            serviceLease = lease
+            serviceAccessAvailable = true
+            update(phase: .idle, detail: "service_access_ready")
+        } catch is CancellationError {
+            // The view disappeared before process-wide Wi-Fi Aware access was granted.
+        } catch {
+            recordFailure(error)
+        }
+    }
+
+    func deactivateServiceAccess() {
+        serviceAccessGeneration &+= 1
+        serviceAccessAvailable = false
+        let activeOperation = cancelProbe()
+        operation = nil
+        operationGeneration = nil
+        diagnosticNetworkOperationActive = false
+        let lease = serviceLease
+        serviceLease = nil
+        update(phase: .idle, detail: "stopped")
+
+        Task {
+            if let activeOperation {
+                await activeOperation.value
+            }
+            // Let SwiftUI remove DeviceDiscoveryUI controls before another
+            // process-local Wi-Fi Aware owner can acquire their roles.
+            await Task.yield()
+            if let lease {
+                await AppleWifiAwareServiceCoordinator.shared.release(lease)
+            }
+        }
+    }
 
     func refreshPairedDevices() {
         refreshGeneration &+= 1
@@ -214,15 +271,17 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
     }
 
     func stop() {
-        attemptGate.cancel()
-        let activeOperation = operation
-        operation = nil
-        activeOperation?.cancel()
+        _ = cancelProbe()
         update(phase: .idle, detail: "stopped")
     }
 
     private func startProbe(role: Role) {
-        stop()
+        guard serviceLease != nil else {
+            update(phase: .idle, detail: "waiting_for_service_access")
+            return
+        }
+
+        let previousOperation = cancelProbe()
         guard let selectedDeviceID,
               let device = pairedDeviceSnapshot[selectedDeviceID] else {
             recordFailure(AppleWifiAwareProbeError.noSelectedDevice)
@@ -230,6 +289,8 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
         }
 
         let token = attemptGate.begin()
+        operationGeneration = token
+        diagnosticNetworkOperationActive = true
         switch role {
         case .publisher:
             update(phase: .publishing, detail: "starting", generation: token)
@@ -239,7 +300,17 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
 
         operation = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.operationDidFinish(generation: token)
+            }
             do {
+                if let previousOperation {
+                    await previousOperation.value
+                }
+                try Task.checkCancellation()
+                guard self.attemptGate.accepts(token) else {
+                    throw CancellationError()
+                }
                 switch role {
                 case .publisher:
                     try await self.runPublisherProbe(device: device, generation: token)
@@ -253,6 +324,23 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
                 self.finishAttempt(token)
             }
         }
+    }
+
+    @discardableResult
+    private func cancelProbe() -> Task<Void, Never>? {
+        attemptGate.cancel()
+        let activeOperation = operation
+        activeOperation?.cancel()
+        return activeOperation
+    }
+
+    private func operationDidFinish(
+        generation: WifiAwareProbeAttemptGate.Token
+    ) {
+        guard operationGeneration == generation else { return }
+        operation = nil
+        operationGeneration = nil
+        diagnosticNetworkOperationActive = false
     }
 
     private func runPublisherProbe(
@@ -421,9 +509,7 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
     }
 
     private func finishAttempt(_ generation: WifiAwareProbeAttemptGate.Token) {
-        if attemptGate.complete(generation) {
-            operation = nil
-        }
+        _ = attemptGate.complete(generation)
     }
 
     private func update(
@@ -608,14 +694,20 @@ struct AppleWifiAwareDeveloperPanel: View {
                     controller.startPublisherProbe()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(controller.selectedDeviceID == nil)
+                .disabled(
+                    controller.selectedDeviceID == nil
+                        || !controller.serviceAccessAvailable
+                )
                 .accessibilityIdentifier("settings_wifi_aware_probe_receive")
 
                 Button(AppText.value("Send probe", "发送探针", language: language)) {
                     controller.startSubscriberProbe()
                 }
                 .buttonStyle(.bordered)
-                .disabled(controller.selectedDeviceID == nil)
+                .disabled(
+                    controller.selectedDeviceID == nil
+                        || !controller.serviceAccessAvailable
+                )
                 .accessibilityIdentifier("settings_wifi_aware_probe_send")
 
                 Button(AppText.value("Stop", "停止", language: language)) {
@@ -627,10 +719,12 @@ struct AppleWifiAwareDeveloperPanel: View {
             .controlSize(.small)
         }
         .task {
+            await controller.activateServiceAccess()
+            guard !Task.isCancelled else { return }
             controller.refreshPairedDevices()
         }
         .onDisappear {
-            controller.stop()
+            controller.deactivateServiceAccess()
         }
     }
 
@@ -663,11 +757,20 @@ struct AppleWifiAwareDeveloperPanel: View {
 
     @ViewBuilder
     private var pairingControls: some View {
-        if let publishable = WAPublishableService.allServices[envoixWifiAwareProbeService],
+        if !controller.serviceAccessAvailable {
+            Text(AppText.value(
+                "Waiting for Wi-Fi Aware access…",
+                "正在等待 Wi-Fi Aware 访问权限…",
+                language: language
+            ))
+            .font(.footnote)
+            .foregroundStyle(Theme.muted)
+        } else if let publishable = WAPublishableService.allServices[envoixWifiAwareProbeService],
            let subscribable = WASubscribableService.allServices[envoixWifiAwareProbeService] {
             HStack(spacing: 8) {
                 DevicePairingView(
-                    .wifiAware(.connecting(to: publishable, from: .userSpecifiedDevices))
+                    .wifiAware(.connecting(to: publishable, from: .userSpecifiedDevices)),
+                    access: .permanent
                 ) {
                     Label(
                         AppText.value("Allow device", "允许设备", language: language),
@@ -679,7 +782,8 @@ struct AppleWifiAwareDeveloperPanel: View {
                 .buttonStyle(.bordered)
 
                 DevicePicker(
-                    .wifiAware(.connecting(to: .userSpecifiedDevices, from: subscribable))
+                    .wifiAware(.connecting(to: .userSpecifiedDevices, from: subscribable)),
+                    access: .permanent
                 ) { _ in
                     controller.pairingEndpointSelected()
                 } label: {
@@ -693,6 +797,7 @@ struct AppleWifiAwareDeveloperPanel: View {
                 .buttonStyle(.bordered)
             }
             .controlSize(.small)
+            .disabled(controller.diagnosticNetworkOperationActive)
         } else {
             Text(AppText.value(
                 "The TCP probe service is missing from Info.plist.",

@@ -24,7 +24,6 @@ const IPV6_RECEIVE_ADDR: &str = "[::]:0";
 Invitation V2:
     envoix receive --create-invite --rendezvous <broker> --output ./received
     envoix send --invite <envoix://invite/v2/...> <file>
-    envoix send --room-code 123456-k7m4-9v2d --rendezvous <broker> <file>
 "
 )]
 pub(crate) struct Cli {
@@ -52,13 +51,13 @@ pub(crate) enum Command {
 #[derive(Args, Debug)]
 pub(crate) struct SendArgs {
     /// Receiver peer descriptor (manual mode). Cannot be combined with --invite.
-    #[arg(long, conflicts_with_all = ["invite", "room_code", "create_invite"])]
+    #[arg(long, conflicts_with_all = ["invite", "create_invite"])]
     pub(crate) peer: Option<PeerDescriptor>,
     /// Explicit TOML config file path.
     #[arg(long)]
     pub(crate) config: Option<PathBuf>,
     /// Use iroh mDNS discovery when available. Cannot be combined with --invite.
-    #[arg(long, conflicts_with_all = ["invite", "room_code", "create_invite"])]
+    #[arg(long, conflicts_with_all = ["invite", "create_invite"])]
     pub(crate) enable_mdns: bool,
     /// Persistent iroh identity file. Created if missing.
     #[arg(long, conflicts_with = "ephemeral_identity")]
@@ -69,18 +68,15 @@ pub(crate) struct SendArgs {
     /// Shared ASCII pairing token (>=12 bytes). Required in manual and mDNS modes.
     #[arg(
         long,
-        required_unless_present_any = ["invite", "room_code", "create_invite"],
-        conflicts_with_all = ["invite", "room_code", "create_invite"]
+        required_unless_present_any = ["invite", "create_invite"],
+        conflicts_with_all = ["invite", "create_invite"]
     )]
     pub(crate) token: Option<String>,
     /// Complete directional InviteV2 payload.
-    #[arg(long, conflicts_with_all = ["peer", "room_code", "enable_mdns", "token", "create_invite"])]
+    #[arg(long, conflicts_with_all = ["peer", "enable_mdns", "token", "create_invite"])]
     pub(crate) invite: Option<String>,
-    /// Canonical or separator-free InviteV2 Room Code.
-    #[arg(long, requires = "rendezvous", conflicts_with_all = ["peer", "invite", "enable_mdns", "token", "create_invite"])]
-    pub(crate) room_code: Option<String>,
     /// Create a directional invitation and wait as its sender.
-    #[arg(long, requires = "rendezvous", conflicts_with_all = ["peer", "invite", "room_code", "enable_mdns", "token"])]
+    #[arg(long, requires = "rendezvous", conflicts_with_all = ["peer", "invite", "enable_mdns", "token"])]
     pub(crate) create_invite: bool,
     /// Rendezvous broker address, `<endpoint-id>@<ip:port>`.
     #[arg(long)]
@@ -134,18 +130,15 @@ pub(crate) struct ReceiveArgs {
     /// Shared ASCII pairing token (>=12 bytes). Required in manual and mDNS modes.
     #[arg(
         long,
-        required_unless_present_any = ["enable_mdns", "invite", "room_code", "create_invite"],
-        conflicts_with_all = ["invite", "room_code", "create_invite"]
+        required_unless_present_any = ["enable_mdns", "invite", "create_invite"],
+        conflicts_with_all = ["invite", "create_invite"]
     )]
     pub(crate) token: Option<String>,
     /// Complete directional InviteV2 payload.
-    #[arg(long, conflicts_with_all = ["room_code", "enable_mdns", "token", "create_invite"])]
+    #[arg(long, conflicts_with_all = ["enable_mdns", "token", "create_invite"])]
     pub(crate) invite: Option<String>,
-    /// Canonical or separator-free InviteV2 Room Code.
-    #[arg(long, requires = "rendezvous", conflicts_with_all = ["invite", "enable_mdns", "token", "create_invite"])]
-    pub(crate) room_code: Option<String>,
     /// Create a directional invitation and wait as its receiver.
-    #[arg(long, requires = "rendezvous", conflicts_with_all = ["invite", "room_code", "enable_mdns", "token"])]
+    #[arg(long, requires = "rendezvous", conflicts_with_all = ["invite", "enable_mdns", "token"])]
     pub(crate) create_invite: bool,
     /// Rendezvous broker address, `<endpoint-id>@<ip:port>`.
     #[arg(long)]
@@ -238,8 +231,8 @@ fn create_invitation_source(
         .map(|qr| format!("\n{qr}"))
         .unwrap_or_default();
     let note = format!(
-        "Room Code: {}\nComplete invitation: {}{qr}\nGive either value to the {give_to}.\n{waiting}",
-        created.room_code, created.payload
+        "Complete invitation: {}{qr}\nGive this value to the {give_to}.\n{waiting}",
+        created.payload
     );
     Ok((
         api::PeerSource::invitation(created.into_bootstrap(), broker.to_string())?,
@@ -290,17 +283,6 @@ impl SendArgs {
             let (source, relay) = join_full_invitation(&payload, api::TransferRole::Sender)?;
             options.relay = relay;
             (source, None)
-        } else if let Some(room_code) = self.room_code {
-            let broker = self
-                .rendezvous
-                .expect("clap requires --rendezvous with --room-code");
-            (
-                api::PeerSource::invitation(
-                    api::parse_room_code(&room_code, api::TransferRole::Sender)?,
-                    broker.clone(),
-                )?,
-                Some(format!("pairing via rendezvous {broker}...")),
-            )
         } else if self.enable_mdns {
             if self.peer.is_some() {
                 return Err(TransferError::input(
@@ -365,17 +347,6 @@ impl ReceiveArgs {
             let (source, relay) = join_full_invitation(&payload, api::TransferRole::Receiver)?;
             options.relay = relay;
             (source, None)
-        } else if let Some(room_code) = self.room_code {
-            let broker = self
-                .rendezvous
-                .expect("clap requires --rendezvous with --room-code");
-            (
-                api::PeerSource::invitation(
-                    api::parse_room_code(&room_code, api::TransferRole::Receiver)?,
-                    broker.clone(),
-                )?,
-                Some(format!("waiting for sender via rendezvous {broker}...")),
-            )
         } else if self.enable_mdns {
             let source = api::PeerSource::mdns(self.token)?;
             (source, Some("waiting for sender...".into()))
@@ -440,4 +411,40 @@ fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
 fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
     path.map(IdentityConfig::Persistent)
         .unwrap_or(IdentityConfig::Ephemeral)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn naked_room_code_flag_is_retired() {
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "send",
+                "--room-code",
+                "123456-k7m4-9v2d",
+                "--rendezvous",
+                "broker",
+                "./hello.txt",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn complete_invitation_flag_remains_available() {
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "send",
+                "--invite",
+                "envoix://invite/v2/example",
+                "./hello.txt",
+            ])
+            .is_ok()
+        );
+    }
 }

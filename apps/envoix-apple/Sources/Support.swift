@@ -20,14 +20,16 @@ let minTokenLength = 12
 let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
 let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
 let defaultLogServer = "https://rdz.chkxwlyh.us:8460"
+let inviteV2URLPrefix = "envoix://invite/v2/"
+let roomControlURLPrefix = "envoix://room/"
 let deprecatedLogServers: Set<String> = [
     "http://67.230.187.238:8460",
     "https://envoix.chkxwlyh.us:8460",
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-let expectedCoreFFIAPIVersion: UInt32 = 11
-let expectedRoomControlCoreCapability = "foreground_room_control_v4"
+let expectedCoreFFIAPIVersion: UInt32 = 12
+let expectedRoomControlCoreCapability = "foreground_room_control_v5"
 let expectedNearbyInviteCoreCapability = "nearby_invite_inbox_v1"
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
@@ -112,24 +114,139 @@ enum RuntimeSettingsProvider {
     }
 }
 
-func newRoomCode() -> String? {
-    try? generateRoomCode()
-}
-
 func formatRoomCodeInput(_ input: String) -> String {
-    if input.lowercased().hasPrefix("envoix:") {
+    let lowercaseInput = input.lowercased()
+    if lowercaseInput.hasPrefix("envoix:")
+        || "envoix:".hasPrefix(lowercaseInput) {
         return input
     }
-    let compact = input.filter { $0 != "-" }.prefix(14)
-    guard compact.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
+
+    var compact = ""
+    var separatorOffsets: Set<Int> = []
+    for character in input {
+        if character == "-" {
+            let offset = compact.count
+            guard (offset == 6 || offset == 10),
+                  separatorOffsets.insert(offset).inserted else {
+                return input
+            }
+            continue
+        }
+        guard compact.count < 14,
+              character.isASCII,
+              character.isLetter || character.isNumber else {
+            return input
+        }
+        compact.append(contentsOf: character.lowercased())
+    }
+    if compact.count == 14 && separatorOffsets.count == 1 {
         return input
     }
-    return String(compact.enumerated().reduce(into: "") { result, item in
+
+    var formatted = String(compact.enumerated().reduce(into: "") { result, item in
         if item.offset == 6 || item.offset == 10 {
             result.append("-")
         }
-        result.append(contentsOf: item.element.lowercased())
+        result.append(item.element)
     })
+    if separatorOffsets.contains(compact.count) {
+        formatted.append("-")
+    }
+    return formatted
+}
+
+enum ConnectionInputKind: Equatable {
+    case inviteV2
+    case roomControl
+}
+
+struct ClassifiedConnectionInput {
+    let kind: ConnectionInputKind
+    let normalizedInput: String
+    let pairingInvite: FfiPairingInvite?
+}
+
+func canonicalBareRoomControlCode(_ input: String) -> String? {
+    let characters = Array(input)
+    let compact: [Character]
+    switch characters.count {
+    case 14:
+        compact = characters
+    case 16:
+        guard characters[6] == "-", characters[11] == "-" else { return nil }
+        compact = Array(characters[0..<6])
+            + Array(characters[7..<11])
+            + Array(characters[12..<16])
+    default:
+        return nil
+    }
+
+    guard compact.prefix(6).allSatisfy({
+        $0.isASCII && $0 >= "0" && $0 <= "9"
+    }), compact.dropFirst(6).allSatisfy({
+        $0.isASCII && ($0.isLetter || $0.isNumber)
+    }) else {
+        return nil
+    }
+
+    let normalized = compact.map { String($0).lowercased() }
+    return normalized[0..<6].joined()
+        + "-"
+        + normalized[6..<10].joined()
+        + "-"
+        + normalized[10..<14].joined()
+}
+
+func classifyConnectionInput(
+    _ input: String,
+    fallbackBroker: String,
+    fallbackRelay: String,
+    allowBareRoomControl: Bool
+) throws -> ClassifiedConnectionInput {
+    let normalized = input.trimmed
+    guard !normalized.isEmpty else {
+        throw RuntimeSettingsError("The connection input is empty.")
+    }
+
+    if normalized.hasPrefix(inviteV2URLPrefix) {
+        let invitation = try parsePairingInvite(input: normalized)
+        return ClassifiedConnectionInput(
+            kind: .inviteV2,
+            normalizedInput: normalized,
+            pairingInvite: invitation
+        )
+    }
+
+    if normalized.hasPrefix(roomControlURLPrefix) {
+        _ = try parseRoomControlInvite(
+            input: normalized,
+            fallbackBroker: fallbackBroker,
+            fallbackRelay: fallbackRelay
+        )
+        return ClassifiedConnectionInput(
+            kind: .roomControl,
+            normalizedInput: normalized,
+            pairingInvite: nil
+        )
+    }
+
+    if allowBareRoomControl,
+       let roomCode = canonicalBareRoomControlCode(normalized) {
+        _ = try parseRoomControlInvite(
+            input: roomCode,
+            fallbackBroker: fallbackBroker,
+            fallbackRelay: fallbackRelay
+        )
+        return ClassifiedConnectionInput(
+            kind: .roomControl,
+            normalizedInput: roomCode,
+            pairingInvite: nil
+        )
+    }
+
+    throw RuntimeSettingsError(
+        "Enter a complete InviteV2 link, Room link, or current Room code."
+    )
 }
 
 struct RuntimeSettingsError: LocalizedError {
@@ -276,12 +393,8 @@ struct RoomCodeField: View {
     @Environment(\.appLanguage) private var language
     @Binding var code: String
     var disabled: Bool
-    var title = "Room code"
-    var placeholder = "135790-a1b2-c3d4"
-    var canGenerate: Bool = false
-    var generateLabel = "Generate"
-    var copyLabel = "Copy Code"
-    var showsCopyAction = true
+    var title: String
+    var placeholder: String
     var pasteAction: (() -> Void)?
     var helper: String
     var accessibilityIdentifier = ""
@@ -312,24 +425,17 @@ struct RoomCodeField: View {
                     .foregroundStyle(Theme.text)
                     .disabled(disabled)
                     .accessibilityIdentifier(accessibilityIdentifier)
-                if canGenerate {
-                    Button {
-                        generateCode()
-                    } label: {
-                        Label(generateLabel, systemImage: "wand.and.stars")
-                            .frame(minHeight: 34)
-                            .contentShape(Rectangle())
+                if let pasteAction {
+                    Button(action: pasteAction) {
+                        Label(
+                            AppText.value("Paste", "粘贴", language: language),
+                            systemImage: "doc.on.clipboard"
+                        )
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
                     }
                     .disabled(disabled)
                 }
-                Button {
-                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language), language: language)
-                } label: {
-                    Label(copyLabel, systemImage: "doc.on.doc")
-                        .frame(minHeight: 34)
-                        .contentShape(Rectangle())
-                }
-                .disabled(code.trimmed.isEmpty)
             }
             .padding(.horizontal, 10)
             .frame(minHeight: 44)
@@ -401,32 +507,6 @@ struct RoomCodeField: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
 
-            if canGenerate || showsCopyAction {
-                HStack(spacing: 8) {
-                    if canGenerate {
-                        Button {
-                            generateCode()
-                        } label: {
-                            Label(generateLabel, systemImage: "wand.and.stars")
-                                .frame(maxWidth: .infinity, minHeight: 36)
-                        }
-                        .disabled(disabled)
-                    }
-
-                    if showsCopyAction {
-                        Button {
-                            copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language), language: language)
-                        } label: {
-                            Label(copyLabel == "Copy Code" ? AppText.value("Copy", "复制", language: language) : copyLabel, systemImage: "doc.on.doc")
-                                .frame(maxWidth: .infinity, minHeight: 36)
-                        }
-                        .disabled(code.trimmed.isEmpty)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-
             if !helper.trimmed.isEmpty {
                 Text(helper)
                     .font(.footnote)
@@ -437,24 +517,6 @@ struct RoomCodeField: View {
         .tint(Theme.accentStrong)
     }
     #endif
-
-    private func generateCode() {
-        guard let generated = newRoomCode() else {
-            code = ""
-            ToastCenter.shared.show(AppText.value(
-                "Could not generate a Room Code",
-                "无法生成接收码",
-                language: language
-            ))
-            return
-        }
-        code = generated
-        ToastCenter.shared.show(AppText.value(
-            "Room code generated",
-            "接收码已生成",
-            language: language
-        ))
-    }
 }
 
 /// Renders a string into a crisp QR code image.
@@ -753,7 +815,7 @@ struct ReceivedItemsSheet: View {
 
 /// Formats a byte count as a short human-readable string (auto KB/MB/GB).
 func byteString(_ bytes: UInt64) -> String {
-    ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
 }
 
 /// Writes a minimal `config.toml` fragment to app storage and returns its path,
@@ -813,7 +875,8 @@ private func tomlEscaped(_ value: String) -> String {
 
 /// Formats a transfer rate, picking the most fitting unit (e.g. "12.3 MB/s").
 func rateString(_ bytesPerSec: Double) -> String {
-    byteString(UInt64(max(0, bytesPerSec))) + "/s"
+    guard bytesPerSec.isFinite, bytesPerSec > 0 else { return byteString(0) + "/s" }
+    return byteString(UInt64(min(bytesPerSec, Double(Int64.max)))) + "/s"
 }
 
 /// Formats a remaining-time estimate as "ETA 1:20" / "ETA 1:02:03".

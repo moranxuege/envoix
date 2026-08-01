@@ -45,6 +45,8 @@ targets:
           - "SecurityFoundation"
           - "-framework"
           - "CoreWLAN"
+          - "-framework"
+          - "CoreBluetooth"
 
   Envoix-iOS:
     type: application
@@ -185,7 +187,12 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - Tests/EnvoixIOSUITests/ManifestV2PhysicalTransferTests.swift
+      - Tests/EnvoixIOSUITests/AppleWifiAwareControlChannelRegistryTests.swift
+      - Tests/EnvoixIOSUITests/AppleWifiAwareControlRoleStoreTests.swift
+      - Tests/EnvoixIOSUITests/AppleWifiAwareServiceCoordinatorTests.swift
+      - Tests/EnvoixIOSUITests/WifiAwareRendezvousProtocolTests.swift
       - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
+      - Tests/EnvoixMacOSUITests/RoomCodeInputFormatterTests.swift
     dependencies:
       - target: Envoix
       - package: EnvoixCore
@@ -208,6 +215,8 @@ targets:
           - "SecurityFoundation"
           - "-framework"
           - "CoreWLAN"
+          - "-framework"
+          - "CoreBluetooth"
 
 schemes:
   Envoix:

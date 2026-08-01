@@ -38,8 +38,8 @@ class NfcInvitationNdefInstrumentedTest {
     }
 
     @Test
-    fun legacyDirectEnvoixUriRecordRemainsReadable() {
-        val legacy =
+    fun directEnvoixUriRecordRemainsReadable() {
+        val direct =
             NdefMessage(
                 arrayOf(
                     uriRecord(INVITE),
@@ -48,15 +48,15 @@ class NfcInvitationNdefInstrumentedTest {
 
         assertEquals(
             INVITE,
-            NfcInvitationNdefCodec.invitationFrom(listOf(legacy)),
+            NfcInvitationNdefCodec.invitationFrom(listOf(direct)),
         )
     }
 
     @Test
     fun canonicalRoomFallbackUsesTheRoomControlParser() {
         val room =
-            "envoix://room/R123456-a1b2-c3d4" +
-                "?broker=test&expires=9999999999"
+            "envoix://room/123456-a1b2-c3d4" +
+                "?broker=test&relay=https%3A%2F%2Frelay.test&expires=9999999999"
         val parsedRoom =
             JSONObject(
                 Native.parseRoomControlInvite(
@@ -70,6 +70,45 @@ class NfcInvitationNdefInstrumentedTest {
         assertFalse(parsedRoom.toString(), parsedRoom.has("error"))
         assertEquals(room, parsedRoom.getString("payload"))
         assertTrue(parsedAsTransfer.toString(), parsedAsTransfer.has("error"))
+    }
+
+    @Test
+    fun malformedRoomQueriesAreRejectedBeforeConfirmation() {
+        val malformedInvitations =
+            listOf(
+                "envoix://room/123456-a1b2-c3d4" +
+                    "?broker=test&relay=https%3A%2F%2Frelay.test&expires=not-a-number",
+                "envoix://room/123456-a1b2-c3d4?broker=%ZZ&expires=9999999999",
+                "envoix://room/123456-a1b2-c3d4" +
+                    "?broker=test&relay=https%3A%2F%2Frelay.test" +
+                    "&expires=9999999999&unknown=value",
+                "envoix://room/123456-a1b2-c3d4" +
+                    "?broker=test&relay=https%3A%2F%2Frelay.test",
+                "envoix://room/123456-a1b2-c3d4" +
+                    "?broker=test&relay=https%3A%2F%2Frelay.test&expires=1",
+            )
+
+        malformedInvitations.forEach { invitation ->
+            assertFalse(
+                invitation,
+                isStrictNativeRoomNfcInvitation(
+                    value = invitation,
+                    fallbackBroker = "fallback",
+                    fallbackRelay = "",
+                    nowEpochMs = 2_000L,
+                ),
+            )
+        }
+        assertTrue(
+            isStrictNativeRoomNfcInvitation(
+                value =
+                    "envoix://room/123456-a1b2-c3d4" +
+                        "?broker=test&relay=https%3A%2F%2Frelay.test&expires=9999999999",
+                fallbackBroker = "fallback",
+                fallbackRelay = "",
+                nowEpochMs = 1L,
+            ),
+        )
     }
 
     @Test

@@ -41,17 +41,23 @@ final class NearbyPresencePreferences: ObservableObject {
             ?? NearbyDiscoveryPeerRegistry.sanitizeDisplayName(platformDisplayName)
             ?? fallbackDisplayName
 
-        let storedVisibility = defaults.string(forKey: Key.visibility)
-            .flatMap(NearbyVisibilityMode.init(rawValue:))
-            ?? .hidden
+        let storedVisibility = defaults.object(forKey: Key.visibility)
+        let resolvedVisibility: NearbyVisibilityMode
+        if let storedVisibility = storedVisibility as? String {
+            resolvedVisibility = NearbyVisibilityMode(rawValue: storedVisibility) ?? .hidden
+        } else if storedVisibility != nil {
+            resolvedVisibility = .hidden
+        } else {
+            resolvedVisibility = .whileAppOpen
+        }
         let storedExpiry = defaults.object(forKey: Key.visibilityExpiresAt) as? Date
-        if storedVisibility == .everyoneTenMinutes,
+        if resolvedVisibility == .everyoneTenMinutes,
            let storedExpiry,
            storedExpiry > now {
-            visibility = storedVisibility
+            visibility = resolvedVisibility
             visibilityExpiresAt = storedExpiry
         } else {
-            visibility = storedVisibility == .whileAppOpen ? .whileAppOpen : .hidden
+            visibility = resolvedVisibility == .whileAppOpen ? .whileAppOpen : .hidden
             visibilityExpiresAt = nil
         }
     }

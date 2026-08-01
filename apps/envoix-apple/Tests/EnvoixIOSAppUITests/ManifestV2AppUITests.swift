@@ -87,6 +87,24 @@ final class ManifestV2AppUITests: XCTestCase {
         element("one_time_room").assertExists()
     }
 
+    func testNearbyDiscoveryToggleStopsAndRestartsTheVisibleList() {
+        launch(
+            language: "en",
+            locale: "en_US",
+            extraArguments: ["--ui-testing-discovery-fixtures"]
+        )
+
+        element("connection_hub").assertExists()
+        let peerList = element("nearby_peer_list")
+        peerList.assertExists()
+
+        button("nearby_discovery_toggle").tap()
+        XCTAssertTrue(peerList.waitForNonExistence(timeout: 5))
+
+        button("nearby_discovery_toggle").tap()
+        element("nearby_peer_list").assertExists()
+    }
+
     func testUnverifiedNearbyOfferRequiresExplicitAcceptance() {
         launch(
             language: "en",
@@ -120,6 +138,7 @@ final class ManifestV2AppUITests: XCTestCase {
         app.launchArguments = [
             "--ui-testing",
             "-envoix.language", language,
+            "-envoix.nearby.visibility", "whileAppOpen",
             "-AppleLanguages", "(\(language))",
             "-AppleLocale", locale,
         ] + extraArguments
@@ -136,7 +155,7 @@ final class ManifestV2AppUITests: XCTestCase {
         scanButton.assertExists()
         XCTAssertEqual(scanButton.label, expectedScanLabel)
         button("connect_enter_code").assertExists()
-        element("room_qr_reveal").assertExists()
+        element("room_qr_toggle").assertExists()
         element("nearby_display_name").assertExists()
         element("nearby_visibility_menu").assertExists()
 

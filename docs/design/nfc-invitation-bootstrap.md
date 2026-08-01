@@ -71,12 +71,18 @@ service.
 The fallback uses the exact proprietary AID `F0454E564F495801`. Opening Connect
 does not itself start Core NFC. An Android presenter first arms a 30-second HCE
 lease and broadcasts a separate, secret-free BLE readiness UUID. One fresh
-readiness generation may start one `NFCTagReaderSession` for the current
-Connect activation. Apple's system NFC sheet is unavoidable and appears before
-private-AID recognition. Cancellation, timeout, and failure never automatically
-reopen it. The compact **Scan by NFC** action starts one user-requested read
-without requiring BLE. The Debug and Release Info plists allowlist only this
-private AID under
+readiness generation may start one `NFCTagReaderSession` while Connect is
+foreground and unobstructed. Apple first correlates that generation to exactly
+one Envoix peer key recently advertised by the same Core Bluetooth peripheral;
+an absent, expired, or ambiguous binding fails closed. That correlation is
+routing metadata, not authentication. Automatic reads are limited to one per
+Connect activation and no more than one per 60 seconds. A fresh offer may wait
+for an in-app sheet or alert to close, but is discarded after its 30-second
+lease. Apple's system NFC sheet is unavoidable and appears before private-AID
+recognition. Cancellation, timeout, and failure never automatically reopen it.
+The compact **Scan by NFC** action remains an explicit fallback without
+requiring BLE. The Debug and Release Info plists allowlist only this private AID
+under
 `com.apple.developer.nfc.readersession.iso7816.select-identifiers`, so Core NFC
 selects it before reporting the `NFCISO7816Tag`. Envoix verifies
 `initialSelectedAID` exactly, selects file `E104`, reads the two-byte NLEN, and
@@ -222,14 +228,20 @@ transfer, and this standard route remains subject to the Android NFC stack
 actually serving the standard NDEF AID.
 
 Connect scans BLE but does not start Core NFC until it observes a fresh Android
-presenter readiness generation. At most one automatic Apple sheet may appear
-per Connect activation, even if an untrusted advertiser rotates IDs.
+presenter readiness generation bound to one recently seen Envoix BLE peer on
+the same Core Bluetooth peripheral. Display names are never used for this
+binding. iOS must be active on Connect, no room may be occupied, and no Envoix
+sheet, scanner, alert, confirmation, or system pairing UI may be competing for
+presentation. At most one automatic Apple sheet may appear per Connect
+activation and per 60 seconds, even if an untrusted advertiser rotates IDs.
 Cancellation, timeout, and failure do not reopen it. **Scan by NFC** starts one
-manual pure-NFC attempt when BLE is unavailable or missed. Apple always presents
-its system sheet before private-AID recognition. Envoix does not write passive
-tags on iOS, and iOS does not expose general third-party NDEF tag emulation.
-The phone-to-phone presenter route is therefore one-way: Android may present an
-invitation to iPhone, but iPhone cannot emulate the equivalent tag.
+manual pure-NFC attempt when BLE is unavailable or missed. Apple always
+presents its system sheet before private-AID recognition. A successful read
+still requires Envoix's redacted **Continue** confirmation; readiness never
+auto-joins a room. Envoix does not write passive tags on iOS, and iOS does not
+expose general third-party NDEF tag emulation. The phone-to-phone presenter
+route is therefore one-way: Android may present an invitation to iPhone, but
+iPhone cannot emulate the equivalent tag.
 
 ### macOS
 
@@ -298,8 +310,11 @@ and result when executing these gates.
 1. Install the builds that register and select `F0454E564F495801`.
 2. Host a room on Android and keep Envoix resumed.
 3. Open Envoix to Connect on iPhone. Confirm no Apple sheet appears until the
-   Android presenter advertises readiness. Cancel once and verify that the sheet
-   does not reopen automatically; **Scan by NFC** starts one manual attempt.
+   Android presenter advertises readiness after its normal Envoix BLE identity
+   was observed. Present another Envoix sheet or alert during readiness and
+   verify NFC waits only while that offer remains fresh. Cancel once and verify
+   that the sheet does not reopen automatically; **Scan by NFC** starts one
+   manual attempt.
 4. Touch the iPhone's top edge to the Android NFC antenna. Verify the trace
    reports only the private application selection, NDEF-file selection,
    bounded-read shapes, and status words; it must not log APDU bodies,

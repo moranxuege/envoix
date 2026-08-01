@@ -15,10 +15,24 @@ struct NearbyDiscoveryState {
     var pairedDevices: [NearbyPairedDevice]
     var statuses: [NearbyDiscoverySource: NearbyProviderStatus]
     var incomingRendezvousOffer: NearbyRendezvousOffer?
+    var incomingNFCReadinessOffer: NearbyNFCReadinessOffer?
 }
 
 final class NearbyDiscoveryCoordinator: ObservableObject {
     typealias ProviderFactory = (LocalNearbyDiscoveryIdentity) -> [NearbyDiscoveryProvider]
+    static let maximumPendingRendezvousOfferCount = 16
+
+    private struct RendezvousOfferKey: Hashable {
+        let source: NearbyDiscoverySource
+        let senderPeerKey: String
+        let requestID: String
+
+        init(_ offer: NearbyRendezvousOffer) {
+            source = offer.source
+            senderPeerKey = offer.senderPeerKey
+            requestID = offer.requestID
+        }
+    }
 
     @Published private(set) var state: NearbyDiscoveryState
 
@@ -32,11 +46,15 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     )
 
     private var providers: [NearbyDiscoveryProvider] = []
+    private var nfcReadinessOffers = NearbyNFCReadinessOfferRegistry()
     private var refreshTimer: Timer?
     private var lastLoggedAvailability: [NearbyDiscoverySource: NearbyProviderAvailability] = [:]
     private var generation = 0
     private var started = false
     private var advertisingEnabled = false
+    private var pendingRendezvousOffers: [NearbyRendezvousOffer] = []
+    private var pendingRendezvousOfferKeys = Set<RendezvousOfferKey>()
+
     init(
         identity: LocalNearbyDiscoveryIdentity? = nil,
         identityFactory: (() -> LocalNearbyDiscoveryIdentity)? = nil,
@@ -65,7 +83,8 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
                     detail: .discoveryStopped
                 ))
             }),
-            incomingRendezvousOffer: nil
+            incomingRendezvousOffer: nil,
+            incomingNFCReadinessOffer: nil
         )
     }
 
@@ -83,11 +102,26 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         state.isActive = true
         state.peers = []
         state.pairedDevices = []
-        state.incomingRendezvousOffer = nil
-        providers = providerFactory(identity)
+        clearPendingRendezvousOffers()
+        state.incomingNFCReadinessOffer = nil
+        if providers.isEmpty {
+            providers = providerFactory(identity)
+        }
         providers.forEach { provider in
+            (provider as? NearbyIdentityConfigurable)?
+                .setIdentity(identity)
             (provider as? NearbyAdvertisingConfigurable)?
                 .setAdvertisingEnabled(advertisingEnabled)
+            (provider as? NearbyRendezvousAdmissionConfigurable)?
+                .setRendezvousOfferAdmission { [weak self] offer in
+                    guard let self,
+                          self.started,
+                          self.generation == activeGeneration,
+                          offer.senderPeerKey != self.identity.peerKey else {
+                        return false
+                    }
+                    return self.enqueueRendezvousOffer(offer)
+                }
             provider.start { [weak self] event in
                 guard let self else { return }
                 if Thread.isMainThread {
@@ -110,13 +144,13 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         refreshTimer?.invalidate()
         refreshTimer = nil
         let activeProviders = providers
-        providers = []
         activeProviders.forEach { $0.stop() }
         registry.clear()
         state.isActive = false
         state.peers = []
         state.pairedDevices = []
-        state.incomingRendezvousOffer = nil
+        clearPendingRendezvousOffers()
+        state.incomingNFCReadinessOffer = nil
         for source in NearbyDiscoverySource.allCases {
             state.statuses[source] = NearbyProviderStatus(
                 source: source,
@@ -125,6 +159,16 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
             )
         }
         refreshPeers()
+    }
+
+    func suspendForSystemPairing() async {
+        let quiescingProviders = providers.compactMap {
+            $0 as? NearbySystemPairingQuiescing
+        }
+        stop()
+        for provider in quiescingProviders {
+            await provider.waitUntilStopped()
+        }
     }
 
     func restart() {
@@ -159,35 +203,115 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         invite: String,
         completion: @escaping (_ error: String?) -> Void
     ) {
-        let rendezvousProviders = providers.compactMap { $0 as? NearbyRendezvousProvider }
-        let isRoomControlInvite = invite.trimmed.lowercased().hasPrefix("envoix://room/")
-        let selectedSecureMdns = isRoomControlInvite
-            && selection.sources.contains(.mdns)
-            && selection.nearbyInviteRoute != nil
-        let provider = selectedSecureMdns
-            ? rendezvousProviders.first { $0.source == .mdns }
-            : rendezvousProviders.first {
-                $0.source != .mdns && $0.canOfferInvite(to: selection)
-            }
-        guard started, let provider else {
+        let isRoomControlInvite = invite.trimmed.hasPrefix(roomControlURLPrefix)
+        guard started else {
+            logUnavailableInvite(selection: selection, reason: "discovery_stopped")
             completion("Nearby invitation delivery is not available for this device")
             return
         }
+        guard let provider = liveRendezvousProvider(
+            to: selection,
+            isRoomControlInvite: isRoomControlInvite
+        ) else {
+            let hasCapturedRoute = selection.nearbyWifiAwareDeviceID != nil
+                || (isRoomControlInvite && selection.nearbyInviteRoute != nil)
+            logUnavailableInvite(
+                selection: selection,
+                reason: hasCapturedRoute ? "route_not_ready" : "route_missing"
+            )
+            completion("Nearby invitation delivery is not available for this device")
+            return
+        }
+        logger.info(
+            "RENDEZVOUS action=offer route=\(provider.source.logName, privacy: .public) state=ready"
+        )
+        let route = provider.source.logName
         let activeGeneration = generation
         provider.offerInvite(to: selection, invite: invite) { [weak self] error in
             DispatchQueue.main.async {
-                guard let self, self.started, self.generation == activeGeneration else {
+                guard let self else {
                     completion("Nearby discovery stopped")
                     return
+                }
+                guard self.started, self.generation == activeGeneration else {
+                    self.logger.error(
+                        "RENDEZVOUS action=offer route=\(route, privacy: .public) result=discarded reason=discovery_stopped"
+                    )
+                    completion("Nearby discovery stopped")
+                    return
+                }
+                if error == nil {
+                    self.logger.info(
+                        "RENDEZVOUS action=offer route=\(route, privacy: .public) result=acknowledged"
+                    )
+                } else {
+                    self.logger.error(
+                        "RENDEZVOUS action=offer route=\(route, privacy: .public) result=failed"
+                    )
                 }
                 completion(error)
             }
         }
     }
 
+    func canOfferRoomInvite(to selection: NearbyPairingSelection) -> Bool {
+        started && liveRendezvousProvider(
+            to: selection,
+            isRoomControlInvite: true
+        ) != nil
+    }
+
+    private func liveRendezvousProvider(
+        to selection: NearbyPairingSelection,
+        isRoomControlInvite: Bool
+    ) -> NearbyRendezvousProvider? {
+        let rendezvousProviders = providers.compactMap {
+            $0 as? NearbyRendezvousProvider
+        }
+        let hasExactWifiAwareRoute = selection.nearbyWifiAwareDeviceID != nil
+        let hasSecureMdnsRoute = isRoomControlInvite
+            && selection.sources.contains(.mdns)
+            && selection.nearbyInviteRoute != nil
+        if hasExactWifiAwareRoute {
+            return rendezvousProviders.first {
+                $0.source == .wifiAware && $0.canOfferInvite(to: selection)
+            }
+        }
+        if hasSecureMdnsRoute {
+            return rendezvousProviders.first {
+                $0.source == .mdns && $0.canOfferInvite(to: selection)
+            }
+        }
+        return rendezvousProviders.first {
+            $0.source != .wifiAware
+                && $0.source != .mdns
+                && selection.sources.contains($0.source)
+                && $0.canOfferInvite(to: selection)
+        }
+    }
+
+    private func logUnavailableInvite(
+        selection: NearbyPairingSelection,
+        reason: String
+    ) {
+        logger.error(
+            "RENDEZVOUS action=offer result=unavailable reason=\(reason, privacy: .public) bluetooth=\(selection.sources.contains(.bluetooth)) mdns=\(selection.sources.contains(.mdns)) wifi_aware=\(selection.sources.contains(.wifiAware)) mdns_route=\(selection.nearbyInviteRoute != nil) wifi_aware_route=\(selection.nearbyWifiAwareDeviceID != nil)"
+        )
+    }
+
     func consumeRendezvousOffer(id: String) {
-        guard state.incomingRendezvousOffer?.id == id else { return }
-        state.incomingRendezvousOffer = nil
+        guard pendingRendezvousOffers.first?.id == id,
+              state.incomingRendezvousOffer?.id == id else {
+            return
+        }
+        let consumed = pendingRendezvousOffers.removeFirst()
+        pendingRendezvousOfferKeys.remove(RendezvousOfferKey(consumed))
+        state.incomingRendezvousOffer = pendingRendezvousOffers.first
+    }
+
+    func consumeNFCReadinessOffer(id: String) {
+        guard state.incomingNFCReadinessOffer?.id == id else { return }
+        state.incomingNFCReadinessOffer = nil
     }
 
     private func startRefreshTimer() {
@@ -220,14 +344,57 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
             }
         case .rendezvousOffer(let offer):
             guard started, offer.senderPeerKey != identity.peerKey else { return }
+            enqueueRendezvousOffer(offer)
+        case .nfcPresenterReadiness(
+            let offerID,
+            let presenterPeerKey,
+            let presenterID
+        ):
+            guard started, presenterPeerKey != identity.peerKey else { return }
+            let now = clock()
+            guard let offer = nfcReadinessOffers.observe(
+                offerID: offerID,
+                presenterPeerKey: presenterPeerKey,
+                presenterID: presenterID,
+                at: now
+            ) else {
+                return
+            }
+            state.nowMilliseconds = now
+            state.incomingNFCReadinessOffer = offer
+        }
+    }
+
+    @discardableResult
+    private func enqueueRendezvousOffer(_ offer: NearbyRendezvousOffer) -> Bool {
+        let key = RendezvousOfferKey(offer)
+        guard !pendingRendezvousOfferKeys.contains(key) else { return true }
+        guard pendingRendezvousOffers.count < Self.maximumPendingRendezvousOfferCount else {
+            logger.error("RENDEZVOUS rejected=queue_limit")
+            return false
+        }
+        pendingRendezvousOffers.append(offer)
+        pendingRendezvousOfferKeys.insert(key)
+        if state.incomingRendezvousOffer == nil {
             state.incomingRendezvousOffer = offer
         }
+        return true
+    }
+
+    private func clearPendingRendezvousOffers() {
+        pendingRendezvousOffers.removeAll(keepingCapacity: true)
+        pendingRendezvousOfferKeys.removeAll(keepingCapacity: true)
+        state.incomingRendezvousOffer = nil
     }
 
     private func refreshPeers() {
         let now = clock()
         state.nowMilliseconds = now
         state.peers = registry.peers(nowMilliseconds: now)
+        if let offer = state.incomingNFCReadinessOffer,
+           !offer.isFresh(at: now) {
+            state.incomingNFCReadinessOffer = nil
+        }
     }
 
     private func replacePairedDevices(
@@ -264,7 +431,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         #endif
     }
 
-    private static func defaultProviderFactory(
+    static func defaultProviderFactory(
         identity: LocalNearbyDiscoveryIdentity
     ) -> [NearbyDiscoveryProvider] {
         #if DEBUG
@@ -277,6 +444,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
             ]
             #else
             return [
+                FixtureNearbyDiscoveryProvider(source: .bluetooth),
                 FixtureNearbyDiscoveryProvider(source: .mdns),
                 UnsupportedWifiAwareDiscoveryProvider(),
             ]
@@ -285,6 +453,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         #endif
         #if os(macOS)
         return [
+            AppleBluetoothDiscoveryProvider(identity: identity),
             AppleBonjourDiscoveryProvider(identity: identity),
             UnsupportedWifiAwareDiscoveryProvider(),
         ]
@@ -295,7 +464,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         ]
         #if canImport(WiFiAware)
         if #available(iOS 26.0, *) {
-            providers.append(AppleWifiAwarePairingProvider())
+            providers.append(AppleWifiAwarePairingProvider(identity: identity))
         } else {
             providers.append(UnsupportedWifiAwareDiscoveryProvider())
         }
@@ -401,9 +570,7 @@ private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
         let validPeer = NearbyDiscoveryPeerRegistry.normalizePeerKey(
             selection.discoveryPeerKey
         ) != nil
-        let normalizedInvite = invite.lowercased()
-        let validInvite = normalizedInvite.hasPrefix("envoix://pair/")
-            || normalizedInvite.hasPrefix("envoix://room/")
+        let validInvite = BleRendezvousProtocol.isSupportedInvite(invite.trimmed)
         completion(validPeer && validInvite ? nil : "Invalid fixture invitation")
     }
 

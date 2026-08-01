@@ -264,7 +264,7 @@ run_apple_method() {
   local platform="$1"
   local method="$2"
   local scenario="$3"
-  local code="$4"
+  local invitation="$4"
   local run_id="$5"
   local log_file="$6"
   local source_xctestrun target destination product_directory derived_data patched status=0
@@ -288,7 +288,9 @@ run_apple_method() {
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE 1
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_RUN_ID "$run_id"
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_SCENARIO "$scenario"
-  set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_CODE "$code"
+  if [[ -n "$invitation" ]]; then
+    set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_INVITATION "$invitation"
+  fi
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_LARGE_BYTES "$large_bytes"
   set_xctestrun_environment "$patched" "$target" ENVOIX_LOG "envoix=info,iroh=warn,warn"
 
@@ -310,16 +312,21 @@ run_apple_method() {
 run_android_method() {
   local method="$1"
   local scenario="$2"
-  local code="$3"
+  local invitation="$3"
   local run_id="$4"
   local log_file="$5"
   local status=0
+  local -a invitation_args=()
+
+  if [[ -n "$invitation" ]]; then
+    invitation_args=(-e envoixCrossDeviceInvitation "$invitation")
+  fi
 
   adb_command shell am instrument -w \
     -e envoixCrossDevice 1 \
     -e envoixCrossDeviceRunId "$run_id" \
     -e envoixCrossDeviceScenario "$scenario" \
-    -e envoixCrossDeviceCode "$code" \
+    ${invitation_args[@]+"${invitation_args[@]}"} \
     -e envoixCrossDeviceLargeBytes "$large_bytes" \
     -e envoixCrossDeviceTimeoutMs "$transfer_timeout_ms" \
     -e class "dev.envoix.app.ManifestV2CrossDeviceInstrumentedTest#$method" \
@@ -334,7 +341,7 @@ run_endpoint_role() {
   local platform="$1"
   local role="$2"
   local scenario="$3"
-  local code="$4"
+  local invitation="$4"
   local run_id="$5"
   local log_file="$6"
   local method
@@ -348,9 +355,9 @@ run_endpoint_role() {
   fi
 
   if [[ "$platform" == "android" ]]; then
-    run_android_method "$method" "$scenario" "$code" "$run_id" "$log_file"
+    run_android_method "$method" "$scenario" "$invitation" "$run_id" "$log_file"
   else
-    run_apple_method "$platform" "$method" "$scenario" "$code" "$run_id" "$log_file"
+    run_apple_method "$platform" "$method" "$scenario" "$invitation" "$run_id" "$log_file"
   fi
 }
 
@@ -413,19 +420,19 @@ run_pair() {
   local sender="$1"
   local receiver="$2"
   local scenario="$3"
-  local code="$4"
+  local invitation="$4"
   local run_id="$5"
   local case_id="$6"
   local sender_log="$log_dir/$case_id.sender.log"
   local receiver_log="$log_dir/$case_id.receiver.log"
   local logcat_log="$log_dir/$case_id.android.logcat.log"
-  local ready_log ready_pattern pairing_code receiver_pid sender_status=0 receiver_status=0
+  local ready_log ready_pattern published_invitation receiver_pid sender_status=0 receiver_status=0
 
   if [[ "$sender" == "android" || "$receiver" == "android" ]]; then
     start_android_logcat "$logcat_log"
   fi
 
-  run_endpoint_role "$receiver" receive "$scenario" "$code" "$run_id" "$receiver_log" &
+  run_endpoint_role "$receiver" receive "$scenario" "$invitation" "$run_id" "$receiver_log" &
   receiver_pid=$!
   case "$receiver" in
     android)
@@ -454,7 +461,7 @@ run_pair() {
     return 1
   fi
   if ! wait_for_log "$ready_log" '\[cross-device\] invitation=[^[:space:]]+'; then
-    echo "fail: receiver did not publish its InviteV2 Room Code for $case_id" >&2
+    echo "fail: receiver did not publish its complete InviteV2 URI for $case_id" >&2
     print_log_tail "$receiver receiver" "$receiver_log"
     [[ -f "$logcat_log" ]] && print_log_tail "Android logcat" "$logcat_log"
     kill "$receiver_pid" >/dev/null 2>&1 || true
@@ -464,12 +471,12 @@ run_pair() {
     stop_android_logcat
     return 1
   fi
-  pairing_code="$(
+  published_invitation="$(
     sed -nE 's/.*\[cross-device\] invitation=([^[:space:]]+).*/\1/p' "$ready_log" |
       tail -n 1
   )"
-  if [[ -z "$pairing_code" ]]; then
-    echo "fail: receiver published an unreadable InviteV2 Room Code for $case_id" >&2
+  if ! [[ "$published_invitation" =~ ^envoix://invite/v2/[^[:space:]]+$ ]]; then
+    echo "fail: receiver published an unreadable InviteV2 URI for $case_id" >&2
     kill "$receiver_pid" >/dev/null 2>&1 || true
     wait "$receiver_pid" >/dev/null 2>&1 || true
     remove_endpoint_patch "$receiver" receive "$run_id"
@@ -481,7 +488,7 @@ run_pair() {
   if [[ "$receiver_settle_seconds" -gt 0 ]]; then
     sleep "$receiver_settle_seconds"
   fi
-  run_endpoint_role "$sender" send "$scenario" "$pairing_code" "$run_id" "$sender_log" || sender_status=$?
+  run_endpoint_role "$sender" send "$scenario" "$published_invitation" "$run_id" "$sender_log" || sender_status=$?
   if [[ "$sender_status" -ne 0 ]]; then
     kill "$receiver_pid" >/dev/null 2>&1 || true
   fi
@@ -503,7 +510,7 @@ case_index=0
 pass_count=0
 fail_count=0
 CURRENT_RUN_ID=""
-CURRENT_CODE=""
+CURRENT_INVITATION=""
 CURRENT_CASE_ID=""
 
 next_case() {
@@ -511,9 +518,8 @@ next_case() {
   local repetition="$2"
   case_index=$((case_index + 1))
   CURRENT_RUN_ID="$base_run_id-c$case_index-r$repetition"
-  # A valid 6-4-4 fallback keeps standalone/local invocations honest. Physical
-  # transfer pairs replace it with the receiver-created InviteV2 Room Code.
-  printf -v CURRENT_CODE '%06d-ambe-come' "$((800000 + case_index % 100000))"
+  # Paired receivers publish the complete InviteV2 URI before their sender starts.
+  CURRENT_INVITATION=""
   printf -v CURRENT_CASE_ID '%03d-%s-r%d' "$case_index" "$label" "$repetition"
 }
 
@@ -544,11 +550,11 @@ run_local_share_recovery() {
       status="FAIL"
       if [[ "$platform" == "android" ]]; then
         if run_android_method shareSourceFailureDoesNotPoisonNextSelection \
-          single_file "$CURRENT_CODE" "$CURRENT_RUN_ID" "$log_file"; then
+          single_file "$CURRENT_INVITATION" "$CURRENT_RUN_ID" "$log_file"; then
           status="PASS"
         fi
       elif run_apple_method ios testShareSourceFailureDoesNotPoisonNextSelection \
-        single_file "$CURRENT_CODE" "$CURRENT_RUN_ID" "$log_file"; then
+        single_file "$CURRENT_INVITATION" "$CURRENT_RUN_ID" "$log_file"; then
         status="PASS"
       fi
       record_result local "$platform" "$platform" unreadable_share "$repetition" "$status"
@@ -584,7 +590,7 @@ for direction in "${directions[@]}"; do
       next_case "$sender-to-$receiver-$scenario" "$repetition"
       echo "case $CURRENT_CASE_ID: $sender -> $receiver, scenario=$scenario"
       if run_pair "$sender" "$receiver" "$scenario" \
-        "$CURRENT_CODE" "$CURRENT_RUN_ID" "$CURRENT_CASE_ID"; then
+        "$CURRENT_INVITATION" "$CURRENT_RUN_ID" "$CURRENT_CASE_ID"; then
         record_result transfer "$sender" "$receiver" "$scenario" "$repetition" PASS
         echo "pass: $CURRENT_CASE_ID"
       else

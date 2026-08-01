@@ -6,6 +6,7 @@ use thiserror::Error;
 /// are carried separately and must never be parsed to recover this value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransferCause {
+    NearbyHybridPreAuthTransportFailure,
     SenderSourceUnavailable,
     SenderPermissionLost,
     SenderSourceChanged,
@@ -23,6 +24,7 @@ pub enum TransferCause {
 impl TransferCause {
     pub const fn code(self) -> &'static str {
         match self {
+            Self::NearbyHybridPreAuthTransportFailure => "nearby_hybrid_pre_auth_transport_failure",
             Self::SenderSourceUnavailable => "sender_source_unavailable",
             Self::SenderPermissionLost => "sender_permission_lost",
             Self::SenderSourceChanged => "sender_source_changed",

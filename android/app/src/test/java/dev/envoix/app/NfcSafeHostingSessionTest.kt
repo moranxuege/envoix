@@ -132,6 +132,56 @@ class NfcSafeHostingSessionTest {
     }
 
     @Test
+    fun `enabling NFC allows another share attempt in the same resume`() {
+        val events = mutableListOf<String>()
+        var unavailable: NfcPhoneHostingStatus? = NfcPhoneHostingStatus.NfcDisabled
+        val platform =
+            object : NfcSafeHostingPlatform {
+                override fun unavailableStatus(): NfcPhoneHostingStatus? = unavailable
+
+                override fun enterListenOnly(): Boolean {
+                    events += "listen-only"
+                    return true
+                }
+
+                override fun resetDiscoveryTechnology() {
+                    events += "reset"
+                }
+
+                override fun preferHostService(): Boolean {
+                    events += "prefer"
+                    return true
+                }
+
+                override fun unsetPreferredHostService() {
+                    events += "unset"
+                }
+            }
+        val session =
+            NfcSafeHostingSession(
+                platform = platform,
+                armInvitation = {
+                    events += "arm"
+                    true
+                },
+                clearInvitation = { events += "clear" },
+            )
+        session.onResume()
+
+        session.setInvitation("envoix://room/first")
+
+        assertEquals(listOf("clear"), events)
+        assertEquals(NfcPhoneHostingStatus.NfcDisabled, session.state.value.status)
+
+        unavailable = null
+        events.clear()
+        session.setInvitation("envoix://room/second")
+
+        assertEquals(listOf("clear", "listen-only", "arm", "prefer"), events)
+        assertTrue(session.state.value.armed)
+    }
+
+    @Test
     fun `failed HCE preference clears invitation but keeps listen-only`() {
         val events = mutableListOf<String>()
         val platform =

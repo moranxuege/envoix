@@ -24,7 +24,7 @@ data class ParsedInvite(
     val expiresAt: Long,
 )
 
-/** All invitation parsing and Room-Code normalization is delegated to Rust. */
+/** Invitation parsing is delegated to Rust; only foreground Room Code typing is formatted locally. */
 object InviteCodec {
     fun generate(
         creatorRole: String,
@@ -54,20 +54,32 @@ object InviteCodec {
         localRole: String,
     ): ParsedInvite? = parsed(Native.parseInviteForRole(input, localRole))
 
-    fun normalizeRoomCode(input: String): String? {
-        val value = json(Native.normalizeRoomCode(input)) ?: return null
-        return value.optString("code").ifEmpty { null }
-    }
-
     /** UI-only formatter; Rust remains authoritative when the transfer starts. */
     fun formatRoomCode(input: String): String {
-        val compact = input.filterNot { it == '-' }.take(14)
-        if (!compact.all { it.isLetterOrDigit() && it.code < 128 }) return input
+        val compact = StringBuilder(14)
+        var separatorAfterSix = false
+        var separatorAfterTen = false
+        for (character in input) {
+            when {
+                character.isLetterOrDigit() && character.code < 128 -> {
+                    if (compact.length == 14) return input
+                    compact.append(character.lowercaseChar())
+                }
+                character == '-' && compact.length == 6 && !separatorAfterSix ->
+                    separatorAfterSix = true
+                character == '-' && compact.length == 10 && !separatorAfterTen ->
+                    separatorAfterTen = true
+                else -> return input
+            }
+        }
+        if (compact.length == 14 && separatorAfterSix != separatorAfterTen) return input
         return buildString {
             compact.forEachIndexed { index, character ->
                 if (index == 6 || index == 10) append('-')
-                append(character.lowercaseChar())
+                append(character)
             }
+            if (compact.length == 6 && separatorAfterSix) append('-')
+            if (compact.length == 10 && separatorAfterTen) append('-')
         }
     }
 

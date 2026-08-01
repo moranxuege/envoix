@@ -289,11 +289,11 @@ internal class NfcSafeHostingSession(
     private fun ensureListenOnly(): Boolean {
         if (listenOnly) return true
         if (listenOnlyAttemptedThisResume) return false
-        listenOnlyAttemptedThisResume = true
         platform.unavailableStatus()?.let {
             publish(it)
             return false
         }
+        listenOnlyAttemptedThisResume = true
         if (!platform.enterListenOnly()) {
             // The call may have partially reached the NFC service before
             // failing. Remain unarmed and do not risk a polling pulse by

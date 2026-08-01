@@ -49,7 +49,6 @@ struct SendView: View {
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var invite: String = ""
-    @State private var roomCode = ""
     @State private var pairingInvite: FfiPairingInvite?
     @State private var roomQRCodeImage: PlatformImage?
     @State private var roomQRCodePayload = ""
@@ -254,7 +253,6 @@ struct SendView: View {
         .onChange(of: viewModel.isBusy) { isBusy in
             if isBusy {
                 invite = ""
-                roomCode = ""
                 pairingInvite = nil
                 roomQRCodeImage = nil
                 roomQRCodePayload = ""
@@ -375,21 +373,16 @@ struct SendView: View {
                         .accessibilityIdentifier("send_scan_receiver_qr")
                     }
                     .frame(maxWidth: .infinity, minHeight: 230)
-                } else if !roomCode.trimmed.isEmpty {
+                } else if !invite.trimmed.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 42))
                             .foregroundStyle(Theme.success)
-                        Text(AppText.value("Ready to join", "已准备加入", language: uiLanguage))
+                        Text(AppText.value("InviteV2 link ready", "InviteV2 链接已就绪", language: uiLanguage))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
-                        Text(roomCode)
-                            .font(.body.monospaced().weight(.semibold))
-                            .foregroundStyle(Theme.accentStrong)
-                            .multilineTextAlignment(.center)
-                            .textSelection(.enabled)
                         Button(AppText.value("Clear and show my QR", "清除并显示我的二维码", language: uiLanguage)) {
-                            roomCode = ""
+                            invite = ""
                         }
                         .buttonStyle(.bordered)
                     }
@@ -403,45 +396,47 @@ struct SendView: View {
                         } else {
                             qrPlaceholder
                         }
-                        LinkRow(
-                            text: pairingInvite?.roomCode ?? AppText.value("Send code", "发送码", language: uiLanguage),
-                            displaysFullText: true
-                        ) {
-                            Button {
-                                copyWithToast(pairingInvite?.roomCode ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage), language: uiLanguage)
-                            } label: {
-                                Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
-                                    .frame(minHeight: 40)
-                            }
-                            .disabled(pairingInvite == nil)
-                            .accessibilityIdentifier("send_room_copy")
+                        Button {
+                            copyWithToast(
+                                pairingInvite?.payload ?? "",
+                                AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                                language: uiLanguage
+                            )
+                        } label: {
+                            Label(
+                                AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage),
+                                systemImage: "doc.on.doc"
+                            )
+                            .frame(maxWidth: .infinity, minHeight: 40)
                         }
+                        .buttonStyle(.bordered)
+                        .disabled(pairingInvite == nil)
+                        .accessibilityIdentifier("send_invite_copy")
                     }
                     .frame(maxWidth: .infinity, minHeight: 230)
                 }
             }
 
             RoomCodeField(
-                code: roomCodeBinding,
+                code: inviteBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Or enter a Room code", "或输入配对码", language: uiLanguage),
-                placeholder: AppText.value("Enter Room code", "输入配对码", language: uiLanguage),
-                showsCopyAction: false,
+                title: AppText.value("Or enter a complete InviteV2 link", "或输入完整 InviteV2 链接", language: uiLanguage),
+                placeholder: "envoix://invite/v2/…",
                 pasteAction: pastePairingInput,
                 helper: "",
-                accessibilityIdentifier: "send_room_code_input"
+                accessibilityIdentifier: "send_invite_input"
             )
         }
         .card(raised: true, padding: 18)
         #else
         VStack(alignment: .center, spacing: 16) {
             VStack(spacing: 4) {
-                Text(AppText.value("Share this QR or code", "分享二维码或发送码", language: uiLanguage))
+                Text(AppText.value("Share this QR or invite link", "分享二维码或邀请链接", language: uiLanguage))
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.text)
                 Text(AppText.value(
-                    "The receiver can scan this QR or enter the same Room code. You can also scan a receiver code below.",
-                    "接收端可以扫码或输入同一个配对码；你也可以在下方扫描接收端的码。",
+                    "The receiver can scan this QR or paste the complete InviteV2 link. You can also scan a receiver QR below.",
+                    "接收端可以扫描此二维码或粘贴完整 InviteV2 链接；你也可以在下方扫描接收端二维码。",
                     language: uiLanguage
                 ))
                 .font(.body)
@@ -457,22 +452,22 @@ struct SendView: View {
                 qrPlaceholder
             }
 
-            LinkRow(
-                text: pairingInvite?.roomCode ?? AppText.value("Send code", "发送码", language: uiLanguage),
-                textIdentifier: "send_room_code",
-                displaysFullText: true
-            ) {
+            HStack(spacing: 8) {
                 Button {
-                    copyWithToast(pairingInvite?.roomCode ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage), language: uiLanguage)
+                    copyWithToast(
+                        pairingInvite?.payload ?? "",
+                        AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                        language: uiLanguage
+                    )
                 } label: {
-                    Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
+                    Label(AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
                 .disabled(pairingInvite == nil)
 
                 Button {
-                    roomCode = ""
+                    invite = ""
                     refreshPairingInvite()
                 } label: {
                     Label(AppText.value("New", "新建", language: uiLanguage), systemImage: "arrow.clockwise")
@@ -481,13 +476,15 @@ struct SendView: View {
                 }
                 .disabled(viewModel.isBusy)
             }
+            .buttonStyle(.bordered)
 
             RoomCodeField(
-                code: roomCodeBinding,
+                code: inviteBinding,
                 disabled: viewModel.isBusy,
                 title: AppText.value("Join receiver instead", "改为加入接收端", language: uiLanguage),
-                placeholder: AppText.value("Scan QR or enter receiver Room code", "扫码或输入接收端配对码", language: uiLanguage),
-                helper: AppText.value("Leave this empty to use your send code above.", "留空则使用上方发送码。", language: uiLanguage)
+                placeholder: "envoix://invite/v2/…",
+                helper: AppText.value("Enter the receiver's complete InviteV2 link, or leave empty to use your QR above.", "输入接收端的完整 InviteV2 链接，或留空使用上方二维码。", language: uiLanguage),
+                accessibilityIdentifier: "send_invite_input"
             )
 
             HStack(spacing: 8) {
@@ -518,10 +515,10 @@ struct SendView: View {
         #endif
     }
 
-    private var roomCodeBinding: Binding<String> {
+    private var inviteBinding: Binding<String> {
         Binding(
-            get: { roomCode },
-            set: { value in roomCode = value }
+            get: { invite },
+            set: { value in invite = value }
         )
     }
 
@@ -945,17 +942,12 @@ struct SendView: View {
     private func applyPairingInput(_ value: String, source: PairingInputSource) -> String? {
         let input = value.trimmed
         do {
-            if input.lowercased().hasPrefix("envoix:") {
-                _ = try parsePairingInviteForRole(input: input, localRole: .send)
-                invite = input
-                roomCode = ""
-                mode = .invite
-            } else {
-                roomCode = try normalizeRoomCode(input: input)
-                pairingPanel = .show
-                mode = .room
-                invite = ""
+            guard input.hasPrefix(inviteV2URLPrefix) else {
+                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
             }
+            _ = try parsePairingInviteForRole(input: input, localRole: .send)
+            invite = input
+            mode = .invite
             let message = source == .scan
                 ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
                 : AppText.value("Invitation pasted", "邀请已粘贴", language: uiLanguage)
@@ -963,8 +955,8 @@ struct SendView: View {
             return nil
         } catch {
             let message = AppText.value(
-                "This is not a valid Envoix pairing code.",
-                "这不是有效的 Envoix 配对码。",
+                "This is not a valid complete Envoix InviteV2 link.",
+                "这不是有效的完整 Envoix InviteV2 链接。",
                 language: uiLanguage
             )
             ToastCenter.shared.show(message)
@@ -1092,7 +1084,7 @@ struct SendView: View {
         }
         switch mode {
         case .room:
-            return !roomCode.trimmed.isEmpty || pairingInvite != nil
+            return !invite.trimmed.isEmpty || pairingInvite != nil
         case .invite:
             return !invite.trimmed.isEmpty
         case .token:
@@ -1628,7 +1620,7 @@ struct SendView: View {
             )
             switch mode {
             case .room:
-                let input = roomCode.trimmed
+                let input = invite.trimmed
                 if input.isEmpty {
                     let pairingInvite = try activeSendPairingInvite()
                     nearbyInviteDelivery.deliver(
@@ -1640,7 +1632,10 @@ struct SendView: View {
                             settings: settings
                         )
                     }
-                } else if input.lowercased().hasPrefix("envoix:") {
+                } else {
+                    guard input.hasPrefix(inviteV2URLPrefix) else {
+                        throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                    }
                     let parsed = try parsePairingInviteForRole(
                         input: input,
                         localRole: .send
@@ -1651,15 +1646,11 @@ struct SendView: View {
                         invite: input,
                         settings: try runtimeSettings(for: parsed)
                     )
-                } else {
-                    let normalized = try normalizeRoomCode(input: input)
-                    roomCode = normalized
-                    startRoomSend(
-                        code: normalized,
-                        settings: settings
-                    )
                 }
             case .invite:
+                guard invite.trimmed.hasPrefix(inviteV2URLPrefix) else {
+                    throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                }
                 let parsed = try parsePairingInviteForRole(input: invite.trimmed, localRole: .send)
                 startInviteSend(
                     invite: invite.trimmed,
