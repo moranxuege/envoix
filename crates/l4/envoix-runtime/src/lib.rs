@@ -81,8 +81,9 @@ pub use error::{AcquireError, CommandRejected};
 pub use launch::{
     AttemptLaunch, NoBulkStorage, NoSourceSessions, PendingReceiveSink, PlatformPorts,
     PreparedAttemptIo, PreparedReceiveSink, PreparedSinkResolver, PreparedSource,
-    PreparedSourceResolver, ReceiveSinkGrant, ReceptionCommission, SinkOpenError, SourceLocator,
-    SourceResolveError, StagedIdentity, receive_blob, receive_sink_gate,
+    PreparedSourceResolver, ReceiveDestination, ReceiveSinkGrant, ReceptionCommission,
+    SinkOpenError, SourceLocator, SourceResolveError, StagedIdentity, receive_blob,
+    receive_sink_gate,
 };
 pub use port::{
     AttemptExecution, AttemptExecutor, ExecutorSignal, NoSourceStaging, SessionProvider,

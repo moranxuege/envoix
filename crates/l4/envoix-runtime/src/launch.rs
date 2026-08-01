@@ -20,7 +20,7 @@ use envoix_outcomes::OutcomeCode;
 use tokio::sync::oneshot;
 
 use envoix_attempt_api::AttemptPlan;
-use envoix_blob_api::{BlobKey, BlobWorkId, SinkSession};
+use envoix_blob_api::{BlobKey, BlobWorkId, SealedArtifact, SinkSession};
 use envoix_capabilities::{SourceAcquisitionKey, SourceSession};
 use envoix_product::{ContentHash, SourceBacking, SourceLifecycle};
 use envoix_types::{ArtifactId, ByteCount, Direction, RecordId, TransferId};
@@ -220,13 +220,44 @@ pub struct ReceptionCommission {
     pub fingerprint: ContentHash,
 }
 
+/// What a card finds when it commissions a destination.
+///
+/// Two arms because "already sealed" is not a failure and not a retry. Sealed
+/// bytes are complete and immutable, so the destination can never be opened for
+/// writing again — reporting that as a transient fault promises a retry that
+/// cannot succeed, no matter how many times it is taken.
+///
+/// The witness comes back because it is the only thing that can prove those
+/// bytes are what this card was expecting, and only the store can mint one.
+#[derive(Debug)]
+pub enum ReceiveDestination {
+    /// Nothing is sealed here. Write.
+    Writable(PreparedReceiveSink),
+    /// These bytes are already complete, and the store says so.
+    AlreadySealed(SealedArtifact),
+}
+
+impl ReceiveDestination {
+    /// The writable session, panicking if these bytes are already sealed.
+    ///
+    /// For callers that have just established there is nothing here — tests
+    /// mostly. Production must handle both arms, because "already complete" is
+    /// a recovery and not a failure.
+    pub fn writable(self) -> Box<dyn SinkSession> {
+        match self {
+            Self::Writable(sink) => sink.into_session(),
+            Self::AlreadySealed(_) => panic!("expected a writable destination"),
+        }
+    }
+}
+
 /// Opens the destination a receive writes into.
 ///
 /// The port the card asks, for the same reason as [`PreparedSourceResolver`]:
 /// what a destination IS — a file under an app-private root, a lease on a bulk
 /// store — is a platform fact, and the runtime holds none of them.
 pub trait PreparedSinkResolver: Send + Sync + 'static {
-    fn open(&self, commission: ReceptionCommission) -> Result<PreparedReceiveSink, SinkOpenError>;
+    fn open(&self, commission: ReceptionCommission) -> Result<ReceiveDestination, SinkOpenError>;
 }
 
 /// The resolver for a composition that stores no bulk bytes.
@@ -234,7 +265,7 @@ pub trait PreparedSinkResolver: Send + Sync + 'static {
 pub struct NoBulkStorage;
 
 impl PreparedSinkResolver for NoBulkStorage {
-    fn open(&self, _commission: ReceptionCommission) -> Result<PreparedReceiveSink, SinkOpenError> {
+    fn open(&self, _commission: ReceptionCommission) -> Result<ReceiveDestination, SinkOpenError> {
         Err(SinkOpenError::Unsupported)
     }
 }

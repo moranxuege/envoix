@@ -21,8 +21,8 @@ use tokio::task::AbortHandle;
 use crate::command::{CommandCompletion, FrontendVerdict};
 use crate::error::CommandRejected;
 use crate::launch::{
-    AttemptLaunch, PlatformPorts, ReceiveSinkGrant, ReceptionCommission, SinkOpenError,
-    SourceLocator, StagedIdentity, receive_blob, receive_sink_gate,
+    AttemptLaunch, PlatformPorts, ReceiveDestination, ReceiveSinkGrant, ReceptionCommission,
+    SinkOpenError, SourceLocator, StagedIdentity, receive_blob, receive_sink_gate,
 };
 use crate::port::{
     AttemptExecution, AttemptExecutor, ExecutorSignal, SourceStagingExecution, SourceStagingSignal,
@@ -704,18 +704,27 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 content.total(),
             ),
         };
-        self.ports
-            .sinks
-            .open(commission)
-            .map_err(|error| match error {
-                // This build cannot receive at all. A card should never have been
-                // asked, so it is ours, not the disk's.
-                SinkOpenError::Unsupported => OutcomeCode::Internal,
-                // The person is told to free space rather than to retry something
-                // that cannot succeed until they do.
-                SinkOpenError::OutOfSpace => OutcomeCode::StorageFull,
-                SinkOpenError::Unavailable => OutcomeCode::StorageFault,
-            })
+        match self.ports.sinks.open(commission) {
+            Ok(ReceiveDestination::Writable(sink)) => Ok(sink),
+            // These bytes are already complete. The card cannot yet turn that
+            // witness back into a completion — the input that would carry it
+            // into product state is step 5's remaining half, and it needs the
+            // transport that does not exist. So the attempt ends rather than
+            // receiving a file that is already here.
+            //
+            // `Internal` is honest for now and deliberately NOT a storage fault:
+            // reaching this means the record disagrees with storage, and telling
+            // the person to retry would promise something no retry can deliver.
+            // What replaces it is adopt-and-complete, not a different code.
+            Ok(ReceiveDestination::AlreadySealed(_witness)) => Err(OutcomeCode::Internal),
+            // This build cannot receive at all. A card should never have been
+            // asked, so it is ours, not the disk's.
+            Err(SinkOpenError::Unsupported) => Err(OutcomeCode::Internal),
+            // The person is told to free space rather than to retry something
+            // that cannot succeed until they do.
+            Err(SinkOpenError::OutOfSpace) => Err(OutcomeCode::StorageFull),
+            Err(SinkOpenError::Unavailable) => Err(OutcomeCode::StorageFault),
+        }
     }
 
     /// One observation from the source-staging worker, as a product input.

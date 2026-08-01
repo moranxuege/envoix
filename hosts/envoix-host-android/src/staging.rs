@@ -27,9 +27,10 @@ use envoix_blob_api::{BlobBackend, BlobKey, BlobState, BlobStore, BlobWorkId};
 use envoix_capabilities::{SourceReadError, SourceSession};
 use envoix_runtime::{
     ContentHash, DerivationSpec, PreparedReceiveSink, PreparedSinkResolver, PreparedSource,
-    PreparedSourceResolver, ReceptionCommission, SinkOpenError, SourceAcquisitionKey,
-    SourceLocator, SourceResolveError, SourceStagingExecution, SourceStagingExecutor,
-    SourceStagingPlan, SourceStagingSignal, StagedIdentity, StagingWork, StopToken, stop_channel,
+    PreparedSourceResolver, ReceiveDestination, ReceptionCommission, SinkOpenError,
+    SourceAcquisitionKey, SourceLocator, SourceResolveError, SourceStagingExecution,
+    SourceStagingExecutor, SourceStagingPlan, SourceStagingSignal, StagedIdentity, StagingWork,
+    StopToken, stop_channel,
 };
 use envoix_types::{AttemptGen, ByteCount};
 use tokio::sync::mpsc;
@@ -231,7 +232,7 @@ impl<B> HostSinks<B> {
 }
 
 impl<B: BlobBackend + Clone> PreparedSinkResolver for HostSinks<B> {
-    fn open(&self, commission: ReceptionCommission) -> Result<PreparedReceiveSink, SinkOpenError> {
+    fn open(&self, commission: ReceptionCommission) -> Result<ReceiveDestination, SinkOpenError> {
         // The CARD commissions; this only executes. The fingerprint arrives with
         // the key because a `BlobKey` carries no announcement, and reconstructing
         // one here could only produce the content-blind v1 answer.
@@ -242,16 +243,25 @@ impl<B: BlobBackend + Clone> PreparedSinkResolver for HostSinks<B> {
         if matches!(blob.work(), BlobWorkId::Derivation { .. }) {
             return Err(SinkOpenError::Unsupported);
         }
-        let lease = self.blobs.begin(blob, fingerprint).map_err(|error| {
-            match error {
-                envoix_blob_api::BlobError::OutOfSpace => SinkOpenError::OutOfSpace,
-                // Already leased, sealed, or a backend fault. All three mean
-                // "not now" rather than "not ever", and none is the person's to
-                // fix.
-                _ => SinkOpenError::Unavailable,
-            }
-        })?;
-        Ok(PreparedReceiveSink::new(Box::new(lease)))
+        match self.blobs.begin(blob, fingerprint) {
+            Ok(lease) => Ok(ReceiveDestination::Writable(PreparedReceiveSink::new(
+                Box::new(lease),
+            ))),
+            // NOT a transient failure. Sealed bytes are immutable, so this
+            // destination can never be opened for writing again — and the
+            // adoption remints the witness that proves they exist, which is the
+            // only thing that can turn them back into a completion.
+            Err(envoix_blob_api::BlobError::Sealed) => match self.blobs.adopt(blob) {
+                Ok(Some(witness)) => Ok(ReceiveDestination::AlreadySealed(witness)),
+                // Sealed a moment ago and unadoptable now: the store disagrees
+                // with itself, which is a fault rather than a seal.
+                Ok(None) | Err(_) => Err(SinkOpenError::Unavailable),
+            },
+            Err(envoix_blob_api::BlobError::OutOfSpace) => Err(SinkOpenError::OutOfSpace),
+            // Already leased, or a backend fault. Both mean "not now" rather
+            // than "not ever", and neither is the person's to fix.
+            Err(_) => Err(SinkOpenError::Unavailable),
+        }
     }
 }
 
@@ -698,7 +708,8 @@ mod tests {
 
         let held = sinks
             .open(commission(first, "a.pdf", 1000))
-            .expect("the first receive opens");
+            .expect("the first receive opens")
+            .writable();
         assert!(
             sinks.open(commission(second, "a.pdf", 1000)).is_ok(),
             "a different transfer opens while the first is held"
@@ -714,6 +725,55 @@ mod tests {
             sinks.open(commission(first, "a.pdf", 1000)).is_ok(),
             "the destination reopens once its writer is gone"
         );
+    }
+
+    /// A completed reception is not a destination, and not a retry either.
+    ///
+    /// Sealed bytes are immutable, so this key can never be opened for writing
+    /// again — reporting that as a transient fault would promise a retry that no
+    /// number of attempts can deliver. The store's own witness comes back
+    /// instead, which is the only thing that can turn those bytes into a
+    /// completion.
+    #[test]
+    fn a_sealed_reception_answers_with_its_witness_not_a_retry() {
+        let root = tempfile::TempDir::new().expect("a root");
+        let blobs = BlobStore::new(envoix_blob_local::LocalBlobs::new(
+            root.path().to_path_buf(),
+        ));
+        let sinks = HostSinks::new(blobs);
+        let card = RecordId::new(7);
+        let artifact = envoix_types::ArtifactId::from_bytes([3; 16]);
+        let transfer = envoix_types::TransferId::from_bytes([1; 16]);
+        let blob = BlobKey::new(card, BlobWorkId::of_reception(transfer, artifact));
+        let fingerprint = reception_fingerprint(
+            transfer,
+            artifact,
+            &envoix_types::OfferedName::from_untrusted("a.pdf").expect("a bounded name"),
+            ByteCount::new(4),
+        );
+        let commission = ReceptionCommission { blob, fingerprint };
+
+        let mut session = sinks
+            .open(commission)
+            .expect("the receive opens")
+            .writable();
+        session.append(ByteCount::new(0), b"done").expect("appends");
+        session
+            .seal(
+                ByteCount::new(4),
+                ContentHash::from_bytes(*blake3::hash(b"done").as_bytes()),
+            )
+            .expect("seals");
+
+        match sinks.open(commission) {
+            Ok(ReceiveDestination::AlreadySealed(witness)) => {
+                assert_eq!(witness.blob(), blob, "the witness names these bytes");
+            }
+            Ok(ReceiveDestination::Writable(_)) => {
+                panic!("sealed bytes must never be reopened for writing")
+            }
+            Err(error) => panic!("a completed reception is not a failure: {error:?}"),
+        }
     }
 
     /// A partial of one document is not a resume point for another.
@@ -748,7 +808,7 @@ mod tests {
         let mut first = sinks
             .open(commission("a.pdf", 1000))
             .expect("the first receive opens")
-            .into_session();
+            .writable();
         first
             .append(ByteCount::new(0), &vec![7_u8; 400])
             .expect("appends");
@@ -764,7 +824,7 @@ mod tests {
         let mut resumed = sinks
             .open(commission("a.pdf", 1000))
             .expect("reopens")
-            .into_session();
+            .writable();
         assert_eq!(
             resumed.resume().expect("a prefix").length,
             ByteCount::new(400),
@@ -776,7 +836,7 @@ mod tests {
         let mut replaced = sinks
             .open(commission("b.pdf", 100))
             .expect("opens for the new document")
-            .into_session();
+            .writable();
         assert_eq!(
             replaced.resume().expect("a prefix").length,
             ByteCount::new(0),
