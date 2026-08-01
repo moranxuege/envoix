@@ -17,8 +17,9 @@ use envoix_product::{
 use envoix_runtime::{
     AttemptExecution, AttemptExecutor, AttemptLaunch, CommandCompletion, CommandRejected,
     CommandVerdict, NoSourceStaging, PlatformPorts, PreparedReceiveSink, PreparedSinkResolver,
-    PreparedSource, PreparedSourceResolver, Runtime, RuntimeConfig, SessionProvider, SinkOpenError,
-    SourceLocator, SourceResolveError, StagedIdentity, stop_channel,
+    PreparedSource, PreparedSourceResolver, ReceptionCommission, Runtime, RuntimeConfig,
+    SessionProvider, SinkOpenError, SourceLocator, SourceResolveError, StagedIdentity,
+    stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -745,7 +746,7 @@ impl PreparedSourceResolver for MemorySources {
 struct MemorySinks;
 
 impl PreparedSinkResolver for MemorySinks {
-    fn open(&self, _blob: envoix_blob_api::BlobKey) -> Result<PreparedReceiveSink, SinkOpenError> {
+    fn open(&self, _commission: ReceptionCommission) -> Result<PreparedReceiveSink, SinkOpenError> {
         Ok(PreparedReceiveSink::new(Box::new(EmptySink)))
     }
 }

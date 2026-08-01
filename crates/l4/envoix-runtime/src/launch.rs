@@ -16,11 +16,14 @@
 
 use std::sync::Arc;
 
+use envoix_outcomes::OutcomeCode;
+use tokio::sync::oneshot;
+
 use envoix_attempt_api::AttemptPlan;
 use envoix_blob_api::{BlobKey, BlobWorkId, SinkSession};
 use envoix_capabilities::{SourceAcquisitionKey, SourceSession};
 use envoix_product::{ContentHash, SourceBacking, SourceLifecycle};
-use envoix_types::{ByteCount, Direction};
+use envoix_types::{ArtifactId, ByteCount, Direction, RecordId, TransferId};
 
 use crate::port::SourceStagingExecutor;
 
@@ -200,13 +203,30 @@ pub enum SinkOpenError {
     Unavailable,
 }
 
+/// Which destination to open, and under what commissioning.
+///
+/// Two values as ONE, because a call site that updated the key and forgot the
+/// fingerprint would open the right file under the wrong eligibility — and the
+/// symptom would be a partial silently adopted for content that never
+/// commissioned it.
+///
+/// The card builds it: the plan supplies card, transfer and artifact, and the
+/// COMMITTED record supplies the name and size. A host cannot reconstruct it
+/// from the key alone, and deliberately so — a `BlobKey` carries no
+/// announcement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReceptionCommission {
+    pub blob: BlobKey,
+    pub fingerprint: ContentHash,
+}
+
 /// Opens the destination a receive writes into.
 ///
 /// The port the card asks, for the same reason as [`PreparedSourceResolver`]:
 /// what a destination IS — a file under an app-private root, a lease on a bulk
 /// store — is a platform fact, and the runtime holds none of them.
 pub trait PreparedSinkResolver: Send + Sync + 'static {
-    fn open(&self, blob: BlobKey) -> Result<PreparedReceiveSink, SinkOpenError>;
+    fn open(&self, commission: ReceptionCommission) -> Result<PreparedReceiveSink, SinkOpenError>;
 }
 
 /// The resolver for a composition that stores no bulk bytes.
@@ -214,7 +234,7 @@ pub trait PreparedSinkResolver: Send + Sync + 'static {
 pub struct NoBulkStorage;
 
 impl PreparedSinkResolver for NoBulkStorage {
-    fn open(&self, _blob: BlobKey) -> Result<PreparedReceiveSink, SinkOpenError> {
+    fn open(&self, _commission: ReceptionCommission) -> Result<PreparedReceiveSink, SinkOpenError> {
         Err(SinkOpenError::Unsupported)
     }
 }
@@ -229,11 +249,8 @@ impl PreparedSinkResolver for NoBulkStorage {
 /// generation against the same transfer, and a receive keyed on the generation
 /// would abandon its partial at every resume. That is the opposite of the
 /// derivation key, where the generation is exactly what identifies the work.
-pub fn receive_blob(plan: AttemptPlan) -> BlobKey {
-    BlobKey::new(
-        plan.stamp.card,
-        BlobWorkId::of_reception(plan.transfer, plan.artifact),
-    )
+pub fn receive_blob(card: RecordId, transfer: TransferId, artifact: ArtifactId) -> BlobKey {
+    BlobKey::new(card, BlobWorkId::of_reception(transfer, artifact))
 }
 
 /// The platform capabilities a composition supplies to the runtime.
@@ -276,11 +293,64 @@ impl std::fmt::Debug for PlatformPorts {
     }
 }
 
+/// The destination an attempt is PROMISED, once its content is admitted.
+///
+/// A receive cannot be handed a sink at launch, because at launch nothing knows
+/// what is being received. Commissioning depends on the peer's announcement, and
+/// a destination opened before it can only be commissioned for whatever the last
+/// attempt was told — which is the wrong one exactly when a re-picked document
+/// arrives.
+///
+/// So the attempt gets a one-shot RECEIVER and no way to open anything itself.
+/// It may accept exactly one destination, chosen by the card, and it has no
+/// operation for choosing another.
+#[derive(Debug)]
+pub struct PendingReceiveSink {
+    granted: oneshot::Receiver<Result<PreparedReceiveSink, OutcomeCode>>,
+}
+
+impl PendingReceiveSink {
+    /// Waits for the card to commission a destination.
+    ///
+    /// `Err` is a local storage outcome the attempt should end with; a dropped
+    /// grant is `Internal`, because a card that went away without commissioning
+    /// has not authorized anything.
+    pub async fn granted(self) -> Result<PreparedReceiveSink, OutcomeCode> {
+        self.granted.await.unwrap_or(Err(OutcomeCode::Internal))
+    }
+}
+
+/// The card's half of the promise. One shot, and held with the live attempt.
+///
+/// Move-only and consumed by fulfilling it: a duplicate header, a stale attempt,
+/// or an attempt whose grant is already spent cannot obtain a second
+/// destination.
+#[derive(Debug)]
+pub struct ReceiveSinkGrant {
+    grant: oneshot::Sender<Result<PreparedReceiveSink, OutcomeCode>>,
+}
+
+impl ReceiveSinkGrant {
+    /// Hands over the commissioned destination, or the outcome that stopped it.
+    ///
+    /// A closed receiver means the attempt is gone; the sink is dropped, which
+    /// releases its writer lease.
+    pub fn fulfill(self, resolved: Result<PreparedReceiveSink, OutcomeCode>) {
+        let _ = self.grant.send(resolved);
+    }
+}
+
+/// Creates the two halves of one attempt's destination promise.
+pub fn receive_sink_gate() -> (ReceiveSinkGrant, PendingReceiveSink) {
+    let (grant, granted) = oneshot::channel();
+    (ReceiveSinkGrant { grant }, PendingReceiveSink { granted })
+}
+
 /// The I/O one attempt performs.
 #[derive(Debug)]
 pub enum PreparedAttemptIo {
     Send(PreparedSource),
-    Receive(PreparedReceiveSink),
+    Receive(PendingReceiveSink),
 }
 
 /// One attempt, with the I/O its direction requires.
@@ -304,9 +374,9 @@ impl AttemptLaunch {
         })
     }
 
-    /// A receive, over the destination it will write. `None` if the plan is not
+    /// A receive, over the destination it is PROMISED. `None` if the plan is not
     /// a receive.
-    pub fn receiving(plan: AttemptPlan, sink: PreparedReceiveSink) -> Option<Self> {
+    pub fn receiving(plan: AttemptPlan, sink: PendingReceiveSink) -> Option<Self> {
         (plan.direction == Direction::Receive).then_some(Self {
             plan,
             io: PreparedAttemptIo::Receive(sink),
@@ -403,6 +473,10 @@ mod tests {
         PreparedReceiveSink::new(Box::new(EmptySink))
     }
 
+    fn pending() -> PendingReceiveSink {
+        receive_sink_gate().1
+    }
+
     fn plan(direction: Direction) -> AttemptPlan {
         AttemptPlan {
             stamp: envoix_attempt_api::AttemptStamp {
@@ -432,15 +506,44 @@ mod tests {
     #[test]
     fn a_launch_cannot_carry_the_wrong_io_for_its_direction() {
         assert!(AttemptLaunch::sending(plan(Direction::Send), source()).is_some());
-        assert!(AttemptLaunch::receiving(plan(Direction::Receive), sink()).is_some());
+        assert!(AttemptLaunch::receiving(plan(Direction::Receive), pending()).is_some());
 
         assert!(
             AttemptLaunch::sending(plan(Direction::Receive), source()).is_none(),
             "a receive was launched with a source to send"
         );
         assert!(
-            AttemptLaunch::receiving(plan(Direction::Send), sink()).is_none(),
+            AttemptLaunch::receiving(plan(Direction::Send), pending()).is_none(),
             "a send was launched with somewhere to receive"
+        );
+    }
+
+    /// The promise delivers exactly one destination, and a card that goes away
+    /// without commissioning delivers none.
+    ///
+    /// The second half is the one that matters: a dropped grant must not read as
+    /// permission. An attempt that took silence for a destination would have
+    /// nowhere to write and no way to say so.
+    #[tokio::test]
+    async fn a_promised_destination_arrives_once_or_not_at_all() {
+        let (grant, pending) = receive_sink_gate();
+        grant.fulfill(Ok(sink()));
+        assert!(pending.granted().await.is_ok());
+
+        let (grant, pending) = receive_sink_gate();
+        grant.fulfill(Err(OutcomeCode::StorageFull));
+        assert_eq!(
+            pending.granted().await.err(),
+            Some(OutcomeCode::StorageFull)
+        );
+
+        // The card went away without commissioning anything.
+        let (grant, pending) = receive_sink_gate();
+        drop(grant);
+        assert_eq!(
+            pending.granted().await.err(),
+            Some(OutcomeCode::Internal),
+            "silence is not a destination"
         );
     }
 
@@ -459,13 +562,14 @@ mod tests {
         resumed.stamp.generation = AttemptGen::new(2);
         resumed.resume = ResumeIntent::Allowed;
 
-        assert_eq!(receive_blob(first), receive_blob(resumed));
+        let key = |plan: AttemptPlan| receive_blob(plan.stamp.card, plan.transfer, plan.artifact);
+        assert_eq!(key(first), key(resumed));
 
         let mut other_transfer = first;
         other_transfer.transfer = TransferId::from_bytes([9; 16]);
         assert_ne!(
-            receive_blob(first),
-            receive_blob(other_transfer),
+            key(first),
+            key(other_transfer),
             "two transfers on one card must not share a destination"
         );
     }

@@ -23,15 +23,13 @@ use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use envoix_blob_api::{
-    BlobBackend, BlobKey, BlobState, BlobStore, BlobWorkId, reception_fingerprint,
-};
+use envoix_blob_api::{BlobBackend, BlobKey, BlobState, BlobStore, BlobWorkId};
 use envoix_capabilities::{SourceReadError, SourceSession};
 use envoix_runtime::{
     ContentHash, DerivationSpec, PreparedReceiveSink, PreparedSinkResolver, PreparedSource,
-    PreparedSourceResolver, SinkOpenError, SourceAcquisitionKey, SourceLocator, SourceResolveError,
-    SourceStagingExecution, SourceStagingExecutor, SourceStagingPlan, SourceStagingSignal,
-    StagedIdentity, StagingWork, StopToken, stop_channel,
+    PreparedSourceResolver, ReceptionCommission, SinkOpenError, SourceAcquisitionKey,
+    SourceLocator, SourceResolveError, SourceStagingExecution, SourceStagingExecutor,
+    SourceStagingPlan, SourceStagingSignal, StagedIdentity, StagingWork, StopToken, stop_channel,
 };
 use envoix_types::{AttemptGen, ByteCount};
 use tokio::sync::mpsc;
@@ -233,18 +231,17 @@ impl<B> HostSinks<B> {
 }
 
 impl<B: BlobBackend + Clone> PreparedSinkResolver for HostSinks<B> {
-    fn open(&self, blob: BlobKey) -> Result<PreparedReceiveSink, SinkOpenError> {
-        // A reception's commissioning IS its key, so the fingerprint is derived
-        // from it rather than carried. See `reception_fingerprint`.
-        let fingerprint = match blob.work() {
-            BlobWorkId::Reception { transfer, artifact } => {
-                reception_fingerprint(transfer, artifact)
-            }
-            // A derivation key reaching the RECEIVE resolver is this composition
-            // wiring itself wrong, not a disk that failed. `Unsupported` says so
-            // — retrying it would never help.
-            BlobWorkId::Derivation { .. } => return Err(SinkOpenError::Unsupported),
-        };
+    fn open(&self, commission: ReceptionCommission) -> Result<PreparedReceiveSink, SinkOpenError> {
+        // The CARD commissions; this only executes. The fingerprint arrives with
+        // the key because a `BlobKey` carries no announcement, and reconstructing
+        // one here could only produce the content-blind v1 answer.
+        let ReceptionCommission { blob, fingerprint } = commission;
+        // A derivation key reaching the RECEIVE resolver is this composition
+        // wiring itself wrong, not a disk that failed. `Unsupported` says so —
+        // retrying it would never help.
+        if matches!(blob.work(), BlobWorkId::Derivation { .. }) {
+            return Err(SinkOpenError::Unsupported);
+        }
         let lease = self.blobs.begin(blob, fingerprint).map_err(|error| {
             match error {
                 envoix_blob_api::BlobError::OutOfSpace => SinkOpenError::OutOfSpace,
@@ -622,6 +619,8 @@ fn scan(
 mod tests {
     use std::io::Write;
 
+    use envoix_blob_api::reception_fingerprint;
+
     use envoix_capabilities::{DutyProvenance, SourceAcquisitionKey};
     use envoix_types::{AttemptGen, RecordId, RequestId};
 
@@ -684,21 +683,104 @@ mod tests {
         );
         assert_ne!(first, second, "two transfers must not share a destination");
 
-        let held = sinks.open(first).expect("the first receive opens");
+        let commission = |blob: BlobKey, name: &str, size: u64| ReceptionCommission {
+            blob,
+            fingerprint: reception_fingerprint(
+                match blob.work() {
+                    BlobWorkId::Reception { transfer, .. } => transfer,
+                    BlobWorkId::Derivation { .. } => unreachable!("a reception key"),
+                },
+                artifact,
+                &envoix_types::OfferedName::from_untrusted(name).expect("a bounded name"),
+                ByteCount::new(size),
+            ),
+        };
+
+        let held = sinks
+            .open(commission(first, "a.pdf", 1000))
+            .expect("the first receive opens");
         assert!(
-            sinks.open(second).is_ok(),
+            sinks.open(commission(second, "a.pdf", 1000)).is_ok(),
             "a different transfer opens while the first is held"
         );
         assert_eq!(
-            sinks.open(first).err(),
+            sinks.open(commission(first, "a.pdf", 1000)).err(),
             Some(SinkOpenError::Unavailable),
             "a second writer on a held destination must be refused"
         );
 
         drop(held);
         assert!(
-            sinks.open(first).is_ok(),
+            sinks.open(commission(first, "a.pdf", 1000)).is_ok(),
             "the destination reopens once its writer is gone"
+        );
+    }
+
+    /// A partial of one document is not a resume point for another.
+    ///
+    /// The destination key is stable across attempts on purpose — a retry must
+    /// find its partial — so the COMMISSIONING is what distinguishes what that
+    /// partial was for. Without it a 400-byte partial of a 1000-byte document
+    /// would be offered as a resume point for a 100-byte replacement, and the
+    /// transfer machine refuses that outright: the receive would just fail.
+    #[test]
+    fn a_changed_announcement_does_not_inherit_the_old_partial() {
+        let root = tempfile::TempDir::new().expect("a root");
+        let blobs = BlobStore::new(envoix_blob_local::LocalBlobs::new(
+            root.path().to_path_buf(),
+        ));
+        let sinks = HostSinks::new(blobs);
+        let card = RecordId::new(7);
+        let artifact = envoix_types::ArtifactId::from_bytes([3; 16]);
+        let transfer = envoix_types::TransferId::from_bytes([1; 16]);
+        let blob = BlobKey::new(card, BlobWorkId::of_reception(transfer, artifact));
+        let commission = |name: &str, size: u64| ReceptionCommission {
+            blob,
+            fingerprint: reception_fingerprint(
+                transfer,
+                artifact,
+                &envoix_types::OfferedName::from_untrusted(name).expect("a bounded name"),
+                ByteCount::new(size),
+            ),
+        };
+
+        // 400 bytes of "a.pdf", promised durable.
+        let mut first = sinks
+            .open(commission("a.pdf", 1000))
+            .expect("the first receive opens")
+            .into_session();
+        first
+            .append(ByteCount::new(0), &vec![7_u8; 400])
+            .expect("appends");
+        first
+            .checkpoint(envoix_types::DurablePrefix {
+                length: ByteCount::new(400),
+                digest: ContentHash::from_bytes(*blake3::hash(&vec![7_u8; 400]).as_bytes()),
+            })
+            .expect("promises");
+        drop(first);
+
+        // The same announcement finds it again — a retry must.
+        let mut resumed = sinks
+            .open(commission("a.pdf", 1000))
+            .expect("reopens")
+            .into_session();
+        assert_eq!(
+            resumed.resume().expect("a prefix").length,
+            ByteCount::new(400),
+            "an identical announcement keeps its partial"
+        );
+        drop(resumed);
+
+        // A re-picked document does not.
+        let mut replaced = sinks
+            .open(commission("b.pdf", 100))
+            .expect("opens for the new document")
+            .into_session();
+        assert_eq!(
+            replaced.resume().expect("a prefix").length,
+            ByteCount::new(0),
+            "a different announcement starts at zero"
         );
     }
 

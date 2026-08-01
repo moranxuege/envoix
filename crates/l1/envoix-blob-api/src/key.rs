@@ -1,6 +1,8 @@
 //! Which blob, and which incarnation of it.
 
-use envoix_types::{ArtifactId, AttemptGen, ContentHash, RecordId, TransferId};
+use envoix_types::{
+    ArtifactId, AttemptGen, ByteCount, ContentHash, OfferedName, RecordId, TransferId,
+};
 use serde::{Deserialize, Serialize};
 
 /// One incarnation of one card's bulk bytes, and what makes it one.
@@ -86,6 +88,16 @@ impl BlobKey {
 
 /// What commissioned a RECEPTION, for checkpoint eligibility.
 ///
+/// v2 includes the peer's ANNOUNCEMENT, and that is what makes a partial
+/// content-specific: a re-picked document computes a different fingerprint, so
+/// `BlobStore::begin` finds the stored checkpoint ineligible and opens at zero.
+/// Without it a 400-byte partial of one document would be offered as a resume
+/// point for a 100-byte replacement, which the transfer machine refuses outright
+/// with `ResumeOffsetExceedsFile` — the receive would simply fail.
+///
+/// A v1 checkpoint is therefore not adopted as v2, and must not be: it never
+/// proved WHICH announcement commissioned it.
+///
 /// A derivation's commissioning is its spec and its selection, neither of which
 /// the key carries — so a re-derivation under the same key with a different spec
 /// must not adopt the old prefix, and the fingerprint is what says so.
@@ -98,10 +110,23 @@ impl BlobKey {
 /// A function rather than a constant so that a reception which one day DOES gain
 /// a second axis has exactly one place to grow, and so that a resumed receive in
 /// a later process computes the same answer without storing it.
-pub fn reception_fingerprint(transfer: TransferId, artifact: ArtifactId) -> ContentHash {
+pub fn reception_fingerprint(
+    transfer: TransferId,
+    artifact: ArtifactId,
+    offered_name: &OfferedName,
+    file_size: ByteCount,
+) -> ContentHash {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"envoix.reception.commissioning.v1");
+    hasher.update(b"envoix.reception.commissioning.v2");
     hasher.update(&transfer.to_bytes());
     hasher.update(&artifact.to_bytes());
+    // LENGTH-FRAMED, so a name ending where another begins cannot produce the
+    // same commissioning as a different split. Fixed big-endian, so the answer
+    // does not depend on the machine that computed it — a resumed receive on
+    // another build must derive the same fingerprint or lose its partial.
+    let name = offered_name.as_str().as_bytes();
+    hasher.update(&(name.len() as u64).to_be_bytes());
+    hasher.update(name);
+    hasher.update(&file_size.get().to_be_bytes());
     ContentHash::from_bytes(*hasher.finalize().as_bytes())
 }

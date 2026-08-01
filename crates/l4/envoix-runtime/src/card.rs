@@ -21,7 +21,8 @@ use tokio::task::AbortHandle;
 use crate::command::{CommandCompletion, FrontendVerdict};
 use crate::error::CommandRejected;
 use crate::launch::{
-    AttemptLaunch, PlatformPorts, SinkOpenError, SourceLocator, StagedIdentity, receive_blob,
+    AttemptLaunch, PlatformPorts, ReceiveSinkGrant, ReceptionCommission, SinkOpenError,
+    SourceLocator, StagedIdentity, receive_blob, receive_sink_gate,
 };
 use crate::port::{
     AttemptExecution, AttemptExecutor, ExecutorSignal, SourceStagingExecution, SourceStagingSignal,
@@ -113,6 +114,14 @@ struct AttemptMeta {
     stamp: AttemptStamp,
     stop: StopHandle,
     pump: AbortHandle,
+    /// A receive's promise of a destination, until it is commissioned.
+    ///
+    /// Held with the ATTEMPT, so it dies with it: a superseded or retired
+    /// attempt's grant is dropped rather than fulfilled, and the attempt then
+    /// ends instead of receiving into a destination its card no longer wants
+    /// written. `None` for a send, and `None` once spent — one attempt cannot
+    /// consume two grants.
+    receive_grant: Option<ReceiveSinkGrant>,
 }
 
 impl Drop for AttemptMeta {
@@ -498,8 +507,8 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 // admission and the same retirement handshake a real executor's
                 // terminal does; `current` stays `None`, so the retirement the
                 // reducer then asks for acks immediately.
-                let launch = match self.launch(plan) {
-                    Ok(launch) => launch,
+                let (launch, receive_grant) = match self.launch(plan) {
+                    Ok(launched) => launched,
                     Err(unreachable) => {
                         self.on_signal(
                             plan.stamp,
@@ -514,6 +523,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                     stamp: plan.stamp,
                     stop,
                     pump,
+                    receive_grant,
                 });
             }
             ProductEffect::RetireAttempt { stamp, intent } => {
@@ -616,19 +626,87 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
         if !self.supervisor.is_current(stamp) {
             return PeerContentVerdict::Refused;
         }
+        // The grant is checked BEFORE anything is decided. An attempt whose
+        // grant is missing or already spent cannot be given a destination, so
+        // admitting its declaration would promise something undeliverable.
+        if self
+            .current
+            .as_ref()
+            .and_then(|meta| meta.receive_grant.as_ref())
+            .is_none()
+        {
+            return PeerContentVerdict::Refused;
+        }
         let decision = self.session().record().classify_peer_content(declaration);
         if let Some(verdict) = verdict_without_commit(decision) {
             return verdict;
         }
-        match self.apply(ProductInput::PeerContentDeclared(declaration.clone())) {
-            // The commit held, so the record now says what the peer declared.
-            // Only now may it proceed.
-            Ok(_) => PeerContentVerdict::Admitted,
-            // It did not. Refusing is the only honest answer: the peer would
-            // otherwise write bytes this card has no durable record of having
-            // agreed to.
-            Err(_) => PeerContentVerdict::Refused,
+        if matches!(
+            decision,
+            PeerContentDecision::Established | PeerContentDecision::Replaced
+        ) && self
+            .apply(ProductInput::PeerContentDeclared(declaration.clone()))
+            .is_err()
+        {
+            // The commit did not hold. Refusing is the only honest answer: the
+            // peer would otherwise write bytes this card has no durable record
+            // of having agreed to.
+            return PeerContentVerdict::Refused;
         }
+        // Commissioned from the COMMITTED record, never from the request being
+        // decided. `SourceLifecycle::content()` is the model's single content
+        // authority, and a declaration that did not reach it must not be able to
+        // commission a destination anyway.
+        let resolved = self.commission_receive();
+        let outcome = resolved.as_ref().err().copied();
+        if let Some(grant) = self
+            .current
+            .as_mut()
+            .and_then(|meta| meta.receive_grant.take())
+        {
+            grant.fulfill(resolved);
+        }
+        match outcome {
+            // The content fact IS durably admitted, so the declaration was
+            // accepted — but the destination could not be opened. The attempt
+            // learns that through the gate and ends with the truthful storage
+            // outcome, rather than being told its content was refused.
+            Some(_) | None => PeerContentVerdict::Admitted,
+        }
+    }
+
+    /// Opens the one destination this attempt may write, for what the record
+    /// now says is being received.
+    fn commission_receive(&self) -> Result<crate::launch::PreparedReceiveSink, OutcomeCode> {
+        let record = self.session().record();
+        // A card with no committed content cannot commission anything. That is
+        // an internal refusal, not permission to fall back to the request.
+        let content = record.source.content().ok_or(OutcomeCode::Internal)?;
+        let commission = ReceptionCommission {
+            blob: receive_blob(
+                record.identity.card,
+                record.identity.transfer,
+                record.identity.artifact,
+            ),
+            fingerprint: envoix_blob_api::reception_fingerprint(
+                record.identity.transfer,
+                record.identity.artifact,
+                content.name(),
+                content.total(),
+            ),
+        };
+        self.ports
+            .sinks
+            .open(commission)
+            .map_err(|error| match error {
+                // This build cannot receive at all. A card should never have been
+                // asked, so it is ours, not the disk's.
+                SinkOpenError::Unsupported => OutcomeCode::Internal,
+                // The person is told to free space rather than to retry something
+                // that cannot succeed until they do.
+                SinkOpenError::OutOfSpace => OutcomeCode::StorageFull,
+                SinkOpenError::Unavailable => OutcomeCode::StorageFault,
+            })
     }
 
     /// One observation from the source-staging worker, as a product input.
@@ -706,25 +784,23 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
     /// outside would be reading the right fact at the wrong place: projections
     /// are drained asynchronously, so nothing orders that observation against
     /// this dispatch.
-    fn launch(&self, plan: AttemptPlan) -> Result<AttemptLaunch, OutcomeCode> {
+    fn launch(
+        &self,
+        plan: AttemptPlan,
+    ) -> Result<(AttemptLaunch, Option<ReceiveSinkGrant>), OutcomeCode> {
         if plan.direction == Direction::Receive {
-            // The card names the destination for the same reason it names the
-            // source: it is the authority, and this is the one step that both
-            // observes the committed record and starts the attempt. The key is
-            // DERIVED from the plan, so nothing durable has to agree with it.
-            let sink = self.ports.sinks.open(receive_blob(plan)).map_err(|error| {
-                match error {
-                    // This build cannot receive at all. A card should never have
-                    // been asked, so it is ours, not the disk's.
-                    SinkOpenError::Unsupported => OutcomeCode::Internal,
-                    // Carried all the way out now: the person is told to free
-                    // space rather than to retry something that cannot succeed
-                    // until they do.
-                    SinkOpenError::OutOfSpace => OutcomeCode::StorageFull,
-                    SinkOpenError::Unavailable => OutcomeCode::StorageFault,
-                }
-            })?;
-            return AttemptLaunch::receiving(plan, sink).ok_or(OutcomeCode::Internal);
+            // NO storage is opened here, and that is the point. Commissioning a
+            // destination depends on what the peer announces, which nothing
+            // knows yet — so a sink opened now could only be commissioned for
+            // whatever the LAST attempt was told, which is exactly wrong when a
+            // re-picked document arrives.
+            //
+            // The attempt gets a promise instead. The card keeps the grant and
+            // fulfills it once the announcement is durably admitted.
+            let (grant, pending) = receive_sink_gate();
+            return AttemptLaunch::receiving(plan, pending)
+                .map(|launch| (launch, Some(grant)))
+                .ok_or(OutcomeCode::Internal);
         }
         let record = self.session().record();
         let SourceLifecycle::Ready { content, .. } = &record.source else {
@@ -752,7 +828,9 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             .sources
             .resolve(locator, identity)
             .map_err(|_| unreachable)?;
-        AttemptLaunch::sending(plan, source).ok_or(OutcomeCode::Internal)
+        AttemptLaunch::sending(plan, source)
+            .map(|launch| (launch, None))
+            .ok_or(OutcomeCode::Internal)
     }
 
     fn try_ack(&mut self, stamp: AttemptStamp) {

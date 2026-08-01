@@ -29,9 +29,9 @@ use envoix_runtime::{
     AcquireError, AttemptExecution, AttemptExecutor, AttemptLaunch, CardUpdateKind,
     CommandCompletion, CommandVerdict, DutyKind, EvidenceSink, EvidenceSinkError, ExecutorSignal,
     LosslessUpdateKind, NoSourceStaging, PlatformPorts, PreparedReceiveSink, PreparedSinkResolver,
-    PreparedSource, PreparedSourceResolver, Runtime, RuntimeConfig, SessionProvider,
-    ShutdownReport, SinkOpenError, SourceLocator, SourceResolveError, StagedIdentity, StopSignal,
-    SubscribeError, TryRecvError, stop_channel,
+    PreparedSource, PreparedSourceResolver, ReceptionCommission, Runtime, RuntimeConfig,
+    SessionProvider, ShutdownReport, SinkOpenError, SourceLocator, SourceResolveError,
+    StagedIdentity, StopSignal, SubscribeError, TryRecvError, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -1299,7 +1299,7 @@ async fn a_send_that_cannot_open_its_source_fails_instead_of_connecting() {
 struct MemorySinks;
 
 impl PreparedSinkResolver for MemorySinks {
-    fn open(&self, _blob: envoix_blob_api::BlobKey) -> Result<PreparedReceiveSink, SinkOpenError> {
+    fn open(&self, _commission: ReceptionCommission) -> Result<PreparedReceiveSink, SinkOpenError> {
         Ok(PreparedReceiveSink::new(Box::new(EmptySink)))
     }
 }
