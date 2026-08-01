@@ -1,13 +1,17 @@
+use std::num::NonZeroU32;
+
 use envoix_attempt_api::{
     AdmittedAttemptEvent, AttemptPlan, AttemptStamp, RetirementAck, RetirementIntent,
 };
 use envoix_capabilities::{AdmittedDutyResult, AdmittedSourceResult, Duty, SourceAcquisitionKey};
 use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{
-    ArtifactId, AttemptGen, ByteCount, CommandId, Direction, PeerContentDeclaration, RequestId,
-    SourceItemId,
+    ArtifactId, AttemptGen, ByteCount, CommandId, Direction, OfferedName, PeerContentDeclaration,
+    RequestId, SourceItemId,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::source_lifecycle::TransferContent;
 
 use crate::{
     AcceptedSourceOffer, ContentHash, DerivationSpec, PairingChannel, ProductIdentity,
@@ -103,6 +107,62 @@ pub struct Facts {
     pub proof_delivered: bool,
     pub receipt_mismatch: bool,
     pub remove_requested: bool,
+}
+
+/// That the sender replaced what it said it was sending, and what it was before.
+///
+/// Durable, because the person it is for may have been elsewhere when it
+/// happened. A card whose name and size simply changed under them, with its
+/// progress back at zero, is indistinguishable from one that restarted — and
+/// those call for completely different reactions.
+///
+/// `previous` is the FIRST thing they saw replaced, not the most recent one. If
+/// it is replaced again before they have looked, what they need to reconcile is
+/// still the document they knew about; `count` says how much churn there was.
+///
+/// Not a second authority on content: what is being received now is always
+/// `SourceLifecycle::NotRequired { peer_content }`. This only remembers what it
+/// displaced.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    into = "ContentReplacementNoticeDto",
+    from = "ContentReplacementNoticeDto"
+)]
+pub struct ContentReplacementNotice {
+    pub previous: TransferContent,
+    pub count: NonZeroU32,
+}
+
+/// The record's shape for the notice.
+///
+/// `TransferContent` is deliberately not serde — it goes through a DTO wherever
+/// it is stored — so this flattens its two fields rather than nesting a second
+/// encoding of the same thing.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContentReplacementNoticeDto {
+    previous_name: OfferedName,
+    previous_total: ByteCount,
+    count: NonZeroU32,
+}
+
+impl From<ContentReplacementNotice> for ContentReplacementNoticeDto {
+    fn from(notice: ContentReplacementNotice) -> Self {
+        Self {
+            previous_name: notice.previous.name().clone(),
+            previous_total: notice.previous.total(),
+            count: notice.count,
+        }
+    }
+}
+
+impl From<ContentReplacementNoticeDto> for ContentReplacementNotice {
+    fn from(dto: ContentReplacementNoticeDto) -> Self {
+        Self {
+            previous: TransferContent::new(dto.previous_name, dto.previous_total),
+            count: dto.count,
+        }
+    }
 }
 
 /// What a card does with a peer's declaration of what it is sending.
@@ -496,6 +556,10 @@ pub struct TransferRecord {
     ///
     /// `None` is the pre-F2b shape and the non-frontend construction paths.
     #[serde(default)]
+    /// Set when a re-picked document displaced what this card was told to
+    /// expect. `None` is the ordinary case and stays that way forever for most
+    /// cards.
+    pub content_replaced: Option<Box<ContentReplacementNotice>>,
     pub create_request_id: Option<Box<CommandId>>,
     pub(crate) receipt_request: RequestId,
     /// Durable frontend-command dedup, committed atomically with each effect.

@@ -208,6 +208,8 @@ class CardTile extends StatelessWidget {
                 ].join(' · '),
                 style: EnvoixType.monoLine.copyWith(color: tokens.muted),
               ),
+              if (view.contentReplaced case final ContentReplacedView notice)
+                _Replaced(notice: notice),
               if (view.invite != null)
                 _Invite(card: row.card, invite: view.invite!),
               if (view.outcome != null) _Outcome(outcome: view.outcome!),
@@ -560,6 +562,35 @@ class _Outcome extends StatelessWidget {
             if (outcome.recovery != null) recoveryLabel(outcome.recovery!),
           ].join(' — '),
         ),
+      ),
+    );
+  }
+}
+
+/// What the sender used to be sending.
+///
+/// A card whose name and size changed with its progress back at zero is
+/// indistinguishable from one that simply restarted — and someone who was
+/// elsewhere when it happened has no other way to tell. Warned, because the
+/// document they were expecting is not the one arriving.
+class _Replaced extends StatelessWidget {
+  const _Replaced({required this.notice});
+
+  final ContentReplacedView notice;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: EnvoixSpace.tight),
+      child: _Fact(
+        label: 'Replaced',
+        value: <String>[
+          'the sender replaced ${notice.previous.offeredName} '
+              '(${notice.previous.total} bytes)',
+          if (notice.count > 1) 'changed ${notice.count} times',
+          'progress restarted',
+        ].join(' — '),
+        warn: true,
       ),
     );
   }

@@ -7,17 +7,19 @@ use envoix_capabilities::{
     SourceAcquisitionFailure, SourceAcquisitionKey, SourceReport, SourceRetention,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
+use std::num::NonZeroU32;
+
 use envoix_types::{
     ArtifactId, ByteCount, Direction, PeerContentDeclaration, RequestId, TransferId,
 };
 
 use crate::identity::next_generation;
 use crate::{
-    AcceptedSourceOffer, CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer,
-    PauseOrigin, PeerContentDecision, ProductCommand, ProductEffect, ProductIdentity, ProductInput,
-    ProductState, Quiescence, SelectionGate, SourceBacking, SourceLifecycle, SourceOfferAnswer,
-    SourcePossession, SourceStagingPlan, StagedContent, StagingPlan, StagingWork, StorageAction,
-    TransferContent, TransferRecord, WorkerKind,
+    AcceptedSourceOffer, CapabilityAction, ContentReplacementNotice, Facts, IdentityError,
+    IdentitySource, NewTransfer, PauseOrigin, PeerContentDecision, ProductCommand, ProductEffect,
+    ProductIdentity, ProductInput, ProductState, Quiescence, SelectionGate, SourceBacking,
+    SourceLifecycle, SourceOfferAnswer, SourcePossession, SourceStagingPlan, StagedContent,
+    StagingPlan, StagingWork, StorageAction, TransferContent, TransferRecord, WorkerKind,
 };
 
 /// The domain tag that separates a card's source-duty request identity from its
@@ -103,6 +105,7 @@ impl TransferRecord {
             phase,
             bytes: ByteCount::new(0),
             bytes_resumed: None,
+            content_replaced: None,
             outcome: None,
             facts: Facts::default(),
             pairing: transfer.pairing,
@@ -580,6 +583,25 @@ impl TransferRecord {
                 }
             }
             PeerContentDecision::Replaced => {
+                // Remember what is being displaced BEFORE it is gone, and keep
+                // the FIRST one: a person who has not looked yet still needs to
+                // reconcile the document they knew about, not the one that
+                // happened to be current a moment ago.
+                let displaced = self
+                    .source
+                    .content()
+                    .cloned()
+                    .expect("a replacement displaces something");
+                self.content_replaced = Some(Box::new(match self.content_replaced.take() {
+                    Some(seen) => ContentReplacementNotice {
+                        count: seen.count.saturating_add(1),
+                        previous: seen.previous,
+                    },
+                    None => ContentReplacementNotice {
+                        previous: displaced,
+                        count: NonZeroU32::MIN,
+                    },
+                }));
                 self.source = SourceLifecycle::NotRequired {
                     peer_content: Some(content),
                 };

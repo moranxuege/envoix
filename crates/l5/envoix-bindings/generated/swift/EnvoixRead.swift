@@ -10,7 +10,7 @@ import Foundation
 
 public enum EnvoixRead {
 
-public static let readSchemaId = "envoix/binding/read/10"
+public static let readSchemaId = "envoix/binding/read/11"
 public static let readMaxFrameBytes = 1048576
 private static let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -239,6 +239,11 @@ public struct TransferContentView: Equatable {
     public let total: Int64
 }
 
+public struct ContentReplacedView: Equatable {
+    public let previous: TransferContentView
+    public let count: Int64
+}
+
 public struct SourceNotRequiredView: Equatable {
     public let peerContent: TransferContentView?
 }
@@ -298,6 +303,7 @@ public struct CardView: Equatable {
     public let outcome: OutcomeView?
     public let allowedActions: [CardActionView]
     public let invite: InviteView?
+    public let contentReplaced: ContentReplacedView?
 }
 
 public struct DutyProvenanceView: Equatable {
@@ -986,6 +992,17 @@ public enum EnvoixReadCodec {
         )
     }
 
+    private static func decodeContentReplacedView(_ value: Any?, _ context: String) throws -> ContentReplacedView {
+        let map = try object(value, context)
+        try knownKeys(map, ["previous", "count"], context)
+        let previous = try decodeTransferContentView(try field(map, "previous", "ContentReplacedView.previous"), "ContentReplacedView.previous")
+        let count = try integer(try field(map, "count", "ContentReplacedView.count"), 4294967295, "ContentReplacedView.count")
+        return ContentReplacedView(
+            previous: previous,
+            count: count
+        )
+    }
+
     private static func decodeSourceNotRequiredView(_ value: Any?, _ context: String) throws -> SourceNotRequiredView {
         let map = try object(value, context)
         try knownKeys(map, ["peer_content"], context)
@@ -1107,7 +1124,7 @@ public enum EnvoixReadCodec {
 
     private static func decodeCardView(_ value: Any?, _ context: String) throws -> CardView {
         let map = try object(value, context)
-        try knownKeys(map, ["identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"], context)
+        try knownKeys(map, ["identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite", "content_replaced"], context)
         let identity = try decodeIdentityView(try field(map, "identity", "CardView.identity"), "CardView.identity")
         let participation = try decodeRoomParticipationView(try field(map, "participation", "CardView.participation"), "CardView.participation")
         let direction = try decodeDirectionView(try field(map, "direction", "CardView.direction"), "CardView.direction")
@@ -1131,6 +1148,12 @@ public enum EnvoixReadCodec {
         } else {
             invite = nil
         }
+        let contentReplaced: ContentReplacedView?
+        if let present = try field(map, "content_replaced", "CardView.content_replaced") {
+            contentReplaced = try decodeContentReplacedView(present, "CardView.content_replaced")
+        } else {
+            contentReplaced = nil
+        }
         return CardView(
             identity: identity,
             participation: participation,
@@ -1144,7 +1167,8 @@ public enum EnvoixReadCodec {
             bytesResumed: bytesResumed,
             outcome: outcome,
             allowedActions: allowedActions,
-            invite: invite
+            invite: invite,
+            contentReplaced: contentReplaced
         )
     }
 

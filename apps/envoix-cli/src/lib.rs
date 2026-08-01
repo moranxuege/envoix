@@ -441,6 +441,7 @@ mod tests {
             outcome: None,
             allowed_actions,
             invite: None,
+            content_replaced: None,
         }
     }
 

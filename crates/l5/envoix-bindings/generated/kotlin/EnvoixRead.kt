@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/10"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/11"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -231,6 +231,11 @@ data class TransferContentView(
     val total: Long,
 )
 
+data class ContentReplacedView(
+    val previous: TransferContentView,
+    val count: Long,
+)
+
 data class SourceNotRequiredView(
     val peerContent: TransferContentView?,
 )
@@ -290,6 +295,7 @@ data class CardView(
     val outcome: OutcomeView?,
     val allowedActions: List<CardActionView>,
     val invite: InviteView?,
+    val contentReplaced: ContentReplacedView?,
 )
 
 data class DutyProvenanceView(
@@ -943,6 +949,15 @@ object EnvoixReadCodec {
         )
     }
 
+    private fun decodeContentReplacedView(value: Any?, context: String): ContentReplacedView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("previous", "count"), context)
+        return ContentReplacedView(
+            previous = decodeTransferContentView(field(map, "previous", "ContentReplacedView.previous"), "ContentReplacedView.previous"),
+            count = integer(field(map, "count", "ContentReplacedView.count"), 4294967295, "ContentReplacedView.count"),
+        )
+    }
+
     private fun decodeSourceNotRequiredView(value: Any?, context: String): SourceNotRequiredView {
         val map = obj(value, context)
         knownKeys(map, setOf("peer_content"), context)
@@ -1053,7 +1068,7 @@ object EnvoixReadCodec {
 
     private fun decodeCardView(value: Any?, context: String): CardView {
         val map = obj(value, context)
-        knownKeys(map, setOf("identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"), context)
+        knownKeys(map, setOf("identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite", "content_replaced"), context)
         return CardView(
             identity = decodeIdentityView(field(map, "identity", "CardView.identity"), "CardView.identity"),
             participation = decodeRoomParticipationView(field(map, "participation", "CardView.participation"), "CardView.participation"),
@@ -1068,6 +1083,7 @@ object EnvoixReadCodec {
             outcome = field(map, "outcome", "CardView.outcome")?.let { decodeOutcomeView(it, "CardView.outcome") },
             allowedActions = decodeList(field(map, "allowed_actions", "CardView.allowed_actions"), 6, "CardView.allowed_actions", ::decodeCardActionView),
             invite = field(map, "invite", "CardView.invite")?.let { decodeInviteView(it, "CardView.invite") },
+            contentReplaced = field(map, "content_replaced", "CardView.content_replaced")?.let { decodeContentReplacedView(it, "CardView.content_replaced") },
         )
     }
 

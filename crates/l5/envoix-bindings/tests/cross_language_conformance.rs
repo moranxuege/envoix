@@ -19,17 +19,17 @@ use envoix_bindings::command::{
 };
 use envoix_bindings::read::{
     AbiSchemaManifestView, AcceptedSourceOfferView, BuildManifestView, CardActionView,
-    CardUpdateKindView, CardUpdateView, CardView, ClosedView, CommandKindView, DegradedView,
-    DeploymentManifestView, DiagnosticsStatusView, DirectionView, EvidenceProgressView,
-    EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView, LagView, LosslessKindView,
-    OutcomeCodeView, OutcomeView, PauseOriginView, PausedView, PhaseView, PickSourceActionView,
-    ProductStateView, ProtocolManifestView, QrView, QuiescenceView, ReadBody, ReadError, ReadFrame,
-    RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView,
-    RetryabilityView, RoomParticipationView, RunningView, SessionKeyView, SourceAcquisitionKeyView,
-    SourceAwaitingSelectionView, SourceLifecycleView, SourceNotRequiredView,
-    SourcePromptReasonView, SourceRePickRequiredView, SourceSelectionGateView,
-    SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView, TransferContentView,
-    WorkerKindView, decode_read_frame, encode_read_frame,
+    CardUpdateKindView, CardUpdateView, CardView, ClosedView, CommandKindView, ContentReplacedView,
+    DegradedView, DeploymentManifestView, DiagnosticsStatusView, DirectionView,
+    EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView,
+    LagView, LosslessKindView, OutcomeCodeView, OutcomeView, PauseOriginView, PausedView,
+    PhaseView, PickSourceActionView, ProductStateView, ProtocolManifestView, QrView,
+    QuiescenceView, ReadBody, ReadError, ReadFrame, RecoveryView, RedactedIdKindView,
+    RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView, RoomParticipationView,
+    RunningView, SessionKeyView, SourceAcquisitionKeyView, SourceAwaitingSelectionView,
+    SourceLifecycleView, SourceNotRequiredView, SourcePromptReasonView, SourceRePickRequiredView,
+    SourceSelectionGateView, SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView,
+    TransferContentView, WorkerKindView, decode_read_frame, encode_read_frame,
 };
 use envoix_bindings::{
     Decl, Direction, SchemaDoc, command_schema_text, emit, parse_schema, read_schema_text,
@@ -765,6 +765,15 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
                 modules: Secret::new("f".repeat(7834)),
             }),
         }),
+        // The widest notice: a maximal displaced name and the largest churn
+        // count a `u32` can carry.
+        content_replaced: Some(ContentReplacedView {
+            previous: TransferContentView {
+                offered_name: "n".repeat(255),
+                total: (1u64 << 53) + 1,
+            },
+            count: u32::MAX,
+        }),
     };
     let narrowest = CardView {
         identity,
@@ -800,6 +809,7 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
         allowed_actions: Vec::new(),
         // A card with no channel at all — the absent optional.
         invite: None,
+        content_replaced: None,
     };
     let entry = |sequence, value| TimelineEntryView { sequence, value };
     let session = SessionKeyView {

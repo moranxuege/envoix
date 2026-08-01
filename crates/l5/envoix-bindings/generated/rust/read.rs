@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/10";
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/11";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -395,6 +395,12 @@ pub struct TransferContentView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentReplacedView {
+    pub previous: TransferContentView,
+    pub count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceNotRequiredView {
     pub peer_content: Option<TransferContentView>,
 }
@@ -463,6 +469,7 @@ pub struct CardView {
     pub outcome: Option<OutcomeView>,
     pub allowed_actions: Vec<CardActionView>,
     pub invite: Option<InviteView>,
+    pub content_replaced: Option<ContentReplacedView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1585,6 +1592,24 @@ fn encode_transfer_content_view_value(value: &TransferContentView) -> Result<Val
     Ok(Value::Object(map))
 }
 
+fn decode_content_replaced_view_value(value: &Value, context: &'static str) -> Result<ContentReplacedView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["previous", "count"], context)?;
+    let previous = decode_transfer_content_view_value(field(map, "previous", "ContentReplacedView.previous")?, "ContentReplacedView.previous")?;
+    let count = integer_u32(field(map, "count", "ContentReplacedView.count")?, "ContentReplacedView.count")?;
+    Ok(ContentReplacedView {
+        previous,
+        count,
+    })
+}
+
+fn encode_content_replaced_view_value(value: &ContentReplacedView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("previous".to_owned(), encode_transfer_content_view_value(&value.previous)?);
+    map.insert("count".to_owned(), Value::from(value.count));
+    Ok(Value::Object(map))
+}
+
 fn decode_source_not_required_view_value(value: &Value, context: &'static str) -> Result<SourceNotRequiredView, ReadError> {
     let map = frame_object(value, context)?;
     known_keys(map, &["peer_content"], context)?;
@@ -1794,7 +1819,7 @@ fn encode_card_action_view_value(value: &CardActionView) -> Result<Value, ReadEr
 
 fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"], context)?;
+    known_keys(map, &["identity", "participation", "direction", "source", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite", "content_replaced"], context)?;
     let identity = decode_identity_view_value(field(map, "identity", "CardView.identity")?, "CardView.identity")?;
     let participation = decode_room_participation_view_value(field(map, "participation", "CardView.participation")?, "CardView.participation")?;
     let direction = decode_direction_view_value(field(map, "direction", "CardView.direction")?, "CardView.direction")?;
@@ -1824,6 +1849,10 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
         Value::Null => None,
         present => Some(decode_invite_view_value(present, "CardView.invite")?),
     };
+    let content_replaced = match field(map, "content_replaced", "CardView.content_replaced")? {
+        Value::Null => None,
+        present => Some(decode_content_replaced_view_value(present, "CardView.content_replaced")?),
+    };
     Ok(CardView {
         identity,
         participation,
@@ -1838,6 +1867,7 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
         outcome,
         allowed_actions,
         invite,
+        content_replaced,
     })
 }
 
@@ -1875,6 +1905,13 @@ fn encode_card_view_value(value: &CardView) -> Result<Value, ReadError> {
         match &value.invite {
             None => Value::Null,
             Some(inner) => encode_invite_view_value(inner)?,
+        },
+    );
+    map.insert(
+        "content_replaced".to_owned(),
+        match &value.content_replaced {
+            None => Value::Null,
+            Some(inner) => encode_content_replaced_view_value(inner)?,
         },
     );
     Ok(Value::Object(map))

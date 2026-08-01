@@ -1171,6 +1171,56 @@ fn a_different_declaration_replaces_an_unsealed_partial() {
     assert_eq!(record.bytes_resumed, None, "nor is anything resumed");
 }
 
+/// A person who was elsewhere must be able to tell a replacement from a restart.
+///
+/// Both look identical on a card: the name and size change and progress is back
+/// at zero. They call for completely different reactions, so the displaced
+/// document is remembered rather than just overwritten.
+///
+/// The FIRST one is kept. Someone who has not looked yet needs to reconcile the
+/// document they knew about, not whichever one happened to be current a moment
+/// before they did.
+#[test]
+fn a_replacement_remembers_the_document_the_person_last_knew() {
+    let mut record = create(Direction::Receive).0;
+    record
+        .reduce(ProductInput::PeerContentDeclared(declaration(
+            &record, "a.pdf", 1000,
+        )))
+        .unwrap();
+    assert!(record.content_replaced.is_none(), "nothing displaced yet");
+
+    record
+        .reduce(ProductInput::PeerContentDeclared(declaration(
+            &record, "b.pdf", 2000,
+        )))
+        .unwrap();
+    let notice = record
+        .content_replaced
+        .clone()
+        .expect("a.pdf was displaced");
+    assert_eq!(notice.previous.name().as_str(), "a.pdf");
+    assert_eq!(notice.previous.total(), ByteCount::new(1000));
+    assert_eq!(notice.count.get(), 1);
+
+    // Replaced again before anyone looked: still a.pdf, and the churn is counted.
+    record
+        .reduce(ProductInput::PeerContentDeclared(declaration(
+            &record, "c.pdf", 3000,
+        )))
+        .unwrap();
+    let notice = record.content_replaced.clone().expect("still displaced");
+    assert_eq!(
+        notice.previous.name().as_str(),
+        "a.pdf",
+        "the document they knew about, not the one in between"
+    );
+    assert_eq!(notice.count.get(), 2);
+
+    // And the notice is never a second authority on what is being received.
+    assert_eq!(record.known_total(), Some(ByteCount::new(3000)));
+}
+
 /// Delivered content is frozen, and not as a matter of taste.
 ///
 /// The mailbox receipt seals under a transfer-derived key with a fixed zero
@@ -2968,6 +3018,7 @@ fn fixture_skeleton() -> TransferRecord {
         phase: Phase::Transferring,
         bytes: ByteCount::new(4),
         bytes_resumed: Some(ByteCount::new(2)),
+        content_replaced: None,
         outcome: None,
         facts: crate::Facts {
             content_locked: false,
@@ -3046,12 +3097,12 @@ fn a_plan_naming_an_item_outside_the_selection_is_refused() {
 }
 
 #[test]
-fn product_record_v12_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"content_locked":false,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired":[{"item":0,"retention":"persisted","seekability":"seekable"}],"backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+fn product_record_v13_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"content_locked":false,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired":[{"item":0,"retention":"persisted","seekability":"seekable"}],"backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"content_replaced":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&12_u32.to_be_bytes());
+    expected.extend_from_slice(&13_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);

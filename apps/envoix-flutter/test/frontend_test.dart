@@ -70,6 +70,7 @@ CardView cardView({
     CommandKindView.remove,
   ],
   SourceLifecycleView? source,
+  ContentReplacedView? contentReplaced,
 }) =>
     CardView(
       allowedActions: allowedActions
@@ -104,6 +105,7 @@ CardView cardView({
       phase: phase,
       bytes: bytes,
       bytesResumed: bytesResumed,
+      contentReplaced: contentReplaced,
       outcome: outcome,
       invite: invite,
     );
@@ -608,6 +610,24 @@ void main() {
   });
 
   group('screen', () {
+    testWidgets('a replaced document is distinguishable from a restart',
+        (WidgetTester tester) async {
+      await pumpTile(
+        tester,
+        rowOf(cardView(
+          contentReplaced: ContentReplacedView(
+            previous: TransferContentView(offeredName: 'a.pdf', total: 1000),
+            count: 2,
+          ),
+        )),
+      );
+      // The document they were expecting, so they can tell this apart from a
+      // card that simply started over.
+      expect(find.textContaining('replaced a.pdf'), findsOneWidget);
+      expect(find.textContaining('changed 2 times'), findsOneWidget);
+      expect(find.textContaining('progress restarted'), findsOneWidget);
+    });
+
     testWidgets('flutter_readonly_snapshot_render', (
       WidgetTester tester,
     ) async {

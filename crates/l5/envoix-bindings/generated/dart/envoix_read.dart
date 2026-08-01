@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/10';
+const String readSchemaId = 'envoix/binding/read/11';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -345,6 +345,16 @@ final class TransferContentView {
   final int total;
 }
 
+final class ContentReplacedView {
+  const ContentReplacedView({
+    required this.previous,
+    required this.count,
+  });
+
+  final TransferContentView previous;
+  final int count;
+}
+
 final class SourceNotRequiredView {
   const SourceNotRequiredView({
     required this.peerContent,
@@ -480,6 +490,7 @@ final class CardView {
     required this.outcome,
     required this.allowedActions,
     required this.invite,
+    required this.contentReplaced,
   });
 
   final IdentityView identity;
@@ -495,6 +506,7 @@ final class CardView {
   final OutcomeView? outcome;
   final List<CardActionView> allowedActions;
   final InviteView? invite;
+  final ContentReplacedView? contentReplaced;
 }
 
 final class DutyProvenanceView {
@@ -1404,6 +1416,15 @@ TransferContentView _decodeTransferContentView(Object? value, String context) {
   );
 }
 
+ContentReplacedView _decodeContentReplacedView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'previous', 'count'}, context);
+  return ContentReplacedView(
+    previous: _decodeTransferContentView(_field(map, 'previous', 'ContentReplacedView.previous'), 'ContentReplacedView.previous'),
+    count: _integer(_field(map, 'count', 'ContentReplacedView.count'), 4294967295, 'ContentReplacedView.count'),
+  );
+}
+
 SourceNotRequiredView _decodeSourceNotRequiredView(Object? value, String context) {
   final map = _object(value, context);
   _knownKeys(map, const {'peer_content'}, context);
@@ -1535,7 +1556,7 @@ CardActionView _decodeCardActionView(Object? value, String context) {
 
 CardView _decodeCardView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'identity', 'participation', 'direction', 'source', 'state', 'quiescence', 'generation', 'phase', 'bytes', 'bytes_resumed', 'outcome', 'allowed_actions', 'invite'}, context);
+  _knownKeys(map, const {'identity', 'participation', 'direction', 'source', 'state', 'quiescence', 'generation', 'phase', 'bytes', 'bytes_resumed', 'outcome', 'allowed_actions', 'invite', 'content_replaced'}, context);
   return CardView(
     identity: _decodeIdentityView(_field(map, 'identity', 'CardView.identity'), 'CardView.identity'),
     participation: _decodeRoomParticipationView(_field(map, 'participation', 'CardView.participation'), 'CardView.participation'),
@@ -1555,6 +1576,10 @@ CardView _decodeCardView(Object? value, String context) {
     invite: switch (_field(map, 'invite', 'CardView.invite')) {
       null => null,
       final present => _decodeInviteView(present, 'CardView.invite'),
+    },
+    contentReplaced: switch (_field(map, 'content_replaced', 'CardView.content_replaced')) {
+      null => null,
+      final present => _decodeContentReplacedView(present, 'CardView.content_replaced'),
     },
   );
 }

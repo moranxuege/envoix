@@ -246,6 +246,7 @@ fn record(
             "receipt_mismatch": false,
             "remove_requested": false,
         },
+        "content_replaced": null,
         "receipt_request": "202122232425262728292a2b2c2d2e2f",
     }))
     .expect("fabricate an authority record")
@@ -493,7 +494,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/11");
+        value["schema"] = serde_json::json!("envoix/binding/read/12");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {

@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/10"
+id = "envoix/binding/read/11"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -344,6 +344,22 @@ fields = [
   { name = "total", type = "u63" },
 ]
 
+# That the sender replaced what it said it was sending. Durable, because the
+# person it is for may have been elsewhere when it happened — a card whose name
+# and size changed with its progress back at zero is otherwise indistinguishable
+# from one that simply restarted, and those call for different reactions.
+#
+# `previous` is the FIRST document displaced, not the most recent: what someone
+# has to reconcile is the one they knew about. `count` says how much churn there
+# was since.
+[[decl]]
+kind = "struct"
+name = "ContentReplacedView"
+fields = [
+  { name = "previous", type = "TransferContentView" },
+  { name = "count", type = "u32" },
+]
+
 # A receiver. It has no source and can never acquire one, and `peer_content` is
 # absent until the peer's header is admitted — honest, because a card joined
 # from an invite knows nothing about the file until the sender says so.
@@ -470,6 +486,10 @@ fields = [
   # was given, and republishing it as though it minted the room is how a joiner
   # would hand out a password it does not own.
   { name = "invite", type = "option(InviteView)" },
+  # Absent for almost every card, and permanently so once set — nothing here
+  # clears it yet. It is NOT a second authority on what is being received; that
+  # is always `source`.
+  { name = "content_replaced", type = "option(ContentReplacedView)" },
 ]
 
 # ---- capability duties ----

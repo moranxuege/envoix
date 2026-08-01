@@ -27,16 +27,17 @@ use crate::command::COMMAND_SCHEMA_ID;
 use crate::read::{
     AbiSchemaManifestView, AcceptedSourceOfferView, BuildManifestView, CapabilityActionView,
     CardActionView, CardUpdateKindView, CardUpdateView, CardView, ClosedView, CommandKindView,
-    DegradedView, DeploymentManifestView, DiagnosticsStatusView, DirectionView, DutyFrameView,
-    DutyKindView, DutyProvenanceView, DutyView, EvidenceProgressView, EvidenceTimelineView,
-    EvidenceValueView, IdentityView, InviteView, LagView, LosslessKindView, OutcomeView,
-    PausedView, PhaseView, PickSourceActionView, ProductStateView, ProtocolManifestView, QrView,
-    QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame, RecoveryView, RedactedIdKindView,
-    RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView, RoomParticipationView,
-    RunningView, SessionKeyView, SourceAcquisitionKeyView, SourceAwaitingSelectionView,
-    SourceLifecycleView, SourceNotRequiredView, SourcePromptReasonView, SourceRePickRequiredView,
-    SourceReadyView, SourceSelectableView, SourceSelectionGateView, SubscribeRejectedView,
-    SubscribeRejectionView, TimelineEntryView, TransferContentView, WorkerKindView,
+    ContentReplacedView, DegradedView, DeploymentManifestView, DiagnosticsStatusView,
+    DirectionView, DutyFrameView, DutyKindView, DutyProvenanceView, DutyView, EvidenceProgressView,
+    EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView, LagView, LosslessKindView,
+    OutcomeView, PausedView, PhaseView, PickSourceActionView, ProductStateView,
+    ProtocolManifestView, QrView, QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame,
+    RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView,
+    RetryabilityView, RoomParticipationView, RunningView, SessionKeyView, SourceAcquisitionKeyView,
+    SourceAwaitingSelectionView, SourceLifecycleView, SourceNotRequiredView,
+    SourcePromptReasonView, SourceRePickRequiredView, SourceReadyView, SourceSelectableView,
+    SourceSelectionGateView, SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView,
+    TransferContentView, WorkerKindView,
 };
 
 /// The codec bound on safe-display text and on offered names: L0 owns both
@@ -235,6 +236,13 @@ fn card_view(record: &TransferRecord) -> CardView {
             .publishes_the_invite()
             .then(|| record.pairing.as_deref().and_then(invite_view))
             .flatten(),
+        content_replaced: record
+            .content_replaced
+            .as_deref()
+            .map(|notice| ContentReplacedView {
+                previous: transfer_content_view(&notice.previous),
+                count: notice.count.get(),
+            }),
     }
 }
 
