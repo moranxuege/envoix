@@ -647,7 +647,11 @@ async fn start_real_attempt(broker: &EndpointAddr, case: AttemptCase) -> Running
         case.receiver_plan,
         case.spec.clone(),
         pair.receiver_token,
-        case.sink,
+        {
+            let (grant, granted) = tokio::sync::oneshot::channel();
+            let _ = grant.send(Ok(case.sink));
+            granted
+        },
         listener,
         AuthFailureBudget::new(1).unwrap(),
         case.receiver_supervisor,

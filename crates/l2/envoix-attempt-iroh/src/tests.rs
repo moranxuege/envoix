@@ -429,7 +429,7 @@ async fn attempt_iroh_generation_and_retirement() {
         plan(Direction::Receive, 1, ResumeIntent::Fresh),
         spec(&bytes),
         receiver_token,
-        sink.clone(),
+        granted(sink.clone()),
         first_links.receiver,
         receiver_supervisor.clone(),
         TestEntropy::new(0x80),
@@ -486,7 +486,7 @@ async fn attempt_iroh_generation_and_retirement() {
         plan(Direction::Receive, 2, resume),
         spec(&bytes),
         receiver_token,
-        sink.clone(),
+        granted(sink.clone()),
         second_links.receiver,
         receiver_supervisor.clone(),
         TestEntropy::new(0x90),
@@ -623,7 +623,7 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         plan(Direction::Receive, 1, ResumeIntent::Fresh),
         spec(&bytes),
         receiver_token,
-        sink.clone(),
+        granted(sink.clone()),
         listener,
         AuthFailureBudget::new(2).unwrap(),
         receiver_supervisor,
@@ -734,7 +734,7 @@ async fn sender_emits_confirming_between_complete_and_ack() {
         plan(Direction::Receive, 1, ResumeIntent::Fresh),
         spec(&bytes),
         receiver_token,
-        sink,
+        granted(sink),
         links.receiver,
         receiver_supervisor,
         TestEntropy::new(0xa0),
@@ -794,6 +794,75 @@ async fn sender_emits_confirming_between_complete_and_ack() {
     receiver.wait_ack().await.unwrap();
 }
 
+/// A promise nobody keeps ends the attempt.
+///
+/// The declaration is admitted — the card said yes — but no destination ever
+/// arrives. Waiting forever would hold an authenticated session with nothing
+/// able to report why, so the attempt ends instead. The peer was told nothing:
+/// no `ResumeStatus` is sent before the sink exists.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_admitted_declaration_with_no_destination_ends_the_attempt() {
+    let bytes = (0..2048_u32).map(|index| index as u8).collect::<Vec<_>>();
+    let source = MemorySource {
+        bytes: Arc::new(bytes.clone()),
+    };
+    let (sender_supervisor, receiver_supervisor) = (
+        Arc::new(Mutex::new(AttemptSupervisor::new())) as SharedAttemptSupervisor,
+        Arc::new(Mutex::new(AttemptSupervisor::new())) as SharedAttemptSupervisor,
+    );
+    let links = link_pair(None);
+    let (sender_token, receiver_token) = token_pair();
+
+    // The gate is created and then abandoned: admitted, but never commissioned.
+    let (grant, granted) = tokio::sync::oneshot::channel::<Result<MemorySink, OutcomeCode>>();
+    drop(grant);
+
+    let mut receiver = spawn_receiver(
+        plan(Direction::Receive, 1, ResumeIntent::Fresh),
+        spec(&bytes),
+        receiver_token,
+        granted,
+        links.receiver,
+        receiver_supervisor,
+        TestEntropy::new(0x92),
+    )
+    .expect("spawn receiver");
+    admit_peer_content(&mut receiver);
+    let sender = spawn_sender(
+        plan(Direction::Send, 1, ResumeIntent::Fresh),
+        spec(&bytes),
+        sender_token,
+        source,
+        links.sender,
+        sender_supervisor,
+        TestEntropy::new(0x93),
+    )
+    .expect("spawn sender");
+
+    let terminal = loop {
+        let event = receiver.next_event().await.expect("a terminal");
+        if let AttemptEventKind::Terminal(outcome) = event.kind {
+            break outcome;
+        }
+    };
+    assert_eq!(
+        terminal,
+        OutcomeCode::Internal,
+        "it ends, and does not hang"
+    );
+    drop(sender);
+}
+
+/// A destination that is ready before it is asked for.
+///
+/// These suites are about the transport, so the commissioning that a card would
+/// do is collapsed into a gate that is already fulfilled.
+fn granted<S>(sink: S) -> tokio::sync::oneshot::Receiver<Result<S, OutcomeCode>> {
+    let (grant, granted) = tokio::sync::oneshot::channel();
+    let _ = grant.send(Ok(sink));
+    granted
+}
+
 /// Silence is not consent.
 ///
 /// A declaration nobody answers must end the attempt, not hold an authenticated
@@ -819,7 +888,7 @@ async fn an_unanswered_declaration_refuses_rather_than_waits() {
         plan(Direction::Receive, 1, ResumeIntent::Fresh),
         spec(&bytes),
         receiver_token,
-        sink.clone(),
+        granted(sink.clone()),
         links.receiver,
         receiver_supervisor,
         TestEntropy::new(0x90),

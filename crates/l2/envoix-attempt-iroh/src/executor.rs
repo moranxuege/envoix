@@ -239,7 +239,7 @@ pub fn spawn_receiver<L, S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
-    sink: S,
+    granted_sink: oneshot::Receiver<Result<S, OutcomeCode>>,
     mut link: L,
     supervisor: SharedAttemptSupervisor,
     entropy: E,
@@ -269,7 +269,7 @@ where
             plan,
             spec,
             token,
-            sink,
+            granted_sink,
             Box::new(link),
             entropy,
             supervisor,
@@ -295,7 +295,7 @@ pub fn spawn_iroh_receiver<S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
-    sink: S,
+    granted_sink: oneshot::Receiver<Result<S, OutcomeCode>>,
     listener: IrohListener,
     auth_failures: AuthFailureBudget,
     supervisor: SharedAttemptSupervisor,
@@ -325,7 +325,7 @@ where
             plan,
             spec,
             token,
-            sink,
+            granted_sink,
             listener,
             auth_failures,
             entropy,
@@ -436,7 +436,7 @@ async fn execute_receiver<S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
-    mut sink: S,
+    granted_sink: oneshot::Receiver<Result<S, OutcomeCode>>,
     mut link: Box<dyn SessionLink>,
     mut entropy: E,
     supervisor: SharedAttemptSupervisor,
@@ -449,6 +449,11 @@ where
     S: StagingSink + Send + 'static,
     E: EntropySource + Send + 'static,
 {
+    // NOT held yet. A destination is commissioned for what the peer declares, so
+    // this attempt cannot have one until it has declared — and holding an
+    // `Option` here rather than a sink is what makes "no writer lease before
+    // admission" a fact about the type instead of a convention.
+    let mut sink: Option<S> = None;
     let clock = AttemptClock::new();
     emit(
         &events,
@@ -474,6 +479,7 @@ where
             transfer_receiver(
                 plan,
                 &spec,
+                granted_sink,
                 &mut sink,
                 &mut *link,
                 &clock,
@@ -506,7 +512,7 @@ async fn execute_iroh_receiver<S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
-    mut sink: S,
+    granted_sink: oneshot::Receiver<Result<S, OutcomeCode>>,
     listener: IrohListener,
     mut auth_failures: AuthFailureBudget,
     mut entropy: E,
@@ -521,6 +527,8 @@ where
     S: StagingSink + Send + 'static,
     E: EntropySource + Send + 'static,
 {
+    // See `execute_receiver`: not held until the card commissions one.
+    let mut sink: Option<S> = None;
     let clock = AttemptClock::new();
     let cancellation = SessionCancellation::new();
     emit(
@@ -652,6 +660,7 @@ where
     let terminal = transfer_receiver(
         plan,
         &spec,
+        granted_sink,
         &mut sink,
         &mut *link,
         &clock,
@@ -1060,10 +1069,11 @@ async fn transfer_sender(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn transfer_receiver(
+async fn transfer_receiver<S: StagingSink>(
     plan: AttemptPlan,
     spec: &AttemptTransferSpec,
-    sink: &mut impl StagingSink,
+    granted_sink: oneshot::Receiver<Result<S, OutcomeCode>>,
+    held: &mut Option<S>,
     link: &mut dyn SessionLink,
     clock: &AttemptClock,
     supervisor: &SharedAttemptSupervisor,
@@ -1148,6 +1158,19 @@ async fn transfer_receiver(
             return Terminal::from_error(AttemptError::PeerContentRefused);
         }
     }
+    // The destination arrives only now, commissioned for what was just admitted.
+    // Bounded and stop-biased for the same reason the verdict is: a promise
+    // nobody keeps must end the attempt, not park it holding a session.
+    let sink = match acquire_granted_sink(
+        granted_sink,
+        stop,
+        clock.remaining(data_deadline.instant().0),
+    )
+    .await
+    {
+        Ok(acquired) => held.insert(acquired),
+        Err(outcome) => return Terminal::local(outcome),
+    };
     let (mut receiving, resume) =
         match admitted.begin_receive(data_deadline, spec.claimed_complete, sink) {
             Ok(next) => next,
@@ -1310,6 +1333,19 @@ impl Terminal {
         }
     }
 
+    /// A local outcome with nothing to tell the peer.
+    ///
+    /// A destination that could not be commissioned is this side's problem, and
+    /// the peer has not been promised anything yet — no `ResumeStatus` has been
+    /// sent — so there is nothing to retract.
+    const fn local(outcome: OutcomeCode) -> Self {
+        Self {
+            outcome,
+            close: CloseOrdering::Active,
+            outbound: None,
+        }
+    }
+
     fn from_error(error: AttemptError) -> Self {
         Self {
             outcome: error.outcome_code(),
@@ -1439,6 +1475,26 @@ fn channel_binding(link: &dyn SessionLink) -> Result<ExportedKeyingMaterial, Att
 
 fn emit(events: &mpsc::UnboundedSender<AttemptEvent>, stamp: AttemptStamp, kind: AttemptEventKind) {
     let _ = events.send(AttemptEvent { stamp, kind });
+}
+
+/// Takes the destination the card commissioned — BOUNDED, like the verdict.
+///
+/// A dropped grant, a retirement, or a deadline all end the attempt. Nothing
+/// about silence produces a place to write, and an attempt that waited forever
+/// would hold an authenticated session with no way to report why.
+async fn acquire_granted_sink<S>(
+    granted: oneshot::Receiver<Result<S, OutcomeCode>>,
+    stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
+    wait: Duration,
+) -> Result<S, OutcomeCode> {
+    tokio::select! {
+        biased;
+        _ = stop.recv() => Err(OutcomeCode::Cancelled),
+        arrived = timeout(wait, granted) => match arrived {
+            Ok(Ok(resolved)) => resolved,
+            Ok(Err(_)) | Err(_) => Err(OutcomeCode::Internal),
+        },
+    }
 }
 
 /// Asks the authority about a declaration and waits for its answer — BOUNDED.
