@@ -119,12 +119,24 @@ pub(crate) fn sealed_artifact(
     bytes: &[u8],
     fingerprint: ContentHash,
 ) -> (tempfile::TempDir, envoix_blob_api::SealedArtifact) {
+    sealed_at(
+        envoix_blob_api::BlobKey::new(
+            card,
+            envoix_blob_api::BlobWorkId::of_derivation(generation, artifact),
+        ),
+        bytes,
+        fingerprint,
+    )
+}
+
+/// As [`sealed_artifact`], for a key the caller names — a RECEPTION, say.
+pub(crate) fn sealed_at(
+    blob: envoix_blob_api::BlobKey,
+    bytes: &[u8],
+    fingerprint: ContentHash,
+) -> (tempfile::TempDir, envoix_blob_api::SealedArtifact) {
     let root = tempfile::TempDir::new().expect("a blob root");
     let store = envoix_blob_api::BlobStore::new(envoix_blob_local::LocalBlobs::new(root.path()));
-    let blob = envoix_blob_api::BlobKey::new(
-        card,
-        envoix_blob_api::BlobWorkId::of_derivation(generation, artifact),
-    );
     let mut lease = store.begin(blob, fingerprint).expect("a lease");
     lease
         .append(envoix_types::ByteCount::new(0), bytes)

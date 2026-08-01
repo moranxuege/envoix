@@ -2,6 +2,7 @@ use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, ResumeIntent, RetirementAck,
     RetirementIntent,
 };
+use envoix_blob_api::{BlobKey, BlobWorkId, SealedArtifact, reception_fingerprint};
 use envoix_capabilities::{
     AdmittedDutyResult, AdmittedSourceResult, Duty, DutyKind, DutyProvenance,
     SourceAcquisitionFailure, SourceAcquisitionKey, SourceReport, SourceRetention,
@@ -239,6 +240,7 @@ impl TransferRecord {
             ProductInput::Restore => self.on_restore(),
             ProductInput::SourceOffered { offer } => self.on_source_offered(offer)?,
             ProductInput::ContentLocked { stamp } => self.on_content_locked(stamp),
+            ProductInput::ReceiveAdopted(seal) => self.on_receive_adopted(&seal),
             ProductInput::PeerContentDeclared(declaration) => {
                 self.on_peer_content_declared(&declaration)
             }
@@ -495,6 +497,47 @@ impl TransferRecord {
     /// currently asking for.
     pub fn answer_source_offer(&self, offer: &AcceptedSourceOffer) -> SourceOfferAnswer {
         self.source.answer_offer(&self.current_acquisition(), offer)
+    }
+
+    /// Completes a receive from bytes that are already here.
+    ///
+    /// Every field of the witness is checked against what this card expects,
+    /// because holding a witness proves the bytes are durable — not that they
+    /// are THIS card's bytes. The key says they belong to this reception, the
+    /// length says they are the file the peer announced, and the commissioning
+    /// fingerprint says they were written for that announcement rather than for
+    /// some earlier one under the same key.
+    ///
+    /// The digest is the seal's own and is not re-checked here: it was verified
+    /// against the peer's `Complete` before the store would seal anything, and
+    /// this card never had an independent expectation of it — a receiver learns
+    /// the digest from the sender, after the bytes.
+    fn on_receive_adopted(&mut self, seal: &SealedArtifact) -> Vec<ProductEffect> {
+        if self.direction != Direction::Receive || !self.state.is_active() {
+            return Vec::new();
+        }
+        let Some(content) = self.source.content() else {
+            return Vec::new();
+        };
+        let expected = BlobKey::new(
+            self.identity.card,
+            BlobWorkId::of_reception(self.identity.transfer, self.identity.artifact),
+        );
+        if seal.blob() != expected
+            || seal.length() != content.total()
+            || seal.fact().fingerprint
+                != reception_fingerprint(
+                    self.identity.transfer,
+                    self.identity.artifact,
+                    content.name(),
+                    content.total(),
+                )
+        {
+            return Vec::new();
+        }
+        let effects = self.exit_effects();
+        self.complete();
+        effects
     }
 
     /// Freezes this transfer's content, before its `Complete` reaches the peer.

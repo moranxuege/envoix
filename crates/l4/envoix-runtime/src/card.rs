@@ -686,8 +686,8 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
 
     /// Opens the one destination this attempt may write, for what the record
     /// now says is being received.
-    fn commission_receive(&self) -> Result<crate::launch::PreparedReceiveSink, OutcomeCode> {
-        let record = self.session().record();
+    fn commission_receive(&mut self) -> Result<crate::launch::PreparedReceiveSink, OutcomeCode> {
+        let record = self.session().record().clone();
         // A card with no committed content cannot commission anything. That is
         // an internal refusal, not permission to fall back to the request.
         let content = record.source.content().ok_or(OutcomeCode::Internal)?;
@@ -706,17 +706,26 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
         };
         match self.ports.sinks.open(commission) {
             Ok(ReceiveDestination::Writable(sink)) => Ok(sink),
-            // These bytes are already complete. The card cannot yet turn that
-            // witness back into a completion — the input that would carry it
-            // into product state is step 5's remaining half, and it needs the
-            // transport that does not exist. So the attempt ends rather than
-            // receiving a file that is already here.
+            // These bytes are already here. A previous attempt received and
+            // sealed them and the card never recorded it — the crash window
+            // between a seal and its commit. Adopt rather than receive a file
+            // that is already on this disk.
             //
-            // `Internal` is honest for now and deliberately NOT a storage fault:
-            // reaching this means the record disagrees with storage, and telling
-            // the person to retry would promise something no retry can deliver.
-            // What replaces it is adopt-and-complete, not a different code.
-            Ok(ReceiveDestination::AlreadySealed(_witness)) => Err(OutcomeCode::Internal),
+            // The reducer checks every field of the witness against what this
+            // card expects before it completes anything. If it refuses, the
+            // record and storage disagree in a way this cannot reconcile, and
+            // `Internal` says so rather than inviting a retry that would find
+            // the same seal again.
+            Ok(ReceiveDestination::AlreadySealed(witness)) => {
+                let completed = self
+                    .apply(ProductInput::ReceiveAdopted(witness))
+                    .is_ok_and(|state| state == ProductState::Completed);
+                Err(if completed {
+                    OutcomeCode::Completed
+                } else {
+                    OutcomeCode::Internal
+                })
+            }
             // This build cannot receive at all. A card should never have been
             // asked, so it is ours, not the disk's.
             Err(SinkOpenError::Unsupported) => Err(OutcomeCode::Internal),

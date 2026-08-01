@@ -1026,6 +1026,94 @@ fn declaration(record: &TransferRecord, name: &str, size: u64) -> PeerContentDec
     }
 }
 
+/// Bytes that are already here complete the card, and only if they are ITS bytes.
+///
+/// The crash window between a store sealing a reception and the card committing
+/// its completion. On the next attempt the destination cannot be opened — sealed
+/// bytes are immutable — and the honest recovery is to adopt rather than receive
+/// a file that is on this disk already.
+///
+/// Holding a witness proves the bytes are durable. It does not prove they are
+/// THIS card's, so every field is checked: the key says they belong to this
+/// reception, the length says they are the file the peer announced, and the
+/// commissioning fingerprint says they were written for THAT announcement rather
+/// than an earlier one under the same key.
+#[test]
+fn a_sealed_reception_completes_the_card_it_belongs_to() {
+    let received = b"the whole file";
+    let mut record = create(Direction::Receive).0;
+    record
+        .reduce(ProductInput::PeerContentDeclared(declaration(
+            &record,
+            "a.pdf",
+            received.len() as u64,
+        )))
+        .unwrap();
+    record.state = ProductState::Transferring;
+
+    let blob = envoix_blob_api::BlobKey::new(
+        record.identity.card,
+        envoix_blob_api::BlobWorkId::of_reception(
+            record.identity.transfer,
+            record.identity.artifact,
+        ),
+    );
+    let fingerprint = envoix_blob_api::reception_fingerprint(
+        record.identity.transfer,
+        record.identity.artifact,
+        &OfferedName::from_untrusted("a.pdf").expect("a bounded name"),
+        ByteCount::new(received.len() as u64),
+    );
+
+    // A witness for the WRONG announcement: same key, other commissioning.
+    let (_other_root, other) =
+        crate::test_support::sealed_at(blob, received, ContentHash::from_bytes([0x5c; 32]));
+    record.reduce(ProductInput::ReceiveAdopted(other)).unwrap();
+    assert_ne!(
+        record.state,
+        ProductState::Completed,
+        "bytes written for a different announcement are not this transfer's"
+    );
+
+    // A witness for ANOTHER card's reception, correctly commissioned for itself.
+    let foreign_blob = envoix_blob_api::BlobKey::new(
+        RecordId::new(record.identity.card.get() + 1),
+        envoix_blob_api::BlobWorkId::of_reception(
+            record.identity.transfer,
+            record.identity.artifact,
+        ),
+    );
+    let (_foreign_root, foreign) =
+        crate::test_support::sealed_at(foreign_blob, received, fingerprint);
+    record
+        .reduce(ProductInput::ReceiveAdopted(foreign))
+        .unwrap();
+    assert_ne!(
+        record.state,
+        ProductState::Completed,
+        "another card's bytes are not this card's, however durable they are"
+    );
+
+    // The right key and commissioning, the wrong number of bytes.
+    let (_short_root, short) = crate::test_support::sealed_at(blob, b"partial", fingerprint);
+    record.reduce(ProductInput::ReceiveAdopted(short)).unwrap();
+    assert_ne!(
+        record.state,
+        ProductState::Completed,
+        "fewer bytes than the peer announced is not the file"
+    );
+
+    let (_root, witness) = crate::test_support::sealed_at(blob, received, fingerprint);
+    record
+        .reduce(ProductInput::ReceiveAdopted(witness))
+        .unwrap();
+    assert_eq!(
+        record.state,
+        ProductState::Completed,
+        "the file is here; the card says so"
+    );
+}
+
 /// A locked transfer's content is final, even though nothing has been delivered.
 ///
 /// The lock is committed BEFORE `Complete` reaches the peer, which is the whole

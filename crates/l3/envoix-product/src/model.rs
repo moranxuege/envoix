@@ -3,6 +3,7 @@ use std::num::NonZeroU32;
 use envoix_attempt_api::{
     AdmittedAttemptEvent, AttemptPlan, AttemptStamp, RetirementAck, RetirementIntent,
 };
+use envoix_blob_api::SealedArtifact;
 use envoix_capabilities::{AdmittedDutyResult, AdmittedSourceResult, Duty, SourceAcquisitionKey};
 use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{
@@ -238,6 +239,13 @@ pub enum ProductInput {
     SourceOffered {
         offer: AcceptedSourceOffer,
     },
+    /// A sealed reception was found for this card, and the store vouches for it.
+    ///
+    /// Carries the WITNESS rather than a length and a digest, because those are
+    /// facts anyone could state. Only the store can mint one, and only for bytes
+    /// that are actually durable — which is the difference between "a worker
+    /// says the file arrived" and "the file is here".
+    ReceiveAdopted(SealedArtifact),
     /// The sending attempt is about to declare this transfer complete.
     ///
     /// Committed BEFORE the packet, so a crash between the two leaves a card
