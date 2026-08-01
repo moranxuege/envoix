@@ -597,6 +597,15 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             } => {
                 let _ = verdict.send(self.answer_peer_content(stamp, &declaration));
             }
+            ExecutorSignal::ContentLockRequested { locked } => {
+                // Answered only after the commit holds. A sender told its
+                // content is locked will put `Complete` on the wire, and the
+                // whole point is that the durable memory precedes the packet.
+                let granted = self.supervisor.is_current(stamp)
+                    && self.apply(ProductInput::ContentLocked { stamp }).is_ok()
+                    && self.session().record().facts.content_locked;
+                let _ = locked.send(granted);
+            }
             ExecutorSignal::CommitCrossed => {
                 let _ = self.supervisor.cross_commit_point(stamp);
             }

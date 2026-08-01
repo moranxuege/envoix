@@ -425,6 +425,7 @@ async fn attempt_iroh_generation_and_retirement() {
         TestEntropy::new(0x10),
     )
     .unwrap();
+    allow_content_lock(&mut first_sender);
     let mut first_receiver = spawn_receiver(
         plan(Direction::Receive, 1, ResumeIntent::Fresh),
         spec(&bytes),
@@ -482,6 +483,7 @@ async fn attempt_iroh_generation_and_retirement() {
         TestEntropy::new(0x20),
     )
     .unwrap();
+    allow_content_lock(&mut second_sender);
     let mut second_receiver = spawn_receiver(
         plan(Direction::Receive, 2, resume),
         spec(&bytes),
@@ -652,6 +654,7 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         TestEntropy::new(0x40),
     )
     .unwrap();
+    allow_content_lock(&mut bad_sender);
     let rejected_outcome = terminal_outcome(&mut bad_sender).await;
     assert!(matches!(
         rejected_outcome,
@@ -681,6 +684,7 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         TestEntropy::new(0x50),
     )
     .unwrap();
+    allow_content_lock(&mut good_sender);
     let (sender_outcome, receiver_outcome) = tokio::join!(
         terminal_outcome(&mut good_sender),
         terminal_outcome(&mut receiver)
@@ -730,6 +734,7 @@ async fn sender_emits_confirming_between_complete_and_ack() {
         TestEntropy::new(0x30),
     )
     .unwrap();
+    allow_content_lock(&mut sender);
     let mut receiver = spawn_receiver(
         plan(Direction::Receive, 1, ResumeIntent::Fresh),
         spec(&bytes),
@@ -792,6 +797,64 @@ async fn sender_emits_confirming_between_complete_and_ack() {
         .unwrap();
     sender.wait_ack().await.unwrap();
     receiver.wait_ack().await.unwrap();
+}
+
+/// `Complete` never goes on the wire without the card's memory of it.
+///
+/// The sender has sent every byte. If the packet went out anyway, the peer could
+/// seal — and a crash before the card recorded anything would leave a sender
+/// that still believed a re-picked document could replace what the peer holds.
+/// So it ends the attempt instead, and the RECEIVER never sees a completion.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_refused_content_lock_stops_complete_reaching_the_peer() {
+    let bytes = (0..512_u32).map(|index| index as u8).collect::<Vec<_>>();
+    let source = MemorySource {
+        bytes: Arc::new(bytes.clone()),
+    };
+    let sink = MemorySink::default();
+    let (sender_supervisor, receiver_supervisor) = (
+        Arc::new(Mutex::new(AttemptSupervisor::new())) as SharedAttemptSupervisor,
+        Arc::new(Mutex::new(AttemptSupervisor::new())) as SharedAttemptSupervisor,
+    );
+    let links = link_pair(None);
+    let (sender_token, receiver_token) = token_pair();
+
+    let mut receiver = spawn_receiver(
+        plan(Direction::Receive, 1, ResumeIntent::Fresh),
+        spec(&bytes),
+        receiver_token,
+        granted(sink.clone()),
+        links.receiver,
+        receiver_supervisor,
+        TestEntropy::new(0x94),
+    )
+    .expect("spawn receiver");
+    admit_peer_content(&mut receiver);
+
+    // NO lock authority: the request goes nowhere.
+    let mut sender = spawn_sender(
+        plan(Direction::Send, 1, ResumeIntent::Fresh),
+        spec(&bytes),
+        sender_token,
+        source,
+        links.sender,
+        sender_supervisor,
+        TestEntropy::new(0x95),
+    )
+    .expect("spawn sender");
+
+    let terminal = loop {
+        let event = sender.next_event().await.expect("a terminal");
+        if let AttemptEventKind::Terminal(outcome) = event.kind {
+            break outcome;
+        }
+    };
+    assert_eq!(terminal, OutcomeCode::Internal, "it ends before the packet");
+    assert!(
+        sink.state.lock().unwrap().sealed.is_none(),
+        "and the peer was never told the transfer was complete"
+    );
+    drop(receiver);
 }
 
 /// A promise nobody keeps ends the attempt.
@@ -928,6 +991,15 @@ async fn an_unanswered_declaration_refuses_rather_than_waits() {
 /// These suites are about the transport, not about what a card decides — but a
 /// receive now WAITS for an authority before it touches a destination, so one
 /// has to exist. A test that supplied none would be testing the refusal path.
+fn allow_content_lock(handle: &mut crate::AttemptHandle) {
+    let mut requests = handle.take_content_lock();
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            let _ = request.locked.send(true);
+        }
+    });
+}
+
 fn admit_peer_content(handle: &mut crate::AttemptHandle) {
     let mut requests = handle.take_peer_content();
     tokio::spawn(async move {

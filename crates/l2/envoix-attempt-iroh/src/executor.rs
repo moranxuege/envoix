@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor,
-    CommitOperationResult, OpenResult, PeerContentRequest, PeerContentVerdict, RetirementAck,
-    RetirementAckResult, RetirementIntent, RetirementRequestResult, TerminalResolutionResult,
+    CommitOperationResult, ContentLockRequest, OpenResult, PeerContentRequest, PeerContentVerdict,
+    RetirementAck, RetirementAckResult, RetirementIntent, RetirementRequestResult,
+    TerminalResolutionResult,
 };
 use envoix_auth::{
     self, AuthError, ExportedKeyingMaterial, MAX_AUTH_PAYLOAD, MonotonicMillis as AuthMillis,
@@ -125,6 +126,9 @@ pub struct AttemptHandle {
     open_result: OpenResult,
     control: AttemptControl,
     events: mpsc::UnboundedReceiver<AttemptEvent>,
+    /// A sender's request to freeze its content before declaring completion.
+    /// Blocks the attempt until answered, like `peer_content`.
+    content_lock: mpsc::UnboundedReceiver<ContentLockRequest>,
     /// Requests that BLOCK the attempt until answered, unlike `events`.
     ///
     /// A separate channel because the two have opposite contracts: an event may
@@ -157,6 +161,12 @@ impl AttemptHandle {
     pub fn take_peer_content(&mut self) -> mpsc::UnboundedReceiver<PeerContentRequest> {
         let (_, empty) = mpsc::unbounded_channel();
         std::mem::replace(&mut self.peer_content, empty)
+    }
+
+    /// Takes the content-lock channel, on the same one-shot terms.
+    pub fn take_content_lock(&mut self) -> mpsc::UnboundedReceiver<ContentLockRequest> {
+        let (_, empty) = mpsc::unbounded_channel();
+        std::mem::replace(&mut self.content_lock, empty)
     }
 
     pub async fn next_path(&mut self) -> Option<PathObservation> {
@@ -198,6 +208,7 @@ where
     let paths = link.take_path_observations();
     let (events_sender, events) = mpsc::unbounded_channel();
     let (peer_content_sender, peer_content) = mpsc::unbounded_channel();
+    let (content_lock_sender, content_lock) = mpsc::unbounded_channel();
     let (stop_sender, stop_receiver) = mpsc::unbounded_channel();
     let retirement_changed = Arc::new(Notify::new());
     let control = AttemptControl {
@@ -207,9 +218,9 @@ where
         retirement_changed: retirement_changed.clone(),
     };
     let task = tokio::spawn(async move {
-        // A send declares its own content; it never asks. The handle still
-        // carries the channel so both directions have one shape, and a sender's
-        // simply never yields.
+        // A send is never TOLD what it is sending — it declares it — so its
+        // peer-content channel simply never yields. The handle still carries
+        // both so the two directions have one shape.
         drop(peer_content_sender);
         execute_sender(
             plan,
@@ -220,6 +231,7 @@ where
             entropy,
             supervisor,
             events_sender,
+            content_lock_sender,
             stop_receiver,
             retirement_changed,
         )
@@ -230,6 +242,7 @@ where
         control,
         events,
         peer_content,
+        content_lock,
         paths,
         task: Some(task),
     })
@@ -256,6 +269,7 @@ where
     let paths = link.take_path_observations();
     let (events_sender, events) = mpsc::unbounded_channel();
     let (peer_content_sender, peer_content) = mpsc::unbounded_channel();
+    let (content_lock_sender, content_lock) = mpsc::unbounded_channel();
     let (stop_sender, stop_receiver) = mpsc::unbounded_channel();
     let retirement_changed = Arc::new(Notify::new());
     let control = AttemptControl {
@@ -265,6 +279,9 @@ where
         retirement_changed: retirement_changed.clone(),
     };
     let task = tokio::spawn(async move {
+        // A receive never declares completion, so it never asks to freeze
+        // content; its channel simply never yields.
+        drop(content_lock_sender);
         execute_receiver(
             plan,
             spec,
@@ -285,6 +302,7 @@ where
         control,
         events,
         peer_content,
+        content_lock,
         paths,
         task: Some(task),
     })
@@ -312,6 +330,7 @@ where
     let (paths_sender, paths) = mpsc::unbounded_channel();
     let (events_sender, events) = mpsc::unbounded_channel();
     let (peer_content_sender, peer_content) = mpsc::unbounded_channel();
+    let (content_lock_sender, content_lock) = mpsc::unbounded_channel();
     let (stop_sender, stop_receiver) = mpsc::unbounded_channel();
     let retirement_changed = Arc::new(Notify::new());
     let control = AttemptControl {
@@ -321,6 +340,8 @@ where
         retirement_changed: retirement_changed.clone(),
     };
     let task = tokio::spawn(async move {
+        // See `spawn_receiver`: a receive never asks to freeze content.
+        drop(content_lock_sender);
         execute_iroh_receiver(
             plan,
             spec,
@@ -343,6 +364,7 @@ where
         control,
         events,
         peer_content,
+        content_lock,
         paths,
         task: Some(task),
     })
@@ -373,6 +395,7 @@ async fn execute_sender<S, E>(
     mut entropy: E,
     supervisor: SharedAttemptSupervisor,
     events: mpsc::UnboundedSender<AttemptEvent>,
+    content_lock: mpsc::UnboundedSender<ContentLockRequest>,
     mut stop: mpsc::UnboundedReceiver<RetirementIntent>,
     retirement_changed: Arc<Notify>,
 ) -> Result<RetirementAck, AttemptError>
@@ -405,6 +428,7 @@ where
             transfer_sender(
                 plan,
                 &spec,
+                &content_lock,
                 &mut source,
                 &mut *link,
                 &clock,
@@ -863,6 +887,7 @@ async fn authenticate_receiver(
 async fn transfer_sender(
     plan: AttemptPlan,
     spec: &AttemptTransferSpec,
+    content_lock: &mpsc::UnboundedSender<ContentLockRequest>,
     source: &mut impl SourceReader,
     link: &mut dyn SessionLink,
     clock: &AttemptClock,
@@ -992,6 +1017,20 @@ async fn transfer_sender(
                 );
             }
             Ok(SenderStep::Complete { state, frame }) => {
+                // FREEZE FIRST. Once this packet is on the wire the peer may
+                // seal, and a crash before the card remembered would leave a
+                // sender that still believes a re-picked document could replace
+                // what the peer already holds.
+                if !lock_content(
+                    content_lock,
+                    plan.stamp,
+                    stop,
+                    clock.remaining(ack_deadline.instant().0),
+                )
+                .await
+                {
+                    return Terminal::from_error(AttemptError::ContentLockRefused);
+                }
                 if let Err(exit) = send_frame_interruptible(
                     link,
                     &frame,
@@ -1477,6 +1516,28 @@ fn emit(events: &mpsc::UnboundedSender<AttemptEvent>, stamp: AttemptStamp, kind:
     let _ = events.send(AttemptEvent { stamp, kind });
 }
 
+/// Asks the card to freeze this transfer's content — BOUNDED, like the verdict.
+///
+/// `false` for a refusal, a dropped channel, a retirement, or a deadline.
+/// Nothing about silence freezes anything, and sending `Complete` on silence is
+/// precisely the crash window this closes.
+async fn lock_content(
+    requests: &mpsc::UnboundedSender<ContentLockRequest>,
+    stamp: AttemptStamp,
+    stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
+    wait: Duration,
+) -> bool {
+    let (locked, answer) = oneshot::channel();
+    if requests.send(ContentLockRequest { stamp, locked }).is_err() {
+        return false;
+    }
+    tokio::select! {
+        biased;
+        _ = stop.recv() => false,
+        answered = timeout(wait, answer) => matches!(answered, Ok(Ok(true))),
+    }
+}
+
 /// Takes the destination the card commissioned — BOUNDED, like the verdict.
 ///
 /// A dropped grant, a retirement, or a deadline all end the attempt. Nothing
@@ -1505,10 +1566,12 @@ async fn acquire_granted_sink<S>(
 /// exists to replace.
 ///
 /// The bound is not defensive tidiness. Without it an unanswered declaration
-/// holds an authenticated session and a writer lease open forever, which is a
-/// worse failure than refusing: the attempt cannot be retired, and nothing
-/// reports why. Found by running it — every existing test hung here before the
-/// timeout went in.
+/// holds an authenticated session open forever, which is a worse failure than
+/// refusing: the attempt cannot be retired, and nothing reports why. Found by
+/// running it — every existing test hung here before the timeout went in.
+///
+/// No writer lease is held at this point. One is granted only after this
+/// answers `Admitted`, which is what makes the wait cheap as well as bounded.
 async fn authorize_peer_content(
     requests: &mpsc::UnboundedSender<PeerContentRequest>,
     stamp: AttemptStamp,

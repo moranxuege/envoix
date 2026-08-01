@@ -221,6 +221,21 @@ async fn run_attempt(
     // A declaration BLOCKS the receive until answered, and the loop below can be
     // parked on `next_event` — which will not produce one, because the attempt
     // is waiting for this answer to make anything happen.
+    let mut locks = handle.take_content_lock();
+    let locking = signals.clone();
+    tokio::spawn(async move {
+        while let Some(request) = locks.recv().await {
+            if locking
+                .send(ExecutorSignal::ContentLockRequested {
+                    locked: request.locked,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
     let mut declarations = handle.take_peer_content();
     let declaring = signals.clone();
     tokio::spawn(async move {

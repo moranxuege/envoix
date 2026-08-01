@@ -235,6 +235,7 @@ impl TransferRecord {
             ProductInput::Command(command) => self.on_command(command)?,
             ProductInput::Restore => self.on_restore(),
             ProductInput::SourceOffered { offer } => self.on_source_offered(offer)?,
+            ProductInput::ContentLocked { stamp } => self.on_content_locked(stamp),
             ProductInput::PeerContentDeclared(declaration) => {
                 self.on_peer_content_declared(&declaration)
             }
@@ -493,6 +494,22 @@ impl TransferRecord {
         self.source.answer_offer(&self.current_acquisition(), offer)
     }
 
+    /// Freezes this transfer's content, before its `Complete` reaches the peer.
+    ///
+    /// Only a live SEND that is actually transferring can lock: a receive has
+    /// nothing to lock, and a stale attempt speaks for a run this card ended.
+    /// Idempotent, because the sender may be retried and the fact is a promise
+    /// rather than an event.
+    fn on_content_locked(&mut self, stamp: AttemptStamp) -> Vec<ProductEffect> {
+        if self.is_current(stamp)
+            && self.direction == Direction::Send
+            && self.state == ProductState::Transferring
+        {
+            self.facts.content_locked = true;
+        }
+        Vec::new()
+    }
+
     /// What this card would do with a peer's declaration, deciding nothing.
     ///
     /// Pure, and separate from applying it, because a caller is WAITING: the
@@ -538,7 +555,8 @@ impl TransferRecord {
                 | ProductState::Verifying
                 | ProductState::Unconfirmed
                 | ProductState::Cancelled
-        ) || self.facts.complete_sent
+        ) || self.facts.content_locked
+            || self.facts.complete_sent
             || self.facts.proof_delivered
             || self.facts.remove_requested
     }

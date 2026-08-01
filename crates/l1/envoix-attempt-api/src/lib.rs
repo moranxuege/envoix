@@ -7,7 +7,8 @@ mod supervisor;
 
 pub use model::{
     AdmittedAttemptEvent, AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp,
-    PeerContentRequest, PeerContentVerdict, ResumeIntent, RetirementAck, RetirementIntent,
+    ContentLockRequest, PeerContentRequest, PeerContentVerdict, ResumeIntent, RetirementAck,
+    RetirementIntent,
 };
 pub use supervisor::{
     AttemptSupervisor, CommitOperationResult, CommitPointResult, EventAdmission, OpenResult,

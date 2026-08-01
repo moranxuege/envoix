@@ -1026,6 +1026,65 @@ fn declaration(record: &TransferRecord, name: &str, size: u64) -> PeerContentDec
     }
 }
 
+/// A locked transfer's content is final, even though nothing has been delivered.
+///
+/// The lock is committed BEFORE `Complete` reaches the peer, which is the whole
+/// point: after that packet the peer may seal, and a crash between the two would
+/// otherwise leave a sender that still believed a re-picked document could
+/// replace what the peer already holds.
+#[test]
+fn locking_content_freezes_it_before_anything_is_delivered() {
+    let mut record = transfer(Direction::Send);
+    assert!(!record.facts.content_locked);
+    assert!(!record.facts.complete_sent, "nothing has been delivered");
+
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::ContentLocked { stamp })
+        .unwrap();
+    assert!(record.facts.content_locked);
+
+    // A receiving card in the same state would now refuse a replacement.
+    let mut receiving = create(Direction::Receive).0;
+    receiving
+        .reduce(ProductInput::PeerContentDeclared(declaration(
+            &receiving, "a.pdf", 1000,
+        )))
+        .unwrap();
+    receiving.facts.content_locked = true;
+    assert_eq!(
+        receiving.classify_peer_content(&declaration(&receiving, "b.pdf", 2000)),
+        PeerContentDecision::FinalContentConflict
+    );
+}
+
+/// Only a live send that is transferring can lock, and a stale attempt cannot.
+#[test]
+fn a_stale_or_receiving_attempt_cannot_lock_content() {
+    let mut receiving = transfer(Direction::Receive);
+    let stamp = receiving.stamp();
+    receiving
+        .reduce(ProductInput::ContentLocked { stamp })
+        .unwrap();
+    assert!(
+        !receiving.facts.content_locked,
+        "a receive has no content of its own to freeze"
+    );
+
+    let mut sending = transfer(Direction::Send);
+    let stale = AttemptStamp {
+        card: sending.identity.card,
+        generation: AttemptGen::new(sending.generation.get() + 1),
+    };
+    sending
+        .reduce(ProductInput::ContentLocked { stamp: stale })
+        .unwrap();
+    assert!(
+        !sending.facts.content_locked,
+        "an attempt this card does not know speaks for nobody"
+    );
+}
+
 /// A receive learns what it is receiving, once, from the peer that knows.
 ///
 /// Until this arrives a receiving card has no total at all, which is why every
@@ -2384,6 +2443,7 @@ fn every_published_command_moves_the_card_and_the_rest_are_inert() {
                         record.state = state;
                         record.quiescence = quiescence;
                         record.facts = Facts {
+                            content_locked: false,
                             complete_sent: bits & 1 != 0,
                             proof_delivered: bits & 2 != 0,
                             receipt_mismatch: bits & 4 != 0,
@@ -2910,6 +2970,7 @@ fn fixture_skeleton() -> TransferRecord {
         bytes_resumed: Some(ByteCount::new(2)),
         outcome: None,
         facts: crate::Facts {
+            content_locked: false,
             complete_sent: false,
             proof_delivered: false,
             receipt_mismatch: false,
@@ -2985,12 +3046,12 @@ fn a_plan_naming_an_item_outside_the_selection_is_refused() {
 }
 
 #[test]
-fn product_record_v11_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired":[{"item":0,"retention":"persisted","seekability":"seekable"}],"backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+fn product_record_v12_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"content_locked":false,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source":{"ready":{"offer":{"key":{"card":1,"generation":7,"request":"656e766f69782f736f757263652f7635"},"selection":[{"id":0,"path":["a.txt"],"reported_size":10}],"output_name":"a.txt"},"acquired":[{"item":0,"retention":"persisted","seekability":"seekable"}],"backing":"persisted_provider","content":{"content":{"name":"a.txt","total":10},"content_hash":[5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5]}}},"participation":"minted","pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&11_u32.to_be_bytes());
+    expected.extend_from_slice(&12_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);

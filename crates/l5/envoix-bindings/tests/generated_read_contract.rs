@@ -240,6 +240,7 @@ fn record(
         "bytes_resumed": 1024,
         "outcome": outcome,
         "facts": {
+            "content_locked": false,
             "complete_sent": false,
             "proof_delivered": false,
             "receipt_mismatch": false,

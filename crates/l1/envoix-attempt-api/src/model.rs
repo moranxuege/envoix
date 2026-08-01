@@ -107,6 +107,19 @@ pub struct PeerContentRequest {
     pub verdict: oneshot::Sender<PeerContentVerdict>,
 }
 
+/// A sender asking to freeze this transfer's content before it declares the
+/// transfer complete.
+///
+/// The same request shape as [`PeerContentRequest`], and for the same reason:
+/// what follows is irreversible from the peer's side, so the authority commits
+/// first. `false` means the card would not lock, and the packet must not be
+/// sent.
+#[derive(Debug)]
+pub struct ContentLockRequest {
+    pub stamp: AttemptStamp,
+    pub locked: oneshot::Sender<bool>,
+}
+
 /// Untrusted executor output, stamped for generation admission.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AttemptEvent {

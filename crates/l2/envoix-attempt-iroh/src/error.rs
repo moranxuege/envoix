@@ -21,6 +21,9 @@ pub enum AttemptError {
     /// never arrived. Never treated as admission — a silent channel says nothing
     /// about whether a declaration was accepted.
     PeerContentRefused,
+    /// The card would not freeze this transfer's content, so `Complete` was
+    /// never sent. Refusing is safe; sending without the durable memory is not.
+    ContentLockRefused,
     TaskStopped,
 }
 
@@ -37,6 +40,7 @@ impl AttemptError {
             | Self::ProtocolEnvelope
             | Self::RetirementHandshake
             | Self::PeerContentRefused
+            | Self::ContentLockRefused
             | Self::TaskStopped => OutcomeCode::Internal,
         }
     }
@@ -60,6 +64,9 @@ impl fmt::Display for AttemptError {
             }
             Self::PeerContentRefused => {
                 formatter.write_str("no authority answered for what the peer declared")
+            }
+            Self::ContentLockRefused => {
+                formatter.write_str("no authority froze this transfer's content")
             }
             Self::TaskStopped => formatter.write_str("attempt executor task stopped"),
         }

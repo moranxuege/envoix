@@ -686,6 +686,16 @@ async fn start_real_attempt(broker: &EndpointAddr, case: AttemptCase) -> Running
         FixedEntropy::new(case.entropy_seed.wrapping_add(0xc0)),
     )
     .expect("spawn sender");
+    // The card would freeze this transfer's content before `Complete` goes out.
+    // This slice drives the MECHANISM, so it allows — but it has to say so,
+    // because an unanswered lock stops the packet.
+    let mut sender = sender;
+    let mut locks = sender.take_content_lock();
+    tokio::spawn(async move {
+        while let Some(request) = locks.recv().await {
+            let _ = request.locked.send(true);
+        }
+    });
     RunningAttempts { sender, receiver }
 }
 

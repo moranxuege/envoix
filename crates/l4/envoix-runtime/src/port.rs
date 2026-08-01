@@ -65,6 +65,9 @@ pub enum ExecutorSignal {
         declaration: PeerContentDeclaration,
         verdict: oneshot::Sender<PeerContentVerdict>,
     },
+    /// A sender is about to declare this transfer complete and wants its
+    /// content frozen first. BLOCKS until answered.
+    ContentLockRequested { locked: oneshot::Sender<bool> },
     /// The executor crossed its single irreversible commit point.
     CommitCrossed,
     /// The executor stopped and released its lease and handles.

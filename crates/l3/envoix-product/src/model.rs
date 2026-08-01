@@ -90,6 +90,15 @@ impl Quiescence {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Facts {
+    /// This transfer's content can no longer change, decided BEFORE `Complete`
+    /// went on the wire.
+    ///
+    /// Separate from `complete_sent`, which records that it did. The gap between
+    /// them is a real crash window: a packet on the wire and no durable memory
+    /// of it means a restored sender would believe a re-picked document could
+    /// still replace what the peer may already have sealed. Locking first closes
+    /// that without claiming a delivery that has not happened.
+    pub content_locked: bool,
     pub complete_sent: bool,
     pub proof_delivered: bool,
     pub receipt_mismatch: bool,
@@ -168,6 +177,14 @@ pub enum ProductInput {
     /// picked document could satisfy a request it was never chosen for.
     SourceOffered {
         offer: AcceptedSourceOffer,
+    },
+    /// The sending attempt is about to declare this transfer complete.
+    ///
+    /// Committed BEFORE the packet, so a crash between the two leaves a card
+    /// that knows its content is final rather than one that would let a
+    /// re-picked document replace bytes the peer may already hold.
+    ContentLocked {
+        stamp: AttemptStamp,
     },
     /// What the peer declared it is sending, on a receiving card.
     ///
