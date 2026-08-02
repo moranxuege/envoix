@@ -222,14 +222,62 @@ impl App {
             self.theme_applied = Some(self.dark);
         }
 
+        self.absorb_dropped_files(ui.ctx());
+
         self.rail(ui, &palette);
         self.composer(ui, &palette);
         self.activity(ui, &palette);
+        self.drop_overlay(ui, &palette);
 
         if self.busy() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
+    }
+
+    /// Dropping files anywhere on the window queues them for sending, which is
+    /// the gesture a desktop user reaches for first.
+    fn absorb_dropped_files(&mut self, ctx: &egui::Context) {
+        if self.busy() {
+            return;
+        }
+        let dropped: Vec<PathBuf> = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        self.mode = Mode::Send;
+        self.tab = Tab::Transfers;
+        for path in dropped {
+            if !self.files.contains(&path) {
+                self.files.push(path);
+            }
+        }
+    }
+
+    fn drop_overlay(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        if self.busy() || !ui.ctx().input(|input| !input.raw.hovered_files.is_empty()) {
+            return;
+        }
+        let screen = ui.ctx().viewport_rect();
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("drop-overlay"),
+        ));
+        painter.rect_filled(screen, 0, palette.accent_soft.gamma_multiply(0.92));
+        painter.text(
+            screen.center(),
+            egui::Align2::CENTER_CENTER,
+            "Drop files to send",
+            theme::bold(24.0),
+            palette.accent_strong,
+        );
     }
 }
 
@@ -766,6 +814,87 @@ mod tests {
             app.progress = Some((6_815_744, 10_485_760));
             app.rate = Some(14_680_064.0);
             app.data_path = Some("direct".to_owned());
+        });
+    }
+
+    #[test]
+    fn idle_light() {
+        preview("idle-light", |app| {
+            app.dark = false;
+            app.mode = Mode::Receive;
+        });
+    }
+
+    #[test]
+    fn offer_awaiting_approval_light() {
+        preview("offer-light", |app| {
+            app.dark = false;
+            app.mode = Mode::Receive;
+            app.stage = Stage::Offered;
+            app.status = "Offer received".to_owned();
+            app.data_path = Some("direct".to_owned());
+            app.room_code = Some("075287-indigo-opal".to_owned());
+            app.offer = Some(OfferSummary {
+                roots: vec!["quarterly-report.pdf".to_owned(), "photos".to_owned()],
+                files: 19,
+                directories: 2,
+                bytes: 8_388_608,
+            });
+        });
+    }
+
+    #[test]
+    fn delivered_light() {
+        preview("delivered-light", |app| {
+            app.dark = false;
+            app.mode = Mode::Receive;
+            app.stage = Stage::Done;
+            app.status = "Delivered".to_owned();
+            app.data_path = Some("direct".to_owned());
+            app.progress = Some((8_388_608, 8_388_608));
+            app.result = Some((21, 8_388_608));
+            app.offer = Some(OfferSummary {
+                roots: vec!["quarterly-report.pdf".to_owned()],
+                files: 19,
+                directories: 2,
+                bytes: 8_388_608,
+            });
+        });
+    }
+
+    #[test]
+    fn send_composer_light() {
+        preview("send-light", |app| {
+            app.dark = false;
+            app.mode = Mode::Send;
+            app.files = vec![
+                PathBuf::from("/home/demo/quarterly-report.pdf"),
+                PathBuf::from("/home/demo/photos"),
+            ];
+            app.invite_input =
+                "envoix://invite/v2/eyJyIjoiMDc1Mjg3LWluZGlnby1vcGFsIiwiYiI6ImU5NDZhMzFhIn0"
+                    .to_owned();
+        });
+    }
+
+    #[test]
+    fn logs_dark() {
+        preview("logs-dark", |app| {
+            app.dark = true;
+            app.tab = Tab::Logs;
+            app.mode = Mode::Receive;
+            app.logs = vec![
+                "invite 075287-indigo-opal".to_owned(),
+                "Waiting for a sender".to_owned(),
+                "Pairing: Joined".to_owned(),
+                "Pairing: Confirmed".to_owned(),
+                "connected via direct".to_owned(),
+                "offer: 19 files, 8.0 MB".to_owned(),
+                "Transferring".to_owned(),
+                "Verifying".to_owned(),
+                "Saving".to_owned(),
+                "delivered 21 entries, 8.0 MB".to_owned(),
+            ];
         });
     }
 }

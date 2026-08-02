@@ -48,6 +48,10 @@ alone; the naked room-code route was retired. The room code is shown because it
 identifies the room to a human, and the QR encodes the same payload the button
 copies.
 
+Files dropped anywhere on the window queue for sending and switch the composer
+to Send, which is the gesture a desktop user reaches for before hunting for a
+file picker.
+
 ## Running it
 
     cargo run -p envoix-desktop

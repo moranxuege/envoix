@@ -8,6 +8,7 @@
 
 mod app;
 mod engine;
+mod icon;
 mod qr;
 mod theme;
 mod widgets;
@@ -17,7 +18,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 720.0])
             .with_min_inner_size([960.0, 600.0])
-            .with_title("Envoix"),
+            .with_title("Envoix")
+            .with_icon(icon::window_icon()),
         ..Default::default()
     };
     eframe::run_native(
