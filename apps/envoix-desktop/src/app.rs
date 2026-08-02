@@ -634,7 +634,12 @@ impl App {
             } else {
                 0.0
             };
-            progress_bar(ui, palette, fraction);
+            let bar = match self.stage {
+                Stage::Failed => palette.danger,
+                Stage::Done => palette.success,
+                _ => palette.accent,
+            };
+            progress_bar(ui, palette, fraction, bar);
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
@@ -960,6 +965,23 @@ mod tests {
                 "Saving".to_owned(),
                 "delivered 21 entries, 8.0 MB".to_owned(),
             ];
+        });
+    }
+
+    #[test]
+    fn failed_light() {
+        preview("failed-light", |app| {
+            app.dark = false;
+            app.mode = Mode::Receive;
+            app.stage = Stage::Failed;
+            app.status = "Failed".to_owned();
+            app.room_code = Some("075287-indigo-opal".to_owned());
+            app.progress = Some((3_145_728, 8_388_608));
+            app.error = Some(
+                "one-time invitation was consumed after authentication: \
+                 transport error: early eof"
+                    .to_owned(),
+            );
         });
     }
 }

@@ -635,4 +635,112 @@ mod tests {
             assert_eq!(landed, payload, "round {round} bytes differ");
         }
     }
+
+    /// Drains both engines once, reporting whether payload moved and how many
+    /// sides ended, split by outcome so a cancel cannot be confused with a
+    /// completion that beat it.
+    #[derive(Default)]
+    struct Drained {
+        moved: bool,
+        failed: usize,
+        finished: usize,
+    }
+
+    impl Drained {
+        fn terminal(&self) -> usize {
+            self.failed + self.finished
+        }
+    }
+
+    fn drain(receiver: &mut Engine, sender: &mut Engine) -> Drained {
+        let mut drained = Drained::default();
+        for event in receiver
+            .poll()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(sender.poll().collect::<Vec<_>>())
+        {
+            match event {
+                UiEvent::Progress { bytes, .. } if bytes > 0 => drained.moved = true,
+                UiEvent::Offer(_) => receiver.accept_offer(),
+                UiEvent::Failed(_) => drained.failed += 1,
+                UiEvent::Finished { .. } => drained.finished += 1,
+                _ => {}
+            }
+        }
+        drained
+    }
+
+    /// A demo that goes wrong has to recover. Cancelling mid-flight must end
+    /// both sides rather than hang, and must not poison the engines: a cancelled
+    /// `TransferCancelToken` stays cancelled, so a stale one would abort every
+    /// later attempt the instant it started.
+    #[test]
+    #[ignore = "requires the deployed rendezvous to be reachable"]
+    fn cancelling_mid_transfer_leaves_the_engines_usable() {
+        let context = egui::Context::default();
+        let mut receiver = Engine::new(context.clone());
+        let mut sender = Engine::new(context);
+        let workspace = tempfile::tempdir().expect("tempdir");
+
+        let source = workspace.path().join("large.bin");
+        std::fs::write(&source, vec![7_u8; 32 * 1024 * 1024]).expect("write source");
+        receiver.start_receive(workspace.path().join("abandoned"));
+        let invite = wait_for_invite(&mut receiver).expect("first invitation");
+        sender.start_send(vec![source], invite);
+
+        let mut moved = false;
+        let mut early_finished = 0;
+        for _ in 0..1800 {
+            let drained = drain(&mut receiver, &mut sender);
+            moved |= drained.moved;
+            early_finished += drained.finished;
+            if moved {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(moved, "no payload moved, so there was nothing to cancel");
+        assert_eq!(
+            early_finished, 0,
+            "the transfer completed before a cancel could be issued; \
+             raise the payload size so the cancel lands mid-flight"
+        );
+
+        sender.cancel();
+        receiver.cancel();
+
+        let mut terminal = 0;
+        let mut failed = 0;
+        for _ in 0..1200 {
+            let drained = drain(&mut receiver, &mut sender);
+            terminal += drained.terminal();
+            failed += drained.failed;
+            if terminal >= 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            terminal >= 2,
+            "cancelled transfer never settled on both sides (saw {terminal})"
+        );
+        assert!(
+            failed >= 1,
+            "both sides reported success despite the cancel, so nothing was cancelled"
+        );
+
+        // The engines must still be good for a fresh round.
+        let save_directory = workspace.path().join("after-cancel");
+        let source = workspace.path().join("small.bin");
+        let payload: Vec<u8> = (0..32 * 1024).map(|index| (index % 251) as u8).collect();
+        std::fs::write(&source, &payload).expect("write source");
+        receiver.start_receive(save_directory.clone());
+        let invite = wait_for_invite(&mut receiver).expect("second invitation");
+        sender.start_send(vec![source], invite);
+        drive_round(&mut receiver, &mut sender).expect("transfer after a cancel");
+
+        let landed = std::fs::read(save_directory.join("small.bin")).expect("received file");
+        assert_eq!(landed, payload, "bytes differ after a cancelled round");
+    }
 }
