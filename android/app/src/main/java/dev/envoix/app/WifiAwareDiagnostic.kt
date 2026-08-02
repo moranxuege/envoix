@@ -125,6 +125,12 @@ internal enum class WifiAwareProbePhase(
     FAILED("failed"),
 }
 
+internal val WifiAwareProbePhase.isRunning: Boolean
+    get() =
+        this != WifiAwareProbePhase.IDLE &&
+            this != WifiAwareProbePhase.SUCCEEDED &&
+            this != WifiAwareProbePhase.FAILED
+
 internal data class WifiAwareProbeSnapshot(
     val phase: WifiAwareProbePhase = WifiAwareProbePhase.IDLE,
     val role: WifiAwareProbeRole? = null,

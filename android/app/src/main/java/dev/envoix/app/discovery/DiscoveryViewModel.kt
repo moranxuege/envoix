@@ -416,3 +416,5 @@ internal fun preferredRendezvousSource(
             DiscoverySource.Bluetooth
         else -> null
     }
+
+internal fun canOfferNearbyRoom(selection: NearbyPairingSelection): Boolean = preferredRendezvousSource(selection) != null

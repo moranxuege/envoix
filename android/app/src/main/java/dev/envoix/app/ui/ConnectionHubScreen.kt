@@ -41,6 +41,7 @@ import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
 import dev.envoix.app.discovery.NearbyVisibility
 import dev.envoix.app.discovery.ProviderAvailability
+import dev.envoix.app.discovery.canOfferNearbyRoom
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -218,8 +219,12 @@ internal fun ConnectionHubScreen(
                     }
                 } else {
                     items(discovery.peers, key = DiscoveredPeer::peerKey) { peer ->
-                        NearbyDeviceCard(peer, discovery.peers) {
-                            val selection = NearbyPairingSelection.from(peer)
+                        val selection = NearbyPairingSelection.from(peer)
+                        NearbyDeviceCard(
+                            peer = peer,
+                            peers = discovery.peers,
+                            enabled = canOfferNearbyRoom(selection),
+                        ) {
                             onNearbyRoom(selection) { invite, completion ->
                                 discoveryViewModel.offerInvite(
                                     selection,
@@ -291,18 +296,9 @@ internal fun ConnectionHubScreen(
             hosting = nfcPhoneHosting,
             reader = nfcPhoneReader,
             onDismiss = { nfcDialogOpen = false },
-            onScan = {
-                nfcDialogOpen = false
-                onScanNfc()
-            },
-            onShare = {
-                nfcDialogOpen = false
-                onShareViaNfc()
-            },
-            onStopSharing = {
-                nfcDialogOpen = false
-                onStopNfcSharing()
-            },
+            onScan = onScanNfc,
+            onShare = onShareViaNfc,
+            onStopSharing = onStopNfcSharing,
         )
     }
     if (wifiAwareDialogOpen) {

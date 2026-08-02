@@ -119,6 +119,23 @@ class ConnectionHubPresentationTest {
     }
 
     @Test
+    fun reservedWifiAwareProviderDoesNotExposeADeadAction() {
+        assertFalse(shouldShowWifiAwareDiscoveryAction(null))
+        assertFalse(
+            shouldShowWifiAwareDiscoveryAction(status(ProviderAvailability.Stopped)),
+        )
+        assertFalse(
+            shouldShowWifiAwareDiscoveryAction(status(ProviderAvailability.Reserved)),
+        )
+        assertTrue(
+            shouldShowWifiAwareDiscoveryAction(status(ProviderAvailability.Starting)),
+        )
+        assertTrue(
+            shouldShowWifiAwareDiscoveryAction(status(ProviderAvailability.Ready)),
+        )
+    }
+
+    @Test
     fun nfcSharingOnlyStartsFromAReplaceableRoomState() {
         assertTrue(canShareRoomViaNfc(RoomControlPhase.None))
         assertTrue(canShareRoomViaNfc(RoomControlPhase.Hosting))

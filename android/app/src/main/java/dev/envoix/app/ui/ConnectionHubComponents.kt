@@ -693,6 +693,14 @@ internal fun wifiAwareDiscoveryUiState(status: ProviderStatus?): WifiAwareDiscov
         else -> WifiAwareDiscoveryUiState.Unavailable
     }
 
+internal fun shouldShowWifiAwareDiscoveryAction(status: ProviderStatus?): Boolean =
+    when (status?.availability) {
+        ProviderAvailability.Ready,
+        ProviderAvailability.Starting,
+        -> true
+        else -> false
+    }
+
 internal fun canShareRoomViaNfc(phase: RoomControlPhase): Boolean =
     phase == RoomControlPhase.None ||
         phase == RoomControlPhase.Hosting ||
@@ -725,26 +733,28 @@ internal fun NearbySectionHeader(
             letterSpacing = 0.8.sp,
             modifier = Modifier.weight(1f),
         )
-        TextButton(
-            onClick = onWifiAware,
-            modifier =
-                Modifier
-                    .heightIn(min = 40.dp)
-                    .testTag("hub_wifi_aware"),
-            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-        ) {
-            Icon(
-                Icons.Default.WifiTethering,
-                appText("Wi-Fi Aware", "Wi-Fi Aware"),
-                tint = if (wifiAwareActive) colors.accent else colors.muted,
-                modifier = Modifier.size(16.dp),
-            )
-            Spacer(Modifier.width(3.dp))
-            Text(
-                appText("Aware", "Aware"),
-                color = if (wifiAwareActive) colors.accent else colors.muted,
-                fontSize = 12.sp,
-            )
+        if (shouldShowWifiAwareDiscoveryAction(wifiAwareStatus)) {
+            TextButton(
+                onClick = onWifiAware,
+                modifier =
+                    Modifier
+                        .heightIn(min = 40.dp)
+                        .testTag("hub_wifi_aware"),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+            ) {
+                Icon(
+                    Icons.Default.WifiTethering,
+                    appText("Wi-Fi Aware", "Wi-Fi Aware"),
+                    tint = if (wifiAwareActive) colors.accent else colors.muted,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    appText("Aware", "Aware"),
+                    color = if (wifiAwareActive) colors.accent else colors.muted,
+                    fontSize = 12.sp,
+                )
+            }
         }
         TextButton(
             onClick = onNfc,
@@ -968,6 +978,7 @@ internal fun WifiAwareDiscoveryDialog(
 internal fun NearbyDeviceCard(
     peer: DiscoveredPeer,
     peers: List<DiscoveredPeer>,
+    enabled: Boolean,
     onClick: () -> Unit,
 ) {
     val colors = Envoix.colors
@@ -977,7 +988,7 @@ internal fun NearbyDeviceCard(
             .clip(RoundedCornerShape(16.dp))
             .background(colors.surface)
             .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(15.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1004,17 +1015,25 @@ internal fun NearbyDeviceCard(
             Text(
                 "${
                     nearbyDiscoverySourceLabel(peer.sources, LocalAppLanguage.current)
-                } · ${appText("Unverified", "未验证")}",
+                } · ${
+                    if (enabled) {
+                        appText("Unverified", "未验证")
+                    } else {
+                        appText("Discovery only", "仅可发现")
+                    }
+                }",
                 color = colors.muted,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
             )
         }
-        Icon(
-            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            appText("Open room", "打开房间"),
-            tint = colors.muted,
-        )
+        if (enabled) {
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                appText("Open room", "打开房间"),
+                tint = colors.muted,
+            )
+        }
     }
 }
 

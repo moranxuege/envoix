@@ -58,6 +58,7 @@ import dev.envoix.app.SettingsStore
 import dev.envoix.app.WifiAwareAvailability
 import dev.envoix.app.WifiAwareCapabilitySnapshot
 import dev.envoix.app.WifiAwareProbeRole
+import dev.envoix.app.isRunning
 
 @Composable
 fun SettingsScreen(onBack: () -> Unit) {
@@ -278,28 +279,45 @@ fun SettingsScreen(onBack: () -> Unit) {
                             wifiAwarePermissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
                         },
                     ) {
-                        Text("Grant nearby Wi-Fi permission")
+                        Text(
+                            appText(
+                                "Grant nearby Wi-Fi permission",
+                                "授予附近 Wi-Fi 权限",
+                            ),
+                        )
                     }
                     Spacer(Modifier.height(8.dp))
                 }
                 val probeEnabled =
                     wifiAwareCapability?.availability == WifiAwareAvailability.READY ||
                         wifiAwareCapability?.availability == WifiAwareAvailability.PAIRING_REQUIRED
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val probeRunning = wifiAwareProbe.phase.isRunning
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     Button(
                         onClick = { wifiAwareController.start(WifiAwareProbeRole.PUBLISHER) },
-                        enabled = probeEnabled,
+                        enabled = probeEnabled && !probeRunning,
+                        modifier = Modifier.weight(1f),
                     ) {
-                        Text("Receive probe")
+                        Text(appText("Receive probe", "接收探测"))
                     }
                     OutlinedButton(
                         onClick = { wifiAwareController.start(WifiAwareProbeRole.SUBSCRIBER) },
-                        enabled = probeEnabled,
+                        enabled = probeEnabled && !probeRunning,
+                        modifier = Modifier.weight(1f),
                     ) {
-                        Text("Send probe")
+                        Text(appText("Send probe", "发送探测"))
                     }
-                    OutlinedButton(onClick = wifiAwareController::stop) {
-                        Text("Stop")
+                }
+                if (probeRunning) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = wifiAwareController::stop,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(appText("Stop probe", "停止探测"))
                     }
                 }
             }

@@ -119,10 +119,13 @@ internal fun activityRoomMetrics(transfers: List<Transfer>): ActivityRoomMetrics
     val bytes = transfers.map { it.bytes }.saturatedNonNegativeLongSum()
     val reportedTotal = transfers.map { it.total }.saturatedNonNegativeLongSum()
     val total = maxOf(reportedTotal, bytes)
+    val transferring = transfers.filter { it.status == Status.Transferring }
+    val transferringBytes = transferring.map { it.bytes }.saturatedNonNegativeLongSum()
+    val transferringReportedTotal = transferring.map { it.total }.saturatedNonNegativeLongSum()
+    val transferringTotal = maxOf(transferringReportedTotal, transferringBytes)
     val currentBps =
-        transfers
+        transferring
             .asSequence()
-            .filter { it.status == Status.Transferring }
             .map(::smoothedBps)
             .saturatedFiniteBpsSum()
     return ActivityRoomMetrics(
@@ -142,8 +145,8 @@ internal fun activityRoomMetrics(transfers: List<Transfer>): ActivityRoomMetrics
                 .map { it.bytes to it.avgBps }
                 .weightedAverageBps(),
         etaSeconds =
-            if (currentBps > 0.0 && total > bytes) {
-                ((total - bytes).toDouble() / currentBps)
+            if (currentBps > 0.0 && transferringTotal > transferringBytes) {
+                ((transferringTotal - transferringBytes).toDouble() / currentBps)
                     .takeIf { it.isFinite() && it >= 0.0 }
             } else {
                 null

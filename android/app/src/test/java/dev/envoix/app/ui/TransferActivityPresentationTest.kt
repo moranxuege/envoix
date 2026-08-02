@@ -195,6 +195,40 @@ class TransferActivityPresentationTest {
     }
 
     @Test
+    fun `room eta excludes unfinished historical transfers`() {
+        val metrics =
+            activityRoomMetrics(
+                listOf(
+                    transfer(
+                        id = 1,
+                        room = "active",
+                        status = Status.Transferring,
+                        bytes = 100,
+                        total = 1_000,
+                        speedHistory = listOf(100.0),
+                    ),
+                    transfer(
+                        id = 2,
+                        room = "failed",
+                        status = Status.Failed,
+                        bytes = 100,
+                        total = 1_000,
+                    ),
+                    transfer(
+                        id = 3,
+                        room = "paused",
+                        status = Status.Paused,
+                        bytes = 100,
+                        total = 1_000,
+                    ),
+                ),
+            )
+
+        assertEquals(100.0, metrics.currentBps, 0.001)
+        assertEquals(9.0, requireNotNull(metrics.etaSeconds), 0.001)
+    }
+
+    @Test
     fun `room average throughput is weighted by transferred bytes and elapsed time`() {
         val metrics =
             activityRoomMetrics(
