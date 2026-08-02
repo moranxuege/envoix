@@ -1,8 +1,8 @@
-# Nearby discovery and experimental BLE rendezvous
+# Nearby discovery and rendezvous
 
-Status: **Android and iOS foreground discovery complete; unauthenticated BLE invitation handoff physically verified from Android to iPhone**
+Status: **BLE/mDNS foreground discovery complete; authenticated Apple Wi-Fi Aware discovery and Room handoff implemented, with the two-device physical regression pending**
 
-Last reviewed: 2026-07-24
+Last reviewed: 2026-07-31
 
 This document freezes the nearby-discovery contract and its experimental handoff
 into the existing Envoix pairing flow. Discovery metadata and the current BLE
@@ -19,22 +19,23 @@ surface. That surface:
 - discovers and publishes a DNS-SD service on the local network;
 - merges observations from both transports by one foreground-presence key;
 - exposes provider availability and permission failures instead of one Boolean;
-- reserves the same provider interface for Wi-Fi Aware; and
+- on iOS/iPadOS 26.4 or later, publishes and browses an authenticated Wi-Fi
+  Aware control service for paired devices; and
 - stops broad discovery when Connect is hidden or the app leaves the
   foreground, except while a nearby One-time Room needs its handoff lease.
   That room filters the visible observations and inbound offers to its selected
   presence key; the current platform providers still scan broadly underneath
   that workflow filter.
 
-Selecting a BLE peer opens an explicitly experimental pairing context. The
-selected context remains attached to one One-time Room while either endpoint
-prepares a send source or confirms an incoming offer. Send/Receive remains an
-internal Invite v1 adapter, not a top-level navigation choice. Only the final
-**Start** action writes an outbound Envoix invitation to the selected peer over
-BLE GATT and starts the existing SPAKE2, Direct/Relay, and transfer state
-machines. The receiving app requires explicit Accept or Reject before entering
-the opposite internal role. No second transfer protocol or persistent
-connection is introduced.
+Selecting a peer opens one nearby context. The selected transport coordinates
+and presence key remain attached to one One-time Room while either endpoint
+prepares a send source or confirms an incoming offer. The product creates one
+Room-control invitation and prefers its exact authenticated Wi-Fi Aware route,
+then its cryptographically protected inbox advertised through mDNS when
+available. A selection that contains either protected route never silently
+downgrades to BLE. BLE-only peers retain the explicitly experimental GATT
+handoff. The receiving app still requires Accept or Reject before entering the
+room. No second transfer protocol or persistent connection is introduced.
 
 The current BLE carrier is useful only for completing the product flow. It is
 not a secure replacement for QR, NFC, or a compared short code: the SPAKE2
@@ -115,8 +116,10 @@ seconds.
 
 mDNS is link-local. The providers can report `Ready` when their platform browse
 and publication objects are running, but peers still need a shared local link
-that carries multicast. BLE discovery remains available when the devices are on
-different IP networks.
+that carries multicast. BLE remains available across different IP networks.
+Two supported, system-paired Apple devices can instead use the Wi-Fi Aware
+control plane in section 6; Wi-Fi must remain enabled, but the devices do not
+need the same access point and Bluetooth may be disabled.
 
 ## 5. Experimental BLE GATT invitation carrier
 
@@ -150,9 +153,9 @@ The current `BleRendezvousSecurity` boundary has only mode `0`, named
 implementation must replace this module boundary without changing discovery or
 the transfer state machine. A receiver rejects bad magic/version/type, unknown
 security modes, invalid peer keys, malformed UTF-8, out-of-order fragments,
-length mismatches, and invitations without the `envoix://pair/` prefix. Limits
-are 4,096 bytes per wire payload, 2,048 invitation bytes, and 192 UTF-8 display
-name bytes.
+length mismatches, and invitations outside the complete InviteV2 or canonical
+Room-control forms. Limits are 4,096 bytes per wire payload, 2,048 invitation
+bytes, and 192 UTF-8 display name bytes.
 
 Only one outbound offer runs at a time and it times out after 15 seconds. Each
 GATT write uses a response and advances the ordered fragment stream, but version
@@ -161,11 +164,63 @@ only direction, state, request ID, and `auth=none`; they never contain the
 invitation, password, peer key, Bluetooth address, or network address.
 
 The service, scanner, advertisement, peripheral map, and partial frame buffers
-exist only while a discovery lease is active. An invitation is sent only after
-the user enters a BLE-observed One-time Room, prepares the transfer details, and
-taps the final **Start** action.
+exist only while a discovery lease is active. The current Room workflow sends
+one direction-neutral Room-control invitation when the user opens the selected
+BLE peer's One-time Room; file selection and transfer still happen only inside
+the authenticated Room.
 
-## 6. Merge and lifecycle rules
+## 6. Authenticated Apple Wi-Fi Aware control plane
+
+Apple Wi-Fi Aware uses one canonical declared application service:
+
+```text
+_envoix._udp   authenticated foreground discovery/Room handoff, then data
+```
+
+`_envoix-disc._udp` remains the discovery-only Bonjour service described in
+section 4; it is not a Wi-Fi Aware service. A process-wide role coordinator
+hands the single Wi-Fi Aware publisher/subscriber pair from control discovery
+to the selected Room's data transfer only after the old listener, browser, and
+outbound control connection have stopped.
+
+The control provider requires supported hardware, system Wi-Fi Aware pairing,
+and iOS/iPadOS 26.4 or later. It continuously browses the selected paired-device
+set while Nearby owns a foreground discovery lease. It publishes a listener
+only when the current visibility policy permits advertising.
+
+Each accepted UDP connection must expose Wi-Fi Aware path metadata for the
+expected `WAPairedDevice` identifier. Both endpoints derive a per-connection
+secret with protocol name `envoix-nearby-v1`, `kdfHash256`, and bundle-ID
+context. Version-1 `EW` frames carry:
+
+```text
+type | request_id | total_length | offset |
+ephemeral_peer_key | display_name | Room-control URI | HMAC-SHA256
+```
+
+Hello, hello acknowledgement, invitation, and invitation acknowledgement are
+authenticated with that secret. The receiver rejects invalid HMACs, malformed
+or overlapping fragments, unsupported invitations, identity changes, one
+presence key claimed by multiple paired devices, and one paired device changing
+its presence key during a lease. Invitations are deduplicated by paired-device
+ID and request ID. Logs never contain the secret, invitation, presence key, or
+paired-device ID.
+
+Only a completed authenticated hello binds the exact paired-device ID to the
+ephemeral Nearby presence key. That ID is frozen into
+`NearbyPairingSelection`; it is not recovered from a global paired-device list
+or a display-name match. An exact Wi-Fi Aware Room selection is fail-closed:
+its invitation is not silently rerouted through mDNS or unauthenticated BLE
+when that selected route is no longer ready.
+
+The product handoff sends the direction-neutral `envoix://room/` control URI.
+The existing InviteV2 form remains accepted at the provider interface for
+compatibility, but the Room workflow does not deliver both forms. After Room
+authentication, the stored exact selection activates the separate
+`_envoix._udp` adapter and hands its connected datagram channel to the existing
+iroh/QUIC engine.
+
+## 7. Merge and lifecycle rules
 
 Every provider emits `DiscoveryObservation` through `DiscoveryProvider`.
 `DiscoveryPeerRegistry` keeps the newest observation per peer and source:
@@ -176,9 +231,10 @@ Every provider emits `DiscoveryObservation` through `DiscoveryProvider`.
 - source not refreshed for 20 seconds: remove only that source;
 - no fresh sources: remove the card.
 
-Providers report `Stopped`, `Starting`, `Ready`, `Degraded`, permission and
-availability failures, or `Reserved`. `WifiAwareDiscoveryProvider` currently
-reports `Reserved` through the same interface and performs no platform calls.
+Providers report `Stopped`, `Starting`, `Ready`, `Degraded`, pairing,
+permission, and availability failures. Apple Wi-Fi Aware reports paired/ready
+only when its authenticated control plane can run; iOS 26.0–26.3 remains
+temporarily unavailable instead of claiming a usable paired route.
 
 Provider state transitions create privacy-safe operation breadcrumbs such as:
 
@@ -187,13 +243,14 @@ DISCOVERY provider=bluetooth state=ready
 DISCOVERY provider=mdns state=degraded
 ```
 
-## 7. Verification
+## 8. Verification
 
 The implementation is accepted when all of the following hold:
 
 1. `ktlintCheck`, JVM unit tests, and `assembleDebug` pass through
    `scripts/with-build-cache-guard.sh`.
-2. The page shows explicit Bluetooth, mDNS, and Wi-Fi Aware provider states.
+2. The page shows explicit Bluetooth, mDNS, and Wi-Fi Aware provider states
+   without adding a standalone Wi-Fi Aware product surface.
 3. A BLE UUID probe appears with a BLE badge and RSSI.
 4. An `_envoix-disc._udp` probe appears with its normalized name and mDNS badge.
 5. BLE and mDNS probes with the same peer key appear as one card with two badges.
@@ -209,6 +266,20 @@ The implementation is accepted when all of the following hold:
 9. Android JVM and Apple hosted tests decode fragmented invitation frames and
    reject invalid, out-of-order, oversized, or mismatched-security payloads.
 10. Android and Apple builds include the GATT server and client implementations.
+11. Apple hosted tests authenticate, fragment, reorder, deduplicate, bound, and
+    reject malformed Wi-Fi Aware control frames; routing tests freeze the exact
+    paired-device ID and reject BLE downgrade from a selected secure route.
+12. A paired iPhone and iPad on different IP networks, with Bluetooth disabled
+    and Wi-Fi enabled, discover the expected ephemeral identities and exchange
+    one acknowledged Room-control invitation over `_envoix._udp`.
+13. After control discovery releases its service roles, the resulting Room
+    reuses the exact selection for `_envoix._udp`, and a hash-verified payload
+    traverses the existing iroh/QUIC Wi-Fi Aware path.
+
+The 2026-07-31 hosted result predates the canonical-service handoff and
+listener-ready fixes. It is historical evidence only; the updated state tests,
+signed build, and items 12–13 must be rerun before this implementation is
+accepted.
 
 The experimental BLE handoff additionally verifies that:
 
@@ -243,7 +314,7 @@ and an iPhone 15 Pro Max:
 
 - the iPhone first merged Android's BLE and mDNS observations into one card;
 - Android selected the iPhone card, chose its local Receive role, and wrote the
-  existing full `envoix://pair/` invitation through the fixed GATT service;
+  then-current full `envoix://pair/` invitation through the fixed GATT service;
 - iPhone decoded the fragmented invitation, presented the unauthenticated
   warning, enabled only the opposite Send role, and disabled Receive;
 - XCTest retained screenshots named `physical-nearby-android-ble-mdns` and
@@ -288,7 +359,7 @@ does not authenticate the displayed names or peer keys. The discovery card is
 user-facing context, is not cryptographically bound to a long-term trusted
 device identity, and must never be presented as one.
 
-## 8. Earlier QR/code pairing and transfer evidence
+## 9. Earlier QR/code pairing and transfer evidence
 
 Before the GATT carrier was implemented, the same device pair exercised the
 existing Room/SPAKE2 and transfer state machines through a separately entered
@@ -322,19 +393,23 @@ second attempt restarted byte progress from zero; persisted-prefix efficiency
 remains a separate transfer-core concern and is not claimed by this discovery
 milestone.
 
-## 9. Security follow-up
+## 10. Security follow-up
 
-The authenticated replacement is intentionally separated from this vertical
-slice as [GitHub issue #52](https://github.com/ECE4410J-NUUB/envoix/issues/52).
-It covers the threat model, cryptographic binding between the
-selected presence and the session, replay/downgrade resistance, first-use
-confirmation, secure key storage, recovery and revocation, rotating identifiers,
-cross-platform vectors, negative tests, and security review. Until that issue is
-implemented and reviewed, the UI and logs must continue to say `auth=none` and
-must not call this flow secure pairing.
+The Apple Wi-Fi Aware carrier authenticates its control frames to the
+system-paired Wi-Fi Aware device and fails closed on route ambiguity. It does
+not turn the ephemeral presence key into an account or long-term device
+identity. BLE remains `auth=none`.
 
-## 10. Source basis
+[GitHub issue #52](https://github.com/ECE4410J-NUUB/envoix/issues/52) remains
+the broader durable-identity and cross-platform security scope: threat model,
+first-use confirmation, secure key storage, recovery and revocation, rotating
+identifiers, cross-platform vectors, negative tests, and external security
+review. UI and logs must describe the actual carrier rather than calling every
+Nearby observation secure pairing.
+
+## 11. Source basis
 
 - [Apple `CBPeripheralManager.startAdvertising`](https://developer.apple.com/documentation/corebluetooth/cbperipheralmanager/startadvertising%28_%3A%29)
+- [Apple: Adopting Wi-Fi Aware](https://developer.apple.com/documentation/wifiaware/adopting-wi-fi-aware)
 - [Android Bluetooth LE overview](https://developer.android.com/develop/connectivity/bluetooth/ble/ble-overview)
 - [Android network service discovery](https://developer.android.com/develop/connectivity/wifi/use-nsd)

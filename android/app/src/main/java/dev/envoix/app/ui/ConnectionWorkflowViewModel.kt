@@ -7,6 +7,8 @@ import dev.envoix.app.InviteCodec
 import dev.envoix.app.ParsedInvite
 import dev.envoix.app.Settings
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.TransferActivityGroup
+import dev.envoix.app.TransferRepository
 import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -101,6 +103,18 @@ internal class ConnectionWorkflowViewModel(
         when (controlWorkflow.state.phase) {
             RoomControlPhase.None, RoomControlPhase.Closed, RoomControlPhase.Failed ->
                 requestRoomAction(::startHosting)
+            RoomControlPhase.Connected ->
+                _uiState.value = _uiState.value.copy(screen = WorkflowScreen.Room)
+            else -> Unit
+        }
+    }
+
+    fun shareRoomViaNfc() {
+        when (controlWorkflow.state.phase) {
+            RoomControlPhase.None, RoomControlPhase.Closed, RoomControlPhase.Failed -> {
+                controlWorkflow.setInviteRevealed(false)
+                requestRoomAction(::startHosting)
+            }
             RoomControlPhase.Connected ->
                 _uiState.value = _uiState.value.copy(screen = WorkflowScreen.Room)
             else -> Unit
@@ -348,14 +362,17 @@ internal class ConnectionWorkflowViewModel(
         val transferDraft = _uiState.value.transferDraft ?: return
         if (!transferDraft.preparation.ownershipWasTransferred()) return
         val usedPending = transferDraft.usesPendingAction
+        TransferRepository.assignActivityGroupByRoom(
+            roomReference = code,
+            groupId = TransferActivityGroup.oneTime(room.id),
+            groupLabel = room.displayName,
+            replaceExisting = true,
+        )
         _uiState.value =
             _uiState.value.copy(
                 room =
                     room.copy(
                         pairingInput = if (usedPending) null else room.pairingInput,
-                        pairingCode = if (usedPending) null else room.pairingCode,
-                        hostedCode = if (usedPending) null else room.hostedCode,
-                        hostedPayload = if (usedPending) null else room.hostedPayload,
                         pendingRoleAdapter = if (usedPending) null else room.pendingRoleAdapter,
                         transferCodes = room.transferCodes + code,
                     ),
@@ -442,6 +459,15 @@ internal class ConnectionWorkflowViewModel(
                 if (receiveId >= 0L) onCancelReceive(receiveId)
                 rejectUnusableIncomingOffer(offer, startError)
                 return@receiveCompletion
+            }
+            val room = _uiState.value.room
+            if (room != null) {
+                TransferRepository.assignActivityGroup(
+                    id = receiveId,
+                    groupId = TransferActivityGroup.oneTime(room.id),
+                    groupLabel = room.displayName,
+                    replaceExisting = true,
+                )
             }
             confirmIncomingRoomOffer(
                 offer = offer,
@@ -649,8 +675,6 @@ internal class ConnectionWorkflowViewModel(
                             displayName = peerName,
                             controlSession = true,
                             controlEndpoint = _uiState.value.control.endpoint,
-                            hostedCode = null,
-                            hostedPayload = null,
                             pendingRoleAdapter =
                                 "send".takeIf {
                                     _uiState.value.pendingShares.isNotEmpty()
@@ -684,7 +708,7 @@ internal class ConnectionWorkflowViewModel(
             when {
                 _uiState.value.pendingShares.isNotEmpty() -> "send"
                 draft.pendingRoleAdapter != null -> draft.pendingRoleAdapter
-                draft.pairingInput != null || draft.hostedPayload != null -> draft.directionAdapter.validDirection()
+                draft.pairingInput != null -> draft.directionAdapter.validDirection()
                 else -> null
             }
         _uiState.value =
@@ -717,9 +741,6 @@ internal class ConnectionWorkflowViewModel(
                     room =
                         currentRoom.copy(
                             pairingInput = offer.invite,
-                            pairingCode = null,
-                            hostedCode = null,
-                            hostedPayload = null,
                             directionAdapter = role,
                             pendingRoleAdapter = role,
                         ),

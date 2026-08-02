@@ -201,11 +201,13 @@ internal object RoomControlGatewayProvider {
 }
 
 internal object RoomControlInviteFormat {
-    private val humanCode = Regex("""(?i)^R\d{6}-[a-z0-9]+-[a-z0-9]+$""")
+    private val humanCode =
+        Regex("""(?i)^(?:\d{6}-[a-z0-9]{4}-[a-z0-9]{4}|\d{6}[a-z0-9]{8})$""")
+    private val roomUri =
+        Regex("""^envoix://room/\d{6}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}(?:\?.*)?$""")
 
     fun looksLikeRoomInvite(input: String): Boolean {
         val normalized = input.trim()
-        return normalized.startsWith("envoix://room/", ignoreCase = true) ||
-            humanCode.matches(normalized)
+        return roomUri.matches(normalized) || humanCode.matches(normalized)
     }
 }

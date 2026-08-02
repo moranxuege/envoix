@@ -1,7 +1,9 @@
 package dev.envoix.app.discovery
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NearbyRendezvousRoutingTest {
@@ -53,6 +55,25 @@ class NearbyRendezvousRoutingTest {
                     sources = setOf(DiscoverySource.Mdns),
                     route = null,
                 ),
+            ),
+        )
+    }
+
+    @Test
+    fun `room action is available only when an invitation carrier can deliver`() {
+        assertFalse(
+            canOfferNearbyRoom(
+                selection(sources = setOf(DiscoverySource.Mdns), route = null),
+            ),
+        )
+        assertTrue(
+            canOfferNearbyRoom(
+                selection(sources = setOf(DiscoverySource.Bluetooth), route = null),
+            ),
+        )
+        assertTrue(
+            canOfferNearbyRoom(
+                selection(sources = setOf(DiscoverySource.Mdns), route = route(relayUrl = RELAY_URL)),
             ),
         )
     }

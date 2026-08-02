@@ -31,5 +31,20 @@ class TransferProgressTrackerTest {
         assertNotNull(completed)
         assertEquals(1_000L, completed?.bytes)
         assertEquals(1_000L, completed?.total)
+        assertEquals(12_000.0, completed?.speedBps ?: 0.0, 0.000_001)
+        assertEquals(12_000.0, completed?.avgBps ?: 0.0, 0.000_001)
+    }
+
+    @Test
+    fun `sampling matches Apple smoothing and includes stalled intervals`() {
+        val tracker = TransferProgressTracker()
+        tracker.update(bytes = 0, total = 1_000, nowNanos = 0)
+
+        tracker.update(bytes = 100, total = 1_000, nowNanos = 1_000_000_000)
+        val stalled = tracker.update(bytes = 100, total = 1_000, nowNanos = 3_000_000_000)
+
+        assertNotNull(stalled)
+        assertEquals(70.0, stalled?.speedBps ?: 0.0, 0.000_001)
+        assertEquals(100.0 / 3.0, stalled?.avgBps ?: 0.0, 0.000_001)
     }
 }

@@ -17,12 +17,14 @@
     <string name="connect_section_title">连接</string>
     <string name="show_qr">显示二维码</string>
     <string name="scan_qr">扫描二维码</string>
-    <string name="switched_to_send_notice">已切换为发送方，因为扫描的是接收码。</string>
-    <string name="switched_to_receive_notice">已切换为接收方，因为扫描的是发送码。</string>
-    <string name="enter_pairing_code_hint">或输入配对码加入…</string>
+    <string name="switched_to_send_notice">已切换为发送方，因为此邀请需要发送方加入。</string>
+    <string name="switched_to_receive_notice">已切换为接收方，因为此邀请需要接收方加入。</string>
+    <string name="enter_pairing_code_hint">或粘贴完整邀请链接…</string>
     <string name="add_files">添加文件</string>
     <string name="add_files_hint">选择一个或多个文件…</string>
     <string name="add_folder">添加文件夹</string>
     <string name="add_folder_hint">选择另一个文件夹…</string>
     <string name="save_to">保存到</string>
+    <string name="nfc_invitation_service_description">通过 NFC 分享当前 Envoix 房间邀请</string>
+    <string name="nfc_invitation_aid_description">Envoix NFC 邀请</string>
 </resources>

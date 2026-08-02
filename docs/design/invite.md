@@ -2,14 +2,17 @@
 
 Status: implemented by Issue 57A.
 
-InviteV2 is the only invitation contract used by the Rust core, QR renderers,
-clipboards, deep links, the CLI, Apple, and Android. Carriers pass the complete
-payload string unchanged. The legacy `envoix:` and `envoix://pair/` formats are
-unsupported and are never reinterpreted as Room Codes.
+InviteV2 is the only general transfer-invitation carrier used by the Rust core,
+QR renderers, clipboards, deep links, the CLI, Apple, and Android. Carriers pass
+the complete payload string unchanged. The legacy `envoix:` and
+`envoix://pair/` formats are unsupported and are never reinterpreted as Room
+Codes. External InviteV2 joins accept only a complete
+`envoix://invite/v2/...` URI; a naked Room Code is rejected.
 
 Manual shared-token and mDNS developer modes are separate compatibility
 features. They are not invitations and cannot fall back from a failed InviteV2
-attempt.
+attempt. Foreground Room Control is also a separate protocol and URI namespace,
+documented below.
 
 ## Direction and lifetime
 
@@ -77,10 +80,11 @@ The complete invitation additionally presents a random 256-bit ticket:
 }
 ```
 
-The typed Room Code is external to this JSON. A carrier selects exactly one
-advertised method: scanned or pasted complete payloads select
-`full-ticket-v1`; typed codes select `room-code-v1`. Authentication failure
-never falls back to another method.
+The `room-code-v1` method remains in the schema to preserve the internal
+creator/bootstrap model. It is not an external InviteV2 carrier. Scanned or
+pasted complete payloads select `full-ticket-v1`; naked codes are rejected
+rather than being reinterpreted as `room-code-v1`. Authentication failure never
+falls back to another method.
 
 ## Commitments and capabilities
 
@@ -109,10 +113,10 @@ Directional binding, single-file transfer, context commitments, and
 exporter-bound data authentication are base InviteV2 behavior, not
 capabilities.
 
-## Room Codes
+## Foreground Room Control
 
-A Room Code contains six uniformly sampled decimal digits plus eight uniformly
-sampled lowercase Base36 characters:
+A foreground Room-Control code contains six uniformly sampled decimal digits
+plus eight uniformly sampled lowercase Base36 characters:
 
 ```text
 123456-k7m4-9v2d
@@ -122,10 +126,13 @@ The canonical display and wire form has both hyphens. Input accepts only that
 form or `123456k7m49v2d`; ASCII uppercase is normalized. Whitespace, other
 separators, Unicode, suffixes, and partial input fail closed.
 
-The complete normalized code is the Room control-PAKE password input. Only the
-six decimal digits reach the broker. The eight Base36 characters provide the
-human-code secret boundary; broker-side online-abuse controls are tracked by
-Issue 57B.
+The complete normalized code is the Room control-PAKE password input. It has no
+`R` prefix; legacy `R`/`r`-prefixed text and Room URIs are rejected. The
+canonical URI is `envoix://room/123456-k7m4-9v2d?...`. Only the six decimal
+digits, under the `c2_` broker locator namespace, reach the broker. The eight
+Base36 characters provide the human-code secret boundary; broker-side
+online-abuse controls are tracked by Issue 57B. Room Control v5 uses the
+`envoix-room-control/5` ALPN and is distinct from InviteV2.
 
 ## Authentication flow
 
@@ -138,7 +145,7 @@ the responder, independently of transfer direction or arrival order. The
 broker matches only opposite invitation sides, complementary transfer roles,
 and a carrier-selected method advertised by the creator.
 
-Room-Code flow:
+Foreground Room-Control flow:
 
 ```text
 Room-Code control SPAKE2
@@ -168,12 +175,12 @@ the remembered credential.
 
 ## Secret handling
 
-Tickets, complete Room Codes, commitments, and derived values use redacting
-types. Durable transfer records contain opaque secret references rather than
-raw invitation credentials. Frontend restore summaries, Activity projections,
-platform extras, accessibility descriptions, and diagnostics do not expose
-the complete payload. The payload is visible only at the intentional initial
-QR/share presentation.
+Tickets, complete Room-Control codes, commitments, and derived values use
+redacting types. Durable transfer records contain opaque secret references
+rather than raw invitation credentials. Frontend restore summaries, Activity
+projections, platform extras, accessibility descriptions, and diagnostics do
+not expose the complete payload. The payload is visible only at the intentional
+initial QR/share presentation.
 
 Invitation secret-store references are process-only, so an unauthenticated
 pending invitation is discarded on relaunch. Remembered relationships use

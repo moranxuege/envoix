@@ -7,6 +7,15 @@ import org.junit.Test
 
 class TransferPresentationPolicyTest {
     @Test
+    fun `transfer rates use the shared decimal units and precision`() {
+        assertEquals("999 B/s", transferRateString(999.0))
+        assertEquals("1 KB/s", transferRateString(1_000.0))
+        assertEquals("1.3 MB/s", transferRateString(1_250_000.0))
+        assertEquals("1.25 GB/s", transferRateString(1_250_000_000.0))
+        assertEquals("0 B/s", transferRateString(Double.NaN))
+    }
+
+    @Test
     fun `every state follows the shared action contract`() {
         val cases =
             mapOf(

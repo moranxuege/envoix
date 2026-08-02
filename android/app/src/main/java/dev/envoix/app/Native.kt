@@ -119,14 +119,11 @@ object Native {
 
     external fun stopNearbyInviteInbox(id: Long)
 
-    /** Validate a complete invitation or Room Code for an active flow. */
+    /** Validate a complete InviteV2 link for an active flow. */
     external fun parseInviteForRole(
         input: String,
         role: String,
     ): String
-
-    /** Strictly normalize a canonical or separator-free Room Code. */
-    external fun normalizeRoomCode(input: String): String
 
     /** Validate protected bytes and return a process-only core reference. */
     external fun registerRememberedCredential(opaqueCredential: ByteArray): String

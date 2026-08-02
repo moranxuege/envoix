@@ -24,8 +24,6 @@ struct ReceiveView: View {
     #endif
     @State private var rememberAfterPairing = false
     @State private var rememberLabel = ""
-    @State private var roomCode = newRoomCode() ?? ""
-    @State private var joinRoomCode = ""
     @State private var joiningInvite = ""
     @State private var pairingInvite: FfiPairingInvite?
     @State private var roomQRCodeImage: PlatformImage?
@@ -183,8 +181,6 @@ struct ReceiveView: View {
         .onChange(of: viewModel.isBusy) { isBusy in
             if isBusy {
                 joiningInvite = ""
-                joinRoomCode = ""
-                roomCode = ""
                 pairingInvite = nil
                 roomQRCodeImage = nil
                 roomQRCodePayload = ""
@@ -549,21 +545,16 @@ struct ReceiveView: View {
                         .accessibilityIdentifier("receive_scan_sender_qr")
                     }
                     .frame(maxWidth: .infinity, minHeight: 230)
-                } else if !joinRoomCode.trimmed.isEmpty {
+                } else if !joiningInvite.trimmed.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 42))
                             .foregroundStyle(Theme.success)
-                        Text(AppText.value("Ready to join", "已准备加入", language: uiLanguage))
+                        Text(AppText.value("InviteV2 link ready", "InviteV2 链接已就绪", language: uiLanguage))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
-                        Text(joinRoomCode)
-                            .font(.body.monospaced().weight(.semibold))
-                            .foregroundStyle(Theme.accentStrong)
-                            .multilineTextAlignment(.center)
-                            .textSelection(.enabled)
                         Button(AppText.value("Clear and show my QR", "清除并显示我的二维码", language: uiLanguage)) {
-                            joinRoomCode = ""
+                            joiningInvite = ""
                         }
                         .buttonStyle(.bordered)
                     }
@@ -576,34 +567,35 @@ struct ReceiveView: View {
                         } else {
                             qrPlaceholder
                         }
-                        LinkRow(
-                            text: roomCode.trimmed.isEmpty ? AppText.value("Receive code", "接收码", language: uiLanguage) : roomCode,
-                            textIdentifier: "receive_room_code",
-                            displaysFullText: true
-                        ) {
-                            Button {
-                                copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage), language: uiLanguage)
-                            } label: {
-                                Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
-                                    .frame(minHeight: 40)
-                            }
-                            .disabled(roomCode.trimmed.isEmpty)
-                            .accessibilityIdentifier("receive_room_copy")
+                        Button {
+                            copyWithToast(
+                                pairingInvite?.payload ?? "",
+                                AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                                language: uiLanguage
+                            )
+                        } label: {
+                            Label(
+                                AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage),
+                                systemImage: "doc.on.doc"
+                            )
+                            .frame(maxWidth: .infinity, minHeight: 40)
                         }
+                        .buttonStyle(.bordered)
+                        .disabled(pairingInvite == nil)
+                        .accessibilityIdentifier("receive_invite_copy")
                     }
                     .frame(maxWidth: .infinity, minHeight: 230)
                 }
             }
 
             RoomCodeField(
-                code: joinRoomCodeBinding,
+                code: joiningInviteBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Or enter a Room code", "或输入配对码", language: uiLanguage),
-                placeholder: AppText.value("Enter Room code", "输入配对码", language: uiLanguage),
-                showsCopyAction: false,
+                title: AppText.value("Or enter a complete InviteV2 link", "或输入完整 InviteV2 链接", language: uiLanguage),
+                placeholder: "envoix://invite/v2/…",
                 pasteAction: pastePairingInput,
                 helper: "",
-                accessibilityIdentifier: "receive_join_room_code_input"
+                accessibilityIdentifier: "receive_invite_input"
             )
         }
         .card(raised: true, padding: 18)
@@ -613,10 +605,10 @@ struct ReceiveView: View {
     private var desktopRoomSection: some View {
         VStack(alignment: .center, spacing: 16) {
             VStack(spacing: 4) {
-                Text(AppText.value("Share this QR or code", "分享二维码或接收码", language: uiLanguage))
+                Text(AppText.value("Share this QR or invite link", "分享二维码或邀请链接", language: uiLanguage))
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value("The sender can scan the QR or enter the same Room code.", "发送方可以扫码，或输入同一个配对码。", language: uiLanguage))
+                Text(AppText.value("The sender can scan this QR or paste the complete InviteV2 link.", "发送方可以扫描此二维码或粘贴完整 InviteV2 链接。", language: uiLanguage))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
                     .multilineTextAlignment(.center)
@@ -629,21 +621,22 @@ struct ReceiveView: View {
                 qrPlaceholder
             }
 
-            LinkRow(
-                text: roomCode.trimmed.isEmpty ? AppText.value("Receive code", "接收码", language: uiLanguage) : roomCode,
-                textIdentifier: "receive_room_code",
-                displaysFullText: true
-            ) {
+            HStack(spacing: 8) {
                 Button {
-                    copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage), language: uiLanguage)
+                    copyWithToast(
+                        pairingInvite?.payload ?? "",
+                        AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                        language: uiLanguage
+                    )
                 } label: {
-                    Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
+                    Label(AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
-                .disabled(roomCode.trimmed.isEmpty)
+                .disabled(pairingInvite == nil)
 
                 Button {
+                    joiningInvite = ""
                     refreshPairingInvite()
                 } label: {
                     Label(AppText.value("New", "新建", language: uiLanguage), systemImage: "arrow.clockwise")
@@ -652,14 +645,15 @@ struct ReceiveView: View {
                 }
                 .disabled(viewModel.isBusy)
             }
+            .buttonStyle(.bordered)
 
             RoomCodeField(
-                code: joinRoomCodeBinding,
+                code: joiningInviteBinding,
                 disabled: viewModel.isBusy,
                 title: AppText.value("Join sender instead", "改为加入发送端", language: uiLanguage),
-                placeholder: AppText.value("Scan QR or enter sender Room code", "扫码或输入发送端配对码", language: uiLanguage),
+                placeholder: "envoix://invite/v2/…",
                 helper: "",
-                accessibilityIdentifier: "receive_join_room_code_input"
+                accessibilityIdentifier: "receive_invite_input"
             )
 
             HStack(spacing: 8) {
@@ -689,10 +683,10 @@ struct ReceiveView: View {
         .card(raised: true, padding: 18)
     }
 
-    private var joinRoomCodeBinding: Binding<String> {
+    private var joiningInviteBinding: Binding<String> {
         Binding(
-            get: { joinRoomCode },
-            set: { value in joinRoomCode = value }
+            get: { joiningInvite },
+            set: { value in joiningInvite = value }
         )
     }
 
@@ -753,7 +747,7 @@ struct ReceiveView: View {
         }
         switch mode {
         case .room:
-            return !joinRoomCode.trimmed.isEmpty || !roomCode.trimmed.isEmpty
+            return !joiningInvite.trimmed.isEmpty || pairingInvite != nil
         case .invite:
             return !joiningInvite.isEmpty
         case .token:
@@ -798,8 +792,7 @@ struct ReceiveView: View {
         do {
             let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
             pairingInvite = invite
-            roomCode = invite.roomCode
-            joinRoomCode = ""
+            joiningInvite = ""
             updateRoomQRCode(for: invite.payload)
         } catch {
             viewModel.handleFailed(error.localizedDescription)
@@ -816,13 +809,8 @@ struct ReceiveView: View {
         }
         let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
         pairingInvite = invite
-        roomCode = invite.roomCode
         updateRoomQRCode(for: invite.payload)
         return invite
-    }
-
-    private func roomCodeFromJoinInput(_ input: String) throws -> String {
-        try normalizeRoomCode(input: input)
     }
 
     private func handleScannedInvite(_ value: String) -> String? {
@@ -846,17 +834,12 @@ struct ReceiveView: View {
     private func applyPairingInput(_ value: String, source: PairingInputSource) -> String? {
         let input = value.trimmed
         do {
-            if input.lowercased().hasPrefix("envoix:") {
-                _ = try parsePairingInviteForRole(input: input, localRole: .receive)
-                joiningInvite = input
-                joinRoomCode = ""
-                mode = .invite
-            } else {
-                joinRoomCode = try roomCodeFromJoinInput(input)
-                joiningInvite = ""
-                pairingPanel = .show
-                mode = .room
+            guard input.hasPrefix(inviteV2URLPrefix) else {
+                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
             }
+            _ = try parsePairingInviteForRole(input: input, localRole: .receive)
+            joiningInvite = input
+            mode = .invite
             let message = source == .scan
                 ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
                 : AppText.value("Invitation pasted", "邀请已粘贴", language: uiLanguage)
@@ -867,8 +850,8 @@ struct ReceiveView: View {
                 error.localizedDescription
             } else {
                 AppText.value(
-                    "This is not a valid Envoix pairing code.",
-                    "这不是有效的 Envoix 配对码。",
+                    "This is not a valid complete Envoix InviteV2 link.",
+                    "这不是有效的完整 Envoix InviteV2 链接。",
                     language: uiLanguage
                 )
             }
@@ -1031,6 +1014,10 @@ struct ReceiveView: View {
     }
 
     private func startReceiveWithRoom() {
+        if !joiningInvite.trimmed.isEmpty {
+            startReceiveWithInvite()
+            return
+        }
         do {
             let prepared = try prepareOutputDir()
             let settings = try RuntimeSettingsProvider.make(
@@ -1053,12 +1040,6 @@ struct ReceiveView: View {
                 )
             }
 
-            let joinedCode = joinRoomCode.trimmed
-            if !joinedCode.isEmpty {
-                start(try roomCodeFromJoinInput(joinedCode))
-                return
-            }
-
             let pairingInvite = try activeReceivePairingInvite()
             nearbyInviteDelivery.deliver(
                 invite: pairingInvite.payload,
@@ -1077,6 +1058,9 @@ struct ReceiveView: View {
 
     private func startReceiveWithInvite() {
         do {
+            guard joiningInvite.trimmed.hasPrefix(inviteV2URLPrefix) else {
+                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+            }
             let parsed = try parsePairingInviteForRole(
                 input: joiningInvite,
                 localRole: .receive

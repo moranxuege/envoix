@@ -155,7 +155,7 @@ internal fun FullScreenScanner(
             Text(
                 when {
                     pickError -> appText("No QR code found in that image", "图片中未找到二维码")
-                    hasCamera -> appText("Point at an Envoix room code", "请对准 Envoix 房间二维码")
+                    hasCamera -> appText("Point at an Envoix QR code", "请对准 Envoix 二维码")
                     else -> appText("Camera access is off", "相机权限未开启")
                 },
                 color = if (pickError) colors.danger else Color.White.copy(alpha = 0.82f),

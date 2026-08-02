@@ -135,9 +135,9 @@ Expected result:
 - Expired invites fail before any connection attempt.
 - Reusing a successfully consumed creator secret fails as replay.
 
-Repeat with the displayed Room Code and `--room-code` plus `--rendezvous`.
-InviteV2 is not an mDNS fallback: this section shares the cross-device
-checklist, not the mDNS discovery path.
+The CLI no longer accepts a naked InviteV2 Room Code or `--room-code`; use the
+complete `--invite` value. InviteV2 is not an mDNS fallback: this section shares
+the cross-device checklist, not the mDNS discovery path.
 
 ## 7. Platform Coverage
 

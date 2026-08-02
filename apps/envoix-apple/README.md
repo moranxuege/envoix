@@ -35,8 +35,7 @@ network, camera, signing, and Share Extension entitlements.
 - Files, folders, Photos, and Share Extension representations all become roots
   in one canonical transfer job.
 - Local enumeration and validation begin immediately after selection. Hashing
-  and Smart compression sampling can continue on the streaming path without a
-  separate preflight gate.
+  can continue on the streaming path without a separate preflight gate.
 - Send is the only seal boundary. After it is tapped, the immutable Manifest v2
   offer is sent over Room, mDNS, manual endpoint, or direct invite routing.
 - The incoming authenticated inventory is visible before payload. Ordinary
@@ -51,7 +50,11 @@ network, camera, signing, and Share Extension entitlements.
   previewed, opened in Finder/Files, or shared through platform actions.
 
 Compression policy (`Never`, `Always`, or `Smart`) is selected in Settings and
-is frozen into the job at Send.
+is frozen into the job at Send. `Never` preserves the original encoding,
+`Always` applies Zstandard, and `Smart` uses a conservative, case-insensitive
+allowlist for the final filename extension. `Smart` does not read a file sample
+or probe the network; unknown extensions, extensionless names, single-component
+dotfiles such as `.env`, and already compressed formats remain uncompressed.
 
 ## Files and Photos
 
@@ -67,10 +70,13 @@ for the lifetime of the active job.
 
 ## Invitations
 
-Both Send and Receive can create an `envoix://invite/v2/<payload>` QR plus the
-same `dddddd-xxxx-xxxx` Room Code. Deep links route to the invitation's
-authenticated joiner role; scans and clipboard input inside an existing flow
-must match that flow. Legacy invitation formats are rejected.
+Both Send and Receive create an `envoix://invite/v2/<payload>` QR and can copy
+that complete invite link. The naked internal InviteV2 Room Code is not a
+public join credential. Foreground Room Control separately accepts
+`envoix://room/<dddddd-xxxx-xxxx>` links and current no-`R` Room codes. Deep
+links route to the invitation's authenticated joiner role; scans and clipboard
+input inside a Send or Receive flow accept only a complete InviteV2 link.
+Legacy invitation formats are rejected.
 
 Pending InviteV2 credentials are process-memory-only. Apple relaunch records do
 not persist full payloads, Room Codes, or tickets, so an invitation that was

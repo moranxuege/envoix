@@ -2,7 +2,6 @@ package dev.envoix.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,9 +23,11 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -486,24 +487,27 @@ internal fun IncomingRoomOfferCard(
             Text(it, color = colors.danger, fontSize = 12.sp)
         }
         Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OutlinedButton(
                 onClick = onReject,
                 enabled = !busy,
-                modifier = Modifier.testTag("room_offer_reject"),
+                modifier = Modifier.weight(1f).testTag("room_offer_reject"),
             ) {
-                Text(appText("Reject", "拒绝"), color = colors.muted)
+                Text(appText("Decline", "拒绝"))
             }
             Button(
                 onClick = onAccept,
                 enabled = !busy,
-                modifier = Modifier.testTag("room_offer_accept"),
+                modifier = Modifier.weight(1f).testTag("room_offer_accept"),
             ) {
                 Text(
                     if (busy) {
                         appText("Preparing receiver…", "正在准备接收…")
                     } else {
-                        appText("Accept", "接收")
+                        appText("Receive", "接收")
                     },
                 )
             }
@@ -601,13 +605,15 @@ internal fun RoomControlPanel(
                 }
             }
             legacy -> {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    TextButton(onClick = onShowQr, modifier = Modifier.testTag("room_show_qr")) {
-                        Text(appText("Show transfer QR", "显示传输二维码"), color = colors.accent)
-                    }
-                    TextButton(onClick = onEnd, modifier = Modifier.testTag("room_close")) {
-                        Text(appText("Close", "关闭"), color = colors.muted)
-                    }
+                TextButton(onClick = onShowQr, modifier = Modifier.testTag("room_show_qr")) {
+                    Text(appText("Show transfer QR", "显示传输二维码"), color = colors.accent)
+                }
+                OutlinedButton(
+                    onClick = onEnd,
+                    modifier = Modifier.fillMaxWidth().testTag("room_close"),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.danger),
+                ) {
+                    Text(appText("End room", "结束房间"))
                 }
             }
             else -> {
@@ -647,9 +653,13 @@ internal fun RoomControlPanel(
                             )
                         }
                     }
-                    TextButton(onClick = onEnd, modifier = Modifier.testTag("room_close")) {
-                        Text(appText("End room", "结束房间"), color = colors.danger)
-                    }
+                }
+                OutlinedButton(
+                    onClick = onEnd,
+                    modifier = Modifier.fillMaxWidth().testTag("room_close"),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.danger),
+                ) {
+                    Text(appText("End room", "结束房间"))
                 }
             }
         }
@@ -689,14 +699,16 @@ private fun RoomActionButton(
     modifier: Modifier = Modifier,
 ) {
     val colors = Envoix.colors
-    Row(
-        modifier
-            .height(50.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(colors.accent.copy(alpha = if (enabled) 1f else 0.38f))
-            .clickable(enabled = enabled, onClick = onClick),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.height(50.dp),
+        colors =
+            ButtonDefaults.buttonColors(
+                containerColor = colors.accent,
+                disabledContainerColor = colors.accent.copy(alpha = 0.38f),
+            ),
+        shape = RoundedCornerShape(14.dp),
     ) {
         Icon(icon, null, tint = Color.White, modifier = Modifier.size(19.dp))
         Spacer(Modifier.size(7.dp))

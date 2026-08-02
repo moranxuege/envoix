@@ -7,8 +7,63 @@ import org.junit.Test
 
 class BleRendezvousProtocolTest {
     private val identity = LocalDiscoveryIdentity("0011223344556677", "Android phone")
-    private val invite = "envoix://pair/123456-alpha-bravo?broker=https%3A%2F%2Fexample.test&role=send"
-    private val roomInvite = "envoix://room/R123456-amber-comet?broker=example.test&expires=42"
+    private val invite = "envoix://invite/v2/test-payload"
+    private val roomInvite = "envoix://room/123456-a1b2-c3d4?broker=example.test&expires=42"
+
+    @Test
+    fun `round trips a full BLE discovery identity`() {
+        val longIdentity =
+            LocalDiscoveryIdentity(
+                peerKey = identity.peerKey,
+                displayName = "Nearby " + "📱".repeat(20),
+            )
+
+        val encoded = requireNotNull(BleRendezvousProtocol.encodeIdentity(longIdentity))
+        val decoded = requireNotNull(BleRendezvousProtocol.decodeIdentity(encoded))
+
+        assertEquals(longIdentity.peerKey, decoded.peerKey)
+        assertEquals(longIdentity.displayName, decoded.displayName)
+    }
+
+    @Test
+    fun `identity payload matches the cross-platform wire vector`() {
+        val encoded =
+            requireNotNull(
+                BleRendezvousProtocol.encodeIdentity(
+                    LocalDiscoveryIdentity("0011223344556677", "设备"),
+                ),
+            )
+
+        assertEquals(
+            "01303031313232333334343535363637370006e8aebee5a487",
+            encoded.joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) },
+        )
+        assertEquals(
+            BleDiscoveryIdentity("0011223344556677", "设备"),
+            BleRendezvousProtocol.decodeIdentity(encoded),
+        )
+    }
+
+    @Test
+    fun `identity payload validates key version length and UTF-8`() {
+        val encoded = requireNotNull(BleRendezvousProtocol.encodeIdentity(identity))
+
+        assertNull(BleRendezvousProtocol.decodeIdentity(encoded.copyOf().also { it[0] = 2 }))
+        assertNull(BleRendezvousProtocol.decodeIdentity(encoded.copyOf().also { it[1] = 'z'.code.toByte() }))
+        assertNull(BleRendezvousProtocol.decodeIdentity(encoded.copyOf(encoded.size - 1)))
+        assertNull(
+            BleRendezvousProtocol.decodeIdentity(
+                encoded.copyOf().also {
+                    it[it.lastIndex] = 0xFF.toByte()
+                },
+            ),
+        )
+        assertNull(
+            BleRendezvousProtocol.encodeIdentity(
+                LocalDiscoveryIdentity(identity.peerKey, "Nearby\u0000phone"),
+            ),
+        )
+    }
 
     @Test
     fun `round trips a fragmented invite`() {
@@ -63,19 +118,22 @@ class BleRendezvousProtocolTest {
 
     @Test
     fun `rejects invalid invites and too small frames`() {
-        assertNull(BleRendezvousProtocol.encodeInvite(identity, "123456-alpha-bravo", REQUEST_ID, 64))
-        assertNull(
-            BleRendezvousProtocol.encodeInvite(
-                identity,
+        val unsupported =
+            listOf(
+                "123456-a1b2-c3d4",
                 "https://example.test/envoix-room",
-                REQUEST_ID,
-                64,
-            ),
-        )
+                "envoix://pair/123456-alpha-bravo",
+                "envoix://invite/v2/",
+                "envoix://room/R123456-a1b2-c3d4",
+                "envoix://room/123456-alpha-bravo",
+            )
+        unsupported.forEach {
+            assertNull(BleRendezvousProtocol.encodeInvite(identity, it, REQUEST_ID, 64))
+        }
         assertNull(
             BleRendezvousProtocol.encodeInvite(
                 identity,
-                "envoix://pair/" + "x".repeat(BleRendezvousProtocol.MAX_INVITE_BYTES),
+                "envoix://invite/v2/" + "x".repeat(BleRendezvousProtocol.MAX_INVITE_BYTES),
                 REQUEST_ID,
                 64,
             ),

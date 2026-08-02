@@ -41,6 +41,8 @@
     <array>
         <string>_envoix-disc._udp</string>
     </array>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Envoix uses Bluetooth to find and be visible to nearby Envoix devices while the Nearby page is open.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Envoix connects to nearby devices on your local network to transfer files.</string>
 </dict>

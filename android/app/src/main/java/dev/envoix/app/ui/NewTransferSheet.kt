@@ -31,6 +31,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -124,8 +125,6 @@ internal fun NewTransferSheet(
     initialPairingInput: String? = null,
     initialSources: List<android.net.Uri> = emptyList(),
     initialRole: String? = null,
-    initialHostedCode: String? = null,
-    initialHostedPayload: String? = null,
     roomMode: Boolean = false,
     connectedRoom: Boolean = false,
     roomEndpoint: RoomControlEndpoint? = null,
@@ -139,6 +138,7 @@ internal fun NewTransferSheet(
     onQueuePreparedSend: QueuePreparedSend? = null,
 ) {
     val colors = Envoix.colors
+    val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val settings by SettingsStore.settings.collectAsState()
     val language = LocalAppLanguage.current
@@ -183,6 +183,7 @@ internal fun NewTransferSheet(
     var startSubmitted by preparation.startSubmitted
     var rememberAfterPairing by remember { mutableStateOf(false) }
     var rememberLabel by remember { mutableStateOf("") }
+    var pairingInputError by remember(draftId) { mutableStateOf<String?>(null) }
 
     val preparationScope = rememberCoroutineScope()
     val preparationMutex = preparation.mutex
@@ -423,8 +424,9 @@ internal fun NewTransferSheet(
         }
     }
 
-    fun applyScanned(scanned: String) {
-        val inv = InviteCodec.parseForRouting(scanned) ?: return
+    fun applyScanned(scanned: String): Boolean {
+        val inv = InviteCodec.parseForRouting(scanned) ?: return false
+        pairingInputError = null
         invitationInput = scanned
         typed = ""
         scannedBroker = inv.broker
@@ -440,30 +442,46 @@ internal fun NewTransferSheet(
                 }
         }
         topMode = "closed" // stop the camera; the code is filled in now
+        return true
+    }
+
+    fun invalidInvitationError() =
+        text(
+            "Paste or scan a complete Envoix invitation link",
+            "请粘贴或扫描完整的 Envoix 邀请链接",
+        )
+
+    fun applyPairingInput(input: String): Boolean {
+        pairingInputError = null
+        if (input.startsWith("envoix:") && applyScanned(input)) {
+            return true
+        }
+        typed = input
+        invitationInput = null
+        scannedBroker = null
+        scannedRelay = null
+        return false
     }
 
     LaunchedEffect(draftId, initialPairingInput) {
         if (!initialPairingInputApplied) {
-            initialPairingInput?.takeIf(String::isNotBlank)?.let(::applyScanned)
+            initialPairingInput?.takeIf(String::isNotBlank)?.let {
+                if (!applyPairingInput(it)) pairingInputError = invalidInvitationError()
+            }
             initialPairingInputApplied = true
         }
     }
 
     val requiresNearbyDelivery =
         nearbySelection?.sources?.contains(DiscoverySource.Bluetooth) == true &&
-            initialPairingInput.isNullOrBlank() &&
-            initialHostedPayload.isNullOrBlank()
-    val roomCodeValid =
-        remember(typed) {
-            typed.isNotBlank() && InviteCodec.normalizeRoomCode(typed) != null
-        }
+            initialPairingInput.isNullOrBlank()
     val ready =
         !startSubmitted &&
             !rendezvousBusy &&
             (!requiresNearbyDelivery || nearbyDeliveryAvailable) &&
             (
                 onQueuePreparedSend != null ||
-                    if (joining) invitationInput != null || roomCodeValid else generated != null
+                    if (joining) invitationInput != null else generated != null
             ) &&
             (!rememberAfterPairing || rememberLabel.trim().isNotEmpty()) &&
             when (role) {
@@ -479,7 +497,6 @@ internal fun NewTransferSheet(
             (
                 connectedRoom ||
                     !initialPairingInput.isNullOrBlank() ||
-                    !initialHostedPayload.isNullOrBlank() ||
                     nearbySelection?.sources?.contains(DiscoverySource.Bluetooth) == true
             )
 
@@ -735,7 +752,6 @@ internal fun NewTransferSheet(
                 Spacer(Modifier.height(18.dp))
                 RoomConnectionSummary(
                     initialPairingInput = initialPairingInput,
-                    initialHostedCode = initialHostedCode,
                     nearbySelection = nearbySelection,
                 )
             } else {
@@ -770,7 +786,14 @@ internal fun NewTransferSheet(
                     Spacer(Modifier.height(12.dp))
                     Box(Modifier.fillMaxWidth().heightIn(min = 210.dp), contentAlignment = Alignment.Center) {
                         if (topMode == "scan") {
-                            InlineScanner(onScanned = ::applyScanned, modifier = Modifier.fillMaxWidth())
+                            InlineScanner(
+                                onScanned = {
+                                    if (!applyScanned(it)) {
+                                        pairingInputError = invalidInvitationError()
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
                         } else if (joining) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(text("You'll join", "即将加入"), color = colors.muted, fontSize = 13.sp)
@@ -784,7 +807,10 @@ internal fun NewTransferSheet(
                                 )
                                 Spacer(Modifier.height(6.dp))
                                 Text(
-                                    text("Clear the code below to show your own", "清空下方配对码即可显示自己的二维码"),
+                                    text(
+                                        "Clear the invitation link below to show your own",
+                                        "清空下方邀请链接即可显示自己的二维码",
+                                    ),
                                     color = colors.muted,
                                     fontSize = 11.sp,
                                 )
@@ -794,26 +820,27 @@ internal fun NewTransferSheet(
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     QrCode(invite.payload, side = 168.dp)
                                     Spacer(Modifier.height(12.dp))
-                                    val clip = LocalClipboardManager.current
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        modifier =
+                                            Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    clipboard.setText(AnnotatedString(invite.payload))
+                                                }.padding(horizontal = 8.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
                                         Text(
-                                            invite.roomCode,
-                                            color = colors.text,
-                                            fontSize = 15.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontFamily = FontFamily.Monospace,
+                                            text("Copy invite link", "复制邀请链接"),
+                                            color = colors.muted,
+                                            fontSize = 13.sp,
                                         )
-                                        Spacer(Modifier.width(8.dp))
+                                        Spacer(Modifier.width(6.dp))
                                         Icon(
                                             Icons.Default.ContentCopy,
-                                            text("Copy code", "复制配对码"),
+                                            contentDescription = null,
                                             tint = colors.muted,
                                             modifier =
                                                 Modifier
-                                                    .clip(CircleShape)
-                                                    .clickable {
-                                                        clip.setText(AnnotatedString(invite.roomCode))
-                                                    }.padding(6.dp)
                                                     .size(18.dp),
                                         )
                                     }
@@ -823,25 +850,47 @@ internal fun NewTransferSheet(
                     }
                 }
 
-                // ---- code field (type/paste a code to join) ----
+                // ---- invitation field (paste a complete invite to join) ----
                 Spacer(Modifier.height(16.dp))
                 OutlinedTextField(
                     value = typed,
-                    onValueChange = {
-                        val value = it.trim()
-                        if (value.startsWith("envoix:")) {
-                            applyScanned(value)
-                        } else {
-                            typed = InviteCodec.formatRoomCode(value)
-                            invitationInput = null
-                            scannedBroker = null
-                            scannedRelay = null
-                        }
-                    },
+                    onValueChange = { applyPairingInput(it) },
                     placeholder = { Text(appString(R.string.enter_pairing_code_hint)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                TextButton(
+                    onClick = {
+                        val pasted =
+                            clipboard
+                                .getText()
+                                ?.text
+                                ?.trim()
+                                .orEmpty()
+                        if (pasted.isEmpty()) {
+                            pairingInputError = text("Clipboard is empty", "剪贴板为空")
+                        } else if (!applyPairingInput(pasted)) {
+                            pairingInputError = invalidInvitationError()
+                        }
+                    },
+                    modifier =
+                        Modifier
+                            .align(Alignment.End)
+                            .testTag("transfer_code_paste"),
+                ) {
+                    Text(text("Paste", "粘贴"))
+                }
+                pairingInputError?.let { error ->
+                    Text(
+                        error,
+                        color = colors.danger,
+                        fontSize = 12.sp,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .testTag("transfer_code_error"),
+                    )
+                }
 
                 Spacer(Modifier.height(12.dp))
                 Row(
@@ -1070,7 +1119,6 @@ internal fun NewTransferSheet(
 @Composable
 private fun RoomConnectionSummary(
     initialPairingInput: String?,
-    initialHostedCode: String?,
     nearbySelection: NearbyPairingSelection?,
 ) {
     val colors = Envoix.colors
@@ -1095,11 +1143,6 @@ private fun RoomConnectionSummary(
                     appText(
                         "The invite will be delivered to the nearby device when you start.",
                         "开始后，邀请会发送到附近设备。",
-                    )
-                !initialHostedCode.isNullOrBlank() ->
-                    appText(
-                        "Shared invite · $initialHostedCode",
-                        "已分享邀请 · $initialHostedCode",
                     )
                 !initialPairingInput.isNullOrBlank() ->
                     appText(
@@ -1175,8 +1218,8 @@ private fun NearbyPairingContext(
                 )
             } else {
                 text(
-                    "This device is not currently reachable over BLE. Use QR or a typed Envoix code to continue.",
-                    "当前无法通过 BLE 连接此设备。请使用二维码或输入 Envoix 配对码继续。",
+                    "This device is not currently reachable over BLE. Use QR or paste a complete invitation link.",
+                    "当前无法通过 BLE 连接此设备。请使用二维码或粘贴完整邀请链接。",
                 )
             },
             color = colors.muted,

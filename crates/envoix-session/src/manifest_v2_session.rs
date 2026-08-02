@@ -19,7 +19,8 @@ use envoix_transfer::{
     NoopManifestV2ResultGate, ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2,
     ReceiverDataPlaneSummaryV2, ReceiverDeliveryRecordV2, ReceiverDeliveryStoreV2,
     SenderDataPlaneSummaryV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderResumeIntentV2,
-    SenderTransferPhaseV2, TransferJobError, sender_resume_intent,
+    SenderTransferPhaseV2, TransferJobError, TransferStage, TransferStageTimeline,
+    sender_resume_intent,
 };
 use envoix_types::{DataPath, TransferDirection, TransferId};
 use iroh::Endpoint;
@@ -42,6 +43,7 @@ use crate::{
 
 struct SessionManifestV2Progress {
     events: Arc<dyn EventSink>,
+    timeline: Arc<TransferStageTimeline>,
     transfer_id: TransferId,
     direction: TransferDirection,
 }
@@ -51,19 +53,12 @@ impl SessionManifestV2Progress {
         events: Arc<dyn EventSink>,
         identity: envoix_protocol::manifest_v2_frames::JobGenerationV2,
         direction: TransferDirection,
+        timeline: Arc<TransferStageTimeline>,
     ) -> Self {
         Self {
             events,
-            transfer_id: TransferId(format!(
-                "{}-{}",
-                identity
-                    .job_id
-                    .0
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>(),
-                identity.generation
-            )),
+            timeline,
+            transfer_id: transfer_id(identity),
             direction,
         }
     }
@@ -86,6 +81,10 @@ impl ManifestV2ProgressSink for SessionManifestV2Progress {
                 direction: self.direction,
                 phase,
             });
+    }
+
+    fn on_stage(&self, stage: TransferStage) {
+        self.timeline.record(stage);
     }
 }
 
@@ -110,6 +109,7 @@ pub struct PendingManifestV2Receive {
     offer: ManifestOfferV2,
     resume_request: Option<ResumeRequestV2>,
     events: Arc<dyn EventSink>,
+    timeline: Arc<TransferStageTimeline>,
     datagram_bridge: Option<DatagramTransportBridge>,
 }
 
@@ -119,6 +119,7 @@ pub struct PendingNativeManifestV2Receive {
     offer: ManifestOfferV2,
     resume_request: Option<ResumeRequestV2>,
     events: Arc<dyn EventSink>,
+    timeline: Arc<TransferStageTimeline>,
 }
 
 impl std::fmt::Debug for PendingManifestV2Receive {
@@ -137,6 +138,32 @@ impl PendingManifestV2Receive {
 
     pub fn offer(&self) -> &ManifestOfferV2 {
         &self.offer
+    }
+
+    fn close_with_stage(mut self, stage: TransferStage) -> impl std::future::Future<Output = ()> {
+        self.timeline.record(stage);
+        async move {
+            let _ = ManifestV2FrameConnection::close(&mut self.connection).await;
+            self.bound_endpoint.local_endpoint.close().await;
+            if let Some(bridge) = self.datagram_bridge.take() {
+                bridge.close().await;
+            }
+        }
+    }
+
+    /// Consumes and closes an authenticated offer without accepting payload.
+    pub fn cancel(self) -> impl std::future::Future<Output = ()> {
+        self.close_with_stage(TransferStage::Canceled)
+    }
+
+    /// Rejecting an offer is a user-canceled receive attempt.
+    pub fn reject(self) -> impl std::future::Future<Output = ()> {
+        self.cancel()
+    }
+
+    /// Consumes an offer that cannot continue because local setup failed.
+    pub fn close_with_failure(self) -> impl std::future::Future<Output = ()> {
+        self.close_with_stage(TransferStage::Failed)
     }
 
     /// Persists destination and capability state before Accept and does not
@@ -174,6 +201,7 @@ impl PendingManifestV2Receive {
                 state_directory,
                 &mut self.connection,
                 self.events.clone(),
+                self.timeline.clone(),
                 result_gate,
             ) => result,
             () = cancel.cancelled() => Err(interrupted_error(cancel)),
@@ -181,6 +209,7 @@ impl PendingManifestV2Receive {
         match &result {
             Ok(_) => self.connection.await_peer_close().await,
             Err(_) => {
+                self.timeline.record(failure_stage(cancel));
                 let _ = ManifestV2FrameConnection::close(&mut self.connection).await;
             }
         }
@@ -204,6 +233,28 @@ impl std::fmt::Debug for PendingNativeManifestV2Receive {
 impl PendingNativeManifestV2Receive {
     pub fn offer(&self) -> &ManifestOfferV2 {
         &self.offer
+    }
+
+    fn close_with_stage(mut self, stage: TransferStage) -> impl std::future::Future<Output = ()> {
+        self.timeline.record(stage);
+        async move {
+            let _ = ManifestV2FrameConnection::close(&mut self.connection).await;
+        }
+    }
+
+    /// Consumes and closes an authenticated offer without accepting payload.
+    pub fn cancel(self) -> impl std::future::Future<Output = ()> {
+        self.close_with_stage(TransferStage::Canceled)
+    }
+
+    /// Rejecting an offer is a user-canceled receive attempt.
+    pub fn reject(self) -> impl std::future::Future<Output = ()> {
+        self.cancel()
+    }
+
+    /// Consumes an offer that cannot continue because local setup failed.
+    pub fn close_with_failure(self) -> impl std::future::Future<Output = ()> {
+        self.close_with_stage(TransferStage::Failed)
     }
 
     pub async fn receive(
@@ -236,6 +287,7 @@ impl PendingNativeManifestV2Receive {
                 state_directory,
                 &mut self.connection,
                 self.events.clone(),
+                self.timeline.clone(),
                 result_gate,
             ) => result,
             () = cancel.cancelled() => Err(interrupted_error(cancel)),
@@ -243,6 +295,7 @@ impl PendingNativeManifestV2Receive {
         match &result {
             Ok(_) => self.connection.await_peer_close().await,
             Err(_) => {
+                self.timeline.record(failure_stage(cancel));
                 let _ = ManifestV2FrameConnection::close(&mut self.connection).await;
             }
         }
@@ -305,14 +358,22 @@ pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
     cancel: &TransferCancelToken,
     authentication: &dyn AuthenticationHandler,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
-    let local_endpoint = super::build_dial_endpoint(
+    let timeline = start_manifest_v2_send_attempt(job, events.clone())?;
+    let local_endpoint = match super::build_dial_endpoint(
         &config.identity,
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
         config.data_stream_window,
     )
-    .await?;
+    .await
+    {
+        Ok(local_endpoint) => local_endpoint,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
     send_manifest_v2_from_endpoint_with_authentication(
         local_endpoint,
         peer_addr,
@@ -322,6 +383,7 @@ pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
         events,
         cancel,
         authentication,
+        timeline,
     )
     .await
 }
@@ -336,8 +398,8 @@ pub(crate) async fn send_manifest_v2_from_endpoint_with_authentication(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
     authentication: &dyn AuthenticationHandler,
+    timeline: Arc<TransferStageTimeline>,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
-    sealed_manifest(job)?;
     events.on_event(envoix_transfer::TransferEvent::Connecting);
     let mut connection = match dial_peer_addr_for_protocol(
         local_endpoint.clone(),
@@ -348,10 +410,12 @@ pub(crate) async fn send_manifest_v2_from_endpoint_with_authentication(
     {
         Ok(connection) => connection,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             local_endpoint.close().await;
             return Err(error);
         }
     };
+    timeline.record(TransferStage::ConnectionReady);
     connection.watch_path(events.clone());
     let result = send_manifest_v2_over_connection_with_authentication(
         job,
@@ -361,6 +425,7 @@ pub(crate) async fn send_manifest_v2_from_endpoint_with_authentication(
         cancel,
         &mut connection,
         authentication,
+        timeline,
     )
     .await;
     let _ = ManifestV2FrameConnection::close(&mut connection).await;
@@ -376,10 +441,22 @@ pub async fn send_manifest_v2_over_native_transport(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
-    sealed_manifest(job)?;
+    let timeline = start_manifest_v2_send_attempt(job, events.clone())?;
     events.on_event(envoix_transfer::TransferEvent::Connecting);
-    let mut connection =
-        NativeFrameConnection::connect(transport, NativeTransportRole::Client, cancel).await?;
+    let mut connection = match NativeFrameConnection::connect(
+        transport,
+        NativeTransportRole::Client,
+        cancel,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
+    timeline.record(TransferStage::ConnectionReady);
     events.on_event(envoix_transfer::TransferEvent::Connected {
         path: DataPath::WifiAware,
     });
@@ -390,6 +467,7 @@ pub async fn send_manifest_v2_over_native_transport(
         events,
         cancel,
         &mut connection,
+        timeline,
     )
     .await;
     let _ = ManifestV2FrameConnection::close(&mut connection).await;
@@ -407,16 +485,23 @@ pub async fn send_manifest_v2_over_datagram_transport(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
-    sealed_manifest(job)?;
+    let timeline = start_manifest_v2_send_attempt(job, events.clone())?;
     events.on_event(envoix_transfer::TransferEvent::Connecting);
-    let datagram = bind_datagram_endpoint(
+    let datagram = match bind_datagram_endpoint(
         transport,
         DatagramTransportRole::Client,
         maximum_datagram_size,
         DEFAULT_DATA_STREAM_WINDOW,
         cancel,
     )
-    .await?;
+    .await
+    {
+        Ok(datagram) => datagram,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
     let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
     let mut connection = match dial_peer_addr_for_protocol(
         local_endpoint.clone(),
@@ -427,11 +512,13 @@ pub async fn send_manifest_v2_over_datagram_transport(
     {
         Ok(connection) => connection,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             local_endpoint.close().await;
             datagram.bridge.close().await;
             return Err(error);
         }
     };
+    timeline.record(TransferStage::ConnectionReady);
     connection.watch_path(events.clone());
     let result = send_manifest_v2_over_connection(
         job,
@@ -440,6 +527,7 @@ pub async fn send_manifest_v2_over_datagram_transport(
         events,
         cancel,
         &mut connection,
+        timeline,
     )
     .await;
     let _ = ManifestV2FrameConnection::close(&mut connection).await;
@@ -455,6 +543,7 @@ async fn send_manifest_v2_over_connection<Connection>(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
     connection: &mut Connection,
+    timeline: Arc<TransferStageTimeline>,
 ) -> Result<SenderManifestV2SessionSummary, SessionError>
 where
     Connection: FrameConnection + ManifestV2FrameConnection,
@@ -467,6 +556,7 @@ where
         cancel,
         connection,
         &NoopAuthenticationHandler,
+        timeline,
     )
     .await
 }
@@ -480,35 +570,65 @@ async fn send_manifest_v2_over_connection_with_authentication<Connection>(
     cancel: &TransferCancelToken,
     connection: &mut Connection,
     authentication: &dyn AuthenticationHandler,
+    timeline: Arc<TransferStageTimeline>,
 ) -> Result<SenderManifestV2SessionSummary, SessionError>
 where
     Connection: FrameConnection + ManifestV2FrameConnection,
 {
-    let manifest = sealed_manifest(job)?;
-    let offer = build_manifest_offer_v2(manifest.clone())
-        .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
-    let store = SenderDeliveryStoreV2::new(state_directory.join("sender-delivery"));
-    let identity = envoix_protocol::manifest_v2_frames::JobGenerationV2 {
-        job_id: manifest.job_id,
-        generation: manifest.generation,
+    let prepared = tokio::select! {
+        result = async {
+            let manifest = sealed_manifest(job)?;
+            let offer = build_manifest_offer_v2(manifest.clone())
+                .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
+            let store = SenderDeliveryStoreV2::new(state_directory.join("sender-delivery"));
+            let identity = envoix_protocol::manifest_v2_frames::JobGenerationV2 {
+                job_id: manifest.job_id,
+                generation: manifest.generation,
+            };
+            let record = match store.load(identity).await.map_err(session_delivery_error)? {
+                Some(record) => record,
+                None => SenderDeliveryRecordV2::new(&offer),
+            };
+            record
+                .validate_offer(&offer)
+                .map_err(session_delivery_error)?;
+            store.save(&record).await.map_err(session_delivery_error)?;
+            Ok::<_, SessionError>((store, identity, record))
+        } => result,
+        () = cancel.cancelled() => Err(interrupted_error(cancel)),
     };
-    let mut record = match store.load(identity).await.map_err(session_delivery_error)? {
-        Some(record) => record,
-        None => SenderDeliveryRecordV2::new(&offer),
+    let (store, identity, mut record) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
     };
-    record
-        .validate_offer(&offer)
-        .map_err(session_delivery_error)?;
-    store.save(&record).await.map_err(session_delivery_error)?;
-    let outcome = auth_bounded(
+    timeline.record(TransferStage::AuthenticationStarted);
+    let outcome = match auth_bounded(
         authenticate_sender_with_remember(connection, pairing, authentication.remember_consent()),
         cancel,
     )
-    .await?;
-    authentication.on_authenticated(outcome)?;
-    let progress =
-        SessionManifestV2Progress::new(events.clone(), identity, TransferDirection::Send);
-    tokio::select! {
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
+    if let Err(error) = authentication.on_authenticated(outcome) {
+        timeline.record(TransferStage::Failed);
+        return Err(error);
+    }
+    timeline.record(TransferStage::AuthenticationComplete);
+    let progress = SessionManifestV2Progress::new(
+        events.clone(),
+        identity,
+        TransferDirection::Send,
+        timeline.clone(),
+    );
+    let result = tokio::select! {
         result = async {
             let data_plane = match record.phase() {
                 SenderTransferPhaseV2::Offering | SenderTransferPhaseV2::Transferring => {
@@ -524,9 +644,12 @@ where
                 }
                 SenderTransferPhaseV2::WaitingForReceiverSave
                 | SenderTransferPhaseV2::Delivered => {
+                    progress.on_stage(TransferStage::ManifestOffer);
                     ManifestV2DataPlane::establish_sender_reconnect(job, &record, connection)
                         .await
                         .map_err(session_sender_data_error)?;
+                    progress.on_stage(TransferStage::ManifestAccepted);
+                    progress.on_stage(TransferStage::PayloadComplete);
                     record.completed_data_summary().ok_or_else(|| {
                         CoreError::Protocol(
                             "sender delivery phase has no durable result summary".into(),
@@ -560,12 +683,73 @@ where
             })
         } => result,
         () = cancel.cancelled() => Err(interrupted_error(cancel)),
+    };
+    match &result {
+        Ok(_) => timeline.record(TransferStage::DeliveryComplete),
+        Err(_) => timeline.record(failure_stage(cancel)),
     }
+    result
 }
 
 fn sealed_manifest(job: &CanonicalTransferJob) -> Result<&ManifestV2, CoreError> {
     job.manifest()
         .ok_or_else(|| CoreError::InvalidInput("transfer job must be sealed before dialing".into()))
+}
+
+pub(crate) fn start_manifest_v2_send_attempt(
+    job: &CanonicalTransferJob,
+    events: Arc<dyn EventSink>,
+) -> Result<Arc<TransferStageTimeline>, SessionError> {
+    let identity = manifest_identity(sealed_manifest(job)?);
+    let timeline = Arc::new(TransferStageTimeline::new(
+        events,
+        Some(transfer_id(identity)),
+        TransferDirection::Send,
+    ));
+    timeline.record(TransferStage::SessionStarted);
+    Ok(timeline)
+}
+
+fn manifest_identity(
+    manifest: &ManifestV2,
+) -> envoix_protocol::manifest_v2_frames::JobGenerationV2 {
+    envoix_protocol::manifest_v2_frames::JobGenerationV2 {
+        job_id: manifest.job_id,
+        generation: manifest.generation,
+    }
+}
+
+fn transfer_id(identity: envoix_protocol::manifest_v2_frames::JobGenerationV2) -> TransferId {
+    TransferId(format!(
+        "{}-{}",
+        identity
+            .job_id
+            .0
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        identity.generation
+    ))
+}
+
+pub(crate) fn failure_stage(cancel: &TransferCancelToken) -> TransferStage {
+    if cancel.is_cancelled() {
+        TransferStage::Canceled
+    } else {
+        TransferStage::Failed
+    }
+}
+
+pub(crate) fn start_manifest_v2_receive_attempt(
+    events: Arc<dyn EventSink>,
+) -> Arc<TransferStageTimeline> {
+    let timeline = Arc::new(TransferStageTimeline::new(
+        events,
+        None,
+        TransferDirection::Receive,
+    ));
+    timeline.record(TransferStage::SessionStarted);
+    timeline
 }
 
 pub async fn receive_manifest_v2_offer(
@@ -591,16 +775,42 @@ pub async fn receive_manifest_v2_offer_with_authentication(
     cancel: &TransferCancelToken,
     authentication: &dyn AuthenticationHandler,
 ) -> Result<PendingManifestV2Receive, SessionError> {
+    receive_manifest_v2_offer_with_authentication_and_timeline(
+        bound_endpoint,
+        pairing,
+        events,
+        cancel,
+        authentication,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn receive_manifest_v2_offer_with_authentication_and_timeline(
+    bound_endpoint: BoundEndpoint,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+    mut first_timeline: Option<Arc<TransferStageTimeline>>,
+) -> Result<PendingManifestV2Receive, SessionError> {
     let mut connection_failures = 0_u32;
     let mut authentication_failures = 0_u32;
-    let mut connection = loop {
+    let accepted_connection = loop {
+        let timeline = first_timeline
+            .take()
+            .unwrap_or_else(|| start_manifest_v2_receive_attempt(events.clone()));
         let accepted = tokio::select! {
             result = bound_endpoint.accept_with_events(events.as_ref()) => result,
-            () = cancel.cancelled() => return Err(interrupted_error(cancel)),
+            () = cancel.cancelled() => {
+                timeline.record(TransferStage::Canceled);
+                return Err(interrupted_error(cancel));
+            },
         };
         let mut connection = match accepted {
             Ok(connection) => connection,
             Err(error) => {
+                timeline.record(failure_stage(cancel));
                 connection_failures += 1;
                 events.on_event(envoix_transfer::TransferEvent::Diagnostic {
                     message: format!(
@@ -614,13 +824,16 @@ pub async fn receive_manifest_v2_offer_with_authentication(
                 continue;
             }
         };
+        timeline.record(TransferStage::ConnectionReady);
         if connection.protocol() != TransferProtocol::ManifestV2 {
+            timeline.record(TransferStage::Failed);
             let _ = ManifestV2FrameConnection::close(&mut connection).await;
             return Err(CoreError::Protocol(
                 "canonical receive endpoint negotiated a non-Manifest-v2 protocol".into(),
             ));
         }
         connection.watch_path(events.clone());
+        timeline.record(TransferStage::AuthenticationStarted);
         match auth_bounded(
             authenticate_receiver_with_remember(
                 &mut connection,
@@ -632,17 +845,23 @@ pub async fn receive_manifest_v2_offer_with_authentication(
         .await
         {
             Ok(outcome) => match authentication.on_authenticated(outcome) {
-                Ok(()) => break connection,
+                Ok(()) => {
+                    timeline.record(TransferStage::AuthenticationComplete);
+                    break (connection, timeline);
+                }
                 Err(error) => {
+                    timeline.record(TransferStage::Failed);
                     let _ = ManifestV2FrameConnection::close(&mut connection).await;
                     return Err(error);
                 }
             },
             Err(error) if cancel.is_cancelled() => {
+                timeline.record(TransferStage::Canceled);
                 let _ = ManifestV2FrameConnection::close(&mut connection).await;
                 return Err(error);
             }
             Err(_error) => {
+                timeline.record(TransferStage::Failed);
                 let _ = ManifestV2FrameConnection::close(&mut connection).await;
                 authentication_failures += 1;
                 events.on_event(envoix_transfer::TransferEvent::Diagnostic {
@@ -657,13 +876,23 @@ pub async fn receive_manifest_v2_offer_with_authentication(
             }
         }
     };
-    let (offer, resume_request) = receive_authenticated_offer(&mut connection, cancel).await?;
+    let (mut connection, timeline) = accepted_connection;
+    let (offer, resume_request) = match receive_authenticated_offer(&mut connection, cancel).await {
+        Ok(offer) => offer,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
+    timeline.bind_transfer_id(transfer_id(manifest_identity(&offer.manifest)));
+    timeline.record(TransferStage::ManifestOffer);
     Ok(PendingManifestV2Receive {
         bound_endpoint,
         connection,
         offer,
         resume_request,
         events,
+        timeline,
         datagram_bridge: None,
     })
 }
@@ -677,17 +906,34 @@ pub async fn receive_manifest_v2_offer_over_datagram_transport(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, SessionError> {
+    let timeline = start_manifest_v2_receive_attempt(events.clone());
     events.on_event(envoix_transfer::TransferEvent::Connecting);
-    let datagram = bind_datagram_endpoint(
+    let datagram = match bind_datagram_endpoint(
         transport,
         DatagramTransportRole::Server,
         maximum_datagram_size,
         DEFAULT_DATA_STREAM_WINDOW,
         cancel,
     )
-    .await?;
+    .await
+    {
+        Ok(datagram) => datagram,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
     let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
-    match receive_manifest_v2_offer(datagram.bound_endpoint, pairing, events, cancel).await {
+    match receive_manifest_v2_offer_with_authentication_and_timeline(
+        datagram.bound_endpoint,
+        pairing,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+        Some(timeline),
+    )
+    .await
+    {
         Ok(mut pending) => {
             pending.attach_datagram_bridge(datagram.bridge);
             Ok(pending)
@@ -706,12 +952,31 @@ pub async fn receive_manifest_v2_offer_over_native_transport(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingNativeManifestV2Receive, SessionError> {
+    let timeline = Arc::new(TransferStageTimeline::new(
+        events.clone(),
+        None,
+        TransferDirection::Receive,
+    ));
+    timeline.record(TransferStage::SessionStarted);
     events.on_event(envoix_transfer::TransferEvent::Connecting);
-    let mut connection =
-        NativeFrameConnection::connect(transport, NativeTransportRole::Server, cancel).await?;
+    let mut connection = match NativeFrameConnection::connect(
+        transport,
+        NativeTransportRole::Server,
+        cancel,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
+    timeline.record(TransferStage::ConnectionReady);
     events.on_event(envoix_transfer::TransferEvent::Connected {
         path: DataPath::WifiAware,
     });
+    timeline.record(TransferStage::AuthenticationStarted);
     let outcome = match auth_bounded(
         authenticate_receiver_with_remember(&mut connection, pairing, false),
         cancel,
@@ -720,26 +985,33 @@ pub async fn receive_manifest_v2_offer_over_native_transport(
     {
         Ok(outcome) => outcome,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             let _ = ManifestV2FrameConnection::close(&mut connection).await;
             return Err(error);
         }
     };
     if let Err(error) = NoopAuthenticationHandler.on_authenticated(outcome) {
+        timeline.record(TransferStage::Failed);
         let _ = ManifestV2FrameConnection::close(&mut connection).await;
         return Err(error);
     }
+    timeline.record(TransferStage::AuthenticationComplete);
     let (offer, resume_request) = match receive_authenticated_offer(&mut connection, cancel).await {
         Ok(offer) => offer,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             let _ = ManifestV2FrameConnection::close(&mut connection).await;
             return Err(error);
         }
     };
+    timeline.bind_transfer_id(transfer_id(manifest_identity(&offer.manifest)));
+    timeline.record(TransferStage::ManifestOffer);
     Ok(PendingNativeManifestV2Receive {
         connection,
         offer,
         resume_request,
         events,
+        timeline,
     })
 }
 
@@ -778,6 +1050,7 @@ where
     Ok((offer, resume_request))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_after_offer<Connection>(
     offer: &ManifestOfferV2,
     resume_request: Option<&ResumeRequestV2>,
@@ -785,6 +1058,7 @@ async fn receive_after_offer<Connection>(
     state_directory: PathBuf,
     connection: &mut Connection,
     events: Arc<dyn EventSink>,
+    timeline: Arc<TransferStageTimeline>,
     result_gate: &dyn ManifestV2ResultGate,
 ) -> Result<ReceiverManifestV2SessionSummary, SessionError>
 where
@@ -794,6 +1068,12 @@ where
         job_id: offer.manifest.job_id,
         generation: offer.manifest.generation,
     };
+    let progress = SessionManifestV2Progress::new(
+        events,
+        identity,
+        TransferDirection::Receive,
+        timeline.clone(),
+    );
     let initial_request = resume_request.is_none();
     if resume_request.is_some_and(|request| request.identity != identity) {
         return Err(CoreError::Protocol(
@@ -908,12 +1188,14 @@ where
             .await
             .map_err(|error| CoreError::Protocol(error.to_string()))?;
     }
+    progress.on_stage(TransferStage::ManifestAccepted);
     let delivery_store = ReceiverDeliveryStoreV2::new(state_directory.join("receiver-delivery"));
     let existing_delivery_record = delivery_store
         .load(identity)
         .await
         .map_err(session_delivery_error)?;
     if resume_intent == Some(SenderResumeIntentV2::AwaitDelivery) {
+        progress.on_stage(TransferStage::PayloadComplete);
         let data_plane = ledger.completed_summary().ok_or_else(|| {
             CoreError::Protocol("delivery record exists without a complete data ledger".into())
         })?;
@@ -932,6 +1214,7 @@ where
         let delivery_proof_digest =
             canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::DeliveryProof(proof))
                 .map_err(|error| CoreError::Protocol(error.to_string()))?;
+        progress.on_stage(TransferStage::DeliveryComplete);
         return Ok(ReceiverManifestV2SessionSummary {
             data_plane,
             delivery_proof_digest,
@@ -944,7 +1227,6 @@ where
             .await
             .map_err(session_destination_error)?,
     };
-    let progress = SessionManifestV2Progress::new(events, identity, TransferDirection::Receive);
     let data_plane = ManifestV2DataPlane::receive(
         offer,
         &mut ledger,
@@ -975,6 +1257,7 @@ where
     let delivery_proof_digest =
         canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::DeliveryProof(proof))
             .map_err(|error| CoreError::Protocol(error.to_string()))?;
+    progress.on_stage(TransferStage::DeliveryComplete);
     Ok(ReceiverManifestV2SessionSummary {
         data_plane,
         delivery_proof_digest,
@@ -1087,5 +1370,107 @@ fn transfer_cause(cause: TransferCause, error: impl std::fmt::Display) -> Sessio
     CoreError::Cause {
         cause,
         detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use envoix_transfer::{EventSink, TransferEvent, TransferStage};
+
+    use super::*;
+    use crate::{CandidateFilter, IdentityConfig, bind_iroh_manifest_v2_endpoint};
+
+    #[derive(Default)]
+    struct RecordingEvents {
+        events: Mutex<Vec<TransferEvent>>,
+    }
+
+    impl EventSink for RecordingEvents {
+        fn on_event(&self, event: TransferEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    impl RecordingEvents {
+        fn attempt_stages(&self) -> BTreeMap<u64, Vec<TransferStage>> {
+            let mut attempts = BTreeMap::new();
+            for event in self.events.lock().unwrap().iter() {
+                if let TransferEvent::StageTiming {
+                    direction,
+                    attempt_id,
+                    stage,
+                    ..
+                } = event
+                {
+                    assert_eq!(*direction, TransferDirection::Receive);
+                    attempts
+                        .entry(*attempt_id)
+                        .or_insert_with(Vec::new)
+                        .push(*stage);
+                }
+            }
+            attempts
+        }
+    }
+
+    async fn test_bound_endpoint() -> BoundEndpoint {
+        bind_iroh_manifest_v2_endpoint(
+            "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            &IdentityConfig::Ephemeral,
+            &None,
+            false,
+            &CandidateFilter::default(),
+            DEFAULT_DATA_STREAM_WINDOW,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn canceled_receive_wait_has_a_terminal_attempt_before_any_connection() {
+        let bound = test_bound_endpoint().await;
+        let endpoint = bound.local_endpoint.clone();
+        let events = Arc::new(RecordingEvents::default());
+        let cancel = TransferCancelToken::new();
+        cancel.cancel();
+        let pairing = PairingConfig::spake2_shared_token("cancel-before-accept").unwrap();
+
+        let result = receive_manifest_v2_offer(bound, &pairing, events.clone(), &cancel).await;
+        endpoint.close().await;
+
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        let attempts = events.attempt_stages();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts.into_values().next().unwrap(),
+            vec![TransferStage::SessionStarted, TransferStage::Canceled]
+        );
+    }
+
+    #[tokio::test]
+    async fn each_retried_accept_failure_gets_an_independent_terminal_attempt() {
+        let bound = test_bound_endpoint().await;
+        bound.local_endpoint.close().await;
+        let events = Arc::new(RecordingEvents::default());
+        let cancel = TransferCancelToken::new();
+        let pairing = PairingConfig::spake2_shared_token("failed-accept-attempts").unwrap();
+
+        let result = receive_manifest_v2_offer(bound, &pairing, events.clone(), &cancel).await;
+
+        assert!(result.is_err());
+        let attempts = events.attempt_stages();
+        assert_eq!(
+            attempts.len(),
+            usize::try_from(super::super::MAX_PRE_AUTH_CONNECTION_FAILURES).unwrap()
+        );
+        assert!(
+            attempts.values().all(|stages| {
+                stages == &[TransferStage::SessionStarted, TransferStage::Failed]
+            })
+        );
     }
 }

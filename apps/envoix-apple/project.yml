@@ -24,8 +24,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app
-        MARKETING_VERSION: "0.2.0"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.2.1"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info-macOS.plist
@@ -45,6 +45,8 @@ targets:
           - "SecurityFoundation"
           - "-framework"
           - "CoreWLAN"
+          - "-framework"
+          - "CoreBluetooth"
 
   Envoix-iOS:
     type: application
@@ -64,11 +66,12 @@ targets:
       - package: EnvoixCore
       - target: EnvoixShare
         embed: true
+      - sdk: CoreNFC.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios
-        MARKETING_VERSION: "0.2.0"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.2.1"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info.plist
@@ -85,6 +88,7 @@ targets:
         INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
         INFOPLIST_KEY_CFBundleDisplayName: Envoix
         INFOPLIST_KEY_NSCameraUsageDescription: "Envoix uses the camera to scan invite QR codes from receiving devices."
+        INFOPLIST_KEY_NFCReaderUsageDescription: "Envoix reads invitations from nearby Envoix phones."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Envoix connects to nearby devices on your local network to transfer files."
         OTHER_LDFLAGS:
           - "-framework"
@@ -115,8 +119,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.share
         PRODUCT_NAME: EnvoixShare
-        MARKETING_VERSION: "0.2.0"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.2.1"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: ShareExtension/Info.plist
@@ -137,6 +141,7 @@ targets:
     dependencies:
       - target: Envoix-iOS
       - package: EnvoixCore
+      - sdk: CoreNFC.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.uitests
@@ -182,7 +187,13 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - Tests/EnvoixIOSUITests/ManifestV2PhysicalTransferTests.swift
+      - Tests/EnvoixIOSUITests/AppleWifiAwareControlChannelRegistryTests.swift
+      - Tests/EnvoixIOSUITests/AppleWifiAwareControlRoleStoreTests.swift
+      - Tests/EnvoixIOSUITests/AppleWifiAwareServiceCoordinatorTests.swift
+      - Tests/EnvoixIOSUITests/WifiAwareRendezvousProtocolTests.swift
+      - Tests/EnvoixMacOSUITests/ConnectionHubPresentationTests.swift
       - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
+      - Tests/EnvoixMacOSUITests/RoomCodeInputFormatterTests.swift
     dependencies:
       - target: Envoix
       - package: EnvoixCore
@@ -205,6 +216,8 @@ targets:
           - "SecurityFoundation"
           - "-framework"
           - "CoreWLAN"
+          - "-framework"
+          - "CoreBluetooth"
 
 schemes:
   Envoix:

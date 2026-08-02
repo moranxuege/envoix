@@ -215,6 +215,8 @@ struct LinkRow<Trailing: View>: View {
 
 /// White, bordered card framing a QR image (white in both themes, by design).
 struct QRCard: View {
+    static let contentPadding: CGFloat = 14
+
     var image: PlatformImage
     var size: CGFloat = 184
 
@@ -223,7 +225,7 @@ struct QRCard: View {
             .interpolation(.none)
             .resizable()
             .frame(width: size, height: size)
-            .padding(14)
+            .padding(Self.contentPadding)
             .background(Color.white)
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.cardRadius)
