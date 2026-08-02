@@ -73,44 +73,51 @@ Two instances on one machine work: point them at different save directories.
 
 ## Windows verification status
 
-There is no Windows machine here, so the `.exe` was exercised under Wine 10.0.
-Wine is not Windows, and the results split cleanly:
+Verified on real hardware: Windows 10 22H2 (build 19045), x86-64, reached over
+Tailscale.
 
 | | Result |
 |---|---|
-| PE loads, Rust runtime starts, tests enumerate | works |
+| PE loads, Rust runtime starts | works |
 | `local_allocatable_bytes` (`GetDiskFreeSpaceExW`) | works |
 | Invitation, SPAKE2 pairing, rendezvous | works |
-| **Sending** to a native Linux peer, bytes compared | **works** |
-| Receiving | fails under Wine only, see below |
+| Sending to a native Linux peer | works |
+| **Receiving from a native Linux peer, hash compared** | **works** |
 
-`interop_receive` and `interop_send` are halves of a pair that talk through a
-published invitation file, so one peer can run native while the other runs
-under Wine:
+The receive leg was proven with `envoix-cli` cross-built for
+`x86_64-pc-windows-gnu`, because it drives the same `envoix-transfer`
+destination and save path this app does, at half the transfer size:
 
-    WIN=target/x86_64-pc-windows-gnu/release/deps/envoix_desktop-*.exe
+    # on Windows
+    envoix.exe receive --create-invite --rendezvous <broker> --relay <relay> \
+        --output C:\recv
+    # on Linux, with the invitation it printed
+    envoix send --invite '<payload>' ./payload.bin
+
+256 KiB arrived byte-identical, the receiver returned its delivery proof, and
+the data path negotiated direct rather than falling back to the relay.
+
+### Wine is not a substitute, and says so loudly
+
+Wine 10.0 runs the executable and gets through pairing, but two failures there
+are Wine's own and do not reproduce on Windows:
+
+- Receiving fails with `receiver_save_failed: OS error 4390`
+  (`ERROR_NOT_A_REPARSE_POINT`). `exclusive_rename` in
+  `crates/envoix-transfer/src/destination_v2.rs` calls `MoveFileExW` without
+  `MOVEFILE_REPLACE_EXISTING` and maps a collision to `AlreadyExists` from
+  error 80 or 183; Wine returns 4390 instead, escaping the mapping. Real
+  Windows returns `ERROR_ALREADY_EXISTS`, and the save path works there.
+- Two peers both under Wine fail earlier: Wine leaves `IP_ECN`
+  (`setsockopt` optname 50), `SIO_UDP_CONNRESET`, and a UDP vendor ioctl
+  unimplemented, all of which QUIC uses. Rendezvous traffic survives it; a
+  direct peer-to-peer session does not.
+
+`interop_receive` and `interop_send` remain useful for pairing one native peer
+against one emulated or remote peer through a published invitation file:
+
     ENVOIX_INTEROP_INVITE=/tmp/i.txt ENVOIX_INTEROP_SAVE=/tmp/recv \
-      cargo test -p envoix-desktop interop_receive -- --ignored --nocapture &
-    ENVOIX_INTEROP_INVITE="$(winepath -w /tmp/i.txt)" \
-      ENVOIX_INTEROP_SOURCE="$(winepath -w /tmp/payload.bin)" \
-      wine $WIN interop_send --ignored --nocapture
-
-### The Wine receive failure is Wine's, not the port's
-
-Receiving under Wine fails with `receiver_save_failed: OS error 4390`
-(`ERROR_NOT_A_REPARSE_POINT`). `exclusive_rename` in
-`crates/envoix-transfer/src/destination_v2.rs` calls `MoveFileExW` without
-`MOVEFILE_REPLACE_EXISTING` and maps a collision to `AlreadyExists` from error
-80 or 183. Wine returns 4390 for that collision instead, which escapes the
-mapping. Real Windows documents `ERROR_ALREADY_EXISTS` here and never returns
-4390 from `MoveFileEx`, so this should not reproduce off Wine.
-
-**Receiving on Windows still needs one run on real hardware.** Sending does not.
-
-Two peers both under Wine also fail, earlier and differently: Wine's Winsock
-leaves `IP_ECN` (`setsockopt` optname 50), `SIO_UDP_CONNRESET`, and a UDP
-vendor ioctl unimplemented, which QUIC needs. Rendezvous traffic survives that;
-a direct peer-to-peer session does not.
+      cargo test -p envoix-desktop interop_receive -- --ignored --nocapture
 
 ## Forcing the relay
 
