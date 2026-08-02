@@ -669,6 +669,15 @@ impl App {
                     );
                 });
             });
+
+            // Delivered files are only useful once you can reach them; the
+            // mobile card offers the same follow-through as "tap to open".
+            if self.stage == Stage::Done && self.mode == Mode::Receive {
+                ui.add_space(12.0);
+                if ghost_button(ui, palette, "Open folder") {
+                    reveal(&self.save_directory);
+                }
+            }
         });
 
         if let Some(error) = self.error.clone() {
@@ -797,6 +806,21 @@ impl App {
                 });
         });
     }
+}
+
+/// Opens `path` in the platform file manager.
+///
+/// Deliberately fire-and-forget: the file manager is not this app's problem,
+/// and a desktop without one is not an error worth surfacing on the card.
+fn reveal(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    const OPENER: &str = "explorer";
+    #[cfg(target_os = "macos")]
+    const OPENER: &str = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    const OPENER: &str = "xdg-open";
+
+    let _ = std::process::Command::new(OPENER).arg(path).spawn();
 }
 
 fn default_save_directory() -> PathBuf {
