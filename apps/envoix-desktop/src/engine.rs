@@ -559,4 +559,80 @@ mod tests {
         std::fs::canonicalize(&file).expect("canonicalize a file");
         std::fs::canonicalize(workspace.path()).expect("canonicalize a directory");
     }
+
+    /// Drains both engines until the round finishes, releasing the offer when
+    /// it arrives the way the Accept button does.
+    fn drive_round(receiver: &mut Engine, sender: &mut Engine) -> Result<(), String> {
+        let mut receiver_done = false;
+        let mut sender_done = false;
+        for _ in 0..1200 {
+            for event in receiver.poll().collect::<Vec<_>>() {
+                match event {
+                    UiEvent::Offer(_) => receiver.accept_offer(),
+                    UiEvent::Finished { .. } => receiver_done = true,
+                    UiEvent::Failed(message) => return Err(format!("receiver: {message}")),
+                    _ => {}
+                }
+            }
+            for event in sender.poll().collect::<Vec<_>>() {
+                match event {
+                    UiEvent::Finished { .. } => sender_done = true,
+                    UiEvent::Failed(message) => return Err(format!("sender: {message}")),
+                    _ => {}
+                }
+            }
+            if receiver_done && sender_done {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err("round did not finish within 60s".into())
+    }
+
+    fn wait_for_invite(engine: &mut Engine) -> Result<String, String> {
+        for _ in 0..600 {
+            for event in engine.poll().collect::<Vec<_>>() {
+                match event {
+                    UiEvent::Invite { payload, .. } => return Ok(payload),
+                    UiEvent::Failed(message) => return Err(message),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err("no invitation within 30s".into())
+    }
+
+    /// A demo does not stop after one transfer. This drives two rounds through
+    /// the same pair of engines, which is where reused state bites: a cancel
+    /// token, once cancelled, stays cancelled, and the accept channel is
+    /// single-use.
+    #[test]
+    #[ignore = "requires the deployed rendezvous to be reachable"]
+    fn two_transfers_in_a_row() {
+        let context = egui::Context::default();
+        let mut receiver = Engine::new(context.clone());
+        let mut sender = Engine::new(context);
+        let workspace = tempfile::tempdir().expect("tempdir");
+
+        for round in 0..2_u8 {
+            let save_directory = workspace.path().join(format!("recv-{round}"));
+            let source = workspace.path().join(format!("source-{round}.bin"));
+            let payload: Vec<u8> = (0..32 * 1024)
+                .map(|index| ((index + usize::from(round)) % 251) as u8)
+                .collect();
+            std::fs::write(&source, &payload).expect("write source");
+
+            receiver.start_receive(save_directory.clone());
+            let invite = wait_for_invite(&mut receiver)
+                .unwrap_or_else(|error| panic!("round {round}: {error}"));
+            sender.start_send(vec![source], invite);
+            drive_round(&mut receiver, &mut sender)
+                .unwrap_or_else(|error| panic!("round {round}: {error}"));
+
+            let landed = std::fs::read(save_directory.join(format!("source-{round}.bin")))
+                .unwrap_or_else(|error| panic!("round {round} received file: {error}"));
+            assert_eq!(landed, payload, "round {round} bytes differ");
+        }
+    }
 }
