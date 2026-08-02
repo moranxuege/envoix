@@ -95,16 +95,16 @@ final class ManifestV2AppUITests: XCTestCase {
         )
 
         element("connection_hub").assertExists()
-        let peerList = element("nearby_peer_list")
-        peerList.assertExists()
+        let nearbyPeer = element("nearby_peer_card")
+        nearbyPeer.assertExists()
 
         element("nearby_visibility_menu").tap()
         app.buttons["Turn Nearby off"].tap()
-        XCTAssertTrue(peerList.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(nearbyPeer.waitForNonExistence(timeout: 5))
 
         element("nearby_visibility_menu").tap()
         app.buttons["On while app is open"].tap()
-        element("nearby_peer_list").assertExists()
+        element("nearby_peer_card").assertExists()
     }
 
     func testUnverifiedNearbyOfferRequiresExplicitAcceptance() {

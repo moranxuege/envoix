@@ -122,7 +122,6 @@ struct ConnectionHubView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("nearby_peer_list")
                 }
 
                 #if DEBUG
@@ -434,7 +433,6 @@ struct ConnectionHubView: View {
             alignment: .topLeading
         )
         .card(raised: true, padding: 16)
-        .accessibilityIdentifier("room_connection_card")
     }
 
     private var roomInvitationViewport: some View {
