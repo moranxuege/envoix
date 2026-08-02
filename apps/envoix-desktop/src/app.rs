@@ -67,6 +67,11 @@ pub struct App {
 
     /// Restyling every frame would churn the context, so track what is applied.
     theme_applied: Option<bool>,
+
+    /// Clicking copy is silent otherwise, so the button reports back briefly.
+    copied_at: Option<Instant>,
+    /// Summed once per selection change rather than stat-ing every frame.
+    selection_bytes: u64,
 }
 
 impl App {
@@ -95,7 +100,30 @@ impl App {
             rate: None,
             last_sample: None,
             theme_applied: None,
+            copied_at: None,
+            selection_bytes: 0,
         }
+    }
+
+    /// Recomputes the queued total. Directories are walked, since a folder is a
+    /// legitimate root and its size is the interesting number.
+    fn refresh_selection_size(&mut self) {
+        fn size_of(path: &std::path::Path) -> u64 {
+            let Ok(metadata) = std::fs::symlink_metadata(path) else {
+                return 0;
+            };
+            if metadata.is_file() {
+                return metadata.len();
+            }
+            if !metadata.is_dir() {
+                return 0;
+            }
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return 0;
+            };
+            entries.flatten().map(|entry| size_of(&entry.path())).sum()
+        }
+        self.selection_bytes = self.files.iter().map(|path| size_of(path)).sum();
     }
 
     fn palette(&self) -> Palette {
@@ -259,6 +287,7 @@ impl App {
                 self.files.push(path);
             }
         }
+        self.refresh_selection_size();
     }
 
     fn drop_overlay(&mut self, ui: &mut egui::Ui, palette: &Palette) {
@@ -396,13 +425,27 @@ impl App {
                 );
             });
             ui.add_space(10.0);
+            let just_copied = self
+                .copied_at
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2));
+            let label = if just_copied { "Copied" } else { "Copy invite" };
+            let mut copied = false;
             ui.vertical_centered(|ui| {
                 if let Some(invite) = &self.invite
-                    && ghost_button(ui, palette, "Copy invite")
+                    && ghost_button(ui, palette, label)
                 {
                     ui.ctx().copy_text(invite.clone());
+                    copied = true;
                 }
             });
+            if copied {
+                self.copied_at = Some(Instant::now());
+            }
+            if just_copied {
+                // Repaint so the label reverts without needing a mouse move.
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
             ui.add_space(16.0);
         }
 
@@ -467,6 +510,17 @@ impl App {
                         .color(palette.text),
                     );
                 }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} item{} \u{b7} {}",
+                        self.files.len(),
+                        if self.files.len() == 1 { "" } else { "s" },
+                        human_bytes(self.selection_bytes)
+                    ))
+                    .font(theme::sans(12.0))
+                    .color(palette.muted),
+                );
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -475,9 +529,11 @@ impl App {
                     && let Some(picked) = rfd::FileDialog::new().pick_files()
                 {
                     self.files = picked;
+                    self.refresh_selection_size();
                 }
                 if !self.files.is_empty() && !self.busy() && ghost_button(ui, palette, "Clear") {
                     self.files.clear();
+                    self.refresh_selection_size();
                 }
             });
         });
@@ -878,6 +934,8 @@ mod tests {
                 PathBuf::from("/home/demo/quarterly-report.pdf"),
                 PathBuf::from("/home/demo/photos"),
             ];
+            // These paths do not exist, so the total cannot be measured here.
+            app.selection_bytes = 8_912_896;
             app.invite_input =
                 "envoix://invite/v2/eyJyIjoiMDc1Mjg3LWluZGlnby1vcGFsIiwiYiI6ImU5NDZhMzFhIn0"
                     .to_owned();
