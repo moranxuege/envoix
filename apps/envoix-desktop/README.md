@@ -58,6 +58,49 @@ file picker.
 
 Two instances on one machine work: point them at different save directories.
 
+## Building both binaries
+
+    # Linux
+    cargo build -p envoix-desktop --release
+    # -> target/release/envoix-desktop
+
+    # Windows, cross-compiled from Linux
+    rustup target add x86_64-pc-windows-gnu
+    cargo install cargo-zigbuild        # needs zig on PATH or the ziglang module
+    cargo zigbuild -p envoix-desktop --release --target x86_64-pc-windows-gnu
+    # -> target/x86_64-pc-windows-gnu/release/envoix-desktop.exe
+
+Both are self-contained. The `.exe` needs no runtime, no webview, and no
+Visual C++ redistributable.
+
+## Demo runbook
+
+Two machines, one transfer, roughly ninety seconds.
+
+1. **Receiver**: launch, leave the composer on **Receive**, set **Save to** if
+   the default is wrong, press **Receive**. A QR and a room code appear.
+2. **Sender**: launch, press **Send**, then drag the files onto the window (or
+   **Choose files**). The card reports the item count and total size.
+3. **Receiver**: press **Copy invite** - the button confirms with "Copied" -
+   and get that string to the sender by any means. The QR carries the same
+   payload for a phone.
+4. **Sender**: paste into **Invite from the receiver**, press **Send**.
+5. **Receiver**: the card reaches *Needs approval* with the inventory. Press
+   **Accept and save**; the QR withdraws, because the invitation is spent.
+6. The bar turns green on delivery and **Open folder** reveals the files.
+
+If the venue's NAT defeats hole punching, start both sides with
+`ENVOIX_DESKTOP_RELAY_ONLY=1`. The transfer then rides the relay rather than a
+direct path, which is slower but far harder to break.
+
+The **Logs** tab in the left rail carries the whole lifecycle, which is the
+first place to look if a step stalls.
+
+Run it twice before presenting. A second transfer through the same window is
+covered by `two_transfers_in_a_row`, and cancelling mid-flight then retrying is
+covered by `cancelling_mid_transfer_leaves_the_engines_usable`, but neither
+substitutes for rehearsing on the actual machines and network.
+
 ## Verified
 
 - `a_file_crosses_the_deployed_rendezvous` (ignored by default, needs the
