@@ -381,7 +381,11 @@ impl App {
     }
 
     fn receive_form(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        if let (Some(matrix), Some(code)) = (&self.qr_matrix, &self.room_code) {
+        // Once a peer has joined, the invitation is spent. Leaving the QR up
+        // would crowd out the approval action that now owns this panel.
+        if self.stage == Stage::Waiting
+            && let (Some(matrix), Some(code)) = (&self.qr_matrix, &self.room_code)
+        {
             ui.vertical_centered(|ui| {
                 qr::draw(ui, matrix, 210.0, palette.text, palette.surface);
                 ui.add_space(12.0);
@@ -834,6 +838,9 @@ mod tests {
             app.status = "Offer received".to_owned();
             app.data_path = Some("direct".to_owned());
             app.room_code = Some("075287-indigo-opal".to_owned());
+            // Seeded so the preview proves the QR is withdrawn once a peer has
+            // joined, rather than passing because none was ever built.
+            app.qr_matrix = QrMatrix::encode("envoix://invite/v2/eyJyIjoiMDc1Mjg3In0");
             app.offer = Some(OfferSummary {
                 roots: vec!["quarterly-report.pdf".to_owned(), "photos".to_owned()],
                 files: 19,
