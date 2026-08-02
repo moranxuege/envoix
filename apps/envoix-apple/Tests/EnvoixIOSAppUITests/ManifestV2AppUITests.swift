@@ -87,7 +87,7 @@ final class ManifestV2AppUITests: XCTestCase {
         element("one_time_room").assertExists()
     }
 
-    func testNearbyDiscoveryToggleStopsAndRestartsTheVisibleList() {
+    func testNearbyAvailabilityMenuStopsAndRestartsTheVisibleList() {
         launch(
             language: "en",
             locale: "en_US",
@@ -98,10 +98,12 @@ final class ManifestV2AppUITests: XCTestCase {
         let peerList = element("nearby_peer_list")
         peerList.assertExists()
 
-        button("nearby_discovery_toggle").tap()
+        element("nearby_visibility_menu").tap()
+        app.buttons["Turn Nearby off"].tap()
         XCTAssertTrue(peerList.waitForNonExistence(timeout: 5))
 
-        button("nearby_discovery_toggle").tap()
+        element("nearby_visibility_menu").tap()
+        app.buttons["On while app is open"].tap()
         element("nearby_peer_list").assertExists()
     }
 

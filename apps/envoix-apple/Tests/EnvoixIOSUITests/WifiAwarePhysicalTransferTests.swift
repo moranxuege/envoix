@@ -513,7 +513,10 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
             throw WifiAwarePhysicalTestError.missingInitialSelectedPath
         }
         if expectBootstrapFallback {
-            guard initialSelectedPath == .direct || initialSelectedPath == .relay else {
+            guard initialSelectedPath == .direct
+                    || initialSelectedPath == .directIpv4
+                    || initialSelectedPath == .directIpv6
+                    || initialSelectedPath == .relay else {
                 throw WifiAwarePhysicalTestError.unexpectedInitialSelectedPath(
                     initialSelectedPath
                 )
@@ -1474,7 +1477,10 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
            recordedInitialSelectedPath == nil {
             recordedInitialSelectedPath = event.pathKind
         } else if event.eventKind == .changed,
-                  event.pathKind == .direct || event.pathKind == .relay {
+                  event.pathKind == .direct
+                    || event.pathKind == .directIpv4
+                    || event.pathKind == .directIpv6
+                    || event.pathKind == .relay {
             observedFallbackMigration = true
         }
         lock.unlock()

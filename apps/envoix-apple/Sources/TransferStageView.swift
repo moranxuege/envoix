@@ -653,7 +653,7 @@ struct TransferStageView: View {
 
     private func pathIcon(_ path: FfiDataPathKind) -> String {
         switch path {
-        case .direct: return "arrow.left.and.right"
+        case .direct, .directIpv4, .directIpv6: return "arrow.left.and.right"
         case .relay: return "point.3.connected.trianglepath.dotted"
         case .wifiAware: return "wifi"
         case .other: return "link"

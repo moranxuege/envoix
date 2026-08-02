@@ -56,6 +56,19 @@ final class TransferPresentationPolicyTests: XCTestCase {
         )
     }
 
+    func testRateTrackerSamplesAtTheSharedOneHundredMillisecondBoundary() {
+        var tracker = RateTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        _ = tracker.update(bytes: 0, now: start)
+
+        XCTAssertEqual(
+            tracker.update(bytes: 100, now: start.addingTimeInterval(0.1)),
+            1_000,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(tracker.samples, 1)
+    }
+
     func testRateTrackerForceSamplesFastCompletion() {
         var tracker = RateTracker()
         let start = Date(timeIntervalSinceReferenceDate: 1_000)
@@ -151,8 +164,12 @@ final class TransferPresentationPolicyTests: XCTestCase {
 
     func testByteAndRateFormattingClampInvalidAndExtremeInputs() {
         XCTAssertFalse(byteString(UInt64.max).isEmpty)
-        XCTAssertEqual(rateString(.infinity), byteString(0) + "/s")
-        XCTAssertEqual(rateString(.nan), byteString(0) + "/s")
+        XCTAssertEqual(rateString(999), "999 B/s")
+        XCTAssertEqual(rateString(1_000), "1 KB/s")
+        XCTAssertEqual(rateString(1_250_000), "1.3 MB/s")
+        XCTAssertEqual(rateString(1_250_000_000), "1.25 GB/s")
+        XCTAssertEqual(rateString(.infinity), "0 B/s")
+        XCTAssertEqual(rateString(.nan), "0 B/s")
     }
 
     func testCurrentTransferMetricsExpireAfterAStall() {

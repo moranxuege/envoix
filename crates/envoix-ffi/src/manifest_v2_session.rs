@@ -301,7 +301,8 @@ fn project_connection_path(
     event_kind: FfiConnectionPathEventKind,
 ) -> FfiConnectionPathEvent {
     let path_kind = match path {
-        DataPath::Direct { .. } => FfiDataPathKind::Direct,
+        DataPath::Direct { addr } if addr.is_ipv4() => FfiDataPathKind::DirectIpv4,
+        DataPath::Direct { .. } => FfiDataPathKind::DirectIpv6,
         DataPath::Relay { .. } => FfiDataPathKind::Relay,
         DataPath::WifiAware => FfiDataPathKind::WifiAware,
         DataPath::Other { .. } => FfiDataPathKind::Other,
@@ -1901,7 +1902,7 @@ fn op_err_core(error: impl std::fmt::Display) -> SessionError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Mutex as StdMutex;
 
     use envoix_error::TransferCause;
@@ -2155,6 +2156,9 @@ mod tests {
         let direct = DataPath::Direct {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 4242),
         };
+        let direct_v6 = DataPath::Direct {
+            addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4242),
+        };
         let relay = DataPath::Relay {
             url: "https://sensitive-relay.example".into(),
         };
@@ -2165,19 +2169,21 @@ mod tests {
 
         let projections = [
             project_connection_path(&direct, FfiConnectionPathEventKind::Selected),
+            project_connection_path(&direct_v6, FfiConnectionPathEventKind::Changed),
             project_connection_path(&relay, FfiConnectionPathEventKind::Changed),
             project_connection_path(&wifi_aware, FfiConnectionPathEventKind::Changed),
             project_connection_path(&other, FfiConnectionPathEventKind::Changed),
         ];
 
-        assert_eq!(projections[0].path_kind, FfiDataPathKind::Direct);
+        assert_eq!(projections[0].path_kind, FfiDataPathKind::DirectIpv4);
         assert_eq!(
             projections[0].event_kind,
             FfiConnectionPathEventKind::Selected
         );
-        assert_eq!(projections[1].path_kind, FfiDataPathKind::Relay);
-        assert_eq!(projections[2].path_kind, FfiDataPathKind::WifiAware);
-        assert_eq!(projections[3].path_kind, FfiDataPathKind::Other);
+        assert_eq!(projections[1].path_kind, FfiDataPathKind::DirectIpv6);
+        assert_eq!(projections[2].path_kind, FfiDataPathKind::Relay);
+        assert_eq!(projections[3].path_kind, FfiDataPathKind::WifiAware);
+        assert_eq!(projections[4].path_kind, FfiDataPathKind::Other);
         let rendered = format!("{projections:?}");
         assert!(!rendered.contains("198.51.100.42"));
         assert!(!rendered.contains("sensitive-relay.example"));
@@ -2210,7 +2216,7 @@ mod tests {
                     event_kind: FfiConnectionPathEventKind::Selected,
                 },
                 FfiConnectionPathEvent {
-                    path_kind: FfiDataPathKind::Direct,
+                    path_kind: FfiDataPathKind::DirectIpv4,
                     event_kind: FfiConnectionPathEventKind::Changed,
                 },
             ]

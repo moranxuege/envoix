@@ -410,11 +410,15 @@ pub struct FfiTransferFailure {
 
 /// Privacy-safe classification of the data path selected by the transport.
 ///
-/// Endpoint addresses and relay URLs remain internal diagnostics and are
-/// deliberately excluded from this product-facing contract.
+/// Direct paths expose only their IP family. Endpoint addresses and relay URLs
+/// remain internal diagnostics and are deliberately excluded from this
+/// product-facing contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum FfiDataPathKind {
+    /// Compatibility value retained for activity records from older builds.
     Direct,
+    DirectIpv4,
+    DirectIpv6,
     Relay,
     WifiAware,
     Other,
@@ -531,9 +535,7 @@ pub fn parse_pairing_invite_for_role(
 /// Return the public Room locator shared by both sides of an InviteV2 flow.
 /// The complete Room Code remains creator-only bootstrap state.
 #[uniffi::export]
-pub fn transfer_invitation_room_id(
-    request: FfiTransferRequest,
-) -> Result<String, EnvoixError> {
+pub fn transfer_invitation_room_id(request: FfiTransferRequest) -> Result<String, EnvoixError> {
     let role = transfer_role(request.direction);
     match request.mode {
         FfiTransferMode::Invite => {
@@ -1019,21 +1021,16 @@ mod created_invitation_tests {
 
     #[test]
     fn creator_and_joiner_share_public_invitation_room_id() {
-        let invitation = make_pairing_invite(
-            FfiInviteRole::Send,
-            TEST_BROKER.into(),
-            String::new(),
-        )
-        .expect("create invitation");
+        let invitation =
+            make_pairing_invite(FfiInviteRole::Send, TEST_BROKER.into(), String::new())
+                .expect("create invitation");
 
-        let creator_room_id = transfer_invitation_room_id(room_request(
-            invitation.room_code.clone(),
-        ))
-        .expect("creator Room ID");
-        let joiner_room_id = transfer_invitation_room_id(invite_request(
-            invitation.payload.clone(),
-        ))
-        .expect("joiner Room ID");
+        let creator_room_id =
+            transfer_invitation_room_id(room_request(invitation.room_code.clone()))
+                .expect("creator Room ID");
+        let joiner_room_id =
+            transfer_invitation_room_id(invite_request(invitation.payload.clone()))
+                .expect("joiner Room ID");
 
         assert_eq!(creator_room_id, joiner_room_id);
         assert_eq!(creator_room_id.len(), 6);

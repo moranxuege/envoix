@@ -1050,6 +1050,7 @@ where
     Ok((offer, resume_request))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_after_offer<Connection>(
     offer: &ManifestOfferV2,
     resume_request: Option<&ResumeRequestV2>,

@@ -52,6 +52,7 @@ import dev.envoix.app.connectionPathLabel
 import dev.envoix.app.humanBytes
 import dev.envoix.app.isTerminal
 import dev.envoix.app.smoothedBps
+import dev.envoix.app.transferRateString
 
 internal data class ActivityRoomGroup(
     val key: String,
@@ -606,14 +607,14 @@ internal fun activityRoomPerformanceSummary(
         when {
             metrics.currentBps > 0.0 ->
                 AppText.value(
-                    "Now ${activityBps(metrics.currentBps)}",
-                    "当前 ${activityBps(metrics.currentBps)}",
+                    "Now ${transferRateString(metrics.currentBps)}",
+                    "当前 ${transferRateString(metrics.currentBps)}",
                     language,
                 )
             metrics.averageBps > 0.0 ->
                 AppText.value(
-                    "Avg ${activityBps(metrics.averageBps)}",
-                    "平均 ${activityBps(metrics.averageBps)}",
+                    "Avg ${transferRateString(metrics.averageBps)}",
+                    "平均 ${transferRateString(metrics.averageBps)}",
                     language,
                 )
             else -> ""
@@ -629,14 +630,6 @@ internal fun activityRoomPerformanceSummary(
             }.orEmpty()
     return listOf(speed, eta).filter(String::isNotEmpty).joinToString(" · ")
 }
-
-private fun activityBps(bps: Double): String =
-    when {
-        bps >= 1_000_000_000.0 -> "%.2f GB/s".format(bps / 1_000_000_000.0)
-        bps >= 1_000_000.0 -> "%.1f MB/s".format(bps / 1_000_000.0)
-        bps >= 1_000.0 -> "%.0f KB/s".format(bps / 1_000.0)
-        else -> "%.0f B/s".format(bps.coerceAtLeast(0.0))
-    }
 
 private fun activityEta(seconds: Double): String {
     val totalSeconds = seconds.coerceAtLeast(0.0).toLong()

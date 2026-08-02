@@ -32,6 +32,7 @@ struct PendingSendSelection: Identifiable {
 
 enum SharedSendImportOutcome {
     case imported
+    case alreadyImported
     case noPendingDraft
     case sendBusy
 }

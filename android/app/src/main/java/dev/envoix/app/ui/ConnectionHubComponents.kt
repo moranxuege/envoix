@@ -1,6 +1,5 @@
 package dev.envoix.app.ui
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,7 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -22,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Devices
@@ -54,11 +54,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
@@ -149,37 +146,25 @@ private fun HubUtilityButton(
     }
 }
 
-private val HiddenRoomQrSide = 148.dp
-private val RevealedRoomQrSide = 168.dp
-private val RoomInviteHorizontalGap = 12.dp
-private val RoomInviteActionsMinimumWidth = 120.dp
-private val RoomCodeInlineActionsWidth = 100.dp
-private val RoomCodeInlineTextWidth = 156.dp
+private val RoomInviteMaximumSide = 240.dp
+private val RoomInviteViewportHeight = 240.dp
+private val RoomInviteHeaderHeight = 60.dp
 
 internal data class MainRoomInviteQrLayout(
     val side: Dp,
-    val stackActions: Boolean,
+    val viewportHeight: Dp,
+    val showsActions: Boolean,
 )
 
 internal fun resolveMainRoomInviteQrLayout(
     maxWidth: Dp,
     revealed: Boolean,
-): MainRoomInviteQrLayout {
-    val preferredSide = if (revealed) RevealedRoomQrSide else HiddenRoomQrSide
-    val side = if (maxWidth < preferredSide) maxWidth else preferredSide
-    return MainRoomInviteQrLayout(
-        side = side,
-        stackActions = maxWidth < side + RoomInviteHorizontalGap + RoomInviteActionsMinimumWidth,
+): MainRoomInviteQrLayout =
+    MainRoomInviteQrLayout(
+        side = minOf(maxWidth, RoomInviteMaximumSide),
+        viewportHeight = RoomInviteViewportHeight,
+        showsActions = !revealed,
     )
-}
-
-internal fun shouldStackRoomCodeActions(
-    maxWidth: Dp,
-    fontScale: Float,
-): Boolean {
-    val scaledTextWidth = RoomCodeInlineTextWidth * fontScale.coerceAtLeast(1f)
-    return maxWidth < RoomCodeInlineActionsWidth + scaledTextWidth
-}
 
 @Composable
 internal fun MainRoomInviteCard(
@@ -242,6 +227,14 @@ internal fun MainRoomInviteCard(
         control.phase == RoomControlPhase.Hosting &&
             control.inviteRevealed &&
             control.invite == null
+    val roomStatus =
+        when {
+            revealed -> requireNotNull(control.invite).code
+            creating -> appText("Creating room…", "正在创建房间…")
+            joining -> appText("Joining room…", "正在加入房间…")
+            control.invite != null -> appText("Ready · Waiting for another device", "已就绪 · 正在等待另一台设备")
+            else -> appText("No active room", "没有活动房间")
+        }
     Column(
         Modifier
             .testTag("hub_room_invite")
@@ -253,17 +246,46 @@ internal fun MainRoomInviteCard(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier.fillMaxWidth().height(RoomInviteHeaderHeight),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                appText("ROOM", "房间"),
-                color = colors.muted,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.7.sp,
-                modifier = Modifier.weight(1f),
-            )
+            Column(
+                Modifier.weight(1f),
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    appText("ROOM", "房间"),
+                    color = colors.muted,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.7.sp,
+                )
+                Text(
+                    roomStatus,
+                    color = if (control.invite == null) colors.muted else colors.accentStrong,
+                    fontSize = 12.sp,
+                    fontWeight = if (revealed) FontWeight.Bold else FontWeight.Normal,
+                    fontFamily = if (revealed) FontFamily.Monospace else FontFamily.Default,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (revealed) {
+                val roomCode = requireNotNull(control.invite).code
+                IconButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(roomCode))
+                    },
+                    modifier = Modifier.testTag("hub_copy_room_code"),
+                ) {
+                    Icon(
+                        Icons.Default.ContentCopy,
+                        appText("Copy room code", "复制房间码"),
+                        tint = colors.muted,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
             if (control.phase == RoomControlPhase.Hosting && control.invite != null) {
                 IconButton(
                     onClick = onRefresh,
@@ -298,88 +320,28 @@ internal fun MainRoomInviteCard(
         Spacer(Modifier.height(8.dp))
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val layout = resolveMainRoomInviteQrLayout(maxWidth, revealed)
-            if (layout.stackActions) {
-                Column(
-                    Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    MainRoomQrToggle(
+            Box(
+                Modifier.fillMaxWidth().height(layout.viewportHeight),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (layout.showsActions) {
+                    MainRoomInviteActions(
                         control = control,
-                        revealed = revealed,
                         joining = joining,
                         creating = creating,
-                        side = layout.side,
                         onReveal = onReveal,
-                        onHide = onHide,
-                    )
-                    Spacer(Modifier.height(RoomInviteHorizontalGap))
-                    MainRoomInviteActions(
                         onScan = onScan,
                         onEnterCode = onEnterCode,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.size(layout.side),
                     )
-                }
-            } else {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+                } else {
                     MainRoomQrToggle(
                         control = control,
-                        revealed = revealed,
-                        joining = joining,
-                        creating = creating,
                         side = layout.side,
-                        onReveal = onReveal,
                         onHide = onHide,
-                    )
-                    Spacer(Modifier.width(RoomInviteHorizontalGap))
-                    MainRoomInviteActions(
-                        onScan = onScan,
-                        onEnterCode = onEnterCode,
-                        modifier = Modifier.weight(1f),
                     )
                 }
             }
-        }
-        Spacer(Modifier.height(13.dp))
-        if (revealed) {
-            val roomCode = requireNotNull(control.invite).code
-            RevealedRoomCode(
-                code = roomCode,
-                onCopy = {
-                    clipboard.setText(AnnotatedString(roomCode))
-                },
-                onHide = onHide,
-            )
-        } else {
-            Text(
-                if (joining) {
-                    appText("Joining room…", "正在加入房间…")
-                } else {
-                    "••••••-••••-••••"
-                },
-                color = colors.muted,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
-            )
-            Spacer(Modifier.height(5.dp))
-            Text(
-                if (control.phase == RoomControlPhase.Hosting && control.inviteRevealed) {
-                    appText("Creating your room…", "正在创建房间…")
-                } else if (joining) {
-                    appText(
-                        "Waiting for an authenticated connection",
-                        "正在等待经过认证的连接",
-                    )
-                } else {
-                    appText("Tap to reveal your room QR and code", "轻触显示房间二维码和房间码")
-                },
-                color = colors.muted,
-                fontSize = 12.sp,
-                textAlign = TextAlign.Center,
-            )
         }
         control.error?.let {
             Spacer(Modifier.height(8.dp))
@@ -389,137 +351,32 @@ internal fun MainRoomInviteCard(
 }
 
 @Composable
-private fun RevealedRoomCode(
-    code: String,
-    onCopy: () -> Unit,
-    onHide: () -> Unit,
-) {
-    val fontScale = LocalDensity.current.fontScale
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val stackActions = shouldStackRoomCodeActions(maxWidth, fontScale)
-        if (stackActions) {
-            Column(
-                Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                RoomCodeLabel(code, Modifier.fillMaxWidth())
-                RoomCodeActionButtons(onCopy = onCopy, onHide = onHide)
-            }
-        } else {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RoomCodeLabel(code)
-                Spacer(Modifier.width(4.dp))
-                RoomCodeActionButtons(onCopy = onCopy, onHide = onHide)
-            }
-        }
-    }
-}
-
-@Composable
-private fun RoomCodeLabel(
-    code: String,
-    modifier: Modifier = Modifier,
-) {
-    Text(
-        code,
-        color = Envoix.colors.text,
-        fontSize = 16.sp,
-        fontWeight = FontWeight.Bold,
-        fontFamily = FontFamily.Monospace,
-        textAlign = TextAlign.Center,
-        modifier = modifier,
-    )
-}
-
-@Composable
-private fun RoomCodeActionButtons(
-    onCopy: () -> Unit,
-    onHide: () -> Unit,
-) {
-    val colors = Envoix.colors
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        IconButton(
-            onClick = onCopy,
-            modifier = Modifier.testTag("hub_copy_room_code"),
-        ) {
-            Icon(
-                Icons.Default.ContentCopy,
-                appText("Copy room code", "复制房间码"),
-                tint = colors.muted,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-        IconButton(
-            onClick = onHide,
-            modifier = Modifier.testTag("hub_hide_room_code"),
-        ) {
-            Icon(
-                Icons.Default.VisibilityOff,
-                appText("Hide room code", "隐藏房间码"),
-                tint = colors.muted,
-                modifier = Modifier.size(19.dp),
-            )
-        }
-    }
-}
-
-@Composable
 private fun MainRoomQrToggle(
     control: RoomControlUiState,
-    revealed: Boolean,
-    joining: Boolean,
-    creating: Boolean,
     side: Dp,
-    onReveal: () -> Unit,
     onHide: () -> Unit,
 ) {
-    val colors = Envoix.colors
     Box(
         Modifier
             .size(side)
             .testTag("hub_room_qr_toggle")
-            .then(
-                when {
-                    revealed ->
-                        Modifier.clickable(
-                            onClickLabel = appText("Hide room QR", "隐藏房间二维码"),
-                            role = Role.Button,
-                            onClick = onHide,
-                        )
-                    !joining && !creating ->
-                        Modifier.clickable(
-                            onClickLabel = appText("Show room QR", "显示房间二维码"),
-                            role = Role.Button,
-                            onClick = onReveal,
-                        )
-                    else -> Modifier
-                },
+            .clickable(
+                onClickLabel = appText("Hide room QR", "隐藏房间二维码"),
+                role = Role.Button,
+                onClick = onHide,
             ),
         contentAlignment = Alignment.Center,
     ) {
-        when {
-            revealed -> QrCode(requireNotNull(control.invite).payload, side = side)
-            joining ->
-                CircularProgressIndicator(
-                    color = colors.accent,
-                    modifier = Modifier.size(34.dp),
-                )
-            control.phase == RoomControlPhase.Hosting && control.inviteRevealed ->
-                CircularProgressIndicator(
-                    color = colors.accent,
-                    modifier = Modifier.size(34.dp),
-                )
-            else -> BlurredQrPlaceholder(side = side)
-        }
+        QrCode(requireNotNull(control.invite).payload, side = side)
     }
 }
 
 @Composable
 private fun MainRoomInviteActions(
+    control: RoomControlUiState,
+    joining: Boolean,
+    creating: Boolean,
+    onReveal: () -> Unit,
     onScan: () -> Unit,
     onEnterCode: () -> Unit,
     modifier: Modifier = Modifier,
@@ -529,57 +386,72 @@ private fun MainRoomInviteActions(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         OutlinedButton(
-            onClick = onScan,
-            modifier = Modifier.fillMaxWidth().testTag("hub_scan_qr"),
+            onClick = onReveal,
+            enabled = !joining && !creating,
+            modifier = Modifier.fillMaxWidth().weight(1f).testTag("hub_room_qr_toggle"),
+            shape = RoundedCornerShape(16.dp),
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
         ) {
-            Icon(Icons.Default.QrCodeScanner, null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(
-                appText("Scan QR", "扫描"),
-                textAlign = TextAlign.Center,
-            )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (joining || creating) {
+                    CircularProgressIndicator(
+                        color = Envoix.colors.accent,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(20.dp),
+                    )
+                } else {
+                    Icon(
+                        if (control.invite == null) Icons.Default.Add else Icons.Default.Visibility,
+                        null,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    when {
+                        creating -> appText("Creating room…", "正在创建房间…")
+                        joining -> appText("Joining room…", "正在加入房间…")
+                        control.invite == null -> appText("Create room", "创建房间")
+                        else -> appText("Reveal QR", "显示二维码")
+                    },
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
-        OutlinedButton(
-            onClick = onEnterCode,
-            modifier = Modifier.fillMaxWidth().testTag("hub_enter_code"),
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+        Row(
+            Modifier.fillMaxWidth().weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Icon(Icons.Default.Keyboard, null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(
-                appText("Enter code", "输入码"),
-                textAlign = TextAlign.Center,
-            )
-        }
-    }
-}
-
-@Composable
-private fun BlurredQrPlaceholder(side: Dp) {
-    val colors = Envoix.colors
-    Box(
-        Modifier
-            .size(side)
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color.White)
-            .padding(10.dp),
-    ) {
-        Canvas(Modifier.fillMaxSize()) {
-            val cells = 23
-            val cell = size.width / cells
-            for (row in 0 until cells) {
-                for (column in 0 until cells) {
-                    if ((row * 31 + column * 17 + row * column) % 5 < 2) {
-                        drawRect(
-                            color = colors.muted.copy(alpha = 0.22f),
-                            topLeft = Offset(column * cell, row * cell),
-                            size = Size(cell * 1.5f, cell * 1.5f),
-                        )
-                    }
+            OutlinedButton(
+                onClick = onScan,
+                modifier = Modifier.weight(1f).fillMaxHeight().testTag("hub_scan_qr"),
+                shape = RoundedCornerShape(16.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.QrCodeScanner, null, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.height(7.dp))
+                    Text(
+                        appText("Scan QR", "扫描"),
+                        textAlign = TextAlign.Center,
+                    )
                 }
             }
-            drawRect(Color.White.copy(alpha = 0.62f))
+            OutlinedButton(
+                onClick = onEnterCode,
+                modifier = Modifier.weight(1f).fillMaxHeight().testTag("hub_enter_code"),
+                shape = RoundedCornerShape(16.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.Keyboard, null, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.height(7.dp))
+                    Text(
+                        appText("Enter code", "输入码"),
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
         }
     }
 }

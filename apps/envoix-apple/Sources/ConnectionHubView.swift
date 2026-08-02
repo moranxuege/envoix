@@ -6,18 +6,30 @@ import UIKit
 import AppKit
 #endif
 
-struct ConnectionHubView: View {
-    private enum RoomInvitationLayout {
-        static let collapsedQRCodeSide: CGFloat = 148
-        static let connectionMethodsMinimumWidth: CGFloat = 136
+enum RoomInvitationLayout {
+    static let maximumContentSide: CGFloat = 240
+    static let viewportHeight: CGFloat = 240
+    static let headerHeight: CGFloat = 44
+    static let cardSpacing: CGFloat = 14
 
-        #if os(macOS)
-        static let revealedQRCodeImageSide: CGFloat = 208
-        #else
-        static let revealedQRCodeImageSide: CGFloat = 184
-        #endif
+    static var cardContentHeight: CGFloat {
+        headerHeight + cardSpacing + viewportHeight
     }
 
+    static func contentSide(availableWidth: CGFloat) -> CGFloat {
+        min(maximumContentSide, availableWidth)
+    }
+
+    static func qrImageSide(contentSide: CGFloat) -> CGFloat {
+        max(0, contentSide - QRCard.contentPadding * 2)
+    }
+
+    static func showsConnectionMethods(revealed: Bool) -> Bool {
+        !revealed
+    }
+}
+
+struct ConnectionHubView: View {
     @Environment(\.appLanguage) private var language
     @ObservedObject var coordinator: NearbyDiscoveryCoordinator
     @ObservedObject var presence: NearbyPresencePreferences
@@ -330,237 +342,194 @@ struct ConnectionHubView: View {
     }
 
     private var roomInvitationCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: RoomInvitationLayout.cardSpacing) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(AppText.value("Room", "房间", language: language))
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(Theme.text)
-                    Text(roomStatusText)
-                        .font(.caption)
-                        .foregroundStyle(roomInvitation == nil ? Theme.muted : Theme.accentStrong)
+
+                    Group {
+                        if let roomInvitation, roomInvitationIsRevealed {
+                            Text(roomInvitation.code)
+                                .font(.caption.monospaced().weight(.semibold))
+                                .privacySensitive()
+                                .accessibilityLabel(roomInvitation.code)
+                        } else {
+                            Text(roomStatusText)
+                                .font(.caption)
+                        }
+                    }
+                    .foregroundStyle(roomInvitation == nil ? Theme.muted : Theme.accentStrong)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .accessibilityIdentifier(roomInvitation == nil ? "room_status" : "room_code")
                 }
 
                 Spacer(minLength: 8)
 
-                if roomInvitation != nil || roomInvitationIsStarting {
-                    Button(role: .destructive, action: onCancelRoomInvitation) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title3)
-                            .frame(width: 36, height: 36)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(AppText.value("Close room", "关闭房间", language: language))
-                    .accessibilityIdentifier("room_end")
-                }
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 12) {
-                    roomQRCodeToggle
-                    roomConnectionMethods
-                        .frame(
-                            minWidth: RoomInvitationLayout.connectionMethodsMinimumWidth,
-                            maxWidth: .infinity
-                        )
-                }
-
-                VStack(spacing: 12) {
-                    roomQRCodeToggle
-                    roomConnectionMethods
-                        .frame(maxWidth: .infinity)
-                }
-            }
-
-            if let roomInvitation {
-                HStack(spacing: 10) {
-                    Group {
-                        if roomInvitationIsRevealed {
-                            Text(roomInvitation.code)
-                                .privacySensitive()
-                                .accessibilityLabel(roomInvitation.code)
-                        } else {
-                            Label(
+                HStack(spacing: 2) {
+                    if let roomInvitation, roomInvitationIsRevealed {
+                        Button {
+                            copyWithToast(
+                                roomInvitation.code,
                                 AppText.value(
-                                    "Room code hidden",
-                                    "房间码已隐藏",
+                                    "Room code copied",
+                                    "房间码已复制",
                                     language: language
                                 ),
-                                systemImage: "eye.slash"
+                                language: language
                             )
-                            .accessibilityLabel(AppText.value(
-                                "Hidden room code",
-                                "已隐藏房间码",
-                                language: language
-                            ))
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .frame(width: 32, height: 32)
+                                .contentShape(Rectangle())
                         }
-                    }
-                    .font(.subheadline.monospaced().weight(.semibold))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                    .accessibilityIdentifier("room_code")
-
-                    Spacer(minLength: 6)
-
-                    Button {
-                        copyWithToast(
-                            roomInvitation.code,
-                            AppText.value(
-                                "Room code copied",
-                                "房间码已复制",
-                                language: language
-                            ),
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(AppText.value(
+                            "Copy room code",
+                            "复制房间码",
                             language: language
-                        )
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                            .frame(width: 32, height: 32)
-                            .contentShape(Rectangle())
+                        ))
+                        .accessibilityIdentifier("room_code_copy")
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!roomInvitationIsRevealed)
-                    .accessibilityLabel(AppText.value(
-                        "Copy room code",
-                        "复制房间码",
-                        language: language
-                    ))
-                    .accessibilityIdentifier("room_code_copy")
 
-                    Button(action: onRefreshRoomInvitation) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .frame(width: 32, height: 32)
-                            .contentShape(Rectangle())
+                    if roomInvitation != nil {
+                        Button(action: onRefreshRoomInvitation) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .frame(width: 32, height: 32)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(roomInvitationIsStarting)
+                        .accessibilityLabel(AppText.value(
+                            "Renew room invitation",
+                            "更新房间邀请",
+                            language: language
+                        ))
+                        .accessibilityIdentifier("room_invitation_renew")
                     }
-                    .buttonStyle(.plain)
-                    .disabled(roomInvitationIsStarting)
-                    .accessibilityLabel(AppText.value(
-                        "Renew room invitation",
-                        "更新房间邀请",
-                        language: language
-                    ))
-                    .accessibilityIdentifier("room_invitation_renew")
+
+                    if roomInvitation != nil || roomInvitationIsStarting {
+                        Button(role: .destructive, action: onCancelRoomInvitation) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title3)
+                                .frame(width: 36, height: 36)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(AppText.value("Close room", "关闭房间", language: language))
+                        .accessibilityIdentifier("room_end")
+                    }
                 }
             }
+            .frame(height: RoomInvitationLayout.headerHeight)
+
+            roomInvitationViewport
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: RoomInvitationLayout.cardContentHeight,
+            maxHeight: RoomInvitationLayout.cardContentHeight,
+            alignment: .topLeading
+        )
         .card(raised: true, padding: 16)
         .accessibilityIdentifier("room_connection_card")
     }
 
-    private var roomQRCodeToggle: some View {
-        Button {
-            if roomInvitationIsRevealed {
-                onHideRoomInvitation()
-            } else {
-                onRevealRoomInvitation()
+    private var roomInvitationViewport: some View {
+        GeometryReader { geometry in
+            let availableWidth = max(0, geometry.size.width)
+            let contentSide = RoomInvitationLayout.contentSide(availableWidth: availableWidth)
+            let showsMethods = RoomInvitationLayout.showsConnectionMethods(
+                revealed: roomInvitationIsRevealed && roomInvitation != nil
+            )
+
+            Group {
+                if showsMethods {
+                    roomConnectionMethods
+                        .frame(width: contentSide, height: contentSide)
+                } else {
+                    roomQRCodeToggle(size: contentSide)
+                }
             }
-        } label: {
-            if roomInvitationIsRevealed,
-               let image = roomInvitation.flatMap({ QRCode.image(from: $0.payload) }) {
+            .frame(
+                width: availableWidth,
+                height: RoomInvitationLayout.viewportHeight,
+                alignment: .center
+            )
+        }
+        .frame(height: RoomInvitationLayout.viewportHeight)
+    }
+
+    private func roomQRCodeToggle(size: CGFloat) -> some View {
+        Button(action: onHideRoomInvitation) {
+            if let image = roomInvitation.flatMap({ QRCode.image(from: $0.payload) }) {
                 QRCard(
                     image: image,
-                    size: RoomInvitationLayout.revealedQRCodeImageSide
+                    size: RoomInvitationLayout.qrImageSide(contentSide: size)
                 )
             } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Theme.surface)
-
-                    VStack(spacing: 8) {
-                        if roomInvitationIsStarting {
-                            ProgressView()
-                                .tint(Theme.accentStrong)
-                        } else {
-                            Image(systemName: roomInvitation == nil ? "qrcode" : "eye")
-                                .font(.title2.weight(.semibold))
-                        }
-                        Text(roomInvitationIsStarting
-                            ? AppText.value(
-                                "Creating invitation…",
-                                "正在创建邀请…",
-                                language: language
-                            )
-                            : roomInvitation == nil
-                                ? AppText.value("Create room", "创建房间", language: language)
-                                : AppText.value("Reveal QR", "显示二维码", language: language))
-                            .font(.callout.weight(.semibold))
-                            .multilineTextAlignment(.center)
-                    }
-                    .foregroundStyle(Theme.accentStrong)
-                    .padding(12)
-                }
-                .frame(
-                    width: RoomInvitationLayout.collapsedQRCodeSide,
-                    height: RoomInvitationLayout.collapsedQRCodeSide
-                )
+                ProgressView()
+                    .tint(Theme.accentStrong)
+                    .frame(width: size, height: size)
             }
         }
         .buttonStyle(.plain)
-        .disabled(roomInvitationIsStarting)
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .accessibilityLabel(
-            roomInvitationIsRevealed
-                ? AppText.value("Hide room QR", "隐藏房间二维码", language: language)
-                : roomInvitationIsStarting
-                    ? AppText.value(
-                        "Creating invitation",
-                        "正在创建邀请",
-                        language: language
-                    )
-                    : roomInvitation == nil
-                        ? AppText.value("Create room", "创建房间", language: language)
-                        : AppText.value("Reveal room QR", "显示房间二维码", language: language)
-        )
-        .accessibilityHint(
-            roomInvitationIsRevealed
-                ? AppText.value(
-                    "Hides the invitation without ending the room.",
-                    "隐藏邀请，但不会结束房间。",
-                    language: language
-                )
-                : roomInvitationIsStarting
-                    ? AppText.value(
-                        "Please wait while the invitation is created.",
-                        "请等待邀请创建完成。",
-                        language: language
-                    )
-                    : AppText.value(
-                        "Shows an invitation another device can scan.",
-                        "显示可供另一台设备扫描的邀请。",
-                        language: language
-                    )
-        )
-        .accessibilityValue(
-            roomInvitationIsRevealed
-                ? AppText.value("Revealed", "已显示", language: language)
-                : roomInvitationIsStarting
-                    ? AppText.value("Creating", "正在创建", language: language)
-                    : roomInvitation == nil
-                        ? AppText.value("No active room", "没有活动房间", language: language)
-                        : AppText.value("Hidden", "已隐藏", language: language)
-        )
+        .accessibilityLabel(AppText.value(
+            "Hide room QR",
+            "隐藏房间二维码",
+            language: language
+        ))
+        .accessibilityHint(AppText.value(
+            "Hides the invitation without ending the room.",
+            "隐藏邀请，但不会结束房间。",
+            language: language
+        ))
+        .accessibilityValue(AppText.value("Revealed", "已显示", language: language))
         .accessibilityIdentifier("room_qr_toggle")
     }
 
     private var roomConnectionMethods: some View {
         VStack(spacing: 10) {
-            #if os(iOS)
             methodButton(
-                AppText.value("Scan QR", "扫描二维码", language: language),
-                systemImage: "qrcode.viewfinder",
-                identifier: "connect_scan_qr",
-                action: onScanQRCode
+                roomInvitationIsStarting
+                    ? AppText.value("Creating invitation…", "正在创建邀请…", language: language)
+                    : roomInvitation == nil
+                        ? AppText.value("Create room", "创建房间", language: language)
+                        : AppText.value("Reveal QR", "显示二维码", language: language),
+                systemImage: roomInvitation == nil ? "plus.viewfinder" : "qrcode",
+                identifier: "room_qr_toggle",
+                isBusy: roomInvitationIsStarting,
+                isEnabled: !roomInvitationIsStarting,
+                isPrimary: true,
+                action: onRevealRoomInvitation
             )
-            #endif
+            #if os(iOS)
+            HStack(spacing: 10) {
+                methodButton(
+                    AppText.value("Scan QR", "扫描二维码", language: language),
+                    systemImage: "qrcode.viewfinder",
+                    identifier: "connect_scan_qr",
+                    action: onScanQRCode
+                )
+                methodButton(
+                    AppText.value("Enter code", "输入房间码", language: language),
+                    systemImage: "keyboard",
+                    identifier: "connect_enter_code",
+                    action: onEnterCode
+                )
+            }
+            #else
             methodButton(
                 AppText.value("Enter code", "输入房间码", language: language),
                 systemImage: "keyboard",
                 identifier: "connect_enter_code",
                 action: onEnterCode
             )
+            #endif
         }
     }
 
@@ -582,21 +551,38 @@ struct ConnectionHubView: View {
         _ title: String,
         systemImage: String,
         identifier: String,
+        isBusy: Bool = false,
+        isEnabled: Bool = true,
+        isPrimary: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 9) {
-                Image(systemName: systemImage)
-                    .font(.body.weight(.semibold))
+            VStack(spacing: 8) {
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.title3.weight(.semibold))
+                }
                 Text(title)
                     .font(.subheadline.weight(.semibold))
                     .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.82)
             }
-            .foregroundStyle(Theme.accentStrong)
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .foregroundStyle(isEnabled ? Theme.accentStrong : Theme.muted)
+            .padding(10)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: 56,
+                maxHeight: .infinity,
+                alignment: .center
+            )
+            .background(
+                isPrimary ? Theme.accentSoft.opacity(0.58) : Color.clear,
+                in: RoundedRectangle(cornerRadius: Theme.cardRadius)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.cardRadius)
                     .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
@@ -604,6 +590,7 @@ struct ConnectionHubView: View {
             .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
         .accessibilityIdentifier(identifier)
     }
 
@@ -638,7 +625,7 @@ struct ConnectionHubView: View {
                 visibilityButton(.everyoneTenMinutes)
                 visibilityButton(.whileAppOpen)
             } label: {
-                Label(visibilityTitle(presence.visibility), systemImage: visibilityIcon)
+                Label(nearbyStatusTitle, systemImage: visibilityIcon)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.accentStrong)
                     .padding(.horizontal, 12)
@@ -655,11 +642,17 @@ struct ConnectionHubView: View {
             onSetVisibility(value)
         } label: {
             if presence.visibility == value {
-                Label(visibilityTitle(value), systemImage: "checkmark")
+                Label(visibilityOptionTitle(value), systemImage: "checkmark")
             } else {
-                Text(visibilityTitle(value))
+                Text(visibilityOptionTitle(value))
             }
         }
+    }
+
+    private var nearbyStatusTitle: String {
+        presence.visibility == .hidden
+            ? AppText.value("Nearby off", "附近已关闭", language: language)
+            : AppText.value("Nearby on", "附近已开启", language: language)
     }
 
     private var visibilityIcon: String {
@@ -670,59 +663,23 @@ struct ConnectionHubView: View {
         }
     }
 
-    private func visibilityTitle(_ value: NearbyVisibilityMode) -> String {
+    private func visibilityOptionTitle(_ value: NearbyVisibilityMode) -> String {
         switch value {
         case .hidden:
-            return AppText.value("Hidden", "隐藏", language: language)
+            return AppText.value("Turn Nearby off", "关闭附近功能", language: language)
         case .everyoneTenMinutes:
-            return AppText.value("Everyone · 10 min", "所有人 · 10 分钟", language: language)
+            return AppText.value("On for 10 minutes", "开启 10 分钟", language: language)
         case .whileAppOpen:
-            return AppText.value("While open", "打开时可见", language: language)
+            return AppText.value("On while app is open", "应用打开时开启", language: language)
         }
     }
 
     private var nearbyHeader: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(AppText.value("Nearby", "附近设备", language: language))
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(Theme.text)
-                Spacer()
-
-                #if os(iOS)
-                if wifiAwarePairingIsAvailable {
-                    nearbyHeaderButton(
-                        AppText.value("Aware", "感知", language: language),
-                        systemImage: "wifi",
-                        isBusy: isPreparingNearbyPairing,
-                        identifier: "nearby_wifi_aware",
-                        action: prepareNearbyPairing
-                    )
-                }
-
-                if nfcIsAvailable {
-                    nearbyHeaderButton(
-                        "NFC",
-                        systemImage: "wave.3.right",
-                        isBusy: nfcIsActive,
-                        identifier: "connect_scan_nfc",
-                        action: onScanNFC
-                    )
-                }
-                #endif
-
-                nearbyHeaderButton(
-                    presence.visibility == .hidden
-                        ? AppText.value("Open", "开启", language: language)
-                        : AppText.value("Close", "关闭", language: language),
-                    systemImage: presence.visibility == .hidden ? "eye" : "eye.slash",
-                    isBusy: false,
-                    identifier: "nearby_discovery_toggle"
-                ) {
-                    onSetVisibility(
-                        presence.visibility == .hidden ? .whileAppOpen : .hidden
-                    )
-                }
+            HStack(spacing: 12) {
+                nearbyHeaderTitle
+                Spacer(minLength: 8)
+                nearbyHeaderActions
             }
 
             #if os(macOS)
@@ -738,6 +695,42 @@ struct ConnectionHubView: View {
             #endif
         }
         .padding(.top, 4)
+    }
+
+    private var nearbyHeaderTitle: some View {
+        Text(AppText.value("Nearby devices", "附近设备", language: language))
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
+            .layoutPriority(1)
+    }
+
+    private var nearbyHeaderActions: some View {
+        HStack(spacing: 8) {
+            #if os(iOS)
+            if wifiAwarePairingIsAvailable {
+                nearbyHeaderButton(
+                    AppText.value("Aware", "感知", language: language),
+                    systemImage: "wifi",
+                    isBusy: isPreparingNearbyPairing,
+                    identifier: "nearby_wifi_aware",
+                    action: prepareNearbyPairing
+                )
+            }
+
+            if nfcIsAvailable {
+                nearbyHeaderButton(
+                    "NFC",
+                    systemImage: "wave.3.right",
+                    isBusy: nfcIsActive,
+                    identifier: "connect_scan_nfc",
+                    action: onScanNFC
+                )
+            }
+            #endif
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private func nearbyHeaderButton(

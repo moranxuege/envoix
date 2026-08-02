@@ -13,6 +13,8 @@ class ConnectionPathPresentationTest {
             mapOf(
                 "direct" to (ConnectionPathKind.Direct to "Direct"),
                 "direct (198.51.100.42:4242)" to (ConnectionPathKind.Direct to "Direct"),
+                "direct_ipv4" to (ConnectionPathKind.DirectIpv4 to "Direct · IPv4"),
+                "direct_ipv6" to (ConnectionPathKind.DirectIpv6 to "Direct · IPv6"),
                 "relay" to (ConnectionPathKind.Relay to "Relay"),
                 "relay (https://private-relay.example)" to (ConnectionPathKind.Relay to "Relay"),
                 "wifi_aware" to (ConnectionPathKind.WifiAware to "Wi-Fi Aware"),

@@ -647,6 +647,11 @@ struct MobileConnectionFlowView: View {
             }
             synchronizeRememberedOutbox()
         }
+        .onChange(of: model.send.isPreparingManifest) { isPreparing in
+            if !isPreparing {
+                presentPendingSendSelection()
+            }
+        }
         .onChange(of: model.receive.presentationState) { state in
             if state == .delivered || state == .failed || state == .canceled {
                 workflow.refreshRememberedRooms()
@@ -1861,11 +1866,6 @@ struct MobileConnectionFlowView: View {
     private func presentPendingSendSelection() {
         #if os(iOS)
         guard pendingExternalInvitation == nil else { return }
-        if model.pendingSendSelection != nil {
-            routePendingSendSelection(notifyWaiting: false)
-            return
-        }
-        guard model.send.protectedShareDraftID == nil else { return }
         presentSharedDraft(preferredID: nil)
         #endif
     }
@@ -1876,8 +1876,10 @@ struct MobileConnectionFlowView: View {
             switch try model.importSharedSendDraft(preferredID: preferredID) {
             case .imported:
                 routePendingSendSelection(notifyWaiting: true)
+            case .alreadyImported:
+                routePendingSendSelection(notifyWaiting: false)
             case .noPendingDraft:
-                break
+                routePendingSendSelection(notifyWaiting: false)
             case .sendBusy:
                 ToastCenter.shared.show(AppText.value(
                     "Finish the current send, then Envoix will open the shared item.",

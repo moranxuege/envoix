@@ -37,6 +37,18 @@ enum ConnectionPathPresentationPolicy {
         switch path {
         case .direct:
             return AppText.value("Data path · Direct", "数据路径 · 直连", language: language)
+        case .directIpv4:
+            return AppText.value(
+                "Data path · Direct · IPv4",
+                "数据路径 · 直连 · IPv4",
+                language: language
+            )
+        case .directIpv6:
+            return AppText.value(
+                "Data path · Direct · IPv6",
+                "数据路径 · 直连 · IPv6",
+                language: language
+            )
         case .relay:
             return AppText.value("Data path · Relay", "数据路径 · 中继", language: language)
         case .wifiAware:

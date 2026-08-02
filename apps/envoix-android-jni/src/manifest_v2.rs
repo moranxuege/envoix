@@ -519,7 +519,8 @@ fn connection_path_event(path: &DataPath, event_kind: &'static str) -> Value {
 
 fn data_path_kind(path: &DataPath) -> &'static str {
     match path {
-        DataPath::Direct { .. } => "direct",
+        DataPath::Direct { addr } if addr.is_ipv4() => "direct_ipv4",
+        DataPath::Direct { .. } => "direct_ipv6",
         DataPath::Relay { .. } => "relay",
         DataPath::WifiAware => "wifi_aware",
         DataPath::Other { .. } => "other",
@@ -2235,7 +2236,7 @@ fn emit_failed_manifest(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use super::*;
 
@@ -2320,6 +2321,9 @@ mod tests {
         let direct = DataPath::Direct {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 4242),
         };
+        let direct_v6 = DataPath::Direct {
+            addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4242),
+        };
         let relay = DataPath::Relay {
             url: "https://sensitive-relay.example".into(),
         };
@@ -2327,13 +2331,14 @@ mod tests {
             description: "sensitive transport details".into(),
         };
 
-        assert_eq!(data_path_kind(&direct), "direct");
+        assert_eq!(data_path_kind(&direct), "direct_ipv4");
+        assert_eq!(data_path_kind(&direct_v6), "direct_ipv6");
         assert_eq!(data_path_kind(&relay), "relay");
         assert_eq!(data_path_kind(&other), "other");
 
         let event = connection_path_event(&direct, "selected");
         assert_eq!(event["event_kind"], "selected");
-        assert_eq!(event["path_kind"], "direct");
+        assert_eq!(event["path_kind"], "direct_ipv4");
         assert!(event.get("path").is_none());
         assert!(event.get("path_event").is_none());
         let rendered = event.to_string();

@@ -97,6 +97,7 @@ import dev.envoix.app.connectionPathLabel
 import dev.envoix.app.humanBytes
 import dev.envoix.app.isTerminal
 import dev.envoix.app.smoothedBps
+import dev.envoix.app.transferRateString
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -749,9 +750,7 @@ internal data class TransferStageTimelineEntry(
     val elapsedFromSessionUs: Long,
 )
 
-internal fun latestTransferStageTimeline(
-    samples: List<TransferStageTiming>,
-): List<TransferStageTimelineEntry> {
+internal fun latestTransferStageTimeline(samples: List<TransferStageTiming>): List<TransferStageTimelineEntry> {
     val latestAttemptId = samples.maxOfOrNull(TransferStageTiming::attemptId) ?: return emptyList()
     val latestAttempt = samples.filter { it.attemptId == latestAttemptId }
     val sessionStartedAt =
@@ -1239,12 +1238,7 @@ private fun speedText(
         }
     }
     val bps = smoothedBps(t)
-    val mbps = bps / 1_000_000.0
-    return if (mbps >= 1) {
-        "${(mbps * 10).roundToInt() / 10.0} MB/s"
-    } else {
-        "${(bps / 1000).roundToInt()} KB/s"
-    }
+    return transferRateString(bps)
 }
 
 private fun etaText(t: Transfer): String {
@@ -1261,10 +1255,5 @@ private fun progressText(t: Transfer): String = "${humanBytes(t.bytes)} / ${huma
 
 private fun humanBps(bps: Double): String {
     if (bps <= 0) return "—"
-    val mbps = bps / 1_000_000.0
-    return if (mbps >= 1) {
-        "${(mbps * 10).roundToInt() / 10.0} MB/s"
-    } else {
-        "${(bps / 1000).roundToInt()} KB/s"
-    }
+    return transferRateString(bps)
 }

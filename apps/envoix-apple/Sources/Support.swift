@@ -875,8 +875,32 @@ private func tomlEscaped(_ value: String) -> String {
 
 /// Formats a transfer rate, picking the most fitting unit (e.g. "12.3 MB/s").
 func rateString(_ bytesPerSec: Double) -> String {
-    guard bytesPerSec.isFinite, bytesPerSec > 0 else { return byteString(0) + "/s" }
-    return byteString(UInt64(min(bytesPerSec, Double(Int64.max)))) + "/s"
+    guard bytesPerSec.isFinite, bytesPerSec > 0 else { return "0 B/s" }
+    let rate = min(bytesPerSec, Double(Int64.max))
+    let format: String
+    let value: Double
+    let fractionDigits: Int
+    switch rate {
+    case 1_000_000_000...:
+        format = "%.2f GB/s"
+        value = rate / 1_000_000_000
+        fractionDigits = 2
+    case 1_000_000...:
+        format = "%.1f MB/s"
+        value = rate / 1_000_000
+        fractionDigits = 1
+    case 1_000...:
+        format = "%.0f KB/s"
+        value = rate / 1_000
+        fractionDigits = 0
+    default:
+        format = "%.0f B/s"
+        value = rate
+        fractionDigits = 0
+    }
+    let scale = pow(10, Double(fractionDigits))
+    let rounded = (value * scale).rounded(.toNearestOrAwayFromZero) / scale
+    return String(format: format, locale: Locale(identifier: "en_US_POSIX"), rounded)
 }
 
 /// Formats a remaining-time estimate as "ETA 1:20" / "ETA 1:02:03".

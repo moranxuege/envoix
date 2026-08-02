@@ -866,10 +866,17 @@ final class ConnectionWorkflowTests: XCTestCase {
     func testPathPresentationIsStructuredAndPrivacySafe() {
         XCTAssertEqual(
             ConnectionPathPresentationPolicy.label(
-                for: FfiConnectionPathEvent(pathKind: .direct, eventKind: .selected),
+                for: FfiConnectionPathEvent(pathKind: .directIpv4, eventKind: .selected),
                 language: "en"
             ),
-            "Data path · Direct"
+            "Data path · Direct · IPv4"
+        )
+        XCTAssertEqual(
+            ConnectionPathPresentationPolicy.label(
+                for: FfiConnectionPathEvent(pathKind: .directIpv6, eventKind: .selected),
+                language: "zh-Hans"
+            ),
+            "数据路径 · 直连 · IPv6"
         )
         XCTAssertEqual(
             ConnectionPathPresentationPolicy.label(

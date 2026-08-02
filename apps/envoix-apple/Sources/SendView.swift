@@ -25,6 +25,12 @@ struct SendSelectionSnapshot {
     var pendingSelectionID: UUID?
 }
 
+enum SendSelectionPresentationPolicy {
+    static func showsTransferStatus(hasTransferActivity: Bool) -> Bool {
+        hasTransferActivity
+    }
+}
+
 struct SendView: View {
     private enum ImportedSelectionKind {
         case any
@@ -234,7 +240,15 @@ struct SendView: View {
                 if roomControlOffer == nil && rememberedRoomRelationshipID == nil {
                     connectionSection
                 }
+                #if os(iOS)
+                if SendSelectionPresentationPolicy.showsTransferStatus(
+                    hasTransferActivity: viewModel.transferActivity != nil
+                ) {
+                    TransferStatusView(viewModel: viewModel)
+                }
+                #else
                 TransferStatusView(viewModel: viewModel)
+                #endif
             }
             .padding(.vertical, 12)
             #if os(iOS)
@@ -605,12 +619,16 @@ struct SendView: View {
                 .accessibilityIdentifier("send_photo_import_progress")
             }
 
-            if !selectedItems.isEmpty {
+            if !selectedItems.isEmpty,
+               viewModel.preparedInventoryRoots.isEmpty {
                 fileChooserLabel
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("send_selection_summary")
                     .accessibilityValue(String(selectedItems.count))
             }
+
+            preparationState
+            preparedItems
             #else
             Button {
                 let urls = chooseSendItems()
@@ -622,6 +640,8 @@ struct SendView: View {
             .disabled(viewModel.isBusy)
             .accessibilityIdentifier("send_file_picker")
             .accessibilityValue(String(selectedItems.count))
+            preparationState
+            preparedItems
             #endif
 
             Text(selectionGuidance)
@@ -648,6 +668,164 @@ struct SendView: View {
             guard !viewModel.isBusy else { return false }
             loadDroppedItems(providers)
             return true
+        }
+    }
+
+    @ViewBuilder private var preparationState: some View {
+        if viewModel.isPreparingManifest {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(AppText.value(
+                    "Reading and validating the selected items…",
+                    "正在读取并验证所选项目…",
+                    language: uiLanguage
+                ))
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
+            }
+            .accessibilityIdentifier("send_selection_preparing")
+        } else if viewModel.transferActivity == nil,
+                  viewModel.presentationState == .failed,
+                  !viewModel.statusText.isEmpty {
+            Label(viewModel.statusText, systemImage: "exclamationmark.triangle.fill")
+                .font(.footnote)
+                .foregroundStyle(Theme.danger)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("send_selection_error")
+        }
+    }
+
+    @ViewBuilder private var preparedItems: some View {
+        if let summary = viewModel.preparedInventorySummary,
+           !viewModel.preparedInventoryRoots.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(preparedInventorySummaryText(summary))
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(Theme.muted)
+                ForEach(viewModel.preparedInventoryRoots.prefix(6), id: \.itemId) { item in
+                    HStack(spacing: 6) {
+                        Image(systemName: sendInventoryIcon(
+                            name: item.name,
+                            isDirectory: item.kind == .directory
+                        ))
+                        .foregroundStyle(item.kind == .directory ? Theme.warning : Theme.accentStrong)
+                        .frame(width: 24)
+                        Text(item.name)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        if item.kind == .file {
+                            Text(byteString(item.plaintextSize))
+                                .monospacedDigit()
+                        }
+                        Button(role: .destructive) {
+                            viewModel.removeManifestSource(rootItemID: item.rootItemId)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.body.weight(.semibold))
+                                .frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.danger)
+                        .disabled(viewModel.isPreparingManifest || viewModel.isBusy)
+                        .accessibilityLabel(AppText.value(
+                            "Remove \(item.name)",
+                            "移除 \(item.name)",
+                            language: uiLanguage
+                        ))
+                        .accessibilityIdentifier("remove_prepared_source_\(item.rootItemId)")
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(item.hasWarning ? Theme.danger : Theme.muted)
+                    .padding(.horizontal, 9)
+                    .frame(minHeight: 34)
+                    .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 9))
+                }
+                if summary.rootCount > 6 {
+                    Text(AppText.value(
+                        "\(summary.rootCount - 6) more top-level items are included.",
+                        "还包含 \(summary.rootCount - 6) 个顶层项目。",
+                        language: uiLanguage
+                    ))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+                }
+                sourceAccessDecisions
+            }
+            .accessibilityIdentifier("prepared_inventory")
+        }
+    }
+
+    @ViewBuilder private var sourceAccessDecisions: some View {
+        if !viewModel.pendingSourceSelections.isEmpty {
+            Divider().overlay(Theme.line)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(AppText.value("Source access decision", "来源访问决定", language: uiLanguage))
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                ForEach(viewModel.pendingSourceSelections, id: \.rootItemId) { selection in
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(selection.requestedName)
+                            .font(.body.weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(AppText.value(
+                            "Some descendants could not be read. Send only accessible content or remove this root.",
+                            "部分子项目无法读取。你可以仅发送可访问内容，或移除此根项目。",
+                            language: uiLanguage
+                        ))
+                        .font(.footnote)
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Button(AppText.value(
+                                "Send accessible content",
+                                "发送可访问内容",
+                                language: uiLanguage
+                            )) {
+                                viewModel.approvePartialManifestSource(rootItemID: selection.rootItemId)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Button(AppText.value("Remove", "移除", language: uiLanguage)) {
+                                viewModel.removeManifestSource(rootItemID: selection.rootItemId)
+                            }
+                            .buttonStyle(.bordered)
+                            .accessibilityLabel(AppText.value(
+                                "Remove \(selection.requestedName)",
+                                "移除 \(selection.requestedName)",
+                                language: uiLanguage
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func preparedInventorySummaryText(_ summary: FfiInventorySummaryV2) -> String {
+        let base = AppText.value(
+            "\(summary.rootCount) roots · \(summary.fileCount) files · \(summary.directoryCount) folders · \(byteString(summary.totalPlaintextBytes))",
+            "\(summary.rootCount) 个根项目 · \(summary.fileCount) 个文件 · \(summary.directoryCount) 个文件夹 · \(byteString(summary.totalPlaintextBytes))",
+            language: uiLanguage
+        )
+        guard summary.warningCount > 0 else { return base }
+        return base + AppText.value(
+            " · \(summary.warningCount) warnings",
+            " · \(summary.warningCount) 个警告",
+            language: uiLanguage
+        )
+    }
+
+    private func sendInventoryIcon(name: String, isDirectory: Bool) -> String {
+        if isDirectory { return "folder.fill" }
+        switch URL(fileURLWithPath: name).pathExtension.lowercased() {
+        case "jpg", "jpeg", "png", "gif", "heic", "webp": return "photo"
+        case "mov", "mp4", "m4v": return "video"
+        case "mp3", "m4a", "wav", "flac": return "waveform"
+        case "pdf": return "doc.richtext"
+        case "zip", "tar", "gz", "7z": return "archivebox"
+        default: return "doc.fill"
         }
     }
 

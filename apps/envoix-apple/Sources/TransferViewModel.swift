@@ -619,19 +619,37 @@ final class AppModel: ObservableObject {
 
     #if os(iOS)
     func importSharedSendDraft(preferredID: UUID? = nil) throws -> SharedSendImportOutcome {
-        guard !send.isBusy else { return .sendBusy }
         let store = try ShareDraftStore.live()
         try store.cleanupExpired()
         guard let draft = try store.pending(preferredID: preferredID) else {
             return .noPendingDraft
         }
-        if pendingSendSelection?.id != draft.descriptor.id {
-            try store.claim(id: draft.descriptor.id)
-            pendingSendSelection = PendingSendSelection(
-                id: draft.descriptor.id,
-                fileURLs: draft.fileURLs,
-                sourceAccess: ShareDraftLease(id: draft.descriptor.id, store: store)
-            )
+        let incomingID = draft.descriptor.id
+        if pendingSendSelection?.id == incomingID {
+            return .alreadyImported
+        }
+        if send.protectedShareDraftID == incomingID {
+            return .alreadyImported
+        }
+        guard !send.isBusy, !send.hasResumableOperation else {
+            return .sendBusy
+        }
+
+        try store.claim(id: incomingID)
+        if send.preparedShareDraftID != nil,
+           !send.supersedePreparedShareDraft(with: incomingID, store: store) {
+            return .sendBusy
+        }
+
+        let supersededPendingID =
+            (pendingSendSelection?.sourceAccess as? ShareDraftLease)?.id
+        pendingSendSelection = PendingSendSelection(
+            id: incomingID,
+            fileURLs: draft.fileURLs,
+            sourceAccess: ShareDraftLease(id: incomingID, store: store)
+        )
+        if let supersededPendingID, supersededPendingID != incomingID {
+            try? store.discard(id: supersededPendingID)
         }
         return .imported
     }
@@ -796,8 +814,12 @@ final class TransferViewModel: ObservableObject {
         [String: [@MainActor () -> Void]] = [:]
 
     #if os(iOS)
+    var preparedShareDraftID: UUID? {
+        (preparedSelection?.sourceAccess as? ShareDraftLease)?.id
+    }
+
     var protectedShareDraftID: UUID? {
-        if let id = (preparedSelection?.sourceAccess as? ShareDraftLease)?.id {
+        if let id = preparedShareDraftID {
             return id
         }
         if transferActivity?.state == .delivered || transferActivity?.state == .canceled {
@@ -1088,6 +1110,20 @@ final class TransferViewModel: ObservableObject {
         }
         return true
     }
+
+    #if os(iOS)
+    @discardableResult
+    func supersedePreparedShareDraft(
+        with incomingID: UUID,
+        store: ShareDraftStore
+    ) -> Bool {
+        guard let currentID = preparedShareDraftID else { return true }
+        guard currentID != incomingID else { return false }
+        guard cancelManifestPreparation() else { return false }
+        try? store.discard(id: currentID)
+        return true
+    }
+    #endif
 
     func approvePartialManifestSource(rootItemID: UInt64) {
         resolveSource(rootItemID: rootItemID, decision: .approvePartial, path: nil)
@@ -2987,7 +3023,7 @@ struct RateTracker {
             return smoothed
         }
         let deltaBytes = bytes - lastBytes
-        guard elapsed > Self.minimumSampleInterval
+        guard elapsed >= Self.minimumSampleInterval
                 || (forceSample && deltaBytes > 0) else {
             return smoothed
         }

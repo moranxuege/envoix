@@ -11,50 +11,47 @@ import org.junit.Test
 
 class ConnectionHubPresentationTest {
     @Test
-    fun hiddenRoomQrRetainsCanonicalSize() {
+    fun roomActionsFillTheSameSquareAsTheRevealedQr() {
         assertEquals(
-            MainRoomInviteQrLayout(side = 148.dp, stackActions = false),
+            MainRoomInviteQrLayout(
+                side = 240.dp,
+                viewportHeight = 240.dp,
+                showsActions = true,
+            ),
             resolveMainRoomInviteQrLayout(maxWidth = 320.dp, revealed = false),
         )
     }
 
     @Test
-    fun revealedRoomQrUsesLargerSizeWhenSpaceAllows() {
+    fun revealedRoomQrUsesTheViewportAndHidesConflictingActions() {
         assertEquals(
-            MainRoomInviteQrLayout(side = 168.dp, stackActions = false),
+            MainRoomInviteQrLayout(
+                side = 240.dp,
+                viewportHeight = 240.dp,
+                showsActions = false,
+            ),
             resolveMainRoomInviteQrLayout(maxWidth = 320.dp, revealed = true),
         )
     }
 
     @Test
-    fun roomQrStacksActionsWhenTheLargerRevealWouldCrowdThem() {
+    fun roomActionsAndQrAdaptToNarrowWidthTogether() {
         assertEquals(
-            MainRoomInviteQrLayout(side = 148.dp, stackActions = false),
-            resolveMainRoomInviteQrLayout(maxWidth = 280.dp, revealed = false),
+            MainRoomInviteQrLayout(
+                side = 220.dp,
+                viewportHeight = 240.dp,
+                showsActions = true,
+            ),
+            resolveMainRoomInviteQrLayout(maxWidth = 220.dp, revealed = false),
         )
         assertEquals(
-            MainRoomInviteQrLayout(side = 168.dp, stackActions = true),
-            resolveMainRoomInviteQrLayout(maxWidth = 280.dp, revealed = true),
+            MainRoomInviteQrLayout(
+                side = 220.dp,
+                viewportHeight = 240.dp,
+                showsActions = false,
+            ),
+            resolveMainRoomInviteQrLayout(maxWidth = 220.dp, revealed = true),
         )
-    }
-
-    @Test
-    fun roomQrShrinksOnlyWhenTheContainerIsNarrowerThanThePlaceholder() {
-        assertEquals(
-            MainRoomInviteQrLayout(side = 140.dp, stackActions = true),
-            resolveMainRoomInviteQrLayout(maxWidth = 140.dp, revealed = false),
-        )
-        assertEquals(
-            MainRoomInviteQrLayout(side = 140.dp, stackActions = true),
-            resolveMainRoomInviteQrLayout(maxWidth = 140.dp, revealed = true),
-        )
-    }
-
-    @Test
-    fun roomCodeActionsStackWhenWidthOrFontScaleWouldCrowdTheCode() {
-        assertFalse(shouldStackRoomCodeActions(maxWidth = 280.dp, fontScale = 1f))
-        assertTrue(shouldStackRoomCodeActions(maxWidth = 240.dp, fontScale = 1f))
-        assertTrue(shouldStackRoomCodeActions(maxWidth = 320.dp, fontScale = 1.5f))
     }
 
     @Test
