@@ -67,6 +67,52 @@ Two instances on one machine work: point them at different save directories.
   offscreen through wgpu into `target/ui-preview/`, so the layout can be
   reviewed and regressed without a display server.
 
+## Windows verification status
+
+There is no Windows machine here, so the `.exe` was exercised under Wine 10.0.
+Wine is not Windows, and the results split cleanly:
+
+| | Result |
+|---|---|
+| PE loads, Rust runtime starts, tests enumerate | works |
+| `local_allocatable_bytes` (`GetDiskFreeSpaceExW`) | works |
+| Invitation, SPAKE2 pairing, rendezvous | works |
+| **Sending** to a native Linux peer, bytes compared | **works** |
+| Receiving | fails under Wine only, see below |
+
+`interop_receive` and `interop_send` are halves of a pair that talk through a
+published invitation file, so one peer can run native while the other runs
+under Wine:
+
+    WIN=target/x86_64-pc-windows-gnu/release/deps/envoix_desktop-*.exe
+    ENVOIX_INTEROP_INVITE=/tmp/i.txt ENVOIX_INTEROP_SAVE=/tmp/recv \
+      cargo test -p envoix-desktop interop_receive -- --ignored --nocapture &
+    ENVOIX_INTEROP_INVITE="$(winepath -w /tmp/i.txt)" \
+      ENVOIX_INTEROP_SOURCE="$(winepath -w /tmp/payload.bin)" \
+      wine $WIN interop_send --ignored --nocapture
+
+### The Wine receive failure is Wine's, not the port's
+
+Receiving under Wine fails with `receiver_save_failed: OS error 4390`
+(`ERROR_NOT_A_REPARSE_POINT`). `exclusive_rename` in
+`crates/envoix-transfer/src/destination_v2.rs` calls `MoveFileExW` without
+`MOVEFILE_REPLACE_EXISTING` and maps a collision to `AlreadyExists` from error
+80 or 183. Wine returns 4390 for that collision instead, which escapes the
+mapping. Real Windows documents `ERROR_ALREADY_EXISTS` here and never returns
+4390 from `MoveFileEx`, so this should not reproduce off Wine.
+
+**Receiving on Windows still needs one run on real hardware.** Sending does not.
+
+Two peers both under Wine also fail, earlier and differently: Wine's Winsock
+leaves `IP_ECN` (`setsockopt` optname 50), `SIO_UDP_CONNRESET`, and a UDP
+vendor ioctl unimplemented, which QUIC needs. Rendezvous traffic survives that;
+a direct peer-to-peer session does not.
+
+## Forcing the relay
+
+Set `ENVOIX_DESKTOP_RELAY_ONLY=1` to force the relay path when a venue's NAT
+defeats hole punching, or to separate a transport fault from an application one.
+
 ## Not covered
 
 mDNS/LAN discovery, manual peer descriptors, resume, cancel mid-payload beyond

@@ -215,6 +215,13 @@ fn client() -> Result<api::Client, String> {
 fn transfer_options(relay: Option<String>) -> api::TransferOptions {
     let mut options = api::TransferOptions::default();
     options.relay = relay;
+    // Escape hatch for venues where hole punching cannot succeed, and the
+    // switch that separates a transport problem from an application one: the
+    // relay path carries QUIC over the relay's TCP connection instead of the
+    // host's UDP socket.
+    if std::env::var_os("ENVOIX_DESKTOP_RELAY_ONLY").is_some() {
+        options.path = api::PathPolicy::RelayOnly;
+    }
     options
 }
 
@@ -454,5 +461,102 @@ mod tests {
         drop(sender_events);
         let landed = std::fs::read(save_directory.join("payload.bin")).expect("received file");
         assert_eq!(landed, payload, "received bytes differ from the source");
+    }
+
+    fn env_path(key: &str) -> PathBuf {
+        PathBuf::from(std::env::var(key).unwrap_or_else(|_| panic!("{key} must be set")))
+    }
+
+    /// Receiving half of the cross-platform interop pair. Publishes its
+    /// invitation to `ENVOIX_INTEROP_INVITE` so a peer in another process, and
+    /// potentially on another platform, can join it.
+    ///
+    /// Run together with `interop_send`; neither half is meaningful alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "interop half: pair with interop_send"]
+    async fn interop_receive() {
+        let invite_file = env_path("ENVOIX_INTEROP_INVITE");
+        let save_directory = env_path("ENVOIX_INTEROP_SAVE");
+
+        let (events_tx, events) = channel();
+        let sink = Sink::new(events_tx, egui::Context::default());
+        let cancel = TransferCancelToken::new();
+        let (accept, accept_rx) = oneshot::channel();
+        accept.send(true).expect("arm accept");
+
+        let receiving = tokio::spawn({
+            let sink = sink.clone();
+            let cancel = cancel.clone();
+            let save_directory = save_directory.clone();
+            async move { receive(save_directory, sink, cancel, accept_rx).await }
+        });
+
+        let invite = tokio::task::spawn_blocking(move || await_invite(&events))
+            .await
+            .expect("invite task");
+        std::fs::write(&invite_file, invite.as_bytes()).expect("publish invite");
+        println!("published invite to {}", invite_file.display());
+
+        receiving
+            .await
+            .expect("receive task")
+            .expect("receive failed");
+        println!("receive completed");
+    }
+
+    /// Sending half of the interop pair. Waits for `interop_receive` to publish
+    /// its invitation, then sends `ENVOIX_INTEROP_SOURCE` into it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "interop half: pair with interop_receive"]
+    async fn interop_send() {
+        let invite_file = env_path("ENVOIX_INTEROP_INVITE");
+        let source = env_path("ENVOIX_INTEROP_SOURCE");
+
+        let invite = tokio::task::spawn_blocking(move || {
+            for _ in 0..600 {
+                if let Ok(text) = std::fs::read_to_string(&invite_file)
+                    && text.starts_with("envoix://")
+                {
+                    return text.trim().to_owned();
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            panic!("peer published no invitation within 30s");
+        })
+        .await
+        .expect("invite task");
+
+        let (events_tx, _events) = channel();
+        let sink = Sink::new(events_tx, egui::Context::default());
+        let cancel = TransferCancelToken::new();
+        send(vec![source], invite, sink, cancel)
+            .await
+            .expect("send failed");
+        println!("send completed");
+    }
+
+    /// The platform filesystem primitives the receiver's save path leans on.
+    ///
+    /// Isolates a port problem in `std::fs` from one in the transfer logic:
+    /// `symlink_metadata` on Windows inspects reparse data, and the destination
+    /// planner canonicalises both the target and each saved entry.
+    #[test]
+    fn platform_filesystem_primitives_work() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let file = workspace.path().join("probe.bin");
+        std::fs::write(&file, b"probe").expect("write probe");
+
+        assert!(
+            std::fs::symlink_metadata(&file)
+                .expect("symlink_metadata on a file")
+                .is_file()
+        );
+        assert!(
+            std::fs::symlink_metadata(workspace.path())
+                .expect("symlink_metadata on a directory")
+                .is_dir()
+        );
+        std::fs::canonicalize(&file).expect("canonicalize a file");
+        std::fs::canonicalize(workspace.path()).expect("canonicalize a directory");
     }
 }
