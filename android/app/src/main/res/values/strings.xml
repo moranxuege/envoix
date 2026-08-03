@@ -17,12 +17,14 @@
     <string name="connect_section_title">CONNECT</string>
     <string name="show_qr">Show QR</string>
     <string name="scan_qr">Scan QR</string>
-    <string name="switched_to_send_notice">Switched to Send because this is a receive code.</string>
-    <string name="switched_to_receive_notice">Switched to Receive because this is a send code.</string>
-    <string name="enter_pairing_code_hint">or enter a code to join…</string>
+    <string name="switched_to_send_notice">Switched to Send because this invitation expects a sender.</string>
+    <string name="switched_to_receive_notice">Switched to Receive because this invitation expects a receiver.</string>
+    <string name="enter_pairing_code_hint">or paste a complete invitation link…</string>
     <string name="add_files">ADD FILES</string>
     <string name="add_files_hint">Choose one or more files…</string>
     <string name="add_folder">ADD FOLDER</string>
     <string name="add_folder_hint">Choose another folder…</string>
     <string name="save_to">SAVE TO</string>
+    <string name="nfc_invitation_service_description">Share the current Envoix room invitation over NFC</string>
+    <string name="nfc_invitation_aid_description">Envoix NFC invitation</string>
 </resources>

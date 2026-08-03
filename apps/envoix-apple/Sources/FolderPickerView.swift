@@ -303,6 +303,68 @@ enum OpenInUITestFixture {
 #endif
 #endif
 
+#if os(macOS)
+import AppKit
+import SwiftUI
+
+struct FolderPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appLanguage) private var language
+
+    let initialDirectoryURL: URL?
+    let onPick: (URL) -> Void
+    let onCancel: () -> Void
+
+    init(
+        initialDirectoryURL: URL? = nil,
+        onPick: @escaping (URL) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.initialDirectoryURL = initialDirectoryURL
+        self.onPick = onPick
+        self.onCancel = onCancel
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(AppText.value("Choose a save folder", "选择保存文件夹", language: language))
+                .font(.title2.weight(.semibold))
+            Text(AppText.value(
+                "Envoix needs access to a folder before accepting these files.",
+                "接受这些文件前，Envoix 需要访问一个保存文件夹。",
+                language: language
+            ))
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button(AppText.value("Cancel", "取消", language: language)) {
+                    onCancel()
+                    dismiss()
+                }
+                Button(AppText.value("Choose Folder", "选择文件夹", language: language)) {
+                    chooseFolder()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 420)
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = initialDirectoryURL
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        onPick(url)
+        dismiss()
+    }
+}
+#endif
+
 final class SecurityScopedResourceAccess {
     let url: URL
     private let didStart: Bool

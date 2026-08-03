@@ -2,7 +2,11 @@ use std::collections::VecDeque;
 
 use async_trait::async_trait;
 use envoix_protocol::ProtocolError;
+use envoix_protocol::manifest_v2::{
+    CompressionPolicyV2, EntryContentDigestV2, ManifestEntryKindV2, build_manifest_offer_v2,
+};
 use envoix_protocol::manifest_v2_frames::canonical_manifest_v2_frame_body_digest;
+use serde_json::json;
 use tempfile::tempdir;
 
 use super::*;
@@ -39,6 +43,98 @@ impl ManifestV2FrameConnection for MockConnection {
     async fn close(&mut self) -> Result<(), ProtocolError> {
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn sender_store_round_trips_frozen_entry_encodings() {
+    let temporary = tempdir().unwrap();
+    let mut offer = offer();
+    offer.manifest.compression_policy = CompressionPolicyV2::Smart;
+    offer.manifest.entries[0].component = "REPORT.TXT".into();
+    offer.manifest.roots[0].requested_name = "REPORT.TXT".into();
+    let offer = build_manifest_offer_v2(offer.manifest).unwrap();
+    let record = SenderDeliveryRecordV2::new(&offer);
+    assert_eq!(
+        record.frozen_entry_encoding(0).unwrap(),
+        EntryEncodingV2::Zstd
+    );
+
+    let store = SenderDeliveryStoreV2::new(temporary.path());
+    store.save(&record).await.unwrap();
+    let restored = store.load(record.identity()).await.unwrap().unwrap();
+    restored.validate_offer(&offer).unwrap();
+    assert_eq!(
+        restored.frozen_entry_encoding(0).unwrap(),
+        EntryEncodingV2::Zstd
+    );
+}
+
+#[test]
+fn sender_record_rejects_invalid_encoding_length_and_directory_encoding() {
+    let mut offer = offer();
+    offer.manifest.compression_policy = CompressionPolicyV2::Smart;
+    let offer = build_manifest_offer_v2(offer.manifest).unwrap();
+    let record = SenderDeliveryRecordV2::new(&offer);
+
+    let mut missing = serde_json::to_value(&record).unwrap();
+    missing["entry_encodings"] = json!([]);
+    let missing: SenderDeliveryRecordV2 = serde_json::from_value(missing).unwrap();
+    assert!(matches!(
+        missing.validate_offer(&offer),
+        Err(DeliveryAuthorityErrorV2::InvalidRecord)
+    ));
+
+    let mut directory_offer = crate::test_support::offer();
+    directory_offer.manifest.compression_policy = CompressionPolicyV2::Smart;
+    directory_offer.manifest.entries[0].kind = ManifestEntryKindV2::Directory;
+    directory_offer.manifest.entries[0].plaintext_size = 0;
+    directory_offer.manifest.entries[0].content_digest = EntryContentDigestV2::Deferred;
+    directory_offer.manifest.totals.file_count = 0;
+    directory_offer.manifest.totals.directory_count = 1;
+    directory_offer.manifest.totals.total_plaintext_bytes = 0;
+    let directory_offer = build_manifest_offer_v2(directory_offer.manifest).unwrap();
+    let directory = SenderDeliveryRecordV2::new(&directory_offer);
+    let mut invalid = serde_json::to_value(directory).unwrap();
+    invalid["entry_encodings"][0] = json!("Zstd");
+    let invalid: SenderDeliveryRecordV2 = serde_json::from_value(invalid).unwrap();
+    assert!(matches!(
+        invalid.validate_offer(&directory_offer),
+        Err(DeliveryAuthorityErrorV2::InvalidRecord)
+    ));
+}
+
+#[tokio::test]
+async fn schema_two_waiting_record_remains_readable_without_encoding_payload() {
+    let temporary = tempdir().unwrap();
+    let offer = offer();
+    let accept = accept(&offer);
+    let accept_digest =
+        canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::Accept(accept.clone())).unwrap();
+    let mut sender = SenderDeliveryRecordV2::new(&offer);
+    sender.commit_accept(&accept, accept_digest).unwrap();
+    sender
+        .commit_results(&SenderDataPlaneSummaryV2 {
+            identity: accept.identity,
+            accept_body_digest: accept_digest,
+            sender_completion_set_digest: ContentDigestV2([0x91; 32]),
+            entry_results: entry_results(&offer),
+        })
+        .unwrap();
+
+    let mut legacy = serde_json::to_value(sender).unwrap();
+    legacy["schema_version"] = json!(LEGACY_SENDER_DELIVERY_SCHEMA_VERSION);
+    legacy.as_object_mut().unwrap().remove("entry_encodings");
+    let legacy: SenderDeliveryRecordV2 = serde_json::from_value(legacy).unwrap();
+    legacy.validate_offer(&offer).unwrap();
+
+    let store = SenderDeliveryStoreV2::new(temporary.path());
+    store.save(&legacy).await.unwrap();
+    let restored = store.load(legacy.identity()).await.unwrap().unwrap();
+    assert_eq!(
+        restored.phase(),
+        SenderTransferPhaseV2::WaitingForReceiverSave
+    );
+    assert!(restored.requires_entry_encoding_migration());
 }
 
 #[tokio::test]

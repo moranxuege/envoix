@@ -104,7 +104,7 @@ class ManifestV2AppUiInstrumentedTest {
         resource(device, CONNECTION_HUB)
 
         text(device, copy.revealInvite)
-        clickResourceUntilText(device, HUB_ROOM_INVITE, copy.roomTitle)
+        clickResourceUntilText(device, HUB_ROOM_QR_TOGGLE, copy.roomTitle)
 
         text(device, copy.roomStatus)
         assertFalse(device.hasObject(By.res(TRANSFER_SHEET)))
@@ -229,6 +229,7 @@ class ManifestV2AppUiInstrumentedTest {
         const val CONNECTION_HUB = "connection_hub"
         const val HUB_ACTIVITY = "hub_activity"
         const val HUB_ROOM_INVITE = "hub_room_invite"
+        const val HUB_ROOM_QR_TOGGLE = "hub_room_qr_toggle"
         const val ROOM_ADD_FILES = "room_add_files"
         const val ROOM_ACTIVITY = "room_activity"
         const val ROOM_SETTINGS = "room_settings"
@@ -272,8 +273,8 @@ private class ImmediatelyConnectedRoomGateway : RoomControlGateway {
         mutableEvents.emit(
             RoomControlEvent.Hosting(
                 RoomControlInvite(
-                    code = "R123456-test-room",
-                    payload = "envoix://room/R123456-test-room",
+                    code = "123456-a1b2-c3d4",
+                    payload = "envoix://room/123456-a1b2-c3d4",
                     endpoint = endpoint,
                     expiresAtEpochMs = System.currentTimeMillis() + ROOM_LIFETIME_MS,
                 ),

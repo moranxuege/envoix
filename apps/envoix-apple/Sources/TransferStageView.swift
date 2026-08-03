@@ -1,7 +1,140 @@
 import SwiftUI
+import EnvoixCore
 #if os(iOS)
 import QuickLook
 #endif
+
+struct ActivityRoomGroup: Identifiable {
+    let id: String
+    let activityGroupID: String?
+    let activityGroupLabel: String?
+    let records: [TransferActivityRecord]
+    let summaryRecord: TransferActivityRecord
+
+    init?(
+        id: String,
+        activityGroupID: String?,
+        records: [TransferActivityRecord]
+    ) {
+        guard !records.isEmpty else { return nil }
+        let sortedRecords = records.sorted(by: Self.recordsNewestFirst)
+        self.id = id
+        self.activityGroupID = activityGroupID
+        self.records = sortedRecords
+        activityGroupLabel = sortedRecords.lazy.compactMap {
+            $0.activityGroupLabel?.trimmed
+        }.first { !$0.isEmpty }
+        let pendingRecords = sortedRecords.filter {
+            ActivityProjectionPolicy.isPending($0.state)
+        }
+        if pendingRecords.isEmpty {
+            summaryRecord = sortedRecords[0]
+        } else {
+            let highestPriority = pendingRecords.map {
+                Self.priority(of: $0.state)
+            }.max() ?? 0
+            summaryRecord = pendingRecords.first {
+                Self.priority(of: $0.state) == highestPriority
+            } ?? pendingRecords[0]
+        }
+    }
+
+    var itemCount: UInt64 {
+        saturatingSum(records.map { UInt64($0.itemCount) })
+    }
+
+    var totalBytes: UInt64 {
+        saturatingSum(records.map(\.totalBytes))
+    }
+
+    var progressRecords: [TransferActivityRecord] {
+        let active = records.filter {
+            TransferPresentationPolicy.progress(for: $0.state) == .active
+        }
+        if !active.isEmpty { return active }
+        return records.filter {
+            ActivityProjectionPolicy.isPending($0.state)
+                && TransferPresentationPolicy.progress(for: $0.state) != .hidden
+        }
+    }
+
+    var progressTotalBytes: UInt64 {
+        saturatingSum(progressRecords.map(\.totalBytes))
+    }
+
+    var progressBytesTransferred: UInt64 {
+        min(
+            saturatingSum(progressRecords.map(\.bytesTransferred)),
+            progressTotalBytes
+        )
+    }
+
+    var updatedAt: Date {
+        records.map(\.updatedAt).max() ?? summaryRecord.updatedAt
+    }
+
+    private func saturatingSum(_ values: [UInt64]) -> UInt64 {
+        values.reduce(0) { partial, value in
+            let (sum, overflow) = partial.addingReportingOverflow(value)
+            return overflow ? UInt64.max : sum
+        }
+    }
+
+    private static func recordsNewestFirst(
+        _ lhs: TransferActivityRecord,
+        _ rhs: TransferActivityRecord
+    ) -> Bool {
+        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        return lhs.activityId < rhs.activityId
+    }
+
+    private static func priority(of state: TransferActivityState) -> Int {
+        switch state {
+        case .awaitingDecision:
+            return 6
+        case .preparing, .waitingForPeer, .pairing, .connecting,
+             .transferring, .verifying, .saving, .waitingForReceiverSave,
+             .finalizingDelivery:
+            return 5
+        case .paused:
+            return 4
+        case .failed:
+            return 3
+        case .canceled:
+            return 2
+        case .delivered:
+            return 1
+        }
+    }
+}
+
+func activityRoomGroups(_ records: [TransferActivityRecord]) -> [ActivityRoomGroup] {
+    var grouped: [String: [TransferActivityRecord]] = [:]
+    var activityGroupIDByKey: [String: String] = [:]
+
+    for record in records {
+        let normalizedGroupID = record.activityGroupID?.trimmed
+        let groupKey: String
+        if let normalizedGroupID, !normalizedGroupID.isEmpty {
+            groupKey = "group:\(normalizedGroupID)"
+            activityGroupIDByKey[groupKey] = normalizedGroupID
+        } else {
+            groupKey = "direct:\(record.activityId)"
+        }
+        grouped[groupKey, default: []].append(record)
+    }
+
+    return grouped.compactMap { key, records in
+        ActivityRoomGroup(
+            id: key,
+            activityGroupID: activityGroupIDByKey[key],
+            records: records
+        )
+    }.sorted {
+        if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+        return $0.id < $1.id
+    }
+}
 
 struct TransferStageView: View {
     let records: [TransferActivityRecord]
@@ -20,7 +153,7 @@ struct TransferStageView: View {
 
     @Environment(\.appLanguage) private var language
     @AppStorage("envoix.developerMode") private var developerMode = false
-    @State private var expandedActivityIDs: Set<String> = []
+    @State private var expandedRoomIDs: Set<String> = []
     #if os(iOS)
     @State private var previewFileURL: URL?
     @State private var receivedItemsPresentation: ReceivedItemsPresentation?
@@ -49,20 +182,9 @@ struct TransferStageView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 48)
                 } else {
-                    activitySection(
-                        AppText.localized("activity.in_progress", language: language),
-                        records: records.filter { ActivityProjectionPolicy.isPending($0.state) }
-                    )
-                    activitySection(
-                        AppText.localized("activity.needs_attention", language: language),
-                        records: records.filter { $0.state == .failed }
-                    )
-                    activitySection(
-                        AppText.localized("activity.recent", language: language),
-                        records: records.filter {
-                            !ActivityProjectionPolicy.isPending($0.state) && $0.state != .failed
-                        }
-                    )
+                    ForEach(roomGroups) { group in
+                        roomCard(group)
+                    }
                 }
             }
             .padding(.vertical, 4)
@@ -75,51 +197,37 @@ struct TransferStageView: View {
         #endif
     }
 
-    @ViewBuilder
-    private func activitySection(_ title: String, records: [TransferActivityRecord]) -> some View {
-        if !records.isEmpty {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Theme.muted)
-                .padding(.top, 4)
-            ForEach(records) { record in
-                activityCard(record)
-            }
-        }
-    }
-
-    private func activityCard(_ record: TransferActivityRecord) -> some View {
-        let actions = activityActionAvailability(for: record)
-        let progress = TransferPresentationPolicy.progress(for: record.state)
-        let metrics = metricsByActivityID[record.activityId] ?? ActivityMetrics()
-        let isExpanded = expandedActivityIDs.contains(record.activityId)
+    private func roomCard(_ group: ActivityRoomGroup) -> some View {
+        let isExpanded = expandedRoomIDs.contains(group.id)
+        let metrics = aggregateMetrics(for: group)
         return VStack(alignment: .leading, spacing: 12) {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     if isExpanded {
-                        expandedActivityIDs.remove(record.activityId)
+                        expandedRoomIDs.remove(group.id)
                     } else {
-                        expandedActivityIDs.insert(record.activityId)
+                        expandedRoomIDs.insert(group.id)
                     }
                 }
             } label: {
-                HStack(alignment: .top, spacing: 11) {
-                    Image(systemName: icon(for: record))
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: group.activityGroupID == nil
+                        ? "arrow.left.arrow.right"
+                        : "person.2.fill")
                         .font(.title2)
-                        .foregroundStyle(tint(for: record.state))
-                        .frame(width: 32)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(title(for: record))
-                            .font(.headline)
+                        .foregroundStyle(tint(for: group.summaryRecord.state))
+                        .frame(width: 34)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(groupTitle(group))
+                            .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
-                        Text(stateText(record))
+                        Text(roomSummary(group))
                             .font(.subheadline)
                             .foregroundStyle(Theme.muted)
+                            .multilineTextAlignment(.leading)
                     }
-                    Spacer()
-                    Text(record.direction == .send
-                        ? AppText.value("Send", "发送", language: language)
-                        : AppText.value("Receive", "接收", language: language))
+                    Spacer(minLength: 8)
+                    Text(transferCountText(group.records.count))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Theme.muted)
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -130,6 +238,104 @@ struct TransferStageView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("activity_room_\(group.id)")
+            .accessibilityLabel(groupTitle(group))
+            .accessibilityValue(isExpanded
+                ? AppText.value("Expanded", "已展开", language: language)
+                : AppText.value("Collapsed", "已收起", language: language))
+            .accessibilityHint(isExpanded
+                ? AppText.value(
+                    "Double-tap to collapse transfer details.",
+                    "轻点两下以收起传输详情。",
+                    language: language
+                )
+                : AppText.value(
+                    "Double-tap to expand transfer details.",
+                    "轻点两下以展开传输详情。",
+                    language: language
+                ))
+
+            HStack(spacing: 8) {
+                Label(
+                    stateText(group.summaryRecord),
+                    systemImage: icon(for: group.summaryRecord)
+                )
+                .foregroundStyle(tint(for: group.summaryRecord.state))
+                Spacer(minLength: 8)
+                Text(updatedText(group.updatedAt))
+                    .foregroundStyle(Theme.muted)
+            }
+            .font(.caption.weight(.semibold))
+
+            if group.progressTotalBytes > 0 {
+                ProgressView(
+                    value: Double(group.progressBytesTransferred),
+                    total: Double(group.progressTotalBytes)
+                )
+                Text(
+                    "\(byteString(group.progressBytesTransferred)) / "
+                        + byteString(group.progressTotalBytes)
+                )
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Theme.muted)
+            }
+
+            TransferPerformanceLine(
+                currentBytesPerSecond: metrics.speedBps,
+                averageBytesPerSecond: metrics.averageSpeedBps,
+                etaSeconds: metrics.etaSeconds,
+                currentSampleDate: metrics.currentRateUpdatedAt,
+                accessibilityPrefix: "activity_room_\(group.id)"
+            )
+
+            if let path = uniformConnectionPath(for: group.records) {
+                Label(
+                    ConnectionPathPresentationPolicy.label(for: path, language: language),
+                    systemImage: pathIcon(path)
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+                .accessibilityIdentifier("activity_room_path_\(group.id)")
+            }
+
+            if isExpanded {
+                Divider()
+                VStack(spacing: 10) {
+                    ForEach(group.records) { record in
+                        transferCard(record)
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .card(raised: true, padding: 16)
+    }
+
+    private func transferCard(_ record: TransferActivityRecord) -> some View {
+        let actions = activityActionAvailability(for: record)
+        let progress = TransferPresentationPolicy.progress(for: record.state)
+        let metrics = metricsByActivityID[record.activityId] ?? ActivityMetrics()
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: icon(for: record))
+                    .font(.title3)
+                    .foregroundStyle(tint(for: record.state))
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title(for: record))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.text)
+                    Text(transferSummary(record))
+                        .font(.caption)
+                        .foregroundStyle(Theme.muted)
+                }
+                Spacer(minLength: 8)
+                Text(record.direction == .send
+                    ? AppText.value("Send", "发送", language: language)
+                    : AppText.value("Receive", "接收", language: language))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(tint(for: record.state))
+            }
             .accessibilityIdentifier("activity_\(record.activityId)")
 
             if record.state != .delivered, progress != .hidden, record.totalBytes > 0 {
@@ -139,17 +345,18 @@ struct TransferStageView: View {
                 )
                 HStack {
                     Text("\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))")
-                    Spacer()
-                    if progress == .active, metrics.speedBps > 0 {
-                        Text(rateString(metrics.speedBps))
-                    }
-                    if progress == .active, let eta = metrics.etaSeconds {
-                        Text(etaString(eta))
-                    }
                 }
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(Theme.muted)
             }
+
+            TransferPerformanceLine(
+                currentBytesPerSecond: progress == .active ? metrics.speedBps : 0,
+                averageBytesPerSecond: metrics.averageSpeedBps,
+                etaSeconds: progress == .active ? metrics.etaSeconds : nil,
+                currentSampleDate: metrics.currentRateUpdatedAt,
+                accessibilityPrefix: "activity_\(record.activityId)"
+            )
 
             if record.direction == .receive,
                record.state == .delivered,
@@ -157,99 +364,336 @@ struct TransferStageView: View {
                 completedReceiveControls(record)
             }
 
-            if isExpanded {
-                if let path = record.connectionPath {
-                    Label(
-                        ConnectionPathPresentationPolicy.label(for: path, language: language),
-                        systemImage: path == .relay ? "point.3.connected.trianglepath.dotted" : "link"
-                    )
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Theme.muted)
-                    .accessibilityIdentifier("activity_path_\(record.activityId)")
-                }
+            if let path = record.connectionPath {
+                Label(
+                    ConnectionPathPresentationPolicy.label(for: path, language: language),
+                    systemImage: pathIcon(path)
+                )
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+                .accessibilityIdentifier("activity_path_\(record.activityId)")
+            }
 
-                if !record.diagnosticMessage.isEmpty {
-                    Text(record.diagnosticMessage)
-                        .font(.footnote)
-                        .foregroundStyle(record.state == .failed ? Theme.danger : Theme.muted)
-                        .textSelection(.enabled)
-                }
+            stageTimingSection(metrics, activityID: record.activityId)
 
-                HStack(spacing: 8) {
-                    if actions.canApprove {
-                        Button(AppText.value("Accept", "接收", language: language)) {
-                            _ = onApprove(record.activityId)
-                        }
-                        .buttonStyle(.borderedProminent)
+            if !record.diagnosticMessage.isEmpty {
+                Text(record.diagnosticMessage)
+                    .font(.footnote)
+                    .foregroundStyle(record.state == .failed ? Theme.danger : Theme.muted)
+                    .textSelection(.enabled)
+            }
+
+            HStack(spacing: 8) {
+                if actions.canApprove {
+                    Button(AppText.value("Receive", "接收", language: language)) {
+                        _ = onApprove(record.activityId)
                     }
-                    if actions.canPause {
-                        Button(AppText.value("Pause", "暂停", language: language)) {
-                            _ = onPause(record.activityId)
-                        }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("activity_receive_\(record.activityId)")
+                }
+                if actions.canPause {
+                    Button(AppText.value("Pause", "暂停", language: language)) {
+                        _ = onPause(record.activityId)
                     }
-                    if actions.canResume, onCanResume(record.activityId) {
-                        Button(AppText.value("Resume", "恢复", language: language)) {
-                            _ = onResume(record.activityId)
-                        }
+                    .accessibilityIdentifier("activity_pause_\(record.activityId)")
+                }
+                if actions.canResume, onCanResume(record.activityId) {
+                    Button(AppText.value("Resume", "恢复", language: language)) {
+                        _ = onResume(record.activityId)
                     }
-                    if actions.canCancel {
-                        Button(AppText.value("Cancel", "取消", language: language), role: .destructive) {
-                            _ = onCancel(record.activityId)
-                        }
+                    .accessibilityIdentifier("activity_resume_\(record.activityId)")
+                }
+                if actions.canCancel {
+                    Button(AppText.value("Cancel", "取消", language: language), role: .destructive) {
+                        _ = onCancel(record.activityId)
                     }
-                    Spacer()
-                    if developerMode || actions.canDelete {
-                        Menu {
-                            if developerMode {
-                                Button(AppText.value("Copy diagnostics", "复制诊断信息", language: language)) {
-                                    copyWithToast(
-                                        onCopyDiagnostics(record),
-                                        AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
-                                        language: language
-                                    )
-                                }
-                                if let target = onRemoteLogTarget(record) {
-                                    Button(AppText.value("Upload diagnostics", "上传诊断信息", language: language)) {
-                                        Task {
-                                            try? await RemoteLogUpload.upload(
-                                                server: UserDefaults.standard.string(
-                                                    forKey: "envoix.logServer"
-                                                ) ?? defaultLogServer,
-                                                target: target,
-                                                body: onRemoteDiagnosticReport(record)
-                                            )
-                                        }
+                    .accessibilityIdentifier("activity_cancel_\(record.activityId)")
+                }
+                Spacer()
+                if developerMode || actions.canDelete {
+                    Menu {
+                        if developerMode {
+                            Button(AppText.value("Copy diagnostics", "复制诊断信息", language: language)) {
+                                copyWithToast(
+                                    onCopyDiagnostics(record),
+                                    AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                    language: language
+                                )
+                            }
+                            if let target = onRemoteLogTarget(record) {
+                                Button(AppText.value("Upload diagnostics", "上传诊断信息", language: language)) {
+                                    Task {
+                                        try? await RemoteLogUpload.upload(
+                                            server: UserDefaults.standard.string(
+                                                forKey: "envoix.logServer"
+                                            ) ?? defaultLogServer,
+                                            target: target,
+                                            body: onRemoteDiagnosticReport(record)
+                                        )
                                     }
                                 }
-                                Button(AppText.value("Copy app diagnostics", "复制应用诊断信息", language: language)) {
-                                    copyWithToast(
-                                        onAppDiagnosticReport(),
-                                        AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
-                                        language: language
-                                    )
-                                }
                             }
-                            if actions.canDelete {
-                                Button(
-                                    AppText.localized("activity.remove_record", language: language),
-                                    role: .destructive
-                                ) {
-                                    _ = onDelete(record.activityId)
-                                }
+                            Button(AppText.value("Copy app diagnostics", "复制应用诊断信息", language: language)) {
+                                copyWithToast(
+                                    onAppDiagnosticReport(),
+                                    AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                    language: language
+                                )
                             }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .frame(width: 32, height: 32)
-                                .contentShape(Rectangle())
                         }
-                        .disabled(pendingRemovalIDs.contains(record.activityId))
+                        if actions.canDelete {
+                            Button(
+                                AppText.localized("activity.remove_record", language: language),
+                                role: .destructive
+                            ) {
+                                _ = onDelete(record.activityId)
+                            }
+                            .accessibilityIdentifier("activity_delete_\(record.activityId)")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .disabled(pendingRemovalIDs.contains(record.activityId))
+                    .accessibilityIdentifier("activity_more_\(record.activityId)")
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Theme.line.opacity(0.65), lineWidth: 0.8)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var roomGroups: [ActivityRoomGroup] {
+        activityRoomGroups(records)
+    }
+
+    private func groupTitle(_ group: ActivityRoomGroup) -> String {
+        if let label = group.activityGroupLabel {
+            return label
+        }
+        return group.activityGroupID == nil
+            ? AppText.value("Standalone transfer", "独立传输", language: language)
+            : AppText.value("One-time Room", "一次性房间", language: language)
+    }
+
+    private func roomSummary(_ group: ActivityRoomGroup) -> String {
+        var parts = [itemCountText(group.itemCount)]
+        if group.totalBytes > 0 {
+            parts.append(byteString(group.totalBytes))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func transferSummary(_ record: TransferActivityRecord) -> String {
+        var parts = [
+            stateText(record),
+            itemCountText(UInt64(record.itemCount)),
+        ]
+        if record.totalBytes > 0 {
+            parts.append(byteString(record.totalBytes))
+        }
+        parts.append(updatedText(record.updatedAt))
+        return parts.joined(separator: " · ")
+    }
+
+    private func itemCountText(_ count: UInt64) -> String {
+        if count == 1 {
+            return AppText.value("1 item", "1 个项目", language: language)
+        }
+        return AppText.value("\(count) items", "\(count) 个项目", language: language)
+    }
+
+    private func transferCountText(_ count: Int) -> String {
+        if count == 1 {
+            return AppText.value("1 transfer", "1 次传输", language: language)
+        }
+        return AppText.value("\(count) transfers", "\(count) 次传输", language: language)
+    }
+
+    private func updatedText(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.locale = Locale(identifier: language.hasPrefix("zh") ? "zh_Hans" : "en")
+        let relative = formatter.localizedString(for: date, relativeTo: Date())
+        return AppText.value(
+            "Updated \(relative)",
+            "\(relative)更新",
+            language: language
+        )
+    }
+
+    private func aggregateMetrics(for group: ActivityRoomGroup) -> ActivityMetrics {
+        let trackedRecords = group.records
+        let activeRecords = trackedRecords.filter {
+            TransferPresentationPolicy.progress(for: $0.state) == .active
+        }
+        let speed = activeRecords.reduce(0.0) { partial, record in
+            saturatingRateSum(
+                partial,
+                boundedRate(metricsByActivityID[record.activityId]?.speedBps ?? 0)
+            )
+        }
+        let recordsWithRemainingBytes = activeRecords.filter {
+            $0.totalBytes > $0.bytesTransferred
+        }
+        let eta: Double?
+        if recordsWithRemainingBytes.isEmpty {
+            eta = nil
+        } else {
+            let stableETAs = recordsWithRemainingBytes.compactMap { record -> Double? in
+                guard TransferPresentationPolicy.progress(for: record.state) == .active else {
+                    return nil
+                }
+                return boundedETA(metricsByActivityID[record.activityId]?.etaSeconds)
+            }
+            eta = stableETAs.count == recordsWithRemainingBytes.count
+                ? stableETAs.max()
+                : nil
+        }
+        return ActivityMetrics(
+            speedBps: speed,
+            averageSpeedBps: trackedRecords.count == 1
+                ? boundedRate(
+                    metricsByActivityID[trackedRecords[0].activityId]?.averageSpeedBps ?? 0
+                )
+                : 0,
+            etaSeconds: eta
+        )
+    }
+
+    private func uniformConnectionPath(
+        for records: [TransferActivityRecord]
+    ) -> FfiDataPathKind? {
+        guard let first = records.first?.connectionPath,
+              records.allSatisfy({ $0.connectionPath == first }) else {
+            return nil
+        }
+        return first
+    }
+
+    private func boundedRate(_ value: Double) -> Double {
+        guard value.isFinite, value > 0 else { return 0 }
+        return min(value, Double(Int64.max))
+    }
+
+    private func saturatingRateSum(_ lhs: Double, _ rhs: Double) -> Double {
+        let maximum = Double(Int64.max)
+        guard lhs < maximum, rhs < maximum - lhs else { return maximum }
+        return lhs + rhs
+    }
+
+    private func boundedETA(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value >= 0 else { return nil }
+        return min(value, Double(Int.max).nextDown)
+    }
+
+    @ViewBuilder
+    private func stageTimingSection(
+        _ metrics: ActivityMetrics,
+        activityID: String
+    ) -> some View {
+        let samples = ActivityStageTimingPresentationPolicy.latestAttempt(
+            from: metrics.stageTimings
+        ).filter { $0.stage != .sessionStarted }
+        if !samples.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(
+                    AppText.value(
+                        "Transfer timeline",
+                        "传输时间线",
+                        language: language
+                    ),
+                    systemImage: "stopwatch"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.text)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 104), alignment: .leading)],
+                    alignment: .leading,
+                    spacing: 7
+                ) {
+                    ForEach(Array(samples.enumerated()), id: \.offset) { _, sample in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(stageTitle(sample.stage))
+                                .font(.caption2)
+                                .foregroundStyle(Theme.muted)
+                                .lineLimit(1)
+                            Text(ActivityStageTimingPresentationPolicy.elapsedString(
+                                microseconds: sample.elapsedMicroseconds
+                            ))
+                                .font(.caption.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(Theme.text)
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            Theme.surfaceRaised,
+                            in: RoundedRectangle(cornerRadius: 9)
+                        )
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier(
+                            "activity_stage_\(stageIdentifier(sample.stage))_\(activityID)"
+                        )
                     }
                 }
-                .buttonStyle(.bordered)
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
+            .accessibilityIdentifier("activity_stage_timing_\(activityID)")
         }
-        .card(padding: 14)
+    }
+
+    private func pathIcon(_ path: FfiDataPathKind) -> String {
+        switch path {
+        case .direct, .directIpv4, .directIpv6: return "arrow.left.and.right"
+        case .relay: return "point.3.connected.trianglepath.dotted"
+        case .wifiAware: return "wifi"
+        case .other: return "link"
+        }
+    }
+
+    private func stageTitle(_ stage: FfiTransferStage) -> String {
+        switch stage {
+        case .sessionStarted: return AppText.value("Started", "开始", language: language)
+        case .connectionReady: return AppText.value("Connected", "连接完成", language: language)
+        case .authenticationStarted:
+            return AppText.value("Authenticating", "开始认证", language: language)
+        case .authenticationComplete:
+            return AppText.value("Authenticated", "认证完成", language: language)
+        case .manifestOffer: return AppText.value("Offer", "清单送达", language: language)
+        case .manifestAccepted: return AppText.value("Accepted", "清单确认", language: language)
+        case .firstPayload: return AppText.value("First byte", "首个数据", language: language)
+        case .payloadComplete:
+            return AppText.value("Payload complete", "数据完成", language: language)
+        case .deliveryComplete:
+            return AppText.value("Delivered", "交付完成", language: language)
+        case .canceled: return AppText.value("Canceled", "已取消", language: language)
+        case .failed: return AppText.value("Failed", "失败", language: language)
+        }
+    }
+
+    private func stageIdentifier(_ stage: FfiTransferStage) -> String {
+        switch stage {
+        case .sessionStarted: return "session_started"
+        case .connectionReady: return "connection_ready"
+        case .authenticationStarted: return "authentication_started"
+        case .authenticationComplete: return "authentication_complete"
+        case .manifestOffer: return "manifest_offer"
+        case .manifestAccepted: return "manifest_accepted"
+        case .firstPayload: return "first_payload"
+        case .payloadComplete: return "payload_complete"
+        case .deliveryComplete: return "delivery_complete"
+        case .canceled: return "canceled"
+        case .failed: return "failed"
+        }
     }
 
     private func completedReceiveControls(_ record: TransferActivityRecord) -> some View {

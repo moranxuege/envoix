@@ -21,7 +21,7 @@ pub use invite::{
     BootstrapKind, Capabilities, CreatedInvitation, InvitationAuthContext, InvitationBootstrap,
     InvitationError, InvitationErrorCode, InvitationPublicContext, InvitationSide, InviteV2,
     RoomCode, TransferRole, ValidatedInvitation, create_invitation, parse_invitation_for_role,
-    parse_invitation_for_routing, parse_room_code,
+    parse_invitation_for_routing,
 };
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{

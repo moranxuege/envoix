@@ -195,22 +195,33 @@ async fn receive(plan: TransferPlan, json: bool) -> CliResult<()> {
     let total = pending.offer().manifest.totals.total_plaintext_bytes;
     let exceptional = total > api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES || total > available / 2;
     if exceptional && !plan.approve_large_transfer {
-        return Err(format!(
+        let error = format!(
             "offer requires explicit approval before payload ({} bytes offered, {} bytes allocatable); rerun with --approve-large-transfer",
             total, available
-        )
-        .into());
+        );
+        pending.reject().await;
+        return Err(error.into());
     }
-    let (decision, copy_staging_directory, staging_available) = match plan.save_mode {
-        SaveModeArg::Direct => (DestinationDecisionV2::UseDirectSave, None, None),
-        SaveModeArg::CopyAfterVerify => {
-            let staging = target_directory.join(".envoix-copy-staging-v2");
-            tokio::fs::create_dir_all(&staging).await?;
-            (
-                DestinationDecisionV2::ContinueWithCopyAfterVerify,
-                Some(staging),
-                Some(available),
-            )
+    let destination_setup: CliResult<_> = async {
+        Ok(match plan.save_mode {
+            SaveModeArg::Direct => (DestinationDecisionV2::UseDirectSave, None, None),
+            SaveModeArg::CopyAfterVerify => {
+                let staging = target_directory.join(".envoix-copy-staging-v2");
+                tokio::fs::create_dir_all(&staging).await?;
+                (
+                    DestinationDecisionV2::ContinueWithCopyAfterVerify,
+                    Some(staging),
+                    Some(available),
+                )
+            }
+        })
+    }
+    .await;
+    let (decision, copy_staging_directory, staging_available) = match destination_setup {
+        Ok(setup) => setup,
+        Err(error) => {
+            pending.close_with_failure().await;
+            return Err(error);
         }
     };
     let summary = pending
@@ -418,22 +429,93 @@ struct CliEvents {
 impl EventSink for CliEvents {
     fn on_event(&self, event: TransferEvent) {
         if self.json {
-            let (kind, detail) = match event {
-                TransferEvent::Diagnostic { message } => ("diagnostic", message),
-                TransferEvent::Pairing { step } => ("pairing", format!("{step:?}")),
-                TransferEvent::Connecting => ("connecting", String::new()),
-                TransferEvent::Connected { path } => ("connected", path.to_string()),
-                TransferEvent::PathChanged { path } => ("path_changed", path.to_string()),
+            let value = match event {
+                TransferEvent::Diagnostic { message } => serde_json::json!({
+                    "kind":"diagnostic",
+                    "detail":message,
+                    "message":message,
+                }),
+                TransferEvent::Pairing { step } => {
+                    let detail = format!("{step:?}");
+                    serde_json::json!({
+                        "kind":"pairing",
+                        "detail":detail,
+                        "step":step,
+                    })
+                }
+                TransferEvent::Connecting => serde_json::json!({
+                    "kind":"connecting",
+                    "detail":"",
+                }),
+                TransferEvent::Connected { path } => {
+                    let path = path.to_string();
+                    serde_json::json!({
+                        "kind":"connected",
+                        "detail":path,
+                        "path":path,
+                    })
+                }
+                TransferEvent::PathChanged { path } => {
+                    let path = path.to_string();
+                    serde_json::json!({
+                        "kind":"path_changed",
+                        "detail":path,
+                        "path":path,
+                    })
+                }
                 TransferEvent::Progress {
+                    transfer_id,
                     bytes_transferred,
                     total_bytes,
                     ..
-                } => ("progress", format!("{bytes_transferred}/{total_bytes}")),
-                TransferEvent::ManifestV2Phase { phase, .. } => {
-                    ("manifest_v2_phase", format!("{phase:?}"))
+                } => serde_json::json!({
+                    "kind":"progress",
+                    "detail":format!("{bytes_transferred}/{total_bytes}"),
+                    "transfer_id":transfer_id.to_string(),
+                    "bytes_transferred":bytes_transferred,
+                    "total_bytes":total_bytes,
+                }),
+                TransferEvent::ManifestV2Phase {
+                    transfer_id,
+                    direction,
+                    phase,
+                } => {
+                    let detail = format!("{phase:?}");
+                    let phase = match phase {
+                        api::ManifestV2ProgressPhase::Transferring => "transferring",
+                        api::ManifestV2ProgressPhase::Verifying => "verifying",
+                        api::ManifestV2ProgressPhase::Saving => "saving",
+                        api::ManifestV2ProgressPhase::WaitingForReceiverSave => {
+                            "waiting_for_receiver_save"
+                        }
+                        api::ManifestV2ProgressPhase::FinalizingDelivery => "finalizing_delivery",
+                    };
+                    serde_json::json!({
+                        "kind":"manifest_v2_phase",
+                        "detail":detail,
+                        "transfer_id":transfer_id.to_string(),
+                        "direction":transfer_direction_wire(direction),
+                        "phase":phase,
+                    })
                 }
+                TransferEvent::StageTiming {
+                    transfer_id,
+                    direction,
+                    attempt_id,
+                    stage,
+                    elapsed_us,
+                    delta_us,
+                } => serde_json::json!({
+                    "kind":"stage_timing",
+                    "stage":transfer_stage_wire(stage),
+                    "direction":transfer_direction_wire(direction),
+                    "attempt_id":attempt_id,
+                    "transfer_id":transfer_id.map(|value| value.to_string()),
+                    "elapsed_us":elapsed_us,
+                    "delta_us":delta_us,
+                }),
             };
-            println!("{}", serde_json::json!({ "kind": kind, "detail": detail }));
+            println!("{value}");
         } else {
             match event {
                 TransferEvent::Diagnostic { message } => eprintln!("{message}"),
@@ -449,7 +531,50 @@ impl EventSink for CliEvents {
                 TransferEvent::ManifestV2Phase { phase, .. } => {
                     eprintln!("manifest v2: {phase:?}")
                 }
+                TransferEvent::StageTiming {
+                    transfer_id,
+                    direction,
+                    attempt_id,
+                    stage,
+                    elapsed_us,
+                    delta_us,
+                } => eprintln!(
+                    "stage_timing stage={} direction={} attempt_id={} transfer_id={} elapsed_us={} delta_us={}",
+                    transfer_stage_wire(stage),
+                    transfer_direction_wire(direction),
+                    attempt_id,
+                    transfer_id
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .as_deref()
+                        .unwrap_or("-"),
+                    elapsed_us,
+                    delta_us,
+                ),
             }
         }
+    }
+}
+
+fn transfer_stage_wire(stage: api::TransferStage) -> &'static str {
+    match stage {
+        api::TransferStage::SessionStarted => "session_started",
+        api::TransferStage::ConnectionReady => "connection_ready",
+        api::TransferStage::AuthenticationStarted => "authentication_started",
+        api::TransferStage::AuthenticationComplete => "authentication_complete",
+        api::TransferStage::ManifestOffer => "manifest_offer",
+        api::TransferStage::ManifestAccepted => "manifest_accepted",
+        api::TransferStage::FirstPayload => "first_payload",
+        api::TransferStage::PayloadComplete => "payload_complete",
+        api::TransferStage::DeliveryComplete => "delivery_complete",
+        api::TransferStage::Canceled => "canceled",
+        api::TransferStage::Failed => "failed",
+    }
+}
+
+fn transfer_direction_wire(direction: api::TransferDirection) -> &'static str {
+    match direction {
+        api::TransferDirection::Send => "send",
+        api::TransferDirection::Receive => "receive",
     }
 }

@@ -32,9 +32,18 @@ object TransferRepository {
     fun create(
         direction: Direction,
         room: String,
+        activityGroupId: String? = null,
+        activityGroupLabel: String? = null,
     ): Long {
         val id = nextId++
-        _transfers.value = _transfers.value + Transfer(id = id, direction = direction, room = room)
+        _transfers.value = _transfers.value +
+            Transfer(
+                id = id,
+                direction = direction,
+                room = room,
+                activityGroupId = activityGroupId,
+                activityGroupLabel = activityGroupLabel,
+            )
         return id
     }
 
@@ -49,6 +58,8 @@ object TransferRepository {
         savedUri: String? = null,
         savedName: String? = null,
         savedDestinationLabel: String? = null,
+        activityGroupId: String? = null,
+        activityGroupLabel: String? = null,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
@@ -61,8 +72,66 @@ object TransferRepository {
                 savedUri = savedUri,
                 savedName = savedName,
                 savedDestinationLabel = savedDestinationLabel,
+                activityGroupId = activityGroupId,
+                activityGroupLabel = activityGroupLabel,
             )
         return true
+    }
+
+    /**
+     * Assign a stable Activity identity without changing the transport room.
+     * A higher-level room owner may explicitly replace a provisional identity.
+     */
+    @Synchronized
+    fun assignActivityGroup(
+        id: Long,
+        groupId: String,
+        groupLabel: String?,
+        replaceExisting: Boolean = false,
+    ): Boolean {
+        val normalizedId = groupId.trim()
+        require(normalizedId.isNotEmpty()) { "Activity group id is required" }
+        val normalizedLabel = groupLabel?.trim()?.takeIf(String::isNotEmpty)
+        var matched = false
+        _transfers.value =
+            _transfers.value.map { transfer ->
+                if (transfer.id != id) {
+                    transfer
+                } else {
+                    matched = true
+                    transfer.withActivityGroup(normalizedId, normalizedLabel, replaceExisting)
+                }
+            }
+        return matched
+    }
+
+    /**
+     * Assign by the opaque room reference while the caller still owns that
+     * reference. This is used only to bridge synchronous transfer creation to
+     * the higher-level room workflow.
+     */
+    @Synchronized
+    fun assignActivityGroupByRoom(
+        roomReference: String,
+        groupId: String,
+        groupLabel: String?,
+        replaceExisting: Boolean = false,
+    ): Int {
+        require(roomReference.isNotBlank()) { "Room reference is required" }
+        val normalizedId = groupId.trim()
+        require(normalizedId.isNotEmpty()) { "Activity group id is required" }
+        val normalizedLabel = groupLabel?.trim()?.takeIf(String::isNotEmpty)
+        var matches = 0
+        _transfers.value =
+            _transfers.value.map { transfer ->
+                if (transfer.room != roomReference) {
+                    transfer
+                } else {
+                    matches += 1
+                    transfer.withActivityGroup(normalizedId, normalizedLabel, replaceExisting)
+                }
+            }
+        return matches
     }
 
     @Synchronized
@@ -101,6 +170,18 @@ object TransferRepository {
     /** Attempts that still own active native work and therefore require the
      * foreground service. Paused records remain durable without a worker. */
     fun activeCount(): Int = _transfers.value.count { !it.status.isTerminal && it.status != Status.Paused }
+
+    private fun Transfer.withActivityGroup(
+        groupId: String,
+        groupLabel: String?,
+        replaceExisting: Boolean,
+    ): Transfer {
+        if (!replaceExisting && activityGroupId != null && activityGroupId != groupId) return this
+        return copy(
+            activityGroupId = groupId,
+            activityGroupLabel = groupLabel ?: activityGroupLabel,
+        )
+    }
 }
 
 /** Deployed Envoix broker + relay defaults (overridable in Settings later). */

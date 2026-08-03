@@ -2,10 +2,124 @@ import Combine
 import EnvoixCore
 import Foundation
 
+struct ActivityStageTimingSample: Equatable {
+    let stage: FfiTransferStage
+    let direction: FfiTransferDirection
+    let attemptID: UInt64
+    let transferID: String?
+    let elapsedMicroseconds: UInt64
+    let deltaMicroseconds: UInt64
+
+    init(_ event: FfiTransferStageTiming) {
+        stage = event.stage
+        direction = event.direction
+        attemptID = event.attemptId
+        transferID = event.transferId
+        elapsedMicroseconds = event.elapsedUs
+        deltaMicroseconds = event.deltaUs
+    }
+
+    var diagnosticLine: String {
+        [
+            "stage_timing",
+            "stage=\(stage.diagnosticName)",
+            "direction=\(direction.diagnosticName)",
+            "attempt_id=\(attemptID)",
+            "transfer_id=\(transferID ?? "-")",
+            "elapsed_us=\(elapsedMicroseconds)",
+            "delta_us=\(deltaMicroseconds)",
+        ].joined(separator: " ")
+    }
+}
+
+enum ActivityStageTimingProjection {
+    static let maximumSamplesPerActivity = 64
+
+    static func appending(
+        _ sample: ActivityStageTimingSample,
+        to samples: [ActivityStageTimingSample]
+    ) -> [ActivityStageTimingSample] {
+        guard !samples.contains(where: {
+            $0.attemptID == sample.attemptID
+                && $0.direction == sample.direction
+                && $0.stage == sample.stage
+        }) else {
+            return samples
+        }
+        var result = samples
+        result.append(sample)
+        result.sort {
+            if $0.attemptID != $1.attemptID {
+                return $0.attemptID < $1.attemptID
+            }
+            if $0.direction != $1.direction {
+                return $0.direction.diagnosticName < $1.direction.diagnosticName
+            }
+            if $0.elapsedMicroseconds != $1.elapsedMicroseconds {
+                return $0.elapsedMicroseconds < $1.elapsedMicroseconds
+            }
+            return $0.stage.diagnosticOrder < $1.stage.diagnosticOrder
+        }
+        if result.count > maximumSamplesPerActivity {
+            result.removeFirst(result.count - maximumSamplesPerActivity)
+        }
+        return result
+    }
+}
+
+private enum ActivityDiagnosticPolicy {
+    static let maximumLogLines = 240
+}
+
+private extension FfiTransferStage {
+    var diagnosticOrder: Int {
+        switch self {
+        case .sessionStarted: return 0
+        case .connectionReady: return 1
+        case .authenticationStarted: return 2
+        case .authenticationComplete: return 3
+        case .manifestOffer: return 4
+        case .manifestAccepted: return 5
+        case .firstPayload: return 6
+        case .payloadComplete: return 7
+        case .deliveryComplete: return 8
+        case .canceled, .failed: return 9
+        }
+    }
+
+    var diagnosticName: String {
+        switch self {
+        case .sessionStarted: return "session_started"
+        case .connectionReady: return "connection_ready"
+        case .authenticationStarted: return "authentication_started"
+        case .authenticationComplete: return "authentication_complete"
+        case .manifestOffer: return "manifest_offer"
+        case .manifestAccepted: return "manifest_accepted"
+        case .firstPayload: return "first_payload"
+        case .payloadComplete: return "payload_complete"
+        case .deliveryComplete: return "delivery_complete"
+        case .canceled: return "canceled"
+        case .failed: return "failed"
+        }
+    }
+}
+
+private extension FfiTransferDirection {
+    var diagnosticName: String {
+        switch self {
+        case .send: return "send"
+        case .receive: return "receive"
+        }
+    }
+}
+
 struct ActivityMetrics {
     var speedBps: Double = 0
+    var averageSpeedBps: Double = 0
     var etaSeconds: Double?
+    var currentRateUpdatedAt: Date?
     var log: [String] = []
+    var stageTimings: [ActivityStageTimingSample] = []
 }
 
 enum TransferActivityState: Equatable {
@@ -39,6 +153,8 @@ struct TransferActivityRecord: Identifiable {
     var roomID: String?
     var connectionPath: FfiDataPathKind?
     var updatedAt: Date
+    var activityGroupID: String? = nil
+    var activityGroupLabel: String? = nil
 
     var id: String { activityId }
 }
@@ -246,6 +362,8 @@ private struct StoredAppleManifestSessionV2: Codable {
     let itemCount: UInt32
     let totalBytes: UInt64
     let roomID: String?
+    let activityGroupID: String?
+    let activityGroupLabel: String?
 }
 
 @MainActor
@@ -345,16 +463,52 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// Associates one transfer with a stable product-level Activity group.
+    ///
+    /// `roomID` is a diagnostics locator and must not be used as a UI grouping
+    /// key. Callers should pass the workflow room/session/relationship identity
+    /// that remains stable across the transfers they want shown together.
+    @discardableResult
+    func assignActivityGroup(
+        activityID: String,
+        groupID: String,
+        label: String? = nil
+    ) -> Bool {
+        let normalizedGroupID = groupID.trimmed
+        guard !activityID.isEmpty, !normalizedGroupID.isEmpty else { return false }
+        let normalizedLabel = label.map { $0.trimmed }.flatMap { $0.isEmpty ? nil : $0 }
+
+        if let owner = owner(of: activityID),
+           let updated = owner.assignActivityGroup(
+               activityID: activityID,
+               groupID: normalizedGroupID,
+               label: normalizedLabel
+           ) {
+            upsert(updated)
+            return true
+        }
+
+        guard let index = activities.firstIndex(where: { $0.activityId == activityID }) else {
+            return false
+        }
+        activities[index].activityGroupID = normalizedGroupID
+        activities[index].activityGroupLabel = normalizedLabel
+        return true
+    }
+
     func diagnosticReport(_ record: TransferActivityRecord) -> String {
-        [
+        var lines = [
             "activity_id=\(record.activityId)",
             "direction=\(record.direction)",
             "mode=\(record.mode)",
             "state=\(record.state)",
             "items=\(record.itemCount)",
             "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
+            "connection_path=\(String(describing: record.connectionPath))",
             "diagnostic=\(record.diagnosticMessage)",
-        ].joined(separator: "\n")
+        ]
+        lines.append(contentsOf: stageTimingDiagnosticLines(for: record))
+        return lines.joined(separator: "\n")
     }
 
     func remoteLogTarget(_ record: TransferActivityRecord) -> RemoteLogUpload.Target? {
@@ -366,23 +520,49 @@ final class AppModel: ObservableObject {
     }
 
     func remoteDiagnosticReport(_ record: TransferActivityRecord) -> String {
-        [
+        var lines = [
             "activity_id=\(record.activityId)",
             "direction=\(record.direction)",
             "mode=\(record.mode)",
             "state=\(record.state)",
             "items=\(record.itemCount)",
             "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
+            "connection_path=\(String(describing: record.connectionPath))",
             "failure_code=\(String(describing: record.failure?.code))",
             "failure_category=\(String(describing: record.failure?.category))",
             "failure_phase=\(String(describing: record.failure?.phase))",
             "retryable=\(record.failure?.retryable ?? false)",
             "recovery_action=\(String(describing: record.failure?.recoveryAction))",
-        ].joined(separator: "\n")
+        ]
+        lines.append(contentsOf: stageTimingDiagnosticLines(for: record))
+        return lines.joined(separator: "\n")
     }
 
     func appDiagnosticReport() -> String {
         activities.map(diagnosticReport).joined(separator: "\n\n")
+    }
+
+    fileprivate func appendStageTiming(
+        _ event: FfiTransferStageTiming,
+        activityID: String
+    ) {
+        guard activities.contains(where: { $0.activityId == activityID }) else { return }
+        let sample = ActivityStageTimingSample(event)
+        var metrics = activityMetrics[activityID] ?? ActivityMetrics()
+        let updated = ActivityStageTimingProjection.appending(sample, to: metrics.stageTimings)
+        guard updated != metrics.stageTimings else { return }
+        metrics.stageTimings = updated
+        metrics.log.append(sample.diagnosticLine)
+        if metrics.log.count > ActivityDiagnosticPolicy.maximumLogLines {
+            metrics.log.removeFirst(
+                metrics.log.count - ActivityDiagnosticPolicy.maximumLogLines
+            )
+        }
+        activityMetrics[activityID] = metrics
+    }
+
+    private func stageTimingDiagnosticLines(for record: TransferActivityRecord) -> [String] {
+        activityMetrics[record.activityId]?.stageTimings.map(\.diagnosticLine) ?? []
     }
 
     func refreshTransferCache() {
@@ -439,19 +619,37 @@ final class AppModel: ObservableObject {
 
     #if os(iOS)
     func importSharedSendDraft(preferredID: UUID? = nil) throws -> SharedSendImportOutcome {
-        guard !send.isBusy else { return .sendBusy }
         let store = try ShareDraftStore.live()
         try store.cleanupExpired()
         guard let draft = try store.pending(preferredID: preferredID) else {
             return .noPendingDraft
         }
-        if pendingSendSelection?.id != draft.descriptor.id {
-            try store.claim(id: draft.descriptor.id)
-            pendingSendSelection = PendingSendSelection(
-                id: draft.descriptor.id,
-                fileURLs: draft.fileURLs,
-                sourceAccess: ShareDraftLease(id: draft.descriptor.id, store: store)
-            )
+        let incomingID = draft.descriptor.id
+        if pendingSendSelection?.id == incomingID {
+            return .alreadyImported
+        }
+        if send.protectedShareDraftID == incomingID {
+            return .alreadyImported
+        }
+        guard !send.isBusy, !send.hasResumableOperation else {
+            return .sendBusy
+        }
+
+        try store.claim(id: incomingID)
+        if send.preparedShareDraftID != nil,
+           !send.supersedePreparedShareDraft(with: incomingID, store: store) {
+            return .sendBusy
+        }
+
+        let supersededPendingID =
+            (pendingSendSelection?.sourceAccess as? ShareDraftLease)?.id
+        pendingSendSelection = PendingSendSelection(
+            id: incomingID,
+            fileURLs: draft.fileURLs,
+            sourceAccess: ShareDraftLease(id: incomingID, store: store)
+        )
+        if let supersededPendingID, supersededPendingID != incomingID {
+            try? store.discard(id: supersededPendingID)
         }
         return .imported
     }
@@ -495,8 +693,11 @@ final class AppModel: ObservableObject {
         var metrics = activityMetrics[record.activityId] ?? ActivityMetrics()
         if let owner = owner(of: record.activityId) {
             metrics.speedBps = owner.bytesPerSec
+            metrics.averageSpeedBps = owner.averageBytesPerSec
             metrics.etaSeconds = owner.etaSeconds
+            metrics.currentRateUpdatedAt = owner.currentRateUpdatedAt
             metrics.log = owner.eventLog
+            metrics.stageTimings = owner.stageTimings
         }
         activityMetrics[record.activityId] = metrics
     }
@@ -545,7 +746,7 @@ final class TransferViewModel: ObservableObject {
     }
 
     @MainActor
-    private final class ReceiveLaunchSignal {
+    final class ReceiveLaunchSignal {
         private var continuation: CheckedContinuation<String?, Never>?
 
         init(_ continuation: CheckedContinuation<String?, Never>) {
@@ -568,7 +769,10 @@ final class TransferViewModel: ObservableObject {
     @Published var statusText = ""
     @Published var peerAddress = ""
     @Published var eventLog: [String] = []
+    @Published private(set) var stageTimings: [ActivityStageTimingSample] = []
     @Published var bytesPerSec: Double = 0
+    @Published private(set) var averageBytesPerSec: Double = 0
+    @Published private(set) var currentRateUpdatedAt: Date?
     @Published var completedFileURL: URL?
     @Published var completedItemURLs: [URL] = []
     @Published private(set) var failure: FfiTransferFailure?
@@ -598,6 +802,7 @@ final class TransferViewModel: ObservableObject {
     private var resourceAccess: AnyObject?
     private var completedDestinationAccess: [String: AnyObject] = [:]
     private var rate = RateTracker()
+    private var rateTrackingIsFinalized = false
     private var observedTransferred: UInt64 = 0
     private var observedTotal: UInt64 = 0
     private var lastProgressPublishAt = Date.distantPast
@@ -609,8 +814,12 @@ final class TransferViewModel: ObservableObject {
         [String: [@MainActor () -> Void]] = [:]
 
     #if os(iOS)
+    var preparedShareDraftID: UUID? {
+        (preparedSelection?.sourceAccess as? ShareDraftLease)?.id
+    }
+
     var protectedShareDraftID: UUID? {
-        if let id = (preparedSelection?.sourceAccess as? ShareDraftLease)?.id {
+        if let id = preparedShareDraftID {
             return id
         }
         if transferActivity?.state == .delivered || transferActivity?.state == .canceled {
@@ -758,11 +967,11 @@ final class TransferViewModel: ObservableObject {
         statusText = ""
         peerAddress = ""
         eventLog = []
-        bytesPerSec = 0
+        stageTimings = []
+        resetRateTracking()
         completedFileURL = nil
         completedItemURLs = []
         connectionPath = nil
-        rate = RateTracker()
         observedTransferred = 0
         observedTotal = 0
         lastProgressPublishAt = .distantPast
@@ -799,6 +1008,10 @@ final class TransferViewModel: ObservableObject {
         operationID = UUID()
         transferred = 0
         total = stored.totalBytes
+        observedTransferred = 0
+        observedTotal = 0
+        lastProgressPublishAt = .distantPast
+        resetRateTracking()
         fileName = stored.itemCount == 1
             ? localized("1 item", "1 个项目")
             : localized("\(stored.itemCount) items", "\(stored.itemCount) 个项目")
@@ -815,7 +1028,9 @@ final class TransferViewModel: ObservableObject {
             savedPaths: [],
             roomID: stored.roomID,
             connectionPath: nil,
-            updatedAt: Date()
+            updatedAt: Date(),
+            activityGroupID: stored.activityGroupID,
+            activityGroupLabel: stored.activityGroupLabel
         )
         presentationState = transferActivity?.state
         statusText = localized("Restoring interrupted transfer", "正在恢复中断的传输")
@@ -895,6 +1110,20 @@ final class TransferViewModel: ObservableObject {
         }
         return true
     }
+
+    #if os(iOS)
+    @discardableResult
+    func supersedePreparedShareDraft(
+        with incomingID: UUID,
+        store: ShareDraftStore
+    ) -> Bool {
+        guard let currentID = preparedShareDraftID else { return true }
+        guard currentID != incomingID else { return false }
+        guard cancelManifestPreparation() else { return false }
+        try? store.discard(id: currentID)
+        return true
+    }
+    #endif
 
     func approvePartialManifestSource(rootItemID: UInt64) {
         resolveSource(rootItemID: rootItemID, decision: .approvePartial, path: nil)
@@ -1343,7 +1572,7 @@ final class TransferViewModel: ObservableObject {
         cancellation?.cancel()
         cancelPendingNearbyHybridDestination()
         operationID = UUID()
-        publishObservedProgress()
+        publishObservedProgress(finalizeRate: true)
         pendingReceive = nil
         presentationState = .paused
         updateActivity(state: .paused, diagnostic: localized("Paused; progress is retained", "已暂停；进度已保留"))
@@ -1368,7 +1597,8 @@ final class TransferViewModel: ObservableObject {
         failure = nil
         transferActivity?.failure = nil
         operationID = UUID()
-        rate = RateTracker()
+        resetRateTracking()
+        lastProgressPublishAt = .distantPast
         presentationState = nil
         if let activeSend {
             launchSend(activeSend)
@@ -1393,7 +1623,7 @@ final class TransferViewModel: ObservableObject {
         cancellation?.cancel()
         cancelPendingNearbyHybridDestination()
         operationID = UUID()
-        publishObservedProgress()
+        publishObservedProgress(finalizeRate: true)
         pendingReceive = nil
         requiresExceptionalTransferApproval = false
         presentationState = .canceled
@@ -1418,6 +1648,7 @@ final class TransferViewModel: ObservableObject {
         }
         transferActivity = nil
         presentationState = nil
+        resetRateTracking()
         activeSend = nil
         activeReceive = nil
         resourceAccess = nil
@@ -1425,6 +1656,33 @@ final class TransferViewModel: ObservableObject {
 
     func ownsActivity(_ activityID: String) -> Bool {
         transferActivity?.activityId == activityID
+    }
+
+    fileprivate func assignActivityGroup(
+        activityID: String,
+        groupID: String,
+        label: String?
+    ) -> TransferActivityRecord? {
+        guard var record = transferActivity, record.activityId == activityID else {
+            return nil
+        }
+        record.activityGroupID = groupID
+        record.activityGroupLabel = label
+        transferActivity = record
+
+        guard ActivityProjectionPolicy.isPending(record.state) else { return record }
+        do {
+            if let activeSend {
+                try persistActiveSend(activeSend)
+            } else if let activeReceive {
+                try persistActiveReceive(activeReceive)
+            }
+        } catch {
+            handleDiagnostic(
+                "failed to persist activity group metadata: \(error.localizedDescription)"
+            )
+        }
+        return record
     }
 
     func handleFailed(_ reason: String) {
@@ -1507,7 +1765,7 @@ final class TransferViewModel: ObservableObject {
         if TransferPresentationPolicy.progress(for: state) == .complete {
             observedTransferred = max(max(observedTransferred, observedTotal), total)
             observedTotal = max(max(observedTotal, total), observedTransferred)
-            publishObservedProgress()
+            publishObservedProgress(finalizeRate: true)
             bytesPerSec = 0
         }
         statusText = text
@@ -1520,7 +1778,7 @@ final class TransferViewModel: ObservableObject {
         let now = Date()
         let complete = observedTotal > 0 && observedTransferred >= observedTotal
         guard complete || now.timeIntervalSince(lastProgressPublishAt) >= 0.2 else { return }
-        publishObservedProgress(now: now)
+        publishObservedProgress(now: now, finalizeRate: complete)
     }
 
     fileprivate func handleCompleted(_ bytes: UInt64) {
@@ -1528,7 +1786,7 @@ final class TransferViewModel: ObservableObject {
         total = max(total, bytes)
         observedTransferred = transferred
         observedTotal = total
-        bytesPerSec = 0
+        publishObservedProgress(finalizeRate: true)
         let direction = transferActivity?.direction
         if let direction {
             clearStoredManifestSession(direction: direction)
@@ -1555,14 +1813,16 @@ final class TransferViewModel: ObservableObject {
     fileprivate func handleTransferFailed(_ value: FfiTransferFailure) {
         if pausedByUser { return }
         cancelPendingNearbyHybridDestination()
-        publishObservedProgress()
+        publishObservedProgress(finalizeRate: true)
         pendingReceive = nil
         requiresExceptionalTransferApproval = false
         failure = value
         statusText = friendlyFailure(value, language: displayLanguage)
         if !value.diagnosticMessage.isEmpty {
             eventLog.append("failure: \(value.diagnosticMessage)")
-            if eventLog.count > 240 { eventLog.removeFirst(eventLog.count - 240) }
+            if eventLog.count > ActivityDiagnosticPolicy.maximumLogLines {
+                eventLog.removeFirst(eventLog.count - ActivityDiagnosticPolicy.maximumLogLines)
+            }
         }
         transferActivity?.failure = value
         if value.code == .userCanceled || value.code == .senderCanceled {
@@ -1590,7 +1850,29 @@ final class TransferViewModel: ObservableObject {
             projectedMessage = message
         }
         eventLog.append(projectedMessage)
-        if eventLog.count > 240 { eventLog.removeFirst(eventLog.count - 240) }
+        if eventLog.count > ActivityDiagnosticPolicy.maximumLogLines {
+            eventLog.removeFirst(eventLog.count - ActivityDiagnosticPolicy.maximumLogLines)
+        }
+    }
+
+    fileprivate func handleStageTiming(
+        _ event: FfiTransferStageTiming,
+        activityID: String?
+    ) {
+        guard let activityID else { return }
+        guard let record = transferActivity, record.activityId == activityID else {
+            appModel?.appendStageTiming(event, activityID: activityID)
+            return
+        }
+        let sample = ActivityStageTimingSample(event)
+        let updated = ActivityStageTimingProjection.appending(sample, to: stageTimings)
+        guard updated != stageTimings else { return }
+        stageTimings = updated
+        eventLog.append(sample.diagnosticLine)
+        if eventLog.count > ActivityDiagnosticPolicy.maximumLogLines {
+            eventLog.removeFirst(eventLog.count - ActivityDiagnosticPolicy.maximumLogLines)
+        }
+        appModel?.upsert(record)
     }
 
     private func startSend(
@@ -1681,6 +1963,7 @@ final class TransferViewModel: ObservableObject {
         let observer = Observer(
             viewModel: self,
             operationID: expectedOperationID,
+            activityID: activityID,
             rememberPersistence: operation.rememberPersistence,
             defersDeliveryUntilNativeReturn: true
         )
@@ -1806,6 +2089,7 @@ final class TransferViewModel: ObservableObject {
         let observer = Observer(
             viewModel: self,
             operationID: expectedOperationID,
+            activityID: activityID,
             rememberPersistence: operation.rememberPersistence,
             onNativePhase: { phase in
                 guard phase == .waitingForPeer else { return }
@@ -1818,12 +2102,11 @@ final class TransferViewModel: ObservableObject {
             defersDeliveryUntilNativeReturn: true
         )
         task = Task { @MainActor [weak self] in
+            defer { launchSignal?.resolve(nil) }
             guard let self else {
-                launchSignal?.resolve(nil)
                 return
             }
             guard isCurrentOperation(expectedOperationID, activityID: activityID) else {
-                launchSignal?.resolve(nil)
                 return
             }
             do {
@@ -1831,7 +2114,22 @@ final class TransferViewModel: ObservableObject {
                 if let completion = try await receiveNearbyHybrid(
                     operation,
                     cancellation: token,
-                    observer: observer
+                    observer: observer,
+                    onWifiAwareListenerReady: { [weak self] in
+                        // The native receive phase cannot start until a Wi-Fi
+                        // Aware sender connects. Release the Room ACK as soon
+                        // as the listener is bound so that sender can start.
+                        guard let self,
+                              self.isCurrentOperation(
+                                  expectedOperationID,
+                                  activityID: activityID
+                              )
+                        else {
+                            launchSignal?.resolve(nil)
+                            return
+                        }
+                        launchSignal?.resolve(activityID)
+                    }
                 ) {
                     guard isCurrentOperation(
                         expectedOperationID,
@@ -1852,7 +2150,6 @@ final class TransferViewModel: ObservableObject {
                 }
             } catch {
                 guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
-                launchSignal?.resolve(nil)
                 if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
@@ -1875,7 +2172,8 @@ final class TransferViewModel: ObservableObject {
     private func receiveNearbyHybrid(
         _ operation: ReceiveOperation,
         cancellation: FfiManifestV2Cancellation,
-        observer: Observer
+        observer: Observer,
+        onWifiAwareListenerReady: @escaping @MainActor @Sendable () -> Void
     ) async throws -> FfiManifestV2Completion? {
         #if os(iOS) && canImport(WiFiAware)
         if #available(iOS 26.0, *),
@@ -1887,7 +2185,8 @@ final class TransferViewModel: ObservableObject {
                 request: operation.request,
                 stateDirectory: operation.stateDirectory,
                 cancellation: cancellation,
-                observer: observer
+                observer: observer,
+                onListenerReady: onWifiAwareListenerReady
             ) { [weak self] pending in
                 guard let self else { throw CancellationError() }
                 return try await self.awaitNearbyHybridDestination(
@@ -1958,6 +2257,7 @@ final class TransferViewModel: ObservableObject {
         let observer = Observer(
             viewModel: self,
             operationID: expectedOperationID,
+            activityID: activityID,
             defersDeliveryUntilNativeReturn: true
         )
         task = Task { @MainActor [weak self] in
@@ -2140,7 +2440,9 @@ final class TransferViewModel: ObservableObject {
             savedPaths: [],
             roomID: roomCode.flatMap(RemoteLogUpload.roomID),
             connectionPath: nil,
-            updatedAt: Date()
+            updatedAt: Date(),
+            activityGroupID: nil,
+            activityGroupLabel: nil
         )
         invite = ""
         peerAddress = ""
@@ -2156,8 +2458,9 @@ final class TransferViewModel: ObservableObject {
         pendingOfferEntries = []
         connectionPath = nil
         requiresExceptionalTransferApproval = false
-        rate = RateTracker()
+        resetRateTracking()
         eventLog = []
+        stageTimings = []
         presentationState = transferActivity?.state
         if let transferActivity { appModel?.upsert(transferActivity) }
     }
@@ -2179,10 +2482,25 @@ final class TransferViewModel: ObservableObject {
         appModel?.upsert(record)
     }
 
-    private func publishObservedProgress(now: Date = Date()) {
+    private func publishObservedProgress(
+        now: Date = Date(),
+        finalizeRate: Bool = false
+    ) {
         transferred = max(transferred, observedTransferred)
         total = max(max(total, observedTotal), transferred)
-        bytesPerSec = rate.update(bytes: transferred, now: now)
+        if !rateTrackingIsFinalized {
+            currentRateUpdatedAt = now
+            bytesPerSec = rate.update(
+                bytes: transferred,
+                now: now,
+                forceSample: finalizeRate
+            )
+            averageBytesPerSec = rate.averageBytesPerSecond
+            if finalizeRate {
+                rateTrackingIsFinalized = true
+                bytesPerSec = 0
+            }
+        }
         lastProgressPublishAt = now
         guard var record = transferActivity else { return }
         record.bytesTransferred = transferred
@@ -2190,6 +2508,14 @@ final class TransferViewModel: ObservableObject {
         record.updatedAt = now
         transferActivity = record
         appModel?.upsert(record)
+    }
+
+    private func resetRateTracking() {
+        rate = RateTracker()
+        rateTrackingIsFinalized = false
+        bytesPerSec = 0
+        averageBytesPerSec = 0
+        currentRateUpdatedAt = nil
     }
 
     private func persistActiveSend(_ operation: SendOperation) throws {
@@ -2228,7 +2554,9 @@ final class TransferViewModel: ObservableObject {
             request: StoredTransferRequestV2(operation.request),
             itemCount: activity.itemCount,
             totalBytes: activity.totalBytes,
-            roomID: activity.roomID
+            roomID: activity.roomID,
+            activityGroupID: activity.activityGroupID,
+            activityGroupLabel: activity.activityGroupLabel
         ), direction: .send)
     }
 
@@ -2255,7 +2583,9 @@ final class TransferViewModel: ObservableObject {
             request: StoredTransferRequestV2(operation.request),
             itemCount: activity.itemCount,
             totalBytes: activity.totalBytes,
-            roomID: activity.roomID
+            roomID: activity.roomID,
+            activityGroupID: activity.activityGroupID,
+            activityGroupLabel: activity.activityGroupLabel
         ), direction: .receive)
     }
 
@@ -2455,7 +2785,7 @@ final class TransferViewModel: ObservableObject {
             relay: settings.relayUrl,
             configPath: settings.configPath,
             pathPolicy: pathPolicy,
-            rendezvous: rendezvousPlan(for: mode)
+            rendezvous: Self.rendezvousPlan(for: mode)
         )
     }
 
@@ -2478,9 +2808,9 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    private func rendezvousPlan(for mode: FfiTransferMode) -> FfiRendezvousPlan {
+    static func rendezvousPlan(for mode: FfiTransferMode) -> FfiRendezvousPlan {
         switch mode {
-        case .room:
+        case .room, .invite:
             return FfiRendezvousPlan(useRoom: true, useMdns: false, internetAvailable: true)
         case .mdns:
             return FfiRendezvousPlan(useRoom: false, useMdns: true, internetAvailable: true)
@@ -2564,6 +2894,7 @@ final class TransferViewModel: ObservableObject {
 final class Observer: TransferObserver, @unchecked Sendable {
     private weak var viewModel: TransferViewModel?
     private let operationID: UUID
+    private let activityID: String?
     private let rememberPersistence: RememberPersistenceContext?
     private let onNativePhase: (@MainActor (FfiManifestV2Phase) -> Void)?
     private let defersDeliveryUntilNativeReturn: Bool
@@ -2571,12 +2902,14 @@ final class Observer: TransferObserver, @unchecked Sendable {
     init(
         viewModel: TransferViewModel,
         operationID: UUID,
+        activityID: String?,
         rememberPersistence: RememberPersistenceContext? = nil,
         onNativePhase: (@MainActor (FfiManifestV2Phase) -> Void)? = nil,
         defersDeliveryUntilNativeReturn: Bool = false
     ) {
         self.viewModel = viewModel
         self.operationID = operationID
+        self.activityID = activityID
         self.rememberPersistence = rememberPersistence
         self.onNativePhase = onNativePhase
         self.defersDeliveryUntilNativeReturn = defersDeliveryUntilNativeReturn
@@ -2611,6 +2944,11 @@ final class Observer: TransferObserver, @unchecked Sendable {
     }
     func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
     func onConnectionPath(event: FfiConnectionPathEvent) { hop { $0.handleConnectionPath(event) } }
+    func onStageTiming(event: FfiTransferStageTiming) {
+        Task { @MainActor [weak viewModel, activityID] in
+            viewModel?.handleStageTiming(event, activityID: activityID)
+        }
+    }
     func onDiagnostic(message: String) { hop { $0.handleDiagnostic(message) } }
     func onRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
         rememberPersistence?.persist(opaqueCredential, generation: generation) ?? false
@@ -2630,29 +2968,73 @@ func estimatedRemainingSeconds(
     bytesPerSecond: Double,
     isStable: Bool
 ) -> Double? {
-    guard isStable, total > transferred, bytesPerSecond > 0 else { return nil }
-    return Double(total - transferred) / bytesPerSecond
+    guard isStable,
+          total > transferred,
+          bytesPerSecond.isFinite,
+          bytesPerSecond > 0 else { return nil }
+    let estimate = Double(total - transferred) / bytesPerSecond
+    return estimate.isFinite ? estimate : nil
 }
 
 struct RateTracker {
+    private static let minimumSampleInterval: TimeInterval = 0.1
+
     private var lastDate: Date?
     private var lastBytes: UInt64 = 0
     private(set) var samples = 0
+    private var positiveSamples = 0
     private var smoothed = 0.0
+    private var accumulatedBytes = 0.0
+    private var accumulatedElapsed: TimeInterval = 0
 
-    var isStable: Bool { samples >= 2 }
+    var isStable: Bool { positiveSamples >= 2 }
+    var averageBytesPerSecond: Double {
+        guard accumulatedElapsed > 0 else { return 0 }
+        return accumulatedBytes / accumulatedElapsed
+    }
 
-    mutating func update(bytes: UInt64, now: Date = Date()) -> Double {
-        defer {
+    mutating func update(
+        bytes: UInt64,
+        now: Date = Date(),
+        forceSample: Bool = false
+    ) -> Double {
+        guard let lastDate else {
             lastDate = now
             lastBytes = bytes
+            return smoothed
         }
-        guard let lastDate, bytes >= lastBytes else { return smoothed }
+        guard bytes >= lastBytes else {
+            self = RateTracker()
+            self.lastDate = now
+            lastBytes = bytes
+            return smoothed
+        }
         let elapsed = now.timeIntervalSince(lastDate)
-        guard elapsed > 0.1 else { return smoothed }
-        let instantaneous = Double(bytes - lastBytes) / elapsed
+        guard elapsed.isFinite else {
+            self.lastDate = now
+            lastBytes = bytes
+            return smoothed
+        }
+        guard elapsed > 0 else {
+            if elapsed < 0 {
+                self.lastDate = now
+                lastBytes = bytes
+            }
+            return smoothed
+        }
+        let deltaBytes = bytes - lastBytes
+        guard elapsed >= Self.minimumSampleInterval
+                || (forceSample && deltaBytes > 0) else {
+            return smoothed
+        }
+        self.lastDate = now
+        lastBytes = bytes
+        let instantaneous = Double(deltaBytes) / elapsed
         smoothed = samples == 0 ? instantaneous : smoothed * 0.7 + instantaneous * 0.3
+        accumulatedBytes += Double(deltaBytes)
+        accumulatedElapsed += elapsed
         samples += 1
+        if deltaBytes > 0 { positiveSamples += 1 }
         return smoothed
     }
 }
