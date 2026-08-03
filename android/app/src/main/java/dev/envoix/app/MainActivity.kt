@@ -114,7 +114,7 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(workflow.screen, selectedPeerKey, controlRoom) {
                         when {
                             workflow.screen == WorkflowScreen.Hub ->
-                                discoveryVm.setMode(DiscoveryMode.BrowseNearby)
+                                { } // Paused by default — user starts explicitly.
                             workflow.screen == WorkflowScreen.Room &&
                                 selectedPeerKey != null &&
                                 !controlRoom ->

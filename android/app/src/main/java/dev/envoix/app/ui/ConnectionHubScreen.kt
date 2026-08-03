@@ -23,6 +23,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -75,6 +76,7 @@ internal fun ConnectionHubScreen(
     val colors = Envoix.colors
     val discovery by discoveryViewModel.uiState.collectAsStateWithLifecycle()
     val settings by SettingsStore.settings.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var scannerOpen by remember { mutableStateOf(false) }
     var codeDialogOpen by remember { mutableStateOf(false) }
     var identityDialogOpen by remember { mutableStateOf(false) }
@@ -86,7 +88,7 @@ internal fun ConnectionHubScreen(
     val permissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
-        ) { discoveryViewModel.restart() }
+        ) { discoveryViewModel.start() }
 
     Column(
         Modifier
@@ -158,9 +160,21 @@ internal fun ConnectionHubScreen(
                     wifiAwareStatus = discovery.statuses[DiscoverySource.WifiAware],
                     nfcPhoneHosting = nfcPhoneHosting,
                     nfcPhoneReader = nfcPhoneReader,
+                    discoveryActive = discovery.active,
                     onWifiAware = { wifiAwareDialogOpen = true },
                     onNfc = { nfcDialogOpen = true },
                     onToggleList = { nearbyListExpanded = !nearbyListExpanded },
+                    onToggleDiscovery = {
+                        if (discovery.active) {
+                            discoveryViewModel.stop()
+                        } else if (DiscoveryPermissions.hasBluetoothPermissions(context)) {
+                            discoveryViewModel.start()
+                        } else {
+                            permissionLauncher.launch(
+                                DiscoveryPermissions.bluetoothRuntimePermissions(),
+                            )
+                        }
+                    },
                 )
             }
             if (nearbyListExpanded) {
@@ -168,44 +182,13 @@ internal fun ConnectionHubScreen(
                         it.availability == ProviderAvailability.PermissionRequired
                     }
                 ) {
-                    Text(
-                        appText("NEARBY DEVICES", "附近设备"),
-                        color = colors.muted,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.8.sp,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(
-                        onClick = {
-                            if (discovery.active) discoveryViewModel.stop()
-                            else discoveryViewModel.start()
-                        },
-                        modifier = Modifier.testTag("hub_restart_nearby"),
-                    ) {
-                        Text(
-                            if (discovery.active) appText("Stop", "停止") else appText("Start", "开始搜索"),
-                            color = colors.accent,
-                        )
-                    }
-                }
-            }
-            if (discovery.statuses.values.any {
-                    it.availability == ProviderAvailability.PermissionRequired
-                }
-            ) {
-                item {
-                    Button(
-                        onClick = {
-                            permissionLauncher.launch(
-                                DiscoveryPermissions.bluetoothRuntimePermissions(),
-                            )
-                        },
-                    ) {
-                        Text(appText("Allow nearby access", "允许附近设备访问"))
-                    }
-                }
-            }
+                    item {
+                        Button(
+                            onClick = {
+                                permissionLauncher.launch(
+                                    DiscoveryPermissions.bluetoothRuntimePermissions(),
+                                )
+                            },
                         ) {
                             Text(appText("Allow nearby access", "允许附近设备访问"))
                         }
@@ -244,7 +227,7 @@ internal fun ConnectionHubScreen(
                             modifier =
                                 Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 20.dp)
+                                    .padding(top = 4.dp)
                                     .testTag("hub_nearby_empty"),
                         )
                     }

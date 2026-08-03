@@ -108,7 +108,7 @@ internal fun RoomHeader(
                     } else {
                         colors.warning
                     },
-                fontSize = 10.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.7.sp,
             )
