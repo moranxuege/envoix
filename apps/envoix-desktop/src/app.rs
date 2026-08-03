@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use egui::{Align, Layout, RichText};
+use egui::{Align, Color32, Layout, Rect, RichText};
 
 use crate::engine::{Engine, OfferSummary, TransferId, UiEvent};
 use crate::qr::{self, QrMatrix};
@@ -177,6 +177,7 @@ impl Transfer {
 /// afterwards, so drawing a card does not need `&mut App`.
 enum Action {
     Accept(TransferId),
+    Enlarge(TransferId),
     Cancel(TransferId),
     Open(PathBuf),
     Copy(TransferId, String),
@@ -201,6 +202,10 @@ pub struct App {
 
     /// Set by a card action, drained once the borrow on `transfers` is over.
     pending_copy: Option<String>,
+    /// Transfer whose QR is being shown large enough to scan.
+    enlarged: Option<TransferId>,
+    /// Uploaded QR textures, kept alive so they are not re-uploaded per frame.
+    textures: std::collections::HashMap<TransferId, egui::TextureHandle>,
     /// Restyling every frame would churn the context, so track what is applied.
     theme_applied: Option<bool>,
     /// Last title pushed to the window manager, so it is only sent on change.
@@ -223,6 +228,8 @@ impl App {
             transfers: Vec::new(),
             logs: Vec::new(),
             pending_copy: None,
+            enlarged: None,
+            textures: std::collections::HashMap::new(),
             theme_applied: None,
             title: String::new(),
         }
@@ -362,6 +369,7 @@ impl App {
                 }
                 self.pending_copy = Some(payload);
             }
+            Action::Enlarge(id) => self.enlarged = Some(id),
             Action::Dismiss(id) => self.transfers.retain(|entry| entry.id != id),
         }
     }
@@ -391,6 +399,7 @@ impl App {
         self.rail(ui, &palette);
         self.composer(ui, &palette);
         self.activity(ui, &palette, &mut actions);
+        self.enlarged_qr(ui, &palette);
         self.drop_overlay(ui, &palette);
 
         for action in actions {
@@ -442,6 +451,75 @@ impl App {
             }
         }
         self.refresh_selection_size();
+    }
+
+    /// A 1050-byte invitation needs a symbol no card can hold at a scannable
+    /// module size, so scanning gets the whole window. Click anywhere to close.
+    fn enlarged_qr(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        let Some(id) = self.enlarged else {
+            return;
+        };
+        let Some(transfer) = self.transfers.iter().find(|entry| entry.id == id) else {
+            self.enlarged = None;
+            return;
+        };
+        let Some(matrix) = &transfer.qr_matrix else {
+            self.enlarged = None;
+            return;
+        };
+
+        let screen = ui.ctx().viewport_rect();
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("qr-enlarged"));
+        let painter = ui.ctx().layer_painter(layer);
+        painter.rect_filled(screen, 0, palette.bg);
+
+        let (module, size) = matrix.fit((screen.height() - 120.0).min(screen.width() - 60.0));
+        let origin = egui::pos2(
+            screen.center().x - size / 2.0,
+            screen.center().y - size / 2.0 - 24.0,
+        );
+        let image = matrix.to_image();
+        let texture = self
+            .textures
+            .entry(id)
+            .or_insert_with(|| {
+                ui.ctx()
+                    .load_texture("qr", image, egui::TextureOptions::NEAREST)
+            })
+            .clone();
+        painter.image(
+            texture.id(),
+            Rect::from_min_size(origin, egui::vec2(size, size)),
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+
+        if let Some(code) = &transfer.room_code {
+            painter.text(
+                egui::pos2(screen.center().x, origin.y + size + 26.0),
+                egui::Align2::CENTER_CENTER,
+                code,
+                theme::mono(18.0),
+                palette.text,
+            );
+        }
+        let scannable = if module >= qr::MIN_SCANNABLE_MODULE_PX {
+            "scannable"
+        } else {
+            "still too small to scan - widen the window"
+        };
+        painter.text(
+            egui::pos2(screen.center().x, origin.y + size + 54.0),
+            egui::Align2::CENTER_CENTER,
+            format!("{module:.0} px per module, {scannable} - click anywhere to close"),
+            theme::sans(12.0),
+            palette.muted,
+        );
+
+        if ui.ctx().input(|input| input.pointer.any_click()) {
+            self.enlarged = None;
+        }
+        ui.ctx().request_repaint();
     }
 
     fn drop_overlay(&mut self, ui: &mut egui::Ui, palette: &Palette) {
@@ -753,30 +831,36 @@ fn transfer_card(
         // A receive that is still waiting owns the invitation, so its code and
         // QR belong on the card rather than in the shared composer.
         if transfer.stage == Stage::Waiting
-            && let (Some(matrix), Some(code)) = (&transfer.qr_matrix, &transfer.room_code)
+            && let Some(code) = &transfer.room_code
         {
             ui.add_space(12.0);
             ui.vertical_centered(|ui| {
-                qr::draw(ui, matrix, 150.0, palette.text, palette.surface);
-                ui.add_space(8.0);
                 ui.label(
                     RichText::new(code)
                         .font(theme::mono(15.0))
                         .color(palette.text),
                 );
-                ui.add_space(6.0);
-                let copied = transfer
-                    .copied_at
-                    .is_some_and(|at| at.elapsed() < COPIED_FEEDBACK);
-                let label = if copied { "Copied" } else { "Copy invite" };
-                if let Some(invite) = &transfer.invite
-                    && ghost_button(ui, palette, label)
-                {
-                    actions.push(Action::Copy(transfer.id, invite.clone()));
-                }
-                if copied {
-                    ui.ctx().request_repaint_after(Duration::from_millis(250));
-                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let copied = transfer
+                        .copied_at
+                        .is_some_and(|at| at.elapsed() < COPIED_FEEDBACK);
+                    let label = if copied { "Copied" } else { "Copy invite" };
+                    if let Some(invite) = &transfer.invite
+                        && ghost_button(ui, palette, label)
+                    {
+                        actions.push(Action::Copy(transfer.id, invite.clone()));
+                    }
+                    // The invitation is ~1kB, which forces a symbol too large
+                    // for a card to render at a module size a camera resolves.
+                    // Scanning gets the whole window instead.
+                    if ghost_button(ui, palette, "Show QR") {
+                        actions.push(Action::Enlarge(transfer.id));
+                    }
+                    if copied {
+                        ui.ctx().request_repaint_after(Duration::from_millis(250));
+                    }
+                });
             });
         }
 
