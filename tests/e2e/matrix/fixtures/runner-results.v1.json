@@ -1,0 +1,30 @@
+{
+  "case_ids": [
+    "l1.physical.room.ios-android.single-file",
+    "l1.physical.room.android-ios.single-file"
+  ],
+  "records": [
+    {
+      "case_id": "l1.physical.room.ios-android.single-file",
+      "repetition": 1,
+      "status": "pass"
+    },
+    {
+      "case_id": "l1.physical.room.ios-android.single-file",
+      "repetition": 2,
+      "status": "product_failure",
+      "failure_code": "receiver_hash_mismatch"
+    },
+    {
+      "case_id": "l1.physical.room.android-ios.single-file",
+      "repetition": 1,
+      "status": "infrastructure_failure",
+      "failure_code": "device_disconnected"
+    },
+    {
+      "case_id": "l1.physical.room.android-ios.single-file",
+      "repetition": 2,
+      "status": "pass"
+    }
+  ]
+}
