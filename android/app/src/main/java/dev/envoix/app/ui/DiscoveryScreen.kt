@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,7 +21,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -112,7 +110,11 @@ internal fun DiscoveryScreen(
     }
 
     Column(Modifier.fillMaxSize().background(colors.bg)) {
-        DiscoveryHeader(onBack = onBack, onRefresh = discoveryViewModel::restart)
+        DiscoveryHeader(
+            onBack = onBack,
+            active = state.active,
+            onToggle = { if (state.active) discoveryViewModel.stop() else discoveryViewModel.start() },
+        )
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -327,7 +329,8 @@ internal fun DiscoveryScreen(
 @Composable
 private fun DiscoveryHeader(
     onBack: () -> Unit,
-    onRefresh: () -> Unit,
+    active: Boolean,
+    onToggle: () -> Unit,
 ) {
     val colors = Envoix.colors
     Row(
@@ -348,17 +351,12 @@ private fun DiscoveryHeader(
             fontWeight = FontWeight.ExtraBold,
             modifier = Modifier.weight(1f),
         )
-        Icon(
-            Icons.Default.Refresh,
-            contentDescription = appText("Restart discovery", "重新发现设备"),
-            tint = colors.accent,
-            modifier =
-                Modifier
-                    .clip(CircleShape)
-                    .clickable(onClick = onRefresh)
-                    .padding(7.dp)
-                    .size(22.dp),
-        )
+        TextButton(onClick = onToggle) {
+            Text(
+                if (active) appText("Stop", "停止") else appText("Start", "开始"),
+                color = colors.accent,
+            )
+        }
     }
 }
 

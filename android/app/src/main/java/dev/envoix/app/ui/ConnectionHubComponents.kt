@@ -242,7 +242,7 @@ internal fun MainRoomInviteCard(
             .clip(RoundedCornerShape(22.dp))
             .background(colors.surface)
             .border(1.dp, colors.line, RoundedCornerShape(22.dp))
-            .padding(horizontal = 16.dp, vertical = 18.dp),
+            .padding(horizontal = 18.dp, vertical = 18.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(
@@ -256,7 +256,7 @@ internal fun MainRoomInviteCard(
                 Text(
                     appText("ROOM", "房间"),
                     color = colors.muted,
-                    fontSize = 11.sp,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.7.sp,
                 )
@@ -476,12 +476,12 @@ internal fun NearbyIdentityRow(
             .clip(RoundedCornerShape(16.dp))
             .background(colors.surface)
             .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-            .padding(14.dp),
+            .padding(horizontal = 18.dp, vertical = 14.dp),
     ) {
         Text(
-            appText("VISIBLE AS", "显示名称"),
+            appText("SET IDENTITY", "设置身份"),
             color = colors.muted,
-            fontSize = 10.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.7.sp,
         )
@@ -585,9 +585,11 @@ internal fun NearbySectionHeader(
     wifiAwareStatus: ProviderStatus?,
     nfcPhoneHosting: NfcPhoneHostingState,
     nfcPhoneReader: NfcPhoneReaderState,
+    discoveryActive: Boolean,
     onWifiAware: () -> Unit,
     onNfc: () -> Unit,
     onToggleList: () -> Unit,
+    onToggleDiscovery: () -> Unit,
 ) {
     val colors = Envoix.colors
     val wifiAwareActive =
@@ -600,11 +602,25 @@ internal fun NearbySectionHeader(
         Text(
             appText("NEARBY DEVICES", "附近设备"),
             color = colors.muted,
-            fontSize = 12.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.8.sp,
             modifier = Modifier.weight(1f),
         )
+        TextButton(
+            onClick = onToggleDiscovery,
+            modifier =
+                Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("hub_restart_nearby"),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+        ) {
+            Text(
+                if (discoveryActive) appText("Stop", "停止") else appText("Start", "开始搜索"),
+                color = colors.accent,
+                fontSize = 12.sp,
+            )
+        }
         if (shouldShowWifiAwareDiscoveryAction(wifiAwareStatus)) {
             TextButton(
                 onClick = onWifiAware,
@@ -1017,7 +1033,7 @@ internal fun EditNearbyNameDialog(
     var typed by remember(currentName) { mutableStateOf(currentName) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Nearby name", "附近名称")) },
+        title = { Text(appText("Other devices can find you as", "其他设备可以发现你为"), fontSize = 16.sp) },
         text = {
             OutlinedTextField(
                 value = typed,
@@ -1025,7 +1041,7 @@ internal fun EditNearbyNameDialog(
                 singleLine = true,
                 label = { Text(appText("Visible as", "显示为")) },
                 supportingText = {
-                    Text(appText("This name is not a verified identity.", "此名称不代表已验证身份。"))
+                    Text(appText("This identity is temporary.", "此身份为临时身份。"))
                 },
                 modifier = Modifier.fillMaxWidth(),
             )
