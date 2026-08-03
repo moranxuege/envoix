@@ -800,6 +800,40 @@ class MatrixContractTests(unittest.TestCase):
         self.assertEqual(result["summary"]["not_run"], 2)
         self.assertTrue(result["dry_run"])
 
+    def test_runner_dry_run_accepts_gate_without_explicit_cases(self) -> None:
+        runner = REPO_ROOT / "scripts/cross-device-transfer-matrix.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(
+                [
+                    str(runner),
+                    "--dry-run",
+                    "--gate",
+                    "cross-platform-baseline",
+                    "--run-id",
+                    "fixture-run",
+                    "--commit",
+                    "0123456789abcdef",
+                    "--output-directory",
+                    directory,
+                    "--build-variant",
+                    "release_equivalent",
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            plan = json.loads(
+                (Path(directory) / "matrix-plan.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(plan["selection"], "gate:cross-platform-baseline")
+        self.assertEqual(len(plan["executions"]), 18)
+        self.assertEqual(
+            {execution["disposition"] for execution in plan["executions"]},
+            {"not_run"},
+        )
+
     def test_runner_records_missing_device_input_as_infrastructure_failure(
         self,
     ) -> None:

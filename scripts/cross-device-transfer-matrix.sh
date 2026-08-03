@@ -247,9 +247,11 @@ resolve_args=(
 )
 [[ "$dry_run" == "1" ]] && resolve_args+=(--dry-run)
 [[ -n "$repeat_count" ]] && resolve_args+=(--repetitions "$repeat_count")
-for case_id in "${selected_cases[@]}"; do
-  resolve_args+=(--case "$case_id")
-done
+if [[ "${#selected_cases[@]}" -gt 0 ]]; then
+  for case_id in "${selected_cases[@]}"; do
+    resolve_args+=(--case "$case_id")
+  done
+fi
 [[ -n "$selected_gate" ]] && resolve_args+=(--gate "$selected_gate")
 [[ -n "$selected_tag" ]] && resolve_args+=(--tag "$selected_tag")
 if [[ "$legacy_selection" == "1" ]]; then
