@@ -54,9 +54,17 @@ matrix-plan.json
 matrix-result.json
 matrix-report.md
 cases/<case-id>/r<repetition>/result.json
+cases/<case-id>/r<repetition>/<evidence-enabled-role>.json
 sanitized/cases/<case-id>/r<repetition>/*.log
 private/
 ```
+
+An Android endpoint writes its bounded result under the app's test-owned
+`files/envoix-matrix/` directory. The runner retrieves and validates that JSON,
+retains it under the matching sender or receiver artifact name, and removes
+only the exact test-owned files. The current Android driver is labeled
+`l1_native` / `direct_jni`; it does not satisfy the product-path L2 Activity
+contract.
 
 `private/` is mode `0700`, is never an uploadable artifact, and can retain raw
 logs only for local failure triage. Successful case logs are removed after

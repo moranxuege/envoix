@@ -35,6 +35,164 @@ class MatrixContractTests(unittest.TestCase):
             f"expected {expected!r} in errors:\n" + "\n".join(errors),
         )
 
+    def endpoint_result(self) -> dict:
+        return {
+            "schema_version": 1,
+            "run_id": "fixture-run-c1-r1",
+            "case_id": "l1.physical.room.android-ios.single-file",
+            "repetition": 1,
+            "role": "sender",
+            "platform": "android",
+            "test_layer": "l1_native",
+            "driver": "direct_jni",
+            "build_variant": "debug",
+            "app_version": "0.2.0",
+            "core_version": None,
+            "protocol_version": 2,
+            "device_model": "Android SDK built for arm64",
+            "os_version": "Android 14 (API 34)",
+            "capabilities": ["manifest_v2", "media_store_publication"],
+            "activity_id": None,
+            "job_id": "fixture-job",
+            "started_at": 1_722_182_400_000,
+            "finished_at": 1_722_182_401_000,
+            "terminal_state": "completed",
+            "ordered_phases": [
+                "waiting_for_peer",
+                "pairing",
+                "connecting",
+                "transferring",
+                "waiting_for_receiver_save",
+                "finalizing_delivery",
+                "completed",
+            ],
+            "attempt_count": 1,
+            "selected_path": "relay",
+            "path_reason": None,
+            "source_summary": {
+                "root_count": 1,
+                "file_count": 1,
+                "directory_count": 0,
+                "plaintext_bytes": 7,
+                "manifest_digest": None,
+                "tree_digest": "a" * 64,
+                "entries": [
+                    {
+                        "relative_path": "single.txt",
+                        "kind": "file",
+                        "plaintext_bytes": 7,
+                        "sha256": "b" * 64,
+                        "disposition": "completed",
+                    }
+                ],
+                "publication": None,
+            },
+            "destination_summary": None,
+            "delivery_proof": True,
+            "failure": None,
+            "cleanup": {"test_owned": True, "completed": True},
+            "metrics": {"plaintext_bytes": 7, "elapsed_ms": 1_000},
+        }
+
+    def test_android_l1_endpoint_result_is_valid(self) -> None:
+        self.assertEqual(
+            matrix_contract.validate_endpoint_result(self.endpoint_result()),
+            [],
+        )
+
+    def test_endpoint_result_identity_mismatch_is_rejected(self) -> None:
+        errors = matrix_contract.validate_endpoint_result(
+            self.endpoint_result(),
+            run_id="another-run",
+            case_id="l1.physical.room.android-ios.single-file",
+            repetition=1,
+            role="sender",
+            platform="android",
+        )
+        self.assert_error(errors, "run_id does not match the runner")
+
+    def test_endpoint_result_hash_and_private_path_are_rejected(self) -> None:
+        value = self.endpoint_result()
+        value["source_summary"]["entries"][0]["sha256"] = "not-a-digest"
+        value["device_model"] = "/data/user/0/private-model"
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "sha256 must be a lowercase SHA-256 digest")
+        self.assert_error(errors, "contains sensitive absolute private path")
+
+    def test_endpoint_result_requires_role_appropriate_summary(self) -> None:
+        value = self.endpoint_result()
+        value["source_summary"] = None
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "sender requires source_summary")
+
+    def test_failed_endpoint_result_requires_typed_failure(self) -> None:
+        value = self.endpoint_result()
+        value["terminal_state"] = "failed"
+        value["ordered_phases"][-1] = "failed"
+        value["delivery_proof"] = False
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "failed endpoint requires failure")
+
+    def test_typed_setup_failure_can_precede_a_summary(self) -> None:
+        value = self.endpoint_result()
+        value["terminal_state"] = "failed"
+        value["ordered_phases"] = ["failed"]
+        value["source_summary"] = None
+        value["delivery_proof"] = False
+        value["failure"] = {
+            "code": "room_not_found",
+            "phase": "setup",
+            "recovery_action": "retry",
+        }
+        self.assertEqual(matrix_contract.validate_endpoint_result(value), [])
+
+    def test_endpoint_result_cli_validates_identity_and_retains_normalized_json(
+        self,
+    ) -> None:
+        contract = REPO_ROOT / "scripts" / "matrix_contract.py"
+        value = self.endpoint_result()
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "raw.json"
+            output_path = Path(directory) / "sender.json"
+            input_path.write_text(json.dumps(value), encoding="utf-8")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(contract),
+                    "validate-endpoint-result",
+                    str(input_path),
+                    "--run-id",
+                    value["run_id"],
+                    "--case",
+                    value["case_id"],
+                    "--repetition",
+                    str(value["repetition"]),
+                    "--role",
+                    value["role"],
+                    "--platform",
+                    value["platform"],
+                    "--output",
+                    str(output_path),
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            retained = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(retained, value)
+
+    def test_execution_record_retains_endpoint_artifact_paths(self) -> None:
+        path = "cases/l1.physical.room.android-ios.single-file/r1/sender.json"
+        record = matrix_contract.execution_record(
+            run_id="fixture-run",
+            case_id="l1.physical.room.android-ios.single-file",
+            repetition=1,
+            status="pass",
+            endpoint_results=[path],
+        )
+        self.assertEqual(record["endpoint_results"], [path])
+
     def test_repository_registry_is_valid(self) -> None:
         self.assertEqual(matrix_contract.validate_registry(self.registry), [])
         self.assertEqual(len(self.registry["cases"]), 22)

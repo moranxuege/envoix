@@ -468,7 +468,9 @@ run_android_method() {
   local scenario="$2"
   local invitation="$3"
   local run_id="$4"
-  local log_file="$5"
+  local case_id="$5"
+  local repetition="$6"
+  local log_file="$7"
   local status=0
   local -a invitation_args=()
 
@@ -479,6 +481,9 @@ run_android_method() {
   adb_command shell am instrument -w \
     -e envoixCrossDevice 1 \
     -e envoixCrossDeviceRunId "$run_id" \
+    -e envoixCrossDeviceCaseId "$case_id" \
+    -e envoixCrossDeviceRepetition "$repetition" \
+    -e envoixCrossDeviceBuildVariant "$build_variant" \
     -e envoixCrossDeviceScenario "$scenario" \
     ${invitation_args[@]+"${invitation_args[@]}"} \
     -e envoixCrossDeviceLargeBytes "$large_bytes" \
@@ -500,7 +505,9 @@ run_endpoint_role() {
   local scenario="$3"
   local invitation="$4"
   local run_id="$5"
-  local log_file="$6"
+  local case_id="$6"
+  local repetition="$7"
+  local log_file="$8"
   local method
 
   if [[ "$role" == "send" ]]; then
@@ -512,10 +519,79 @@ run_endpoint_role() {
   fi
 
   if [[ "$platform" == "android" ]]; then
-    run_android_method "$method" "$scenario" "$invitation" "$run_id" "$log_file"
+    run_android_method \
+      "$method" "$scenario" "$invitation" "$run_id" "$case_id" "$repetition" "$log_file"
   else
     run_apple_method "$platform" "$method" "$scenario" "$invitation" "$run_id" "$log_file"
   fi
+}
+
+ANDROID_EVIDENCE_ERROR=""
+
+collect_android_evidence() {
+  local role="$1"
+  local run_id="$2"
+  local case_id="$3"
+  local repetition="$4"
+  local private_case_dir="$5"
+  local endpoint_role="sender"
+  local app_path private_path public_path
+  local read_status=0 validation_status=0 cleanup_status=0
+
+  [[ "$role" == "receive" ]] && endpoint_role="receiver"
+  app_path="files/envoix-matrix/$run_id/$case_id/$endpoint_role.json"
+  private_path="$private_case_dir/android-$endpoint_role.json"
+  public_path="$output_dir/cases/$case_id/r$repetition/$endpoint_role.json"
+
+  adb_command exec-out run-as dev.envoix.app cat "$app_path" \
+    > "$private_path" 2>/dev/null || read_status=$?
+  if [[ "$read_status" -ne 0 || ! -s "$private_path" ]]; then
+    ANDROID_EVIDENCE_ERROR="missing_android_endpoint_result"
+    validation_status=1
+  elif ! python3 "$contract" validate-endpoint-result "$private_path" \
+    --run-id "$run_id" \
+    --case "$case_id" \
+    --repetition "$repetition" \
+    --role "$endpoint_role" \
+    --platform android \
+    --output "$public_path"; then
+    ANDROID_EVIDENCE_ERROR="invalid_android_endpoint_result"
+    validation_status=1
+  else
+    rm -f "$private_path"
+  fi
+
+  adb_command shell run-as dev.envoix.app \
+    rm -f "$app_path" "files/envoix-matrix/$run_id/$case_id/.$endpoint_role.json.tmp" \
+    >/dev/null 2>&1 || cleanup_status=1
+  adb_command shell run-as dev.envoix.app \
+    rmdir "files/envoix-matrix/$run_id/$case_id" \
+    >/dev/null 2>&1 || true
+  adb_command shell run-as dev.envoix.app \
+    rmdir "files/envoix-matrix/$run_id" \
+    >/dev/null 2>&1 || true
+  if [[ "$cleanup_status" -ne 0 ]]; then
+    ANDROID_EVIDENCE_ERROR="android_endpoint_cleanup_failed"
+    return 1
+  fi
+  return "$validation_status"
+}
+
+remove_android_evidence_files() {
+  local run_id="$1"
+  local case_id="$2"
+  local directory="files/envoix-matrix/$run_id/$case_id"
+
+  adb_command shell run-as dev.envoix.app rm -f \
+    "$directory/sender.json" \
+    "$directory/receiver.json" \
+    "$directory/.sender.json.tmp" \
+    "$directory/.receiver.json.tmp" \
+    >/dev/null 2>&1 || true
+  adb_command shell run-as dev.envoix.app rmdir "$directory" \
+    >/dev/null 2>&1 || true
+  adb_command shell run-as dev.envoix.app rmdir "files/envoix-matrix/$run_id" \
+    >/dev/null 2>&1 || true
 }
 
 remove_endpoint_patch() {
@@ -541,6 +617,7 @@ ANDROID_LOGCAT_PID=""
 ACTIVE_RECEIVER_PID=""
 ACTIVE_RECEIVER_PLATFORM=""
 ACTIVE_RECEIVER_RUN_ID=""
+ACTIVE_CASE_ID=""
 
 start_android_logcat() {
   local log_file="$1"
@@ -573,6 +650,9 @@ cleanup_runner() {
     remove_endpoint_patch \
       "$ACTIVE_RECEIVER_PLATFORM" receive "$ACTIVE_RECEIVER_RUN_ID"
   fi
+  if [[ -n "$ACTIVE_RECEIVER_RUN_ID" && -n "$ACTIVE_CASE_ID" ]]; then
+    remove_android_evidence_files "$ACTIVE_RECEIVER_RUN_ID" "$ACTIVE_CASE_ID"
+  fi
   stop_android_tests
   stop_android_logcat
 }
@@ -598,12 +678,13 @@ run_pair() {
   local invitation="$4"
   local run_id="$5"
   local case_id="$6"
-  local private_case_dir="$7"
+  local repetition="$7"
+  local private_case_dir="$8"
   local sender_log="$private_case_dir/sender.log"
   local receiver_log="$private_case_dir/receiver.log"
   local logcat_log="$private_case_dir/android-logcat.log"
   local ready_log ready_pattern published_invitation receiver_pid
-  local sender_status=0 receiver_status=0 sanitization_status=0
+  local sender_status=0 receiver_status=0 sanitization_status=0 evidence_status=0
 
   LAST_FAILURE_STATUS=""
   LAST_FAILURE_CODE=""
@@ -613,11 +694,13 @@ run_pair() {
     start_android_logcat "$logcat_log"
   fi
 
-  run_endpoint_role "$receiver" receive "$scenario" "$invitation" "$run_id" "$receiver_log" &
+  run_endpoint_role \
+    "$receiver" receive "$scenario" "$invitation" "$run_id" "$case_id" "$repetition" "$receiver_log" &
   receiver_pid=$!
   ACTIVE_RECEIVER_PID="$receiver_pid"
   ACTIVE_RECEIVER_PLATFORM="$receiver"
   ACTIVE_RECEIVER_RUN_ID="$run_id"
+  ACTIVE_CASE_ID="$case_id"
   case "$receiver" in
     android)
       ready_log="$logcat_log"
@@ -643,6 +726,8 @@ run_pair() {
     remove_endpoint_patch "$receiver" receive "$run_id"
     stop_android_tests
     stop_android_logcat
+    remove_android_evidence_files "$run_id" "$case_id"
+    ACTIVE_CASE_ID=""
     sanitize_log "$sender_log"
     sanitize_log "$receiver_log"
     sanitize_log "$logcat_log"
@@ -660,6 +745,8 @@ run_pair() {
     remove_endpoint_patch "$receiver" receive "$run_id"
     stop_android_tests
     stop_android_logcat
+    remove_android_evidence_files "$run_id" "$case_id"
+    ACTIVE_CASE_ID=""
     sanitize_log "$sender_log"
     sanitize_log "$receiver_log"
     sanitize_log "$logcat_log"
@@ -679,6 +766,8 @@ run_pair() {
     remove_endpoint_patch "$receiver" receive "$run_id"
     stop_android_tests
     stop_android_logcat
+    remove_android_evidence_files "$run_id" "$case_id"
+    ACTIVE_CASE_ID=""
     sanitize_log "$sender_log"
     sanitize_log "$receiver_log"
     sanitize_log "$logcat_log"
@@ -690,7 +779,9 @@ run_pair() {
   if [[ "$receiver_settle_seconds" -gt 0 ]]; then
     sleep "$receiver_settle_seconds"
   fi
-  run_endpoint_role "$sender" send "$scenario" "$published_invitation" "$run_id" "$sender_log" || sender_status=$?
+  run_endpoint_role \
+    "$sender" send "$scenario" "$published_invitation" "$run_id" "$case_id" "$repetition" "$sender_log" ||
+    sender_status=$?
   published_invitation=""
   if [[ "$sender_status" -ne 0 ]]; then
     kill "$receiver_pid" >/dev/null 2>&1 || true
@@ -699,6 +790,15 @@ run_pair() {
   ACTIVE_RECEIVER_PID=""
   remove_endpoint_patch "$sender" send "$run_id"
   remove_endpoint_patch "$receiver" receive "$run_id"
+  if [[ "$sender" == "android" ]]; then
+    collect_android_evidence \
+      send "$run_id" "$case_id" "$repetition" "$private_case_dir" || evidence_status=1
+  fi
+  if [[ "$receiver" == "android" ]]; then
+    collect_android_evidence \
+      receive "$run_id" "$case_id" "$repetition" "$private_case_dir" || evidence_status=1
+  fi
+  ACTIVE_CASE_ID=""
   stop_android_tests
   stop_android_logcat
   sanitize_log "$sender_log" || sanitization_status=1
@@ -708,6 +808,12 @@ run_pair() {
   if [[ "$sanitization_status" -ne 0 ]]; then
     LAST_FAILURE_STATUS="infrastructure_failure"
     LAST_FAILURE_CODE="log_sanitization_failed"
+    return 1
+  fi
+
+  if [[ "$evidence_status" -ne 0 ]]; then
+    LAST_FAILURE_STATUS="infrastructure_failure"
+    LAST_FAILURE_CODE="$ANDROID_EVIDENCE_ERROR"
     return 1
   fi
 
@@ -761,6 +867,12 @@ record_execution() {
   for log in sender.log receiver.log android-logcat.log; do
     if [[ -f "$sanitized_dir/$log" ]]; then
       args+=(--sanitized-log "sanitized/cases/$case_id/r$repetition/$log")
+    fi
+  done
+  local endpoint
+  for endpoint in sender.json receiver.json; do
+    if [[ -f "$output_dir/cases/$case_id/r$repetition/$endpoint" ]]; then
+      args+=(--endpoint-result "cases/$case_id/r$repetition/$endpoint")
     fi
   done
   python3 "$contract" "${args[@]}"
@@ -866,7 +978,7 @@ for row in "${execution_rows[@]}"; do
   private_case_dir="$output_dir/private/cases/$case_id/r$repetition"
   echo "case $case_id r$repetition: $sender -> $receiver, scenario=$scenario"
   if run_pair "$sender" "$receiver" "$scenario" \
-    "$CURRENT_INVITATION" "$CURRENT_RUN_ID" "$case_id" "$private_case_dir"; then
+    "$CURRENT_INVITATION" "$CURRENT_RUN_ID" "$case_id" "$repetition" "$private_case_dir"; then
     record_execution "$case_id" "$repetition" pass
     echo "pass: $case_id r$repetition"
   else
