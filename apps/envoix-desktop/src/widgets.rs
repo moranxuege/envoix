@@ -179,8 +179,8 @@ pub fn direction_arrow(ui: &mut egui::Ui, color: Color32, up: bool) {
     ));
 }
 
-/// `fill` carries the transfer's health: a stalled bar in the healthy accent
-/// reads as paused rather than failed.
+/// `fill` is passed in so a stalled bar can be coloured by outcome; in the
+/// accent it reads as paused rather than failed.
 pub fn progress_bar(ui: &mut egui::Ui, palette: &Palette, fraction: f32, fill: Color32) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
     let painter = ui.painter();
@@ -192,8 +192,8 @@ pub fn progress_bar(ui: &mut egui::Ui, palette: &Palette, fraction: f32, fill: C
     }
 }
 
-/// Left-rail navigation entry; the active one wears the accent-soft pill the
-/// bottom bar uses on mobile.
+/// Left-rail navigation entry. The active one takes the accent-soft pill the
+/// mobile bottom bar uses.
 pub fn rail_item(ui: &mut egui::Ui, palette: &Palette, label: &str, active: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
     let painter = ui.painter();

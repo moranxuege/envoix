@@ -35,7 +35,7 @@ pub fn window_icon() -> egui::IconData {
     }
 }
 
-/// Signed coverage of a rounded square, antialiased over one pixel.
+/// Coverage of a rounded square in 0..=1, antialiased over one pixel.
 fn tile_coverage(x: f32, y: f32) -> f32 {
     let half = SIZE as f32 / 2.0;
     let inner = half - RADIUS;
@@ -63,8 +63,8 @@ fn arrow_coverage(x: f32, y: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// Writes the generated icon out so it can be eyeballed; the shapes come
-    /// from arithmetic, not from an asset anyone has looked at.
+    /// Writes the icon out for review. The shapes come from arithmetic, so a
+    /// mistake here is invisible until someone looks at the result.
     #[test]
     fn icon_renders() {
         let icon = window_icon();

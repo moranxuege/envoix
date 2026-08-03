@@ -527,7 +527,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(format!(
-                        "{} item{} \u{b7} {}",
+                        "{} item{} · {}",
                         self.files.len(),
                         if self.files.len() == 1 { "" } else { "s" },
                         human_bytes(self.selection_bytes)
@@ -667,7 +667,7 @@ impl App {
                         RichText::new(if total > 0 {
                             human_bytes(total)
                         } else {
-                            "—".to_owned()
+                            "-".to_owned()
                         })
                         .font(theme::bold(13.0))
                         .color(palette.text),
@@ -676,7 +676,7 @@ impl App {
                     ui.label(
                         RichText::new(match self.rate {
                             Some(rate) if rate > 0.0 => format!("{}/s", human_bytes(rate as u64)),
-                            _ => "—".to_owned(),
+                            _ => "-".to_owned(),
                         })
                         .font(theme::sans(13.0))
                         .color(palette.muted),

@@ -18,7 +18,7 @@ use envoix_client::{IdentityConfig, TransferCancelToken};
 use tokio::sync::oneshot;
 
 /// Deployed broker and relay, matching `Endpoints` in
-/// `android/app/src/main/java/dev/envoix/app/ui/../TransferRepository.kt`.
+/// `android/app/src/main/java/dev/envoix/app/TransferRepository.kt`.
 pub const BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 pub const RELAY: &str = "https://envoix.chkxwlyh.us:8444";
@@ -535,7 +535,7 @@ mod tests {
         println!("send completed");
     }
 
-    /// The platform filesystem primitives the receiver's save path leans on.
+    /// The platform filesystem primitives the receiver's save path depends on.
     ///
     /// Isolates a port problem in `std::fs` from one in the transfer logic:
     /// `symlink_metadata` on Windows inspects reparse data, and the destination
