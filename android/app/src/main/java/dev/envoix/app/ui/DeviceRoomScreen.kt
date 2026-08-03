@@ -329,8 +329,6 @@ internal fun DeviceRoomScreen(
                     },
                 nearbySelection = nearbySelection,
                 nearbyDeliveryAvailable = nearbyAvailable != false,
-                initialHostedCode = draft.hostedCode.takeIf { setupUsesPending },
-                initialHostedPayload = draft.hostedPayload.takeIf { setupUsesPending },
                 roomMode = true,
                 connectedRoom = connectedRoom,
                 roomEndpoint = draft.controlEndpoint.takeIf { connectedRoom },

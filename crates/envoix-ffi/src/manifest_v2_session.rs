@@ -13,9 +13,9 @@ use envoix_client::api::{
     AuthenticationHandler, AuthenticationOutcome, DestinationDecisionV2, DestinationRequestV2,
     EventSink, InvitationConsumption, InvitationLease, PairingConfig, PeerSource,
     PendingManifestV2Receive, PendingNativeManifestV2Receive, RendezvousCause, SessionError,
-    TransferCancelToken, TransferEvent, acquire_invitation, acquire_remembered_credential,
-    acquire_shared_token, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
-    receive_manifest_v2_offer_over_datagram_transport,
+    TransferCancelToken, TransferDirection as CoreTransferDirection, TransferEvent, TransferStage,
+    acquire_invitation, acquire_remembered_credential, acquire_shared_token, parse_broker_addr,
+    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_over_datagram_transport,
     receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
     receive_manifest_v2_offer_via_room_hybrid_with_authentication,
     receive_manifest_v2_offer_via_room_with_authentication,
@@ -34,9 +34,9 @@ use super::{
     FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailurePhase,
     FfiManifestV2Phase, FfiNativeDatagramTransport, FfiNativeDuplexTransport, FfiPathPolicy,
     FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferMode,
-    FfiTransferRequest, TransferObserver, build_client_for_request, core_datagram_transport,
-    core_native_transport, on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
-    transfer_options_for_request,
+    FfiTransferRequest, FfiTransferStage, FfiTransferStageTiming, TransferObserver,
+    build_client_for_request, core_datagram_transport, core_native_transport, on_ffi_runtime,
+    op_err, peer_sources_for_request, spawn_on_ffi_runtime, transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -274,6 +274,21 @@ impl FfiPendingManifestV2Receive {
 
     pub fn cancel(&self) {
         self.cancellation.token.cancel();
+        let pending = self
+            .pending
+            .try_lock()
+            .ok()
+            .and_then(|mut pending| pending.take());
+        if let Some(pending) = pending {
+            match pending {
+                CorePendingManifestV2Receive::Iroh(pending) => {
+                    std::mem::drop(crate::ffi_runtime().spawn(pending.cancel()));
+                }
+                CorePendingManifestV2Receive::Native(pending) => {
+                    std::mem::drop(crate::ffi_runtime().spawn(pending.cancel()));
+                }
+            }
+        }
     }
 }
 
@@ -286,7 +301,8 @@ fn project_connection_path(
     event_kind: FfiConnectionPathEventKind,
 ) -> FfiConnectionPathEvent {
     let path_kind = match path {
-        DataPath::Direct { .. } => FfiDataPathKind::Direct,
+        DataPath::Direct { addr } if addr.is_ipv4() => FfiDataPathKind::DirectIpv4,
+        DataPath::Direct { .. } => FfiDataPathKind::DirectIpv6,
         DataPath::Relay { .. } => FfiDataPathKind::Relay,
         DataPath::WifiAware => FfiDataPathKind::WifiAware,
         DataPath::Other { .. } => FfiDataPathKind::Other,
@@ -439,7 +455,45 @@ impl EventSink for NativeSessionEvents {
                     FfiManifestV2Phase::FinalizingDelivery
                 }
             }),
+            TransferEvent::StageTiming {
+                transfer_id,
+                direction,
+                attempt_id,
+                stage,
+                elapsed_us,
+                delta_us,
+            } => self.observer.on_stage_timing(FfiTransferStageTiming {
+                stage: project_transfer_stage(stage),
+                direction: project_transfer_direction(direction),
+                attempt_id,
+                transfer_id: transfer_id.map(|value| value.to_string()),
+                elapsed_us,
+                delta_us,
+            }),
         }
+    }
+}
+
+fn project_transfer_stage(stage: TransferStage) -> FfiTransferStage {
+    match stage {
+        TransferStage::SessionStarted => FfiTransferStage::SessionStarted,
+        TransferStage::ConnectionReady => FfiTransferStage::ConnectionReady,
+        TransferStage::AuthenticationStarted => FfiTransferStage::AuthenticationStarted,
+        TransferStage::AuthenticationComplete => FfiTransferStage::AuthenticationComplete,
+        TransferStage::ManifestOffer => FfiTransferStage::ManifestOffer,
+        TransferStage::ManifestAccepted => FfiTransferStage::ManifestAccepted,
+        TransferStage::FirstPayload => FfiTransferStage::FirstPayload,
+        TransferStage::PayloadComplete => FfiTransferStage::PayloadComplete,
+        TransferStage::DeliveryComplete => FfiTransferStage::DeliveryComplete,
+        TransferStage::Canceled => FfiTransferStage::Canceled,
+        TransferStage::Failed => FfiTransferStage::Failed,
+    }
+}
+
+fn project_transfer_direction(direction: CoreTransferDirection) -> FfiTransferDirection {
+    match direction {
+        CoreTransferDirection::Send => FfiTransferDirection::Send,
+        CoreTransferDirection::Receive => FfiTransferDirection::Receive,
     }
 }
 
@@ -1722,6 +1776,15 @@ fn manifest_v2_cause_projection(
 ) {
     let local = FfiFailureOrigin::Local;
     match cause {
+        "nearby_hybrid_pre_auth_transport_failure" => (
+            FfiFailureCode::NetworkLost,
+            FfiFailureCategory::Network,
+            FfiFailurePhase::Connecting,
+            FfiFailureOrigin::Unknown,
+            true,
+            FfiRecoveryAction::Resume,
+            "transfer.network_lost",
+        ),
         "sender_source_unavailable" => (
             FfiFailureCode::SenderSourceUnavailable,
             FfiFailureCategory::Storage,
@@ -1839,7 +1902,7 @@ fn op_err_core(error: impl std::fmt::Display) -> SessionError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Mutex as StdMutex;
 
     use envoix_error::TransferCause;
@@ -1874,6 +1937,7 @@ mod tests {
     struct RecordingObserver {
         failure: StdMutex<Option<FfiTransferFailure>>,
         path_events: StdMutex<Vec<FfiConnectionPathEvent>>,
+        stage_timings: StdMutex<Vec<FfiTransferStageTiming>>,
         diagnostics: StdMutex<Vec<String>>,
     }
 
@@ -1894,6 +1958,10 @@ mod tests {
 
         fn on_connection_path(&self, event: FfiConnectionPathEvent) {
             self.path_events.lock().unwrap().push(event);
+        }
+
+        fn on_stage_timing(&self, event: FfiTransferStageTiming) {
+            self.stage_timings.lock().unwrap().push(event);
         }
 
         fn on_diagnostic(&self, message: String) {
@@ -1931,6 +1999,34 @@ mod tests {
             io_failure_recovery(FfiTransferDirection::Send),
             FfiRecoveryAction::Retry
         );
+    }
+
+    #[test]
+    fn nearby_hybrid_pre_auth_transport_cause_has_a_stable_fallback_marker() {
+        let error = SessionError::Cause {
+            cause: TransferCause::NearbyHybridPreAuthTransportFailure,
+            detail: "custom QUIC dial failed".into(),
+        };
+        let EnvoixError::Operation { reason } = op_err(error) else {
+            panic!("session failures project as operation errors");
+        };
+
+        assert_eq!(
+            reason,
+            "nearby_hybrid_pre_auth_transport_failure: custom QUIC dial failed"
+        );
+    }
+
+    #[test]
+    fn nearby_hybrid_pre_auth_transport_cause_projects_as_connecting_network_failure() {
+        let projection =
+            manifest_v2_cause_projection(TransferCause::NearbyHybridPreAuthTransportFailure.code());
+
+        assert_eq!(projection.0, FfiFailureCode::NetworkLost);
+        assert_eq!(projection.1, FfiFailureCategory::Network);
+        assert_eq!(projection.2, FfiFailurePhase::Connecting);
+        assert!(projection.4);
+        assert_eq!(projection.5, FfiRecoveryAction::Resume);
     }
 
     #[test]
@@ -2060,6 +2156,9 @@ mod tests {
         let direct = DataPath::Direct {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 4242),
         };
+        let direct_v6 = DataPath::Direct {
+            addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4242),
+        };
         let relay = DataPath::Relay {
             url: "https://sensitive-relay.example".into(),
         };
@@ -2070,19 +2169,21 @@ mod tests {
 
         let projections = [
             project_connection_path(&direct, FfiConnectionPathEventKind::Selected),
+            project_connection_path(&direct_v6, FfiConnectionPathEventKind::Changed),
             project_connection_path(&relay, FfiConnectionPathEventKind::Changed),
             project_connection_path(&wifi_aware, FfiConnectionPathEventKind::Changed),
             project_connection_path(&other, FfiConnectionPathEventKind::Changed),
         ];
 
-        assert_eq!(projections[0].path_kind, FfiDataPathKind::Direct);
+        assert_eq!(projections[0].path_kind, FfiDataPathKind::DirectIpv4);
         assert_eq!(
             projections[0].event_kind,
             FfiConnectionPathEventKind::Selected
         );
-        assert_eq!(projections[1].path_kind, FfiDataPathKind::Relay);
-        assert_eq!(projections[2].path_kind, FfiDataPathKind::WifiAware);
-        assert_eq!(projections[3].path_kind, FfiDataPathKind::Other);
+        assert_eq!(projections[1].path_kind, FfiDataPathKind::DirectIpv6);
+        assert_eq!(projections[2].path_kind, FfiDataPathKind::Relay);
+        assert_eq!(projections[3].path_kind, FfiDataPathKind::WifiAware);
+        assert_eq!(projections[4].path_kind, FfiDataPathKind::Other);
         let rendered = format!("{projections:?}");
         assert!(!rendered.contains("198.51.100.42"));
         assert!(!rendered.contains("sensitive-relay.example"));
@@ -2115,7 +2216,7 @@ mod tests {
                     event_kind: FfiConnectionPathEventKind::Selected,
                 },
                 FfiConnectionPathEvent {
-                    path_kind: FfiDataPathKind::Direct,
+                    path_kind: FfiDataPathKind::DirectIpv4,
                     event_kind: FfiConnectionPathEventKind::Changed,
                 },
             ]
@@ -2125,5 +2226,35 @@ mod tests {
         assert!(diagnostics.contains("Direct"));
         assert!(!diagnostics.contains("relay.example"));
         assert!(!diagnostics.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn native_events_project_stage_timing_without_transport_details() {
+        let observer = Arc::new(RecordingObserver::default());
+        let sink = NativeSessionEvents {
+            observer: observer.clone(),
+        };
+
+        sink.on_event(TransferEvent::StageTiming {
+            transfer_id: Some(envoix_types::TransferId::new("job-17")),
+            direction: CoreTransferDirection::Receive,
+            attempt_id: 23,
+            stage: TransferStage::FirstPayload,
+            elapsed_us: 41_000,
+            delta_us: 7_000,
+        });
+
+        assert_eq!(
+            *observer.stage_timings.lock().unwrap(),
+            vec![FfiTransferStageTiming {
+                stage: FfiTransferStage::FirstPayload,
+                direction: FfiTransferDirection::Receive,
+                attempt_id: 23,
+                transfer_id: Some("job-17".into()),
+                elapsed_us: 41_000,
+                delta_us: 7_000,
+            }]
+        );
+        assert!(observer.diagnostics.lock().unwrap().is_empty());
     }
 }

@@ -100,10 +100,11 @@ internal class RoomControlWorkflow(
             showError("Room connections are unavailable in this build")
             return
         }
+        val shouldRevealInvite = state.inviteRevealed
         update {
             RoomControlUiState(
                 phase = RoomControlPhase.Hosting,
-                inviteRevealed = true,
+                inviteRevealed = shouldRevealInvite,
                 nowEpochMs = clockEpochMs(),
             )
         }

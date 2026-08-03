@@ -45,7 +45,7 @@ class NatTestReceiver : BroadcastReceiver() {
         val invitation = JSONObject(Native.generateInvite("receive", broker, relay))
         invitation.throwNativeError()
 
-        val roomCode = invitation.getString("code")
+        val invitePayload = invitation.getString("payload")
         TransferService.startReceive(
             context = context,
             room = invitation.getString("reference"),
@@ -57,7 +57,7 @@ class NatTestReceiver : BroadcastReceiver() {
             rememberedRelationshipId = null,
         )
         resultCode = Activity.RESULT_OK
-        resultData = roomCode
+        resultData = invitePayload
     }
 
     private fun startSender(
@@ -73,9 +73,9 @@ class NatTestReceiver : BroadcastReceiver() {
                 ?.let { rememberedPeer(context, it) }
         val invitation =
             if (remembered == null) {
-                val room = intent.getStringExtra(EXTRA_ROOM).orEmpty()
-                require(room.isNotBlank()) { "Room Code is missing" }
-                JSONObject(Native.parseInviteForRole(room, "send")).also {
+                val invite = intent.getStringExtra(EXTRA_INVITATION).orEmpty()
+                require(invite.isNotBlank()) { "Complete InviteV2 URI is missing" }
+                JSONObject(Native.parseInviteForRole(invite, "send")).also {
                     it.throwNativeError()
                 }
             } else {
@@ -200,7 +200,7 @@ class NatTestReceiver : BroadcastReceiver() {
         const val ACTION_QUERY_TRANSFER = "dev.envoix.app.NAT_TEST_QUERY_TRANSFER"
         const val EXTRA_BROKER = "broker"
         const val EXTRA_RELAY = "relay"
-        const val EXTRA_ROOM = "room"
+        const val EXTRA_INVITATION = "invitation"
         const val EXTRA_PATH = "path"
         const val EXTRA_DIRECTION = "direction"
         const val EXTRA_FIELD = "field"

@@ -27,11 +27,13 @@ struct BleRendezvousInvite: Equatable {
 enum BleRendezvousProtocol {
     static let serviceUUID = UUID(uuidString: "d5f3a2d8-8f4a-4b33-8a01-000000000001")!
     static let writeCharacteristicUUID = UUID(uuidString: "d5f3a2d8-8f4a-4b33-8a01-000000000002")!
+    static let identityCharacteristicUUID = UUID(uuidString: "d5f3a2d8-8f4a-4b33-8a01-000000000003")!
 
     static let frameHeaderSize = 16
     static let maximumWirePayloadBytes = 4_096
     static let maximumInviteBytes = 2_048
     static let maximumDisplayNameBytes = 192
+    static let maximumProvisionalDisplayNameBytes = 13
     static let minimumGATTWriteBytes = 20
 
     private static let frameMagic: [UInt8] = [0x45, 0x58]
@@ -39,9 +41,61 @@ enum BleRendezvousProtocol {
     private static let frameTypeInvite: UInt8 = 1
     private static let envelopeVersion: UInt8 = 1
     private static let envelopeTypeInvite: UInt8 = 1
+    private static let identityVersion: UInt8 = 1
     private static let peerKeyBytes = 16
     private static let envelopeFixedBytes = 6 + peerKeyBytes
-    private static let invitePrefixes = ["envoix://pair/", "envoix://room/"]
+
+    static func encodeIdentity(identity: LocalNearbyDiscoveryIdentity) -> Data? {
+        guard let peerKey = NearbyDiscoveryPeerRegistry.normalizePeerKey(identity.peerKey),
+              let displayName = normalizedDisplayName(identity.displayName) else {
+            return nil
+        }
+        let nameBytes = boundedUTF8(displayName, maximumBytes: maximumDisplayNameBytes)
+        guard !nameBytes.isEmpty else { return nil }
+
+        var payload = [identityVersion]
+        payload.append(contentsOf: peerKey.utf8)
+        payload.append(contentsOf: unsignedShort(nameBytes.count))
+        payload.append(contentsOf: nameBytes)
+        return Data(payload)
+    }
+
+    static func decodeIdentity(_ data: Data) -> LocalNearbyDiscoveryIdentity? {
+        let bytes = Array(data)
+        let fixedBytes = 1 + peerKeyBytes + 2
+        guard bytes.count >= fixedBytes,
+              bytes[0] == identityVersion,
+              let rawPeerKey = String(bytes: bytes[1..<(1 + peerKeyBytes)], encoding: .ascii),
+              let peerKey = NearbyDiscoveryPeerRegistry.normalizePeerKey(rawPeerKey) else {
+            return nil
+        }
+        let nameLength = unsignedShort(bytes, offset: 1 + peerKeyBytes)
+        guard nameLength > 0,
+              nameLength <= maximumDisplayNameBytes,
+              fixedBytes + nameLength == bytes.count,
+              let rawName = String(bytes: bytes[fixedBytes...], encoding: .utf8),
+              let displayName = normalizedDisplayName(rawName) else {
+            return nil
+        }
+        return LocalNearbyDiscoveryIdentity(
+            peerKey: peerKey,
+            displayName: displayName
+        )
+    }
+
+    static func decodeProvisionalDisplayName(
+        serviceData: Data?,
+        localName: String?
+    ) -> String? {
+        if let serviceData,
+           !serviceData.isEmpty,
+           serviceData.count <= maximumProvisionalDisplayNameBytes,
+           let value = String(data: serviceData, encoding: .utf8),
+           let displayName = normalizedDisplayName(value) {
+            return displayName
+        }
+        return normalizedDisplayName(localName)
+    }
 
     static func encodeInvite(
         identity: LocalNearbyDiscoveryIdentity,
@@ -94,6 +148,7 @@ enum BleRendezvousProtocol {
         private var requestID: UInt64?
         private var totalLength = 0
         private var bytes: [UInt8] = []
+        var isAssembling: Bool { requestID != nil }
 
         init(security: any BleRendezvousSecurity = InsecureBleRendezvousSecurity()) {
             self.security = security
@@ -177,9 +232,25 @@ enum BleRendezvousProtocol {
         )
     }
 
-    private static func isSupportedInvite(_ value: String) -> Bool {
-        let normalized = value.lowercased()
-        return invitePrefixes.contains { normalized.hasPrefix($0) }
+    static func isSupportedInvite(_ value: String) -> Bool {
+        if value.hasPrefix(inviteV2URLPrefix) {
+            return value.count > inviteV2URLPrefix.count
+        }
+
+        guard value.hasPrefix(roomControlURLPrefix) else { return false }
+        let suffix = value.dropFirst(roomControlURLPrefix.count)
+        let code = String(suffix.prefix { $0 != "?" })
+        return canonicalBareRoomControlCode(code) == code
+    }
+
+    private static func normalizedDisplayName(_ value: String?) -> String? {
+        guard let displayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(value),
+              displayName.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return displayName
     }
 
     private static func boundedUTF8(_ value: String, maximumBytes: Int) -> [UInt8] {

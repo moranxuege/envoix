@@ -10,6 +10,7 @@ import dev.envoix.app.RoomOutboxState
 import dev.envoix.app.RoomOutboxStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
+import dev.envoix.app.TransferActivityGroup
 import dev.envoix.app.TransferRepository
 import dev.envoix.app.TransferService
 import dev.envoix.app.deleteManifestJobArtifacts
@@ -328,6 +329,11 @@ internal class RememberedRoomTransferCoordinator private constructor(
                     )
                     return@launch
                 }
+            TransferRepository.assignActivityGroup(
+                id = receiveId,
+                groupId = TransferActivityGroup.remembered(relationshipId),
+                groupLabel = peer.label,
+            )
             val ready =
                 withTimeoutOrNull(RECEIVER_START_TIMEOUT_MS) {
                     TransferRepository.transfers
@@ -604,6 +610,18 @@ internal class RememberedRoomTransferCoordinator private constructor(
                 )
                 return
             }
+        val currentLabel =
+            runCatching {
+                peers
+                    .peers()
+                    .firstOrNull { it.relationshipId == relationshipId }
+                    ?.label
+            }.getOrNull()
+        TransferRepository.assignActivityGroup(
+            id = transferId,
+            groupId = TransferActivityGroup.remembered(relationshipId),
+            groupLabel = currentLabel,
+        )
         if (!outbox.markTransferring(pending.entry.id, offerId, transferId)) {
             TransferService.cancel(appContext, transferId)
             return

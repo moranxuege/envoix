@@ -3,6 +3,103 @@ import XCTest
 @testable import Envoix_iOS
 
 final class WifiAwareCapabilityTests: XCTestCase {
+    func testPairingPresentationGuidesFirstPair() {
+        XCTAssertEqual(
+            pairingPresentation(baselineDeviceIDs: [], currentDeviceIDs: []),
+            .guidance(.newPair)
+        )
+    }
+
+    func testPairingPresentationGuidesUnchangedExistingPairs() {
+        XCTAssertEqual(
+            pairingPresentation(baselineDeviceIDs: [1], currentDeviceIDs: [1]),
+            .guidance(.existingPairs(count: 1))
+        )
+        XCTAssertEqual(
+            pairingPresentation(
+                baselineDeviceIDs: [1, 2, 3],
+                currentDeviceIDs: [1, 2, 3]
+            ),
+            .guidance(.existingPairs(count: 3))
+        )
+    }
+
+    func testPairingPresentationObservesNewDeviceID() {
+        XCTAssertEqual(
+            pairingPresentation(
+                baselineDeviceIDs: [1],
+                currentDeviceIDs: [1, 2]
+            ),
+            .success(.pairedDevicesObserved(deviceIDs: [2], totalCount: 2))
+        )
+    }
+
+    func testPairingPresentationDetectsSameCountDeviceReplacement() {
+        XCTAssertEqual(
+            pairingPresentation(
+                baselineDeviceIDs: [1],
+                currentDeviceIDs: [2]
+            ),
+            .success(.pairedDevicesObserved(deviceIDs: [2], totalCount: 1))
+        )
+    }
+
+    func testPickerSelectionSucceedsWhileSnapshotIsDelayed() {
+        XCTAssertEqual(
+            WifiAwarePairingPresentationPolicy.evaluate(
+                observation: .loading,
+                pickerSelectedDeviceID: 9
+            ),
+            .success(.pickerSelected(deviceID: 9, snapshotConfirmed: false))
+        )
+        XCTAssertEqual(
+            pairingPresentation(
+                baselineDeviceIDs: [],
+                currentDeviceIDs: [],
+                pickerSelectedDeviceID: 9
+            ),
+            .success(.pickerSelected(deviceID: 9, snapshotConfirmed: false))
+        )
+    }
+
+    func testPickerSelectionReportsSnapshotConfirmation() {
+        XCTAssertEqual(
+            pairingPresentation(
+                baselineDeviceIDs: [],
+                currentDeviceIDs: [9],
+                pickerSelectedDeviceID: 9
+            ),
+            .success(.pickerSelected(deviceID: 9, snapshotConfirmed: true))
+        )
+    }
+
+    func testPairingPresentationRepresentsLoadingAndObserverFailure() {
+        XCTAssertEqual(
+            WifiAwarePairingPresentationPolicy.evaluate(
+                observation: .loading,
+                pickerSelectedDeviceID: nil
+            ),
+            .loading
+        )
+        XCTAssertEqual(
+            WifiAwarePairingPresentationPolicy.evaluate(
+                observation: .failed,
+                pickerSelectedDeviceID: nil
+            ),
+            .observationFailed
+        )
+    }
+
+    func testPickerSelectionTakesPrecedenceOverObserverFailure() {
+        XCTAssertEqual(
+            WifiAwarePairingPresentationPolicy.evaluate(
+                observation: .failed,
+                pickerSelectedDeviceID: 9
+            ),
+            .success(.pickerSelected(deviceID: 9, snapshotConfirmed: false))
+        )
+    }
+
     func testAvailabilityPolicyCoversEveryStructuredState() {
         let cases: [(WifiAwareCapabilityFacts, WifiAwareAvailability)] = [
             (readyFacts(osSupported: false), .unsupportedOS),
@@ -25,6 +122,17 @@ final class WifiAwareCapabilityTests: XCTestCase {
             (readyFacts(pairingSupported: nil), .temporarilyUnavailable),
             (readyFacts(pairedDeviceCount: nil), .temporarilyUnavailable),
             (readyFacts(pairedDeviceCount: 0), .pairingRequired),
+            (
+                readyFacts(
+                    authenticatedRendezvousSupported: false,
+                    pairedDeviceCount: 0
+                ),
+                .pairingRequired
+            ),
+            (
+                readyFacts(authenticatedRendezvousSupported: false),
+                .temporarilyUnavailable
+            ),
             (readyFacts(), .ready),
         ]
 
@@ -50,7 +158,6 @@ final class WifiAwareCapabilityTests: XCTestCase {
         )
         XCTAssertEqual(envoixWifiAwareService, "_envoix._udp")
         XCTAssertEqual(envoixWifiAwareProbeService, "_envoix-probe._tcp")
-        XCTAssertEqual(envoixWifiAwareTransferService, "_envoix._udp")
     }
 
     func testProbeProtocolRoundTripAndRejectsCorruption() throws {
@@ -171,6 +278,21 @@ final class WifiAwareCapabilityTests: XCTestCase {
                 )
             )
         )
+        XCTAssertTrue(
+            AppleWifiAwareTransportSession.isRecoverableWifiAwareFailure(
+                EnvoixError.Operation(
+                    reason: "nearby_hybrid_pre_auth_transport_failure: " +
+                        "custom QUIC dial failed"
+                )
+            )
+        )
+        XCTAssertFalse(
+            AppleWifiAwareTransportSession.isRecoverableWifiAwareFailure(
+                WifiAwareFallbackTestError(
+                    "wrapped nearby_hybrid_pre_auth_transport_failure: fake"
+                )
+            )
+        )
         XCTAssertFalse(
             AppleWifiAwareTransportSession.isRecoverableWifiAwareFailure(
                 WifiAwareFallbackTestError("transport error: early eof")
@@ -220,16 +342,23 @@ final class WifiAwareCapabilityTests: XCTestCase {
 
         XCTAssertEqual(snapshot.pairingSupported, true, evidence)
         XCTAssertNotNil(snapshot.pairedDeviceCount, evidence)
-        XCTAssertTrue(
-            snapshot.availability == .pairingRequired || snapshot.availability == .ready,
-            evidence
-        )
+        if #available(iOS 26.4, *) {
+            XCTAssertTrue(
+                snapshot.availability == .pairingRequired || snapshot.availability == .ready,
+                evidence
+            )
+        } else if snapshot.pairedDeviceCount == 0 {
+            XCTAssertEqual(snapshot.availability, .pairingRequired, evidence)
+        } else {
+            XCTAssertEqual(snapshot.availability, .temporarilyUnavailable, evidence)
+        }
         #endif
     }
 
     private func readyFacts(
         osSupported: Bool = true,
         hardwareSupported: Bool = true,
+        authenticatedRendezvousSupported: Bool = true,
         entitlementPresent: Bool = true,
         permissionState: WifiAwarePermissionState = .granted,
         wifiEnabled: Bool = true,
@@ -241,6 +370,7 @@ final class WifiAwareCapabilityTests: XCTestCase {
         WifiAwareCapabilityFacts(
             osSupported: osSupported,
             hardwareSupported: hardwareSupported,
+            authenticatedRendezvousSupported: authenticatedRendezvousSupported,
             entitlementPresent: entitlementPresent,
             permissionState: permissionState,
             wifiEnabled: wifiEnabled,
@@ -248,6 +378,20 @@ final class WifiAwareCapabilityTests: XCTestCase {
             temporarilyAvailable: temporarilyAvailable,
             pairingSupported: pairingSupported,
             pairedDeviceCount: pairedDeviceCount
+        )
+    }
+
+    private func pairingPresentation(
+        baselineDeviceIDs: Set<UInt64>,
+        currentDeviceIDs: Set<UInt64>,
+        pickerSelectedDeviceID: UInt64? = nil
+    ) -> WifiAwarePairingPresentation {
+        WifiAwarePairingPresentationPolicy.evaluate(
+            observation: .snapshot(
+                baselineDeviceIDs: baselineDeviceIDs,
+                currentDeviceIDs: currentDeviceIDs
+            ),
+            pickerSelectedDeviceID: pickerSelectedDeviceID
         )
     }
 }

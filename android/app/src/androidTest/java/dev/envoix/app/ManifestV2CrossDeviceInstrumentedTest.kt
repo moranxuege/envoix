@@ -14,6 +14,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -134,11 +135,15 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 val invitation =
                     checkedResponse(
                         Native.parseInviteForRole(
-                            scenarioCode(),
+                            scenarioInvitation(),
                             "send",
                         ),
                     )
-                val callback = RecordingCallback(evidence = evidence)
+                val callback =
+                    RecordingCallback(
+                        evidence = evidence,
+                        expectedDirection = Direction.Send,
+                    )
                 val sessionId = sessionId()
                 try {
                     Native.startManifestV2Session(
@@ -200,7 +205,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                             Endpoints.RELAY,
                         ),
                     )
-                marker("invitation=${invitation.getString("code")}")
+                marker("invitation=${invitation.getString("payload")}")
 
                 if (fixture.scenario == Scenario.Collision) {
                     val sentinel = File(testRoot, "collision-sentinel").apply { writeBytes(COLLISION_SENTINEL) }
@@ -212,6 +217,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 val endpointCallback =
                     RecordingCallback(
                         evidence = evidence,
+                        expectedDirection = Direction.Receive,
                         plan = { request ->
                             if (fixture.directoryCount > 0) {
                                 localPublisher.plan(request)
@@ -321,11 +327,13 @@ class ManifestV2CrossDeviceInstrumentedTest {
 
     private class RecordingCallback(
         private val evidence: AndroidMatrixEndpointEvidence,
+        expectedDirection: Direction,
         private val plan: ((String) -> String)? = null,
         private val save: ((String) -> String)? = null,
         private val offer: ((JSONObject) -> Unit)? = null,
     ) : ManifestV2Callback {
         private val terminal = CountDownLatch(1)
+        private val stageTimings = StageTimingCapture(expectedDirection)
         val states: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
         @Volatile
@@ -337,6 +345,11 @@ class ManifestV2CrossDeviceInstrumentedTest {
         override fun onEvent(json: String) {
             val event = JSONObject(json)
             evidence.recordEvent(event)
+            if (event.optString("kind") == "stage_timing") {
+                marker(stageTimings.accept(event))
+                return
+            }
+
             val state = event.optString("state")
             if (state.isNotEmpty()) states += state
             when (state) {
@@ -373,7 +386,207 @@ class ManifestV2CrossDeviceInstrumentedTest {
 
         fun assertCompleted(): JSONObject {
             assertTrue("Manifest v2 physical transfer failed: ${failure ?: "unknown"}", failure == null)
-            return requireNotNull(completed) { "Manifest v2 transfer ended without completion" }
+            val result = requireNotNull(completed) { "Manifest v2 transfer ended without completion" }
+            stageTimings.assertSuccessfulTransfer()
+            marker(stageTimings.verificationMarker())
+            return result
+        }
+    }
+
+    private class StageTimingCapture(
+        private val expectedDirection: Direction,
+    ) {
+        private val lock = Any()
+        private var samples = emptyList<TransferStageTiming>()
+        private val violations = mutableListOf<String>()
+        private var droppedSamples = 0
+
+        fun accept(event: JSONObject): String =
+            synchronized(lock) {
+                val timing = parse(event)
+                if (timing == null) {
+                    violations += "malformed stage_timing event"
+                    return@synchronized "stage_timing_invalid reason=malformed"
+                }
+                if (timing.direction != expectedDirection) {
+                    violations +=
+                        "stage_timing direction ${timing.direction.wire} did not match ${expectedDirection.wire}"
+                    return@synchronized "stage_timing_invalid reason=direction_mismatch"
+                }
+
+                val wasAtCapacity = samples.size == TransferStageTimingHistory.SAMPLE_CAP
+                val appended = TransferStageTimingHistory.append(samples, timing)
+                if (!appended.accepted) {
+                    violations +=
+                        "stage_timing attempt ${timing.attemptId} rejected duplicate or out-of-order stage ${timing.stage.wire}"
+                    return@synchronized "stage_timing_invalid reason=sequence"
+                }
+                if (wasAtCapacity) droppedSamples += 1
+                samples = appended.samples
+                timing.diagnosticLine()
+            }
+
+        fun assertSuccessfulTransfer() {
+            val snapshot =
+                synchronized(lock) {
+                    CaptureSnapshot(samples, violations.toList(), droppedSamples)
+                }
+            assertTrue(
+                "Stage timing contract violations: ${snapshot.violations.joinToString()}",
+                snapshot.violations.isEmpty(),
+            )
+            assertEquals(
+                "Stage timing exceeded the fixed ${TransferStageTimingHistory.SAMPLE_CAP}-sample evidence capacity",
+                0,
+                snapshot.droppedSamples,
+            )
+            assertTrue("Manifest v2 transfer emitted no stage timing evidence", snapshot.samples.isNotEmpty())
+
+            val attempts = snapshot.samples.groupBy { it.attemptId to it.direction }
+            attempts.forEach { (attempt, attemptSamples) ->
+                assertEquals(expectedDirection, attempt.second)
+                assertEquals(
+                    "Attempt ${attempt.first} did not begin with session_started",
+                    TransferStage.SessionStarted,
+                    attemptSamples.first().stage,
+                )
+                assertEquals(
+                    "Attempt ${attempt.first} first delta must be measured from attempt start",
+                    attemptSamples.first().elapsedUs,
+                    attemptSamples.first().deltaUs,
+                )
+                assertTrue(
+                    "Attempt ${attempt.first} did not emit a terminal stage",
+                    attemptSamples.last().stage.isTerminal,
+                )
+                validateMonotonicAttempt(attempt.first, attemptSamples)
+                validateTransferIdentity(attempt.first, attemptSamples)
+            }
+
+            val successfulAttempts =
+                attempts.values.filter { it.last().stage == TransferStage.DeliveryComplete }
+            assertEquals("Expected exactly one delivered transfer attempt", 1, successfulAttempts.size)
+            val successfulStages = successfulAttempts.single().map(TransferStageTiming::stage).toSet()
+            assertTrue(
+                "Delivered attempt omitted required stage milestones: $successfulStages",
+                successfulStages.containsAll(REQUIRED_SUCCESS_STAGES),
+            )
+            assertEquals(
+                "delivery_complete must be the final structured timing event",
+                TransferStage.DeliveryComplete,
+                snapshot.samples.last().stage,
+            )
+        }
+
+        fun verificationMarker(): String =
+            synchronized(lock) {
+                "stage_timing_verified direction=${expectedDirection.wire} " +
+                    "attempts=${samples.map(TransferStageTiming::attemptId).distinct().size} " +
+                    "samples=${samples.size} cap=${TransferStageTimingHistory.SAMPLE_CAP}"
+            }
+
+        private fun validateMonotonicAttempt(
+            attemptId: Long,
+            attemptSamples: List<TransferStageTiming>,
+        ) {
+            attemptSamples.zipWithNext().forEach { (previous, current) ->
+                assertTrue(
+                    "Attempt $attemptId stage order regressed from ${previous.stage.wire} to ${current.stage.wire}",
+                    current.stage.order > previous.stage.order,
+                )
+                assertTrue(
+                    "Attempt $attemptId elapsed_us regressed",
+                    current.elapsedUs >= previous.elapsedUs,
+                )
+                assertEquals(
+                    "Attempt $attemptId delta_us did not match adjacent elapsed_us values",
+                    current.elapsedUs - previous.elapsedUs,
+                    current.deltaUs,
+                )
+            }
+        }
+
+        private fun validateTransferIdentity(
+            attemptId: Long,
+            attemptSamples: List<TransferStageTiming>,
+        ) {
+            var boundTransferId: String? = null
+            attemptSamples.forEach { sample ->
+                val transferId = sample.transferId
+                if (transferId == null) {
+                    assertNull(
+                        "Attempt $attemptId cleared transfer_id after it was bound",
+                        boundTransferId,
+                    )
+                } else if (boundTransferId == null) {
+                    boundTransferId = transferId
+                } else {
+                    assertEquals(
+                        "Attempt $attemptId changed transfer_id",
+                        boundTransferId,
+                        transferId,
+                    )
+                }
+            }
+        }
+
+        private fun parse(event: JSONObject): TransferStageTiming? {
+            val transferId =
+                when {
+                    !event.has("transfer_id") || event.isNull("transfer_id") -> null
+                    else -> event.opt("transfer_id") as? String ?: return null
+                }
+            return TransferStageTimingParser.parse(
+                stageWire = event.strictString("stage"),
+                directionWire = event.strictString("direction"),
+                attemptId = event.strictNonNegativeLong("attempt_id"),
+                transferId = transferId,
+                elapsedUs = event.strictNonNegativeLong("elapsed_us"),
+                deltaUs = event.strictNonNegativeLong("delta_us"),
+            )
+        }
+
+        private fun TransferStageTiming.diagnosticLine(): String =
+            "stage_timing stage=${stage.wire} direction=${direction.wire} " +
+                "attempt_id=$attemptId transfer_id=${transferId ?: "-"} " +
+                "elapsed_us=$elapsedUs delta_us=$deltaUs"
+
+        private fun JSONObject.strictString(name: String): String? {
+            if (!has(name) || isNull(name)) return null
+            return opt(name) as? String
+        }
+
+        private fun JSONObject.strictNonNegativeLong(name: String): Long? {
+            if (!has(name) || isNull(name)) return null
+            val value =
+                when (val raw = opt(name)) {
+                    is Byte -> raw.toLong()
+                    is Short -> raw.toLong()
+                    is Int -> raw.toLong()
+                    is Long -> raw
+                    else -> return null
+                }
+            return value.takeIf { it >= 0L }
+        }
+
+        private data class CaptureSnapshot(
+            val samples: List<TransferStageTiming>,
+            val violations: List<String>,
+            val droppedSamples: Int,
+        )
+
+        companion object {
+            private val REQUIRED_SUCCESS_STAGES =
+                setOf(
+                    TransferStage.SessionStarted,
+                    TransferStage.ConnectionReady,
+                    TransferStage.AuthenticationStarted,
+                    TransferStage.AuthenticationComplete,
+                    TransferStage.ManifestOffer,
+                    TransferStage.ManifestAccepted,
+                    TransferStage.PayloadComplete,
+                    TransferStage.DeliveryComplete,
+                )
         }
     }
 
@@ -472,7 +685,10 @@ class ManifestV2CrossDeviceInstrumentedTest {
         return value
     }
 
-    private fun scenarioCode(): String = argument(ARG_CODE) ?: DEFAULT_CODE
+    private fun scenarioInvitation(): String =
+        requireNotNull(argument(ARG_INVITATION)) {
+            "$ARG_INVITATION must contain the receiver's complete InviteV2 URI"
+        }
 
     private fun argument(name: String): String? =
         InstrumentationRegistry
@@ -554,9 +770,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
         const val ARG_BUILD_VARIANT = "envoixCrossDeviceBuildVariant"
         const val ARG_TIMEOUT_MS = "envoixCrossDeviceTimeoutMs"
         const val ARG_SCENARIO = "envoixCrossDeviceScenario"
-        const val ARG_CODE = "envoixCrossDeviceCode"
+        const val ARG_INVITATION = "envoixCrossDeviceInvitation"
         const val ARG_LARGE_BYTES = "envoixCrossDeviceLargeBytes"
-        const val DEFAULT_CODE = "741203-ambe-come"
         const val DEFAULT_TIMEOUT_MS = 180_000L
         const val TIMEOUT_BYTES_PER_MS = 2_048L
         const val DEFAULT_LARGE_BYTES = 128L * 1_024 * 1_024

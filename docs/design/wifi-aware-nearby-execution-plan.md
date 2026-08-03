@@ -163,24 +163,23 @@ A Wi-Fi Aware path may be added only when:
 
 1. the local platform and signed application have the required Wi-Fi Aware
    capabilities, entitlement, and service declarations;
-2. the user selected a concrete BLE peer from the current foreground Nearby
+2. the user selected a concrete peer from the current foreground Nearby
    generation;
-3. the current Apple snapshot contains exactly one Wi-Fi Aware paired device;
+3. the authenticated `_envoix._udp` control plane bound that peer's
+   ephemeral presence key to one exact Wi-Fi Aware paired-device ID;
 4. the remote peer has an active compatible Nearby/Wi-Fi Aware context;
 5. the connected UDP channel reports Wi-Fi Aware path metadata;
 6. both endpoints exchange and verify the expected iroh endpoint IDs; and
 7. the negotiated datagram capacity is at least 1,200 bytes.
 
-BLE and discovery-only mDNS identities are untrusted and ephemeral. The
-one-day integration therefore never guesses between paired devices and never
-matches display names: zero or multiple paired Wi-Fi Aware devices omit the
-custom path. With exactly one candidate, Room authentication still must bind
-its endpoint ID to the bootstrap ID before dialing. A wrong candidate fails
-closed rather than reaching payload.
-
-This is deliberately narrower than a future peer-registry association. It is
-safe for the current two-device test topology and does not claim that BLE and
-Apple paired-device identifiers are intrinsically equivalent.
+BLE and discovery-only mDNS identities remain untrusted and ephemeral. The
+Apple control provider never guesses between paired devices and never matches
+display names. It authenticates hello/ack frames with the per-connection Wi-Fi
+Aware shared secret, then freezes the resulting presence-key-to-device-ID
+binding into `NearbyPairingSelection`. Multiple paired devices are supported
+only when every visible presence key and device ID has a unique one-to-one
+claim; collisions and identity changes fail closed. Room authentication still
+binds the iroh endpoint ID before payload.
 
 No Wi-Fi Aware pairing prompt, publisher, listener, or connection is created
 for a non-Nearby entry point.
@@ -193,8 +192,8 @@ already-bound endpoint.
 
 The first implementation therefore uses a per-session hybrid endpoint:
 
-1. Nearby captures the only eligible Apple paired-device ID before its
-   discovery generation stops;
+1. Nearby captures the selected peer's exact authenticated Apple paired-device
+   ID before its discovery generation stops;
 2. Swift establishes and validates the connected Wi-Fi Aware UDP channel;
 3. Rust exchanges endpoint IDs and MTU through `ENVXWA02`;
 4. Rust builds one endpoint with IP, configured relay transport, and the custom
@@ -205,13 +204,13 @@ The first implementation therefore uses a per-session hybrid endpoint:
    only the custom address; and
 7. iroh NAT traversal validates the ordinary IP backup on that connection.
 
-When the paired-device snapshot is absent or ambiguous, no Apple channel is
-opened and the existing ordinary Room path runs. When a unique candidate has
-entered native setup, a recoverable Apple setup error falls back to that same
-ordinary authenticated Room route. The receiver waits at most 20 seconds for
-the first native connection to become ready; this prevents a ready-but-unused
-listener from remaining on Wi-Fi Aware after the sender has already fallen
-back.
+When the selected peer has no exact authenticated device ID, no Apple data
+channel is opened and the existing ordinary Room path runs. When an exact
+candidate has entered native setup, a recoverable Apple setup error falls back
+to that same ordinary authenticated Room route. The receiver waits at most
+20 seconds for the first native connection to become ready; this prevents a
+ready-but-unused listener from remaining on Wi-Fi Aware after the sender has
+already fallen back.
 
 The fallback boundary is explicit. Cancellation, malformed input, peer or
 endpoint identity mismatch, and authentication/integrity failures do not
@@ -495,9 +494,11 @@ Verification:
 
 Device use: none until the final H3 gate.
 
-Status: complete locally for the two-device topology. Only the Nearby BLE flow
-can stage a Wi-Fi Aware device ID. Zero or multiple Apple paired devices use
-ordinary iroh; non-Nearby entry points never stage the route.
+Status: superseded and strengthened on 2026-07-31. Only the Nearby workflow can
+stage a Wi-Fi Aware device ID, but the ID now comes from the authenticated
+peer-specific control binding rather than a globally unique paired-device
+snapshot. Ambiguous claims are omitted; non-Nearby entry points never stage the
+route.
 
 ### H4 — No-device quality gate
 
@@ -662,6 +663,39 @@ Status: complete on 2026-07-28.
 - The focused hosted Apple suite passed 78 tests on the final build. The 30-run
   firmware/NDP stability gate above remains separate from this integration
   result.
+
+### H8 — Wi-Fi Aware discovery and Room-control handoff
+
+The original H3/H7 implementation activated Wi-Fi Aware only after another
+transport had already discovered the peer and established a Room. That was
+insufficient when two Apple devices were on different IP networks with
+Bluetooth disabled.
+
+Status: implementation and prebuild complete on 2026-07-31; two-device physical
+regression pending because both target devices were offline after the build.
+
+- `_envoix._udp` publishes and browses paired Apple devices while Nearby owns
+  its foreground control lease. `_envoix-disc._udp` remains mDNS-only.
+- iOS/iPadOS 26.4 or later derives a per-connection Wi-Fi Aware shared secret
+  and authenticates fragmented hello, invitation, and acknowledgement frames
+  with HMAC-SHA256.
+- The authenticated hello binds the exact paired-device ID to the ephemeral
+  Nearby presence key; collisions, identity changes, stale generations, and
+  display-name matching fail closed.
+- A Room selection freezes that exact ID. An exact Wi-Fi Aware selection fails
+  closed instead of silently changing its Room-control route to mDNS or BLE.
+- Incoming offers use a bounded, deduplicated FIFO, and Room invitation scope
+  cannot be reassigned from peer A to peer B.
+- After the control listener/browser fully stop, a process-wide role lease
+  hands the same `_envoix._udp` service to the selected iroh/QUIC data path.
+- The listener uses the platform's infinite new-connection allowance. A
+  previous `.newConnectionLimit(4)` review finding was removed because that API
+  is a lifetime delivery budget, not a concurrent-connection cap. The physical
+  regression sends six sequential invitations so this failure cannot return
+  unnoticed.
+- The earlier 103-test hosted result predates the canonical-service handoff and
+  listener-ready fixes; the revised state tests, signed build, and two-device
+  product flow must be rerun.
 
 ## 13. API compatibility
 

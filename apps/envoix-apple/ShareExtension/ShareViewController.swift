@@ -354,8 +354,8 @@ final class ShareViewController: UIViewController {
         activityIndicator.stopAnimating()
         titleLabel.text = localized("Ready in Envoix", "已在 Envoix 中准备好")
         detailLabel.text = localized(
-            "Tap Done, then open Envoix to pair with the receiver and send.",
-            "点击“完成”，然后打开 Envoix 与接收端配对并发送。"
+            "Tap Done, then return to Envoix. If a Room is connected, this selection will be ready there.",
+            "点击“完成”，然后返回 Envoix。如果房间仍已连接，所选项目会直接在该房间中准备好。"
         )
         primaryButton.setTitle(localized("Done", "完成"), for: .normal)
         primaryButton.isHidden = false

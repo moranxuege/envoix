@@ -42,15 +42,6 @@ pub fn parse_invitation_for_routing(
     InviteV2::parse(payload, now).map_err(to_transfer_error)
 }
 
-pub fn parse_room_code(
-    input: &str,
-    local_role: TransferRole,
-) -> Result<InvitationBootstrap, TransferError> {
-    RoomCode::parse(input)
-        .map(|room_code| InvitationBootstrap::room_code_joiner(room_code, local_role))
-        .map_err(to_transfer_error)
-}
-
 fn to_transfer_error(error: InvitationError) -> TransferError {
     TransferError::input(format!("invitation {}: {error}", error.code().as_str()))
 }

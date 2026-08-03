@@ -26,9 +26,8 @@ use crate::{
     TransferCancelToken, parse_broker_addr,
 };
 
-pub const ROOM_CONTROL_ALPN: &[u8] = b"envoix-room-control/4";
-const ROOM_CONTROL_VERSION: u16 = 4;
-const ROOM_CODE_PREFIX: char = 'R';
+pub const ROOM_CONTROL_ALPN: &[u8] = b"envoix-room-control/5";
+const ROOM_CONTROL_VERSION: u16 = 5;
 const ROOM_URI_PREFIX: &str = "envoix://room/";
 const ROOM_INVITE_TTL: Duration = Duration::from_secs(300);
 const ROOM_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
@@ -58,9 +57,8 @@ impl RoomControlInvite {
     ) -> Result<Self, SessionError> {
         let room_code =
             RoomCode::generate().map_err(|error| CoreError::InvalidInput(error.to_string()))?;
-        let code = format!("{ROOM_CODE_PREFIX}{}", room_code.canonical());
         Self::from_parts(
-            code,
+            room_code.canonical().to_string(),
             broker.into(),
             relay,
             now_unix_secs()?.saturating_add(ROOM_INVITE_TTL.as_secs()),
@@ -165,11 +163,7 @@ impl RoomControlInvite {
     }
 
     fn room_id(&self) -> String {
-        let canonical = self
-            .code
-            .strip_prefix(ROOM_CODE_PREFIX)
-            .expect("validated room code");
-        let room_code = RoomCode::parse(canonical).expect("validated room code");
+        let room_code = RoomCode::parse(&self.code).expect("validated room code");
         format!("{ROOM_CONTROL_LOCATOR_PREFIX}{}", room_code.room_id())
     }
 
@@ -1602,19 +1596,14 @@ where
 
 fn normalize_room_code(code: &str) -> Result<String, SessionError> {
     let code = code.trim();
-    let Some(prefix) = code.chars().next() else {
+    if code.starts_with('R') || code.starts_with('r') {
         return Err(CoreError::InvalidInput(
-            "room code must start with 'R'".into(),
-        ));
-    };
-    if !prefix.eq_ignore_ascii_case(&ROOM_CODE_PREFIX) {
-        return Err(CoreError::InvalidInput(
-            "room code must start with 'R'".into(),
+            "legacy R-prefixed room codes are not supported".into(),
         ));
     }
-    let canonical = RoomCode::parse(&code[prefix.len_utf8()..])
-        .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
-    Ok(format!("{ROOM_CODE_PREFIX}{}", canonical.canonical()))
+    let canonical =
+        RoomCode::parse(code).map_err(|error| CoreError::InvalidInput(error.to_string()))?;
+    Ok(canonical.canonical().to_string())
 }
 
 fn validate_display_name(name: &str) -> Result<(), SessionError> {
