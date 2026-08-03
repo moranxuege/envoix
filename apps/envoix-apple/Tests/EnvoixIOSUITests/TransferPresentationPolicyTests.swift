@@ -670,6 +670,7 @@ final class TransferPresentationPolicyTests: XCTestCase {
             activityId: id,
             direction: .send,
             mode: .invite,
+            attemptCount: 1,
             itemCount: 1,
             totalBytes: total,
             bytesTransferred: bytes,

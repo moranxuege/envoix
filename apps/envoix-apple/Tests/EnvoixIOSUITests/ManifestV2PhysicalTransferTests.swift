@@ -1324,7 +1324,7 @@ private final class AppleMatrixEndpointEvidence: @unchecked Sendable {
 
     private static func wirePath(_ value: FfiDataPathKind) -> String {
         switch value {
-        case .direct: return "direct"
+        case .direct, .directIpv4, .directIpv6: return "direct"
         case .relay: return "relay"
         case .wifiAware: return "wifi_aware"
         case .other: return "other"
