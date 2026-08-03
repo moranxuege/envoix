@@ -247,7 +247,13 @@ ENDPOINT_PHASES = {
 PATH_KINDS = {"direct", "relay", "wifi_aware", "other"}
 ENTRY_KINDS = {"file", "directory"}
 ENTRY_DISPOSITIONS = {"completed", "skipped", "renamed", "rejected", "failed"}
-PUBLICATION_MECHANISMS = {"media_store", "test_local_directory", "mixed"}
+PUBLICATION_MECHANISMS = {
+    "files_directory",
+    "media_store",
+    "mixed",
+    "storage_access_framework",
+    "test_local_directory",
+}
 RECOVERY_ACTIONS = {
     "none",
     "retry",
@@ -255,6 +261,14 @@ RECOVERY_ACTIONS = {
     "re_pair",
     "open_settings",
     "choose_folder",
+}
+FAILURE_PHASES = ENDPOINT_PHASES | {
+    "setup",
+    "authenticating",
+    "negotiating",
+    "committing",
+    "driver_validation",
+    "cleanup",
 }
 ENDPOINT_SUMMARY_KEYS = {
     "root_count",
@@ -598,16 +612,25 @@ def validate_endpoint_result(
         actual_platform != "android" or actual_layer != "l1_native"
     ):
         errors.append("direct_jni endpoint results must be Android L1 evidence")
-    if actual_driver == "direct_ffi" and actual_layer != "l1_native":
-        errors.append("direct_ffi endpoint results must be L1 evidence")
+    if actual_driver == "direct_ffi" and (
+        actual_platform not in {"ios", "macos"} or actual_layer != "l1_native"
+    ):
+        errors.append("direct_ffi endpoint results must be Apple L1 evidence")
     if actual_driver == "product_activity" and actual_layer != "l2_physical":
         errors.append("product_activity endpoint results must be L2 evidence")
-    _check_enum(
+    actual_build_variant = _check_enum(
         value.get("build_variant"),
         BUILD_VARIANTS,
         "endpoint result.build_variant",
         errors,
     )
+    if (
+        actual_driver == "product_activity"
+        and actual_build_variant != "release_equivalent"
+    ):
+        errors.append(
+            "product_activity endpoint results require a release-equivalent build"
+        )
     _check_text(value.get("app_version"), "endpoint result.app_version", errors)
     _check_nullable_text(
         value.get("core_version"),
@@ -633,16 +656,20 @@ def validate_endpoint_result(
                 f"endpoint result.capabilities[{index}] must be a stable "
                 "lowercase identifier"
             )
+    identifiers: dict[str, str | None] = {}
     for field in ("activity_id", "job_id"):
         identifier = _check_nullable_text(
             value.get(field),
             f"endpoint result.{field}",
             errors,
         )
+        identifiers[field] = identifier
         if identifier is not None and not RUN_IDENTIFIER.fullmatch(identifier):
             errors.append(
                 f"endpoint result.{field} must be a stable identifier or null"
             )
+    if actual_driver == "product_activity" and identifiers["activity_id"] is None:
+        errors.append("product_activity endpoint results require activity_id")
 
     started_at = value.get("started_at")
     finished_at = value.get("finished_at")
@@ -695,6 +722,12 @@ def validate_endpoint_result(
             "endpoint result.selected_path",
             errors,
         )
+    if (
+        actual_driver == "product_activity"
+        and terminal_state == "completed"
+        and selected_path is None
+    ):
+        errors.append("product_activity endpoint results require selected_path")
     path_reason = _check_nullable_text(
         value.get("path_reason"),
         "endpoint result.path_reason",
@@ -725,6 +758,25 @@ def validate_endpoint_result(
                 "endpoint result.destination_summary",
                 errors,
             )
+        if (
+            actual_driver == "product_activity"
+            and terminal_state == "completed"
+            and isinstance(destination, dict)
+        ):
+            publication = destination.get("publication")
+            if not isinstance(publication, dict):
+                errors.append(
+                    "completed product_activity receiver requires publication"
+                )
+            else:
+                if publication.get("mechanism") == "test_local_directory":
+                    errors.append(
+                        "product_activity receiver cannot use test-local publication"
+                    )
+                if publication.get("committed") is not True:
+                    errors.append(
+                        "completed product_activity receiver requires committed publication"
+                    )
 
     delivery_proof = value.get("delivery_proof")
     if type(delivery_proof) is not bool:
@@ -756,7 +808,7 @@ def validate_endpoint_result(
                 )
             _check_enum(
                 failure.get("phase"),
-                ENDPOINT_PHASES | {"setup", "driver_validation", "cleanup"},
+                FAILURE_PHASES,
                 "endpoint result.failure.phase",
                 errors,
             )
@@ -1967,19 +2019,25 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
+        cases_by_id = {case["case_id"]: case for case in registry["cases"]}
         for execution in plan["executions"]:
             print(
                 "\t".join(
-                    str(execution[field])
-                    for field in (
-                        "case_id",
-                        "repetition",
-                        "sender",
-                        "receiver",
-                        "scenario",
-                        "timeout_seconds",
-                        "disposition",
-                    )
+                    [
+                        *(
+                            str(execution[field])
+                            for field in (
+                                "case_id",
+                                "repetition",
+                                "sender",
+                                "receiver",
+                                "scenario",
+                                "timeout_seconds",
+                            )
+                        ),
+                        cases_by_id[execution["case_id"]]["test_layer"],
+                        execution["disposition"],
+                    ]
                 )
             )
         return 0

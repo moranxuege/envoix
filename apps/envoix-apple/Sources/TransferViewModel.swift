@@ -143,6 +143,7 @@ struct TransferActivityRecord: Identifiable {
     let activityId: String
     let direction: FfiTransferDirection
     let mode: FfiTransferMode
+    var attemptCount: UInt32
     var itemCount: UInt32
     var totalBytes: UInt64
     var bytesTransferred: UInt64
@@ -501,6 +502,7 @@ final class AppModel: ObservableObject {
             "activity_id=\(record.activityId)",
             "direction=\(record.direction)",
             "mode=\(record.mode)",
+            "attempt=\(record.attemptCount)",
             "state=\(record.state)",
             "items=\(record.itemCount)",
             "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
@@ -524,6 +526,7 @@ final class AppModel: ObservableObject {
             "activity_id=\(record.activityId)",
             "direction=\(record.direction)",
             "mode=\(record.mode)",
+            "attempt=\(record.attemptCount)",
             "state=\(record.state)",
             "items=\(record.itemCount)",
             "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
@@ -845,6 +848,7 @@ final class TransferViewModel: ObservableObject {
     var isFinalizing: Bool {
         presentationState.map(TransferPresentationPolicy.isFinalizing) ?? false
     }
+    var preparedManifestJobID: String? { preparedSelection?.jobID }
     fileprivate var hasResumableOperation: Bool {
         activeSend != nil || activeReceive != nil
     }
@@ -1019,6 +1023,7 @@ final class TransferViewModel: ObservableObject {
             activityId: stored.activityID,
             direction: direction,
             mode: request.mode,
+            attemptCount: 1,
             itemCount: stored.itemCount,
             totalBytes: stored.totalBytes,
             bytesTransferred: 0,
@@ -1430,6 +1435,51 @@ final class TransferViewModel: ObservableObject {
         )
     }
 
+    /// Starts the same product Room receiver as `startReceivingWithRoom`, but
+    /// returns only after the persisted native receive future reaches its
+    /// waiting-for-peer phase.
+    func startReceivingWithRoomWhenReady(
+        outputDir: String,
+        code: String,
+        settings: EnvoixRuntimeSettings,
+        destinationAccess: AnyObject? = nil
+    ) async -> String? {
+        displayLanguage = settings.language
+        let request = request(
+            direction: .receive,
+            mode: .room,
+            settings: settings,
+            code: code
+        )
+        beginActivity(direction: .receive, mode: request.mode, roomCode: code)
+        do {
+            guard let activityID = transferActivity?.activityId else {
+                throw RuntimeSettingsError("Cannot start a receiver without an activity.")
+            }
+            let operation = ReceiveOperation(
+                settings: settings,
+                request: request,
+                stateDirectory: try receiveStateDirectory(activityID: activityID),
+                targetDirectory: outputDir,
+                destinationAccess: destinationAccess,
+                nearbyWifiAwareDeviceID: nil,
+                rememberPersistence: nil,
+                expectedControlOffer: nil
+            )
+            activeReceive = operation
+            activeSend = nil
+            return await withCheckedContinuation { continuation in
+                launchReceive(
+                    operation,
+                    launchSignal: ReceiveLaunchSignal(continuation)
+                )
+            }
+        } catch {
+            handleFailed(error.localizedDescription)
+            return nil
+        }
+    }
+
     func startReceivingWithInvite(
         outputDir: String,
         invite: String,
@@ -1596,6 +1646,7 @@ final class TransferViewModel: ObservableObject {
         pausedByUser = false
         failure = nil
         transferActivity?.failure = nil
+        transferActivity?.attemptCount += 1
         operationID = UUID()
         resetRateTracking()
         lastProgressPublishAt = .distantPast
@@ -2431,6 +2482,7 @@ final class TransferViewModel: ObservableObject {
             activityId: activityID,
             direction: direction,
             mode: mode,
+            attemptCount: 1,
             itemCount: 0,
             totalBytes: 0,
             bytesTransferred: 0,
