@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use envoix_error::CoreError;
+use envoix_error::{CoreError, TransferCause};
 use envoix_invite::{
     BootstrapKind, InvitationBootstrap, InvitationError, InvitationSide, TransferRole,
 };
@@ -17,7 +17,7 @@ use envoix_rendezvous_iroh::{
     AuthenticatedControl, BrokerSession, RoomPairing, authenticate_invitation,
     build_endpoint_with_dns, join_invitation,
 };
-use envoix_transfer::{SenderDeliveryStoreV2, SenderTransferPhaseV2};
+use envoix_transfer::{SenderDeliveryStoreV2, SenderTransferPhaseV2, TransferStage};
 use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
@@ -25,14 +25,17 @@ use crate::datagram_transport::{
     DatagramTransportRole, PlatformDatagramTransport, WIFI_AWARE_TRANSPORT_ID,
     bind_hybrid_datagram_endpoint,
 };
-use crate::manifest_v2_session::send_manifest_v2_from_endpoint_with_authentication;
+use crate::manifest_v2_session::{
+    failure_stage, receive_manifest_v2_offer_with_authentication_and_timeline,
+    send_manifest_v2_from_endpoint_with_authentication, start_manifest_v2_receive_attempt,
+    start_manifest_v2_send_attempt,
+};
 use crate::{
     AuthenticationHandler, AuthenticationOutcome, BindAddrs, BoundEndpoint, CanonicalTransferJob,
     EventSink, NoopAuthenticationHandler, PairingConfig, PendingManifestV2Receive,
     RememberedSession, RendezvousCause, RendezvousRetryPolicy, SenderManifestV2SessionSummary,
     SessionConfig, SessionError, TransferCancelToken, TransferEvent,
-    bind_iroh_manifest_v2_endpoint, receive_manifest_v2_offer_with_authentication,
-    send_manifest_v2_to_endpoint_addr_with_authentication,
+    bind_iroh_manifest_v2_endpoint, send_manifest_v2_to_endpoint_addr_with_authentication,
 };
 
 const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
@@ -40,6 +43,35 @@ const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
 struct TrackedAuthentication<'a> {
     inner: &'a dyn AuthenticationHandler,
     authenticated: AtomicBool,
+}
+
+/// Tracks the same selected-path boundary that native clients observe. A
+/// hybrid retry is safe only before this event and before peer authentication.
+struct TrackedHybridEvents {
+    inner: Arc<dyn EventSink>,
+    connected: AtomicBool,
+}
+
+impl TrackedHybridEvents {
+    fn new(inner: Arc<dyn EventSink>) -> Self {
+        Self {
+            inner,
+            connected: AtomicBool::new(false),
+        }
+    }
+
+    fn connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+}
+
+impl EventSink for TrackedHybridEvents {
+    fn on_event(&self, event: TransferEvent) {
+        if matches!(event, TransferEvent::Connected { .. }) {
+            self.connected.store(true, Ordering::Release);
+        }
+        self.inner.on_event(event);
+    }
 }
 
 impl<'a> TrackedAuthentication<'a> {
@@ -390,6 +422,7 @@ pub async fn receive_manifest_v2_offer_via_room_with_authentication(
     let (rdz, control) =
         authenticate_room(broker, &bootstrap, &config, events.as_ref(), cancel, None).await?;
     validate_authenticated_context(&bootstrap, &control)?;
+    let timeline = start_manifest_v2_receive_attempt(events.clone());
     let bound = match bind_iroh_manifest_v2_endpoint(
         listen_addrs,
         &config.identity,
@@ -402,6 +435,7 @@ pub async fn receive_manifest_v2_offer_via_room_with_authentication(
     {
         Ok(bound) => bound,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             rdz.close().await;
             return Err(error);
         }
@@ -418,6 +452,7 @@ pub async fn receive_manifest_v2_offer_via_room_with_authentication(
     {
         Ok(auth) => auth,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             bound.local_endpoint.close().await;
             rdz.close().await;
             return Err(error);
@@ -425,12 +460,13 @@ pub async fn receive_manifest_v2_offer_via_room_with_authentication(
     };
     rdz.close().await;
     let authentication = TrackedAuthentication::new(authentication);
-    let result = receive_manifest_v2_offer_with_authentication(
+    let result = receive_manifest_v2_offer_with_authentication_and_timeline(
         bound,
         &auth,
         events,
         cancel,
         &authentication,
+        Some(timeline),
     )
     .await;
     if authentication.authenticated() {
@@ -478,9 +514,10 @@ pub async fn receive_manifest_v2_offer_via_room_hybrid_with_authentication(
     authentication: &dyn AuthenticationHandler,
 ) -> Result<PendingManifestV2Receive, SessionError> {
     require_bootstrap_role(&bootstrap, TransferRole::Receiver)?;
+    let timeline = start_manifest_v2_receive_attempt(events.clone());
     // Both roles must finish the platform datagram bootstrap before joining
     // the Room; the sender follows this same order and cannot match us earlier.
-    let datagram = bind_hybrid_datagram_endpoint(
+    let datagram = match bind_hybrid_datagram_endpoint(
         transport,
         DatagramTransportRole::Server,
         maximum_datagram_size,
@@ -488,7 +525,14 @@ pub async fn receive_manifest_v2_offer_via_room_hybrid_with_authentication(
         &config,
         cancel,
     )
-    .await?;
+    .await
+    {
+        Ok(datagram) => datagram,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
     events.on_event(TransferEvent::Diagnostic {
         message: "Nearby hybrid endpoint admitted Wi-Fi Aware with iroh IP fallback discovery"
             .into(),
@@ -498,12 +542,14 @@ pub async fn receive_manifest_v2_offer_via_room_hybrid_with_authentication(
         match authenticate_room(broker, &bootstrap, &config, events.as_ref(), cancel, None).await {
             Ok(pairing) => pairing,
             Err(error) => {
+                timeline.record(failure_stage(cancel));
                 local_endpoint.close().await;
                 datagram.bridge.close().await;
                 return Err(error);
             }
         };
     if let Err(error) = validate_authenticated_context(&bootstrap, &control) {
+        timeline.record(TransferStage::Failed);
         local_endpoint.close().await;
         datagram.bridge.close().await;
         rdz.close().await;
@@ -521,6 +567,7 @@ pub async fn receive_manifest_v2_offer_via_room_hybrid_with_authentication(
     {
         Ok(auth) => auth,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             local_endpoint.close().await;
             datagram.bridge.close().await;
             rdz.close().await;
@@ -529,19 +576,23 @@ pub async fn receive_manifest_v2_offer_via_room_hybrid_with_authentication(
     };
     rdz.close().await;
     let authentication = TrackedAuthentication::new(authentication);
-    let result = receive_manifest_v2_offer_with_authentication(
+    let transfer_events = Arc::new(TrackedHybridEvents::new(events));
+    let result = receive_manifest_v2_offer_with_authentication_and_timeline(
         datagram.bound_endpoint,
         &auth,
-        events,
+        transfer_events.clone(),
         cancel,
         &authentication,
+        Some(timeline),
     )
     .await;
-    let result = if authentication.authenticated() {
-        result.map_err(invitation_consumed)
-    } else {
-        result
-    };
+    let result = result.map_err(|error| {
+        classify_hybrid_failure(
+            error,
+            authentication.authenticated(),
+            transfer_events.connected(),
+        )
+    });
     match result {
         Ok(mut pending) => {
             pending.attach_datagram_bridge(datagram.bridge);
@@ -580,6 +631,7 @@ pub async fn receive_manifest_v2_offer_via_remembered(
         None,
     )
     .await?;
+    let timeline = start_manifest_v2_receive_attempt(events.clone());
     let bound = match bind_iroh_manifest_v2_endpoint(
         listen_addrs,
         &config.identity,
@@ -592,6 +644,7 @@ pub async fn receive_manifest_v2_offer_via_remembered(
     {
         Ok(bound) => bound,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             rdz.close().await;
             return Err(error);
         }
@@ -602,6 +655,7 @@ pub async fn receive_manifest_v2_offer_via_remembered(
     let pairing = match exchange_descriptor_or_cancel(control, Some(&my_addr), cancel).await {
         Ok(pairing) => pairing,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             bound.local_endpoint.close().await;
             rdz.close().await;
             return Err(error);
@@ -611,14 +665,29 @@ pub async fn receive_manifest_v2_offer_via_remembered(
         step: PairingStep::Exchanged,
     });
     events.on_event(TransferEvent::Connecting);
-    let auth = remembered.finish_pairing(
+    let auth = match remembered.finish_pairing(
         broker_binding,
         pairing.control_key(),
         pairing.control_transcript_hash,
-    )?;
+    ) {
+        Ok(auth) => auth,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            bound.local_endpoint.close().await;
+            rdz.close().await;
+            return Err(error);
+        }
+    };
     rdz.close().await;
-    receive_manifest_v2_offer_with_authentication(bound, &auth, events, cancel, authentication)
-        .await
+    receive_manifest_v2_offer_with_authentication_and_timeline(
+        bound,
+        &auth,
+        events,
+        cancel,
+        authentication,
+        Some(timeline),
+    )
+    .await
 }
 
 async fn complete_receiver_pairing(
@@ -816,7 +885,8 @@ pub async fn send_manifest_v2_via_room_hybrid_with_authentication(
     authentication: &dyn AuthenticationHandler,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
     require_bootstrap_role(&bootstrap, TransferRole::Sender)?;
-    let datagram = bind_hybrid_datagram_endpoint(
+    let timeline = start_manifest_v2_send_attempt(job, events.clone())?;
+    let datagram = match bind_hybrid_datagram_endpoint(
         transport,
         DatagramTransportRole::Client,
         maximum_datagram_size,
@@ -824,7 +894,14 @@ pub async fn send_manifest_v2_via_room_hybrid_with_authentication(
         &config,
         cancel,
     )
-    .await?;
+    .await
+    {
+        Ok(datagram) => datagram,
+        Err(error) => {
+            timeline.record(failure_stage(cancel));
+            return Err(error);
+        }
+    };
     events.on_event(TransferEvent::Diagnostic {
         message: "Nearby hybrid endpoint admitted Wi-Fi Aware with iroh IP fallback discovery"
             .into(),
@@ -834,6 +911,7 @@ pub async fn send_manifest_v2_via_room_hybrid_with_authentication(
     {
         Ok(pairing) => pairing,
         Err(error) => {
+            timeline.record(failure_stage(cancel));
             local_endpoint.close().await;
             datagram.bridge.close().await;
             return Err(error);
@@ -842,28 +920,52 @@ pub async fn send_manifest_v2_via_room_hybrid_with_authentication(
     let peer = match wifi_aware_first_peer(&pairing.peer, &datagram.peer_addr) {
         Ok(peer) => peer,
         Err(error) => {
+            timeline.record(TransferStage::Failed);
             local_endpoint.close().await;
             datagram.bridge.close().await;
             return Err(error);
         }
     };
     let authentication = TrackedAuthentication::new(authentication);
+    let transfer_events = Arc::new(TrackedHybridEvents::new(events));
     let result = send_manifest_v2_from_endpoint_with_authentication(
         local_endpoint,
         peer,
         job,
         state_directory,
         &pairing.auth,
-        events,
+        transfer_events.clone(),
         cancel,
         &authentication,
+        timeline,
     )
     .await;
     datagram.bridge.close().await;
-    if authentication.authenticated() {
-        result.map_err(invitation_consumed)
-    } else {
-        result
+    result.map_err(|error| {
+        classify_hybrid_failure(
+            error,
+            authentication.authenticated(),
+            transfer_events.connected(),
+        )
+    })
+}
+
+fn classify_hybrid_failure(
+    error: SessionError,
+    authenticated: bool,
+    connected: bool,
+) -> SessionError {
+    // Authentication consumes the one-time invitation. Connected is also a
+    // public no-fallback boundary, even if authentication has not finished.
+    if authenticated {
+        return invitation_consumed(error);
+    }
+    match error {
+        CoreError::Transport(detail) if !connected => CoreError::Cause {
+            cause: TransferCause::NearbyHybridPreAuthTransportFailure,
+            detail,
+        },
+        error => error,
     }
 }
 

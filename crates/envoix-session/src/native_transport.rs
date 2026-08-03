@@ -455,7 +455,7 @@ mod tests {
     use envoix_protocol::manifest_v2::CompressionPolicyV2;
     use envoix_transfer::{
         CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
-        POST_SAVE_RESERVE_BYTES, TransferEvent,
+        POST_SAVE_RESERVE_BYTES, TransferEvent, TransferStage,
     };
     use tempfile::tempdir;
     use tokio::fs;
@@ -568,6 +568,24 @@ mod tests {
                         }
                     )
                 })
+        }
+
+        fn stage_timings(&self) -> Vec<(TransferStage, u64, u64, u64)> {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter_map(|event| match event {
+                    TransferEvent::StageTiming {
+                        attempt_id,
+                        stage,
+                        elapsed_us,
+                        delta_us,
+                        ..
+                    } => Some((*stage, *attempt_id, *elapsed_us, *delta_us)),
+                    _ => None,
+                })
+                .collect()
         }
     }
 
@@ -772,5 +790,231 @@ mod tests {
         assert_eq!(fs::read(received_path).await.unwrap(), source_bytes);
         assert!(sender_events.selected_wifi_aware());
         assert!(receiver_events.selected_wifi_aware());
+        let expected_stages = [
+            TransferStage::SessionStarted,
+            TransferStage::ConnectionReady,
+            TransferStage::AuthenticationStarted,
+            TransferStage::AuthenticationComplete,
+            TransferStage::ManifestOffer,
+            TransferStage::ManifestAccepted,
+            TransferStage::FirstPayload,
+            TransferStage::PayloadComplete,
+            TransferStage::DeliveryComplete,
+        ];
+        for timings in [
+            sender_events.stage_timings(),
+            receiver_events.stage_timings(),
+        ] {
+            assert_eq!(
+                timings.iter().map(|(stage, ..)| *stage).collect::<Vec<_>>(),
+                expected_stages
+            );
+            let attempt_id = timings[0].1;
+            assert!(timings.iter().all(|timing| timing.1 == attempt_id));
+            assert!(timings.windows(2).all(|pair| pair[0].2 <= pair[1].2));
+            assert!(
+                timings
+                    .windows(2)
+                    .all(|pair| pair[1].3 == pair[1].2.saturating_sub(pair[0].2))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn canceling_pending_native_offer_emits_one_canceled_terminal_stage() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("pending-cancel.bin");
+        fs::write(&source, b"pending offer cancellation")
+            .await
+            .unwrap();
+
+        let mut job = CanonicalTransferJob::new(CompressionPolicyV2::Never).unwrap();
+        job.add_local_path(source).await.unwrap();
+        job.prepare_all().await.unwrap();
+        job.seal_for_send().unwrap();
+
+        let (client_transport, server_transport) = MemoryPlatformTransport::pair(13);
+        let sender_pairing = PairingConfig::spake2_shared_token("pending-cancel-secret").unwrap();
+        let receiver_pairing = PairingConfig::spake2_shared_token("pending-cancel-secret").unwrap();
+        let sender_events = Arc::new(RecordingEvents::default());
+        let receiver_events = Arc::new(RecordingEvents::default());
+        let sender_cancel = TransferCancelToken::new();
+        let receiver_cancel = TransferCancelToken::new();
+
+        let sender = send_manifest_v2_over_native_transport(
+            client_transport,
+            &job,
+            temporary.path().join("sender-state"),
+            &sender_pairing,
+            sender_events,
+            &sender_cancel,
+        );
+        let receiver = async {
+            let pending = receive_manifest_v2_offer_over_native_transport(
+                server_transport,
+                &receiver_pairing,
+                receiver_events.clone(),
+                &receiver_cancel,
+            )
+            .await
+            .unwrap();
+            let close = pending.cancel();
+            assert_eq!(
+                receiver_events
+                    .stage_timings()
+                    .last()
+                    .map(|(stage, ..)| *stage),
+                Some(TransferStage::Canceled)
+            );
+            close.await;
+        };
+        let (sender, ()) = tokio::join!(sender, receiver);
+
+        assert!(sender.is_err());
+        let stages = receiver_events
+            .stage_timings()
+            .into_iter()
+            .map(|(stage, ..)| stage)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stages,
+            vec![
+                TransferStage::SessionStarted,
+                TransferStage::ConnectionReady,
+                TransferStage::AuthenticationStarted,
+                TransferStage::AuthenticationComplete,
+                TransferStage::ManifestOffer,
+                TransferStage::Canceled,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_pending_native_offer_emits_one_failed_terminal_stage() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("pending-failure.bin");
+        fs::write(&source, b"pending offer setup failure")
+            .await
+            .unwrap();
+
+        let mut job = CanonicalTransferJob::new(CompressionPolicyV2::Never).unwrap();
+        job.add_local_path(source).await.unwrap();
+        job.prepare_all().await.unwrap();
+        job.seal_for_send().unwrap();
+
+        let (client_transport, server_transport) = MemoryPlatformTransport::pair(13);
+        let sender_pairing = PairingConfig::spake2_shared_token("pending-failure-secret").unwrap();
+        let receiver_pairing =
+            PairingConfig::spake2_shared_token("pending-failure-secret").unwrap();
+        let sender_events = Arc::new(RecordingEvents::default());
+        let receiver_events = Arc::new(RecordingEvents::default());
+        let sender_cancel = TransferCancelToken::new();
+        let receiver_cancel = TransferCancelToken::new();
+
+        let sender = send_manifest_v2_over_native_transport(
+            client_transport,
+            &job,
+            temporary.path().join("sender-state"),
+            &sender_pairing,
+            sender_events,
+            &sender_cancel,
+        );
+        let receiver = async {
+            let pending = receive_manifest_v2_offer_over_native_transport(
+                server_transport,
+                &receiver_pairing,
+                receiver_events.clone(),
+                &receiver_cancel,
+            )
+            .await
+            .unwrap();
+            let close = pending.close_with_failure();
+            assert_eq!(
+                receiver_events
+                    .stage_timings()
+                    .last()
+                    .map(|(stage, ..)| *stage),
+                Some(TransferStage::Failed)
+            );
+            close.await;
+        };
+        let (sender, ()) = tokio::join!(sender, receiver);
+
+        assert!(sender.is_err());
+        let stages = receiver_events
+            .stage_timings()
+            .into_iter()
+            .map(|(stage, ..)| stage)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stages,
+            vec![
+                TransferStage::SessionStarted,
+                TransferStage::ConnectionReady,
+                TransferStage::AuthenticationStarted,
+                TransferStage::AuthenticationComplete,
+                TransferStage::ManifestOffer,
+                TransferStage::Failed,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sender_local_delivery_store_failure_is_terminal() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("sender-preparation.bin");
+        fs::write(&source, b"sender local setup failure")
+            .await
+            .unwrap();
+        let invalid_state_directory = temporary.path().join("state-is-a-file");
+        fs::write(&invalid_state_directory, b"not a directory")
+            .await
+            .unwrap();
+
+        let mut job = CanonicalTransferJob::new(CompressionPolicyV2::Never).unwrap();
+        job.add_local_path(source).await.unwrap();
+        job.prepare_all().await.unwrap();
+        job.seal_for_send().unwrap();
+
+        let (client_transport, server_transport) = MemoryPlatformTransport::pair(13);
+        let sender_pairing =
+            PairingConfig::spake2_shared_token("sender-preparation-secret").unwrap();
+        let receiver_pairing =
+            PairingConfig::spake2_shared_token("sender-preparation-secret").unwrap();
+        let sender_events = Arc::new(RecordingEvents::default());
+        let receiver_events = Arc::new(RecordingEvents::default());
+        let sender_cancel = TransferCancelToken::new();
+        let receiver_cancel = TransferCancelToken::new();
+
+        let sender = send_manifest_v2_over_native_transport(
+            client_transport,
+            &job,
+            invalid_state_directory,
+            &sender_pairing,
+            sender_events.clone(),
+            &sender_cancel,
+        );
+        let receiver = receive_manifest_v2_offer_over_native_transport(
+            server_transport,
+            &receiver_pairing,
+            receiver_events,
+            &receiver_cancel,
+        );
+        let (sender, receiver) = tokio::join!(sender, receiver);
+
+        assert!(sender.is_err());
+        assert!(receiver.is_err());
+        assert_eq!(
+            sender_events
+                .stage_timings()
+                .into_iter()
+                .map(|(stage, ..)| stage)
+                .collect::<Vec<_>>(),
+            vec![
+                TransferStage::SessionStarted,
+                TransferStage::ConnectionReady,
+                TransferStage::Failed,
+            ]
+        );
     }
 }

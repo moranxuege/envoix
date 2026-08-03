@@ -40,8 +40,8 @@ pub use envoix_transfer::{
     SenderDataPlaneSummaryV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderResumeIntentV2,
     SenderTransferPhaseV2, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
     SourceSelectionInfo, SourceSelectionState, StorageDomainIdentityV2, TransferCancelToken,
-    TransferEvent, TransferJobError, TransferJobStore, VerifiedEntryV2, local_allocatable_bytes,
-    sender_resume_intent,
+    TransferEvent, TransferJobError, TransferJobStore, TransferStage, VerifiedEntryV2,
+    local_allocatable_bytes, sender_resume_intent,
 };
 pub use envoix_types::TransferDirection;
 use iroh::Endpoint;
@@ -353,7 +353,8 @@ pub async fn receive_manifest_v2_offer_with_bound_peer<F>(
 where
     F: FnOnce(PeerDescriptor, Vec<String>) + Send,
 {
-    let bound_endpoint = bind_iroh_manifest_v2_endpoint(
+    let timeline = manifest_v2_session::start_manifest_v2_receive_attempt(events.clone());
+    let bound_endpoint = match bind_iroh_manifest_v2_endpoint(
         listen_addrs,
         &config.identity,
         &config.data_relay(),
@@ -361,17 +362,39 @@ where
         &config.candidates,
         config.data_stream_window,
     )
-    .await?;
+    .await
+    {
+        Ok(bound_endpoint) => bound_endpoint,
+        Err(error) => {
+            timeline.record(manifest_v2_session::failure_stage(cancel));
+            return Err(error);
+        }
+    };
     let endpoint_addr = bound_endpoint
         .ready_endpoint_addr(config.data_relay().is_some())
         .await;
-    let peer = bound_endpoint.peer_descriptor()?;
+    let peer = match bound_endpoint.peer_descriptor() {
+        Ok(peer) => peer,
+        Err(error) => {
+            timeline.record(manifest_v2_session::failure_stage(cancel));
+            bound_endpoint.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     let relay_urls = endpoint_addr
         .relay_urls()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     on_bound_peer(peer, relay_urls);
-    receive_manifest_v2_offer(bound_endpoint, pairing, events, cancel).await
+    manifest_v2_session::receive_manifest_v2_offer_with_authentication_and_timeline(
+        bound_endpoint,
+        pairing,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+        Some(timeline),
+    )
+    .await
 }
 
 pub async fn receive_manifest_v2_offer_enable_mdns<F>(
@@ -385,16 +408,39 @@ pub async fn receive_manifest_v2_offer_enable_mdns<F>(
 where
     F: FnOnce(PeerDescriptor, Vec<String>) + Send,
 {
-    let bound_endpoint = bind_iroh_manifest_v2_endpoint_enable_mdns(
+    let timeline = manifest_v2_session::start_manifest_v2_receive_attempt(events.clone());
+    let bound_endpoint = match bind_iroh_manifest_v2_endpoint_enable_mdns(
         listen_addrs,
         &config.identity,
         &config.candidates,
         config.data_stream_window,
     )
-    .await?;
-    let peer = bound_endpoint.peer_descriptor()?;
+    .await
+    {
+        Ok(bound_endpoint) => bound_endpoint,
+        Err(error) => {
+            timeline.record(manifest_v2_session::failure_stage(cancel));
+            return Err(error);
+        }
+    };
+    let peer = match bound_endpoint.peer_descriptor() {
+        Ok(peer) => peer,
+        Err(error) => {
+            timeline.record(manifest_v2_session::failure_stage(cancel));
+            bound_endpoint.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     on_bound_peer(peer, Vec::new());
-    receive_manifest_v2_offer(bound_endpoint, pairing, events, cancel).await
+    manifest_v2_session::receive_manifest_v2_offer_with_authentication_and_timeline(
+        bound_endpoint,
+        pairing,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+        Some(timeline),
+    )
+    .await
 }
 
 pub(crate) async fn dial_peer_addr_for_protocol(

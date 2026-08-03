@@ -30,9 +30,15 @@ internal data class BleRendezvousInvite(
     val invite: String,
 )
 
+internal data class BleDiscoveryIdentity(
+    val peerKey: String,
+    val displayName: String,
+)
+
 internal object BleRendezvousProtocol {
     val SERVICE_UUID: UUID = UUID.fromString("d5f3a2d8-8f4a-4b33-8a01-000000000001")
     val WRITE_CHARACTERISTIC_UUID: UUID = UUID.fromString("d5f3a2d8-8f4a-4b33-8a01-000000000002")
+    val IDENTITY_CHARACTERISTIC_UUID: UUID = UUID.fromString("d5f3a2d8-8f4a-4b33-8a01-000000000003")
 
     const val FRAME_HEADER_SIZE = 16
     const val MAX_WIRE_PAYLOAD_BYTES = 4_096
@@ -48,7 +54,46 @@ internal object BleRendezvousProtocol {
     private const val ENVELOPE_TYPE_INVITE: Byte = 1
     private const val PEER_KEY_BYTES = 16
     private const val ENVELOPE_FIXED_BYTES = 6 + PEER_KEY_BYTES
-    private val INVITE_PREFIXES = listOf("envoix://pair/", "envoix://room/")
+    private const val IDENTITY_VERSION: Byte = 1
+    private const val IDENTITY_FIXED_BYTES = 1 + PEER_KEY_BYTES + 2
+    private const val INVITE_V2_PREFIX = "envoix://invite/v2/"
+    private val ROOM_INVITE =
+        Regex("""^envoix://room/\d{6}-[a-z0-9]{4}-[a-z0-9]{4}(?:\?.*)?$""")
+
+    fun encodeIdentity(identity: LocalDiscoveryIdentity): ByteArray? {
+        val peerKey = DiscoveryPeerRegistry.normalizePeerKey(identity.peerKey) ?: return null
+        val nameBytes =
+            BleDiscoveryName.encode(identity.displayName, MAX_DISPLAY_NAME_BYTES)
+                ?: return null
+        return ByteArrayOutputStream(IDENTITY_FIXED_BYTES + nameBytes.size)
+            .apply {
+                write(IDENTITY_VERSION.toInt())
+                write(peerKey.toByteArray(StandardCharsets.US_ASCII))
+                writeShort(nameBytes.size)
+                write(nameBytes)
+            }.toByteArray()
+    }
+
+    fun decodeIdentity(bytes: ByteArray): BleDiscoveryIdentity? {
+        if (bytes.size < IDENTITY_FIXED_BYTES || bytes[0] != IDENTITY_VERSION) return null
+        val peerKey =
+            String(bytes, 1, PEER_KEY_BYTES, StandardCharsets.US_ASCII)
+                .let(DiscoveryPeerRegistry::normalizePeerKey)
+                ?: return null
+        val nameLength = getUnsignedShort(bytes, 1 + PEER_KEY_BYTES)
+        if (nameLength == 0 ||
+            nameLength > MAX_DISPLAY_NAME_BYTES ||
+            IDENTITY_FIXED_BYTES + nameLength != bytes.size
+        ) {
+            return null
+        }
+        val displayName =
+            BleDiscoveryName.decode(
+                bytes.copyOfRange(IDENTITY_FIXED_BYTES, bytes.size),
+                MAX_DISPLAY_NAME_BYTES,
+            ) ?: return null
+        return BleDiscoveryIdentity(peerKey, displayName)
+    }
 
     fun encodeInvite(
         identity: LocalDiscoveryIdentity,
@@ -202,9 +247,10 @@ internal object BleRendezvousProtocol {
 
     private fun supportedInvite(invite: String): Boolean {
         val normalized = invite.trim()
-        return INVITE_PREFIXES.any { prefix ->
-            normalized.startsWith(prefix, ignoreCase = true)
-        }
+        val inviteV2 =
+            normalized.startsWith(INVITE_V2_PREFIX) &&
+                normalized.length > INVITE_V2_PREFIX.length
+        return inviteV2 || ROOM_INVITE.matches(normalized)
     }
 
     private fun decodeUtf8(

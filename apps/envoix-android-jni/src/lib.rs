@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_client::api::{
     Capabilities, InvitationBootstrap, InvitationError, InviteSecretRef, InviteV2, PeerSource,
-    RoomCode, TransferRole, ValidatedInvitation, register_remembered_credential,
+    TransferRole, ValidatedInvitation, register_remembered_credential,
 };
 use jni::JNIEnv;
 use jni::JavaVM;
@@ -131,8 +131,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
     to_jstring(&mut env, &json)
 }
 
-/// Validate a full invitation or Room Code against the active flow and retain
-/// the private bootstrap only behind an opaque process-memory reference.
+/// Validate a complete InviteV2 URI against the active flow and retain the
+/// private bootstrap only behind an opaque process-memory reference.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_parseInviteForRole(
     mut env: JNIEnv,
@@ -146,49 +146,25 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInviteForRole(
         "receive" => TransferRole::Receiver,
         _ => return to_jstring(&mut env, r#"{"error":"role must be send or receive"}"#),
     };
-    let prepared = if input.starts_with("envoix:") {
-        InviteV2::parse_for_role(&input, role, unix_now()).and_then(|validated| {
-            let public = &validated.invitation().public_context;
-            let broker = public.broker.clone();
-            let relay = public.relay_urls.first().cloned();
-            let creator_role = public.creator_transfer_role;
-            let joiner_role = public.joiner_transfer_role;
-            let expires_at = public.expires_at;
-            store_invitation(validated.into_bootstrap(), broker.clone()).map(|reference| {
-                prepared_invite_json(
-                    &reference,
-                    &broker,
-                    relay.as_deref(),
-                    creator_role,
-                    joiner_role,
-                    expires_at,
-                )
-            })
-        })
-    } else {
-        RoomCode::parse(&input).and_then(|room_code| {
-            store_invitation(
-                InvitationBootstrap::room_code_joiner(room_code, role),
-                String::new(),
+    let prepared = parse_full_invite_for_role(&input, role).and_then(|validated| {
+        let public = &validated.invitation().public_context;
+        let broker = public.broker.clone();
+        let relay = public.relay_urls.first().cloned();
+        let creator_role = public.creator_transfer_role;
+        let joiner_role = public.joiner_transfer_role;
+        let expires_at = public.expires_at;
+        store_invitation(validated.into_bootstrap(), broker.clone()).map(|reference| {
+            prepared_invite_json(
+                &reference,
+                &broker,
+                relay.as_deref(),
+                creator_role,
+                joiner_role,
+                expires_at,
             )
-            .map(|reference| prepared_invite_json(&reference, "", None, role.complement(), role, 0))
         })
-    };
+    });
     let json = prepared.unwrap_or_else(|error| invitation_error_json(&error));
-    to_jstring(&mut env, &json)
-}
-
-/// Strictly normalize canonical or separator-free Room Code input.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_normalizeRoomCode(
-    mut env: JNIEnv,
-    _class: JClass,
-    input: JString,
-) -> jni::sys::jstring {
-    let input = jstr(&mut env, &input);
-    let json = RoomCode::parse(&input)
-        .map(|code| format!(r#"{{"code":{}}}"#, json_str(code.canonical())))
-        .unwrap_or_else(|error| invitation_error_json(&error));
     to_jstring(&mut env, &json)
 }
 
@@ -223,6 +199,13 @@ fn store_invitation(
         PeerSource::Invitation { secret_ref, .. } => Ok(secret_ref),
         _ => unreachable!("invitation constructor returned a non-invitation source"),
     }
+}
+
+fn parse_full_invite_for_role(
+    input: &str,
+    role: TransferRole,
+) -> Result<ValidatedInvitation, InvitationError> {
+    InviteV2::parse_for_role(input, role, unix_now())
 }
 
 fn reference_json(reference: &InviteSecretRef) -> String {
@@ -381,7 +364,10 @@ mod room_control;
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_PAIRING_BROKER, DEFAULT_PAIRING_RELAY, pairing_invite_endpoints};
+    use super::{
+        Capabilities, DEFAULT_PAIRING_BROKER, DEFAULT_PAIRING_RELAY, InviteV2, TransferRole,
+        pairing_invite_endpoints, parse_full_invite_for_role, unix_now,
+    };
 
     #[test]
     fn blank_pairing_endpoints_use_public_defaults() {
@@ -406,5 +392,24 @@ mod tests {
 
         assert_eq!(broker, "broker.example:8500");
         assert_eq!(relay, None);
+    }
+
+    #[test]
+    fn role_parser_rejects_naked_invite_v2_room_codes() {
+        assert!(parse_full_invite_for_role("123456-k7m4-9v2d", TransferRole::Receiver).is_err());
+    }
+
+    #[test]
+    fn role_parser_keeps_complete_invite_v2_uris() {
+        let invite = InviteV2::create(
+            DEFAULT_PAIRING_BROKER.into(),
+            vec![DEFAULT_PAIRING_RELAY.into()],
+            TransferRole::Sender,
+            Capabilities::current(),
+            unix_now(),
+        )
+        .expect("create complete invitation");
+
+        assert!(parse_full_invite_for_role(&invite.payload, TransferRole::Receiver).is_ok());
     }
 }

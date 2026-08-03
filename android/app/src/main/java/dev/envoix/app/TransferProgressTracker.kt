@@ -19,11 +19,13 @@ class TransferProgressTracker(
 ) {
     private var observedBytes = initialBytes.coerceAtLeast(0)
     private var observedTotal = observedBytes
-    private var startedAtNanos: Long? = null
     private var lastRateAtNanos: Long? = null
     private var lastRateBytes = observedBytes
     private var lastPublishAtNanos: Long? = null
     private var smoothedBps = 0.0
+    private var rateSamples = 0
+    private var accumulatedBytes = 0.0
+    private var accumulatedNanos = 0L
     private var history = emptyList<Double>()
 
     @Synchronized
@@ -35,25 +37,29 @@ class TransferProgressTracker(
         observedBytes = max(observedBytes, bytes.coerceAtLeast(0))
         observedTotal = max(max(observedTotal, total.coerceAtLeast(0)), observedBytes)
 
-        if (startedAtNanos == null) {
-            startedAtNanos = nowNanos
+        if (lastRateAtNanos == null) {
             lastRateAtNanos = nowNanos
             lastPublishAtNanos = nowNanos
             lastRateBytes = observedBytes
-            return snapshot(avgBps = 0.0)
+            return snapshot()
         }
 
         val rateElapsed = nowNanos - checkNotNull(lastRateAtNanos)
-        if (rateElapsed >= RATE_SAMPLE_NANOS) {
+        val deltaBytes = (observedBytes - lastRateBytes).coerceAtLeast(0)
+        val complete = observedTotal > 0 && observedBytes >= observedTotal
+        if (rateElapsed >= RATE_SAMPLE_NANOS || (complete && rateElapsed > 0 && deltaBytes > 0)) {
             val instantaneous =
-                (observedBytes - lastRateBytes).coerceAtLeast(0).toDouble() *
+                deltaBytes.toDouble() *
                     NANOS_PER_SECOND / rateElapsed.toDouble()
             smoothedBps =
-                if (history.isEmpty()) {
+                if (rateSamples == 0) {
                     instantaneous
                 } else {
                     smoothedBps * (1.0 - RATE_ALPHA) + instantaneous * RATE_ALPHA
                 }
+            accumulatedBytes += deltaBytes.toDouble()
+            accumulatedNanos += rateElapsed
+            rateSamples += 1
             if (smoothedBps > 0) {
                 history = (history + smoothedBps).takeLast(HISTORY_LIMIT)
             }
@@ -62,27 +68,22 @@ class TransferProgressTracker(
         }
 
         val publishElapsed = nowNanos - checkNotNull(lastPublishAtNanos)
-        val complete = observedTotal > 0 && observedBytes >= observedTotal
         if (!complete && publishElapsed < PUBLISH_INTERVAL_NANOS) return null
         lastPublishAtNanos = nowNanos
-
-        val totalElapsed = nowNanos - checkNotNull(startedAtNanos)
-        val average =
-            if (totalElapsed > 0) {
-                (observedBytes - initialBytes.coerceAtLeast(0)).coerceAtLeast(0).toDouble() *
-                    NANOS_PER_SECOND / totalElapsed.toDouble()
-            } else {
-                0.0
-            }
-        return snapshot(avgBps = average)
+        return snapshot()
     }
 
-    private fun snapshot(avgBps: Double) =
+    private fun snapshot() =
         TransferProgressSnapshot(
             bytes = observedBytes,
             total = observedTotal,
             speedBps = smoothedBps,
-            avgBps = avgBps,
+            avgBps =
+                if (accumulatedNanos > 0) {
+                    accumulatedBytes * NANOS_PER_SECOND / accumulatedNanos.toDouble()
+                } else {
+                    0.0
+                },
             speedHistory = history,
         )
 

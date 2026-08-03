@@ -133,12 +133,19 @@ data class NearbyRendezvousOffer(
     val source: DiscoverySource = DiscoverySource.Bluetooth,
 )
 
+data class NfcReadinessOffer(
+    val offerId: String,
+    val seenAtMs: Long,
+)
+
 interface DiscoveryListener {
     fun onObservation(observation: DiscoveryObservation)
 
     fun onStatus(status: ProviderStatus)
 
     fun onRendezvousOffer(offer: NearbyRendezvousOffer) = Unit
+
+    fun onNfcReadinessOffer(offer: NfcReadinessOffer) = Unit
 }
 
 interface DiscoveryProvider {
@@ -157,6 +164,10 @@ interface NearbyRendezvousProvider {
         invite: String,
         completion: (error: String?) -> Unit,
     )
+}
+
+interface NfcReadinessProvider {
+    fun setNfcReadinessOffer(offerId: String?)
 }
 
 internal fun normalizeNearbyInboxEndpointId(value: String?): String? =

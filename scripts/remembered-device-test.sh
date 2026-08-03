@@ -276,17 +276,17 @@ stage_input() {
 }
 
 start_initial_pairing() {
-    local room
+    local invitation
 
-    room="$(broadcast_data "$SERIAL_B" "$ACTION_CREATE_RECEIVER_INVITE" \
+    invitation="$(broadcast_data "$SERIAL_B" "$ACTION_CREATE_RECEIVER_INVITE" \
         --es broker "$broker_endpoint" \
         --es relay "$RELAY_URL" \
         --es remember_label "$LABEL_ON_RECEIVER")"
-    [[ "$room" =~ ^[0-9]{6}-[a-z0-9]{4}-[a-z0-9]{4}$ ]] ||
-        die "receiver returned an invalid Room Code"
+    [[ "$invitation" =~ ^envoix://invite/v2/[^[:space:]]+$ ]] ||
+        die "receiver returned an invalid InviteV2 URI"
     sleep 1
     broadcast_data "$SERIAL_A" "$ACTION_START_SENDER" \
-        --es room "$room" \
+        --es invitation "$invitation" \
         --es path "$device_input" \
         --es broker "$broker_endpoint" \
         --es relay "$RELAY_URL" \
@@ -420,7 +420,7 @@ sleep 2
 [ "$(query_remembered "$SERIAL_B" "$LABEL_ON_RECEIVER")" = "$receiver_record" ] ||
     die "receiver remembered relationship changed after restart"
 
-printf '\n[remembered-reconnect] Transferring without a Room Code or QR payload...\n'
+printf '\n[remembered-reconnect] Transferring without an invitation link or QR payload...\n'
 start_remembered_transfer
 wait_for_transfer remembered-reconnect
 

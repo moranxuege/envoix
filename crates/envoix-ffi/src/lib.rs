@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_client::PeerDescriptor;
 use envoix_client::api::{
-    Capabilities, Client, CreatedInvitation, InvitationBootstrap, InvitationError,
-    InvitationErrorCode, InviteV2, PathPolicy, PeerSource, RememberedCredentialRef, RoomCode,
-    TransferOptions, TransferRole, ValidatedInvitation, register_remembered_credential,
+    Capabilities, Client, CreatedInvitation, InvitationError, InvitationErrorCode, InviteV2,
+    PathPolicy, PeerSource, RememberedCredentialRef, RoomCode, TransferOptions, TransferRole,
+    ValidatedInvitation, register_remembered_credential,
 };
 
 uniffi::setup_scaffolding!();
@@ -33,7 +33,7 @@ pub use room_control::*;
 const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
-const ENVOIX_FFI_API_VERSION: u32 = 11;
+const ENVOIX_FFI_API_VERSION: u32 = 12;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
@@ -195,6 +195,37 @@ impl std::fmt::Debug for FfiPairingInvite {
 pub enum FfiTransferDirection {
     Send,
     Receive,
+}
+
+/// Stable, secret-free milestones for one native transfer attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiTransferStage {
+    SessionStarted,
+    ConnectionReady,
+    AuthenticationStarted,
+    AuthenticationComplete,
+    ManifestOffer,
+    ManifestAccepted,
+    FirstPayload,
+    PayloadComplete,
+    DeliveryComplete,
+    Canceled,
+    Failed,
+}
+
+/// Monotonic elapsed time projected from the native transfer timeline.
+///
+/// This record intentionally excludes endpoint, invitation, and credential
+/// material. `transfer_id` may be absent until the manifest identifies the
+/// transfer.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiTransferStageTiming {
+    pub stage: FfiTransferStage,
+    pub direction: FfiTransferDirection,
+    pub attempt_id: u64,
+    pub transfer_id: Option<String>,
+    pub elapsed_us: u64,
+    pub delta_us: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -379,11 +410,15 @@ pub struct FfiTransferFailure {
 
 /// Privacy-safe classification of the data path selected by the transport.
 ///
-/// Endpoint addresses and relay URLs remain internal diagnostics and are
-/// deliberately excluded from this product-facing contract.
+/// Direct paths expose only their IP family. Endpoint addresses and relay URLs
+/// remain internal diagnostics and are deliberately excluded from this
+/// product-facing contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum FfiDataPathKind {
+    /// Compatibility value retained for activity records from older builds.
     Direct,
+    DirectIpv4,
+    DirectIpv6,
     Relay,
     WifiAware,
     Other,
@@ -412,6 +447,7 @@ pub trait TransferObserver: Send + Sync {
     fn on_completed(&self, bytes: u64);
     fn on_transfer_failed(&self, failure: FfiTransferFailure);
     fn on_connection_path(&self, event: FfiConnectionPathEvent);
+    fn on_stage_timing(&self, event: FfiTransferStageTiming);
     fn on_diagnostic(&self, message: String);
     /// Called only on the native worker at the authenticated persistence
     /// boundary. Implementations store these bytes immediately and must never
@@ -440,7 +476,8 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "wifi_aware_manifest_v2".into(),
             "wifi_aware_nearby_hybrid_v1".into(),
             "structured_connection_path".into(),
-            "foreground_room_control_v4".into(),
+            "structured_stage_timing_v1".into(),
+            "foreground_room_control_v5".into(),
             "remembered_room_control_v1".into(),
             "nearby_invite_inbox_v1".into(),
             "remembered_devices_v1".into(),
@@ -448,6 +485,8 @@ pub fn envoix_core_info() -> FfiCoreInfo {
     }
 }
 
+/// Compatibility helper for bindings that still carry the retained RoomCode
+/// field. Its output cannot be used to join an external InviteV2 invitation.
 #[uniffi::export]
 pub fn generate_room_code() -> Result<String, EnvoixError> {
     RoomCode::generate()
@@ -493,6 +532,39 @@ pub fn parse_pairing_invite_for_role(
     Ok(FfiPairingInvite::from_validated(&invitation))
 }
 
+/// Return the public Room locator shared by both sides of an InviteV2 flow.
+/// The complete Room Code remains creator-only bootstrap state.
+#[uniffi::export]
+pub fn transfer_invitation_room_id(request: FfiTransferRequest) -> Result<String, EnvoixError> {
+    let role = transfer_role(request.direction);
+    match request.mode {
+        FfiTransferMode::Invite => {
+            let invitation = InviteV2::parse_for_role(
+                required(&request.invite, "invite")?,
+                role,
+                now_unix_seconds(),
+            )
+            .map_err(invitation_err)?;
+            Ok(invitation.into_bootstrap().room_id().to_string())
+        }
+        FfiTransferMode::Room => {
+            let room_code =
+                RoomCode::parse(required(&request.code, "code")?).map_err(invitation_err)?;
+            match created_invitation_source(&room_code, role) {
+                Some(PeerSource::Invitation { room_id, .. }) => Ok(room_id),
+                _ => Err(EnvoixError::Operation {
+                    reason: "Naked InviteV2 Room Codes are no longer supported".into(),
+                }),
+            }
+        }
+        _ => Err(EnvoixError::Operation {
+            reason: "invitation Room ID requires Room or Invite mode".into(),
+        }),
+    }
+}
+
+/// Compatibility normalizer for the retained RoomCode field. Normalization
+/// does not authorize naked-code InviteV2 joining.
 #[uniffi::export]
 pub fn normalize_room_code(input: String) -> Result<String, EnvoixError> {
     RoomCode::parse(&input)
@@ -662,27 +734,19 @@ pub(crate) fn peer_sources_for_request(
         FfiTransferMode::Room => {
             let room_code =
                 RoomCode::parse(required(&request.code, "code")?).map_err(invitation_err)?;
-            let broker = non_empty(&request.broker)
-                .or_else(|| non_empty(&settings.server_url))
-                .unwrap_or(DEFAULT_RENDEZVOUS_BROKER)
-                .to_string();
+            let role = transfer_role(request.direction);
+            let source = created_invitation_source(&room_code, role).ok_or_else(|| {
+                EnvoixError::Operation {
+                    reason: "Naked InviteV2 Room Codes are no longer supported".into(),
+                }
+            })?;
             if !request.rendezvous.use_room || !request.rendezvous.internet_available {
                 return Err(EnvoixError::Operation {
-                    reason: "Room-Code invitations require an available rendezvous broker".into(),
+                    reason: "Creator invitation bootstrap requires an available rendezvous broker"
+                        .into(),
                 });
             }
-            let role = transfer_role(request.direction);
-            if let Some(source) = created_invitation_source(&room_code, role) {
-                single(source)
-            } else {
-                single(
-                    PeerSource::invitation(
-                        InvitationBootstrap::room_code_joiner(room_code, role),
-                        broker,
-                    )
-                    .map_err(op_err)?,
-                )
-            }
+            single(source)
         }
     }
 }
@@ -915,6 +979,97 @@ mod created_invitation_tests {
     const TEST_BROKER: &str =
         "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 
+    fn room_request(code: String) -> FfiTransferRequest {
+        FfiTransferRequest {
+            direction: FfiTransferDirection::Send,
+            mode: FfiTransferMode::Room,
+            peer_descriptor: String::new(),
+            invite: String::new(),
+            code,
+            token: String::new(),
+            remember_consent: false,
+            remembered_credential_ref: String::new(),
+            remembered_generation: 0,
+            remembered_previous_generation: None,
+            broker: TEST_BROKER.into(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            rendezvous: FfiRendezvousPlan::default(),
+        }
+    }
+
+    fn invite_request(invite: String) -> FfiTransferRequest {
+        FfiTransferRequest {
+            direction: FfiTransferDirection::Receive,
+            mode: FfiTransferMode::Invite,
+            peer_descriptor: String::new(),
+            invite,
+            code: String::new(),
+            token: String::new(),
+            remember_consent: false,
+            remembered_credential_ref: String::new(),
+            remembered_generation: 0,
+            remembered_previous_generation: None,
+            broker: TEST_BROKER.into(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            rendezvous: FfiRendezvousPlan::default(),
+        }
+    }
+
+    #[test]
+    fn creator_and_joiner_share_public_invitation_room_id() {
+        let invitation =
+            make_pairing_invite(FfiInviteRole::Send, TEST_BROKER.into(), String::new())
+                .expect("create invitation");
+
+        let creator_room_id =
+            transfer_invitation_room_id(room_request(invitation.room_code.clone()))
+                .expect("creator Room ID");
+        let joiner_room_id =
+            transfer_invitation_room_id(invite_request(invitation.payload.clone()))
+                .expect("joiner Room ID");
+
+        assert_eq!(creator_room_id, joiner_room_id);
+        assert_eq!(creator_room_id.len(), 6);
+        assert!(creator_room_id.bytes().all(|byte| byte.is_ascii_digit()));
+        assert_ne!(creator_room_id, invitation.room_code);
+    }
+
+    #[test]
+    fn invitation_room_id_rejects_non_invitation_modes() {
+        let mut request = room_request("123456-k7m4-9v2d".into());
+        request.mode = FfiTransferMode::Mdns;
+
+        assert!(matches!(
+            transfer_invitation_room_id(request),
+            Err(EnvoixError::Operation { reason })
+                if reason == "invitation Room ID requires Room or Invite mode"
+        ));
+    }
+
+    #[test]
+    fn external_naked_invite_v2_room_code_is_rejected() {
+        let settings = EnvoixRuntimeSettings::default();
+        let result = peer_sources_for_request(&settings, &room_request("123456-k7m4-9v2d".into()));
+
+        assert!(matches!(
+            result,
+            Err(EnvoixError::Operation { reason })
+                if reason == "Naked InviteV2 Room Codes are no longer supported"
+        ));
+
+        let mut offline = room_request("123456-k7m4-9v2d".into());
+        offline.rendezvous.internet_available = false;
+        assert!(matches!(
+            peer_sources_for_request(&settings, &offline),
+            Err(EnvoixError::Operation { reason })
+                if reason == "Naked InviteV2 Room Codes are no longer supported"
+        ));
+    }
+
     #[test]
     fn creator_room_source_survives_pre_authentication_retry() {
         let invitation = InviteV2::create(
@@ -933,6 +1088,13 @@ mod created_invitation_tests {
         let second = created_invitation_source(&room_code, TransferRole::Sender)
             .expect("creator source remains registered");
         assert_eq!(first, second);
+        let routed = peer_sources_for_request(
+            &EnvoixRuntimeSettings::default(),
+            &room_request(room_code.to_string()),
+        )
+        .expect("registered creator code remains routable");
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].source, first);
 
         let PeerSource::Invitation { secret_ref, .. } = first else {
             panic!("expected invitation source");

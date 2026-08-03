@@ -3,10 +3,13 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use envoix_protocol::manifest_v2::{ContentDigestV2, JobIdV2, ManifestOfferV2};
+use envoix_protocol::manifest_v2::{
+    CompressionPolicyV2, ContentDigestV2, JobIdV2, ManifestEntryKindV2, ManifestEntryV2,
+    ManifestOfferV2,
+};
 use envoix_protocol::manifest_v2_frames::{
-    DeliveryProofV2, EntryResultV2, JobGenerationV2, ManifestAcceptV2, ManifestV2Frame,
-    ManifestV2FrameConnection, ProofCapabilityV2, encode_manifest_v2_frame,
+    DeliveryProofV2, EntryEncodingV2, EntryResultV2, JobGenerationV2, ManifestAcceptV2,
+    ManifestV2Frame, ManifestV2FrameConnection, ProofCapabilityV2, encode_manifest_v2_frame,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -15,8 +18,15 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{ReceiverDataPlaneSummaryV2, SenderDataPlaneSummaryV2};
 
-const SENDER_DELIVERY_SCHEMA_VERSION: u16 = 2;
+const SENDER_DELIVERY_SCHEMA_VERSION: u16 = 3;
+pub(crate) const LEGACY_SENDER_DELIVERY_SCHEMA_VERSION: u16 = 2;
 const RECEIVER_DELIVERY_SCHEMA_VERSION: u16 = 1;
+const SMART_COMPRESSIBLE_EXTENSIONS: &[&str] = &[
+    "c", "cc", "cfg", "conf", "cpp", "css", "csv", "cxx", "fish", "go", "graphql", "h", "hh",
+    "hpp", "htm", "html", "ini", "java", "js", "json", "jsonl", "jsx", "kt", "kts", "log", "md",
+    "markdown", "ndjson", "php", "plist", "py", "rb", "rs", "rtf", "sh", "sql", "srt", "svg",
+    "swift", "text", "toml", "ts", "tsx", "tsv", "txt", "vtt", "xml", "yaml", "yml", "zsh",
+];
 const CHALLENGE_KEY_CONTEXT: &str = "envoix/manifest/v2/accept-challenge-key";
 const DELIVERY_KEY_CONTEXT: &str = "envoix/manifest/v2/delivery-proof-key";
 const CHALLENGE_TRANSCRIPT_CONTEXT: &[u8] = b"envoix/manifest/v2/accept-challenge";
@@ -45,6 +55,8 @@ pub struct SenderDeliveryRecordV2 {
     sender_completion_set_digest: Option<ContentDigestV2>,
     entry_results: Vec<EntryResultV2>,
     delivery_proof: Option<DeliveryProofV2>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    entry_encodings: Vec<EntryEncodingV2>,
 }
 
 impl fmt::Debug for SenderDeliveryRecordV2 {
@@ -57,6 +69,7 @@ impl fmt::Debug for SenderDeliveryRecordV2 {
             .field("accept_committed", &self.accept_body_digest.is_some())
             .field("result_count", &self.entry_results.len())
             .field("proof_committed", &self.delivery_proof.is_some())
+            .field("encoding_count", &self.entry_encodings.len())
             .finish()
     }
 }
@@ -76,6 +89,12 @@ impl SenderDeliveryRecordV2 {
             sender_completion_set_digest: None,
             entry_results: Vec::new(),
             delivery_proof: None,
+            entry_encodings: offer
+                .manifest
+                .entries
+                .iter()
+                .map(|entry| initial_entry_encoding(entry, offer.manifest.compression_policy))
+                .collect(),
         }
     }
 
@@ -93,6 +112,36 @@ impl SenderDeliveryRecordV2 {
 
     pub fn accept_body_digest(&self) -> Option<ContentDigestV2> {
         self.accept_body_digest
+    }
+
+    pub(crate) fn frozen_entry_encoding(
+        &self,
+        entry_id: u32,
+    ) -> Result<EntryEncodingV2, DeliveryAuthorityErrorV2> {
+        self.entry_encodings
+            .get(entry_id as usize)
+            .copied()
+            .ok_or(DeliveryAuthorityErrorV2::InvalidRecord)
+    }
+
+    pub(crate) fn requires_entry_encoding_migration(&self) -> bool {
+        self.schema_version == LEGACY_SENDER_DELIVERY_SCHEMA_VERSION
+            && self.entry_encodings.is_empty()
+    }
+
+    pub(crate) fn freeze_entry_encodings(
+        &mut self,
+        offer: &ManifestOfferV2,
+        entry_encodings: Vec<EntryEncodingV2>,
+    ) -> Result<(), DeliveryAuthorityErrorV2> {
+        if !self.requires_entry_encoding_migration() {
+            return Err(DeliveryAuthorityErrorV2::InvalidRecord);
+        }
+        self.validate_offer(offer)?;
+        validate_entry_encodings(offer, &entry_encodings)?;
+        self.entry_encodings = entry_encodings;
+        self.schema_version = SENDER_DELIVERY_SCHEMA_VERSION;
+        self.validate_offer(offer)
     }
 
     pub fn proof_capability(&self) -> Option<ProofCapabilityV2> {
@@ -113,11 +162,15 @@ impl SenderDeliveryRecordV2 {
             job_id: offer.manifest.job_id,
             generation: offer.manifest.generation,
         };
-        if self.schema_version != SENDER_DELIVERY_SCHEMA_VERSION
-            || self.identity != identity
-            || self.manifest_digest != offer.structural_digest
-        {
+        if self.identity != identity || self.manifest_digest != offer.structural_digest {
             return Err(DeliveryAuthorityErrorV2::InvalidRecord);
+        }
+        match self.schema_version {
+            SENDER_DELIVERY_SCHEMA_VERSION => {
+                validate_entry_encodings(offer, &self.entry_encodings)?;
+            }
+            LEGACY_SENDER_DELIVERY_SCHEMA_VERSION if self.entry_encodings.is_empty() => {}
+            _ => return Err(DeliveryAuthorityErrorV2::InvalidRecord),
         }
         self.validate()
     }
@@ -188,7 +241,13 @@ impl SenderDeliveryRecordV2 {
 
     fn validate(&self) -> Result<(), DeliveryAuthorityErrorV2> {
         let accept_committed = self.accept_body_digest.is_some() && self.accept.is_some();
-        if self.accept_body_digest.is_some() != self.accept.is_some()
+        let encoding_shape_is_valid = match self.schema_version {
+            SENDER_DELIVERY_SCHEMA_VERSION => !self.entry_encodings.is_empty(),
+            LEGACY_SENDER_DELIVERY_SCHEMA_VERSION => self.entry_encodings.is_empty(),
+            _ => false,
+        };
+        if !encoding_shape_is_valid
+            || self.accept_body_digest.is_some() != self.accept.is_some()
             || self.entry_results.is_empty() != self.sender_completion_set_digest.is_none()
             || self
                 .entry_results
@@ -244,6 +303,58 @@ impl SenderDeliveryRecordV2 {
             .then_some(())
             .ok_or(DeliveryAuthorityErrorV2::InvalidRecord)
     }
+}
+
+pub(crate) fn initial_entry_encoding(
+    entry: &ManifestEntryV2,
+    policy: CompressionPolicyV2,
+) -> EntryEncodingV2 {
+    if entry.kind == ManifestEntryKindV2::Directory {
+        return EntryEncodingV2::Identity;
+    }
+    match policy {
+        CompressionPolicyV2::Never => EntryEncodingV2::Identity,
+        CompressionPolicyV2::Always => EntryEncodingV2::Zstd,
+        CompressionPolicyV2::Smart => {
+            if is_smart_compression_candidate(&entry.component) {
+                EntryEncodingV2::Zstd
+            } else {
+                EntryEncodingV2::Identity
+            }
+        }
+    }
+}
+
+fn validate_entry_encodings(
+    offer: &ManifestOfferV2,
+    entry_encodings: &[EntryEncodingV2],
+) -> Result<(), DeliveryAuthorityErrorV2> {
+    if entry_encodings.len() != offer.manifest.entries.len()
+        || offer
+            .manifest
+            .entries
+            .iter()
+            .zip(entry_encodings)
+            .any(|(entry, encoding)| {
+                entry.kind == ManifestEntryKindV2::Directory
+                    && *encoding != EntryEncodingV2::Identity
+            })
+    {
+        return Err(DeliveryAuthorityErrorV2::InvalidRecord);
+    }
+    Ok(())
+}
+
+fn is_smart_compression_candidate(component: &str) -> bool {
+    let Some((stem, extension)) = component.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() || extension.is_empty() {
+        return false;
+    }
+    SMART_COMPRESSIBLE_EXTENSIONS
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
 }
 
 #[derive(Clone, Deserialize, Serialize)]

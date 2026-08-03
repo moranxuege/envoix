@@ -75,8 +75,8 @@ class RoomControlWorkflowTest {
             gateway.emit(
                 RoomControlEvent.Hosting(
                     RoomControlInvite(
-                        code = "R123456-amber-comet",
-                        payload = "envoix://room/R123456-amber-comet",
+                        code = "123456-a1b2-c3d4",
+                        payload = "envoix://room/123456-a1b2-c3d4",
                         endpoint = TEST_ROOM_ENDPOINT,
                         expiresAtEpochMs = 5_000L,
                     ),
@@ -133,8 +133,8 @@ class RoomControlWorkflowTest {
             runCurrent()
             val invite =
                 RoomControlInvite(
-                    code = "R123456-amber-comet",
-                    payload = "envoix://room/R123456-amber-comet",
+                    code = "123456-a1b2-c3d4",
+                    payload = "envoix://room/123456-a1b2-c3d4",
                     endpoint = TEST_ROOM_ENDPOINT,
                     expiresAtEpochMs = 60_000L,
                 )
@@ -420,7 +420,7 @@ class RoomControlWorkflowTest {
         val TEST_OFFER =
             RoomTransferOffer(
                 id = "offer-1",
-                transferInvite = "envoix://pair/123456-alpha-bravo?role=send",
+                transferInvite = "envoix://invite/v2/test-payload",
                 rootNames = listOf("Photos"),
                 itemCount = 3,
                 directoryCount = 1,
@@ -507,8 +507,8 @@ private val TEST_ROOM_ENDPOINT =
 
 private val TEST_ROOM_INVITE =
     RoomControlInvite(
-        code = "R123456-amber-comet",
-        payload = "envoix://room/R123456-amber-comet",
+        code = "123456-a1b2-c3d4",
+        payload = "envoix://room/123456-a1b2-c3d4",
         endpoint = TEST_ROOM_ENDPOINT,
         expiresAtEpochMs = Long.MAX_VALUE,
     )

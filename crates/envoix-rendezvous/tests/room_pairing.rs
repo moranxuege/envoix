@@ -341,7 +341,7 @@ async fn remembered_locator_rejects_reversed_roles() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn room_control_locator_pairs_only_the_fixed_control_roles() {
     let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(5)));
-    let room = "c1_123456";
+    let room = "c2_123456";
     let (creator, creator_serve) = start_peer(registry.clone(), room_control_creator_join(room));
     wait_for_creator(&registry).await;
     let (joiner, joiner_serve) = start_peer(registry, room_control_joiner_join(room));
@@ -364,18 +364,18 @@ async fn room_control_locator_pairs_only_the_fixed_control_roles() {
 #[tokio::test]
 async fn room_control_locator_rejects_non_control_join_shapes() {
     let invalid_joins = [
-        creator_join("c1_123456", TransferRole::Receiver),
+        creator_join("c2_123456", TransferRole::Receiver),
         Join {
             transfer_role: TransferRole::Sender,
-            ..room_control_creator_join("c1_123456")
+            ..room_control_creator_join("c2_123456")
         },
         Join {
             selected_bootstrap_method: Some(BootstrapKind::FullTicket),
-            ..room_control_joiner_join("c1_123456")
+            ..room_control_joiner_join("c2_123456")
         },
         Join {
             transfer_role: TransferRole::Receiver,
-            ..room_control_joiner_join("c1_123456")
+            ..room_control_joiner_join("c2_123456")
         },
     ];
 
