@@ -1,6 +1,119 @@
 package dev.envoix.app
 
-enum class Direction { Send, Receive }
+enum class Direction(
+    val wire: String,
+) {
+    Send("send"),
+    Receive("receive"),
+    ;
+
+    companion object {
+        fun fromWire(wire: String): Direction? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+/** Stable, secret-free milestones emitted by one native transfer attempt. */
+enum class TransferStage(
+    val wire: String,
+    internal val order: Int,
+) {
+    SessionStarted("session_started", 0),
+    ConnectionReady("connection_ready", 1),
+    AuthenticationStarted("authentication_started", 2),
+    AuthenticationComplete("authentication_complete", 3),
+    ManifestOffer("manifest_offer", 4),
+    ManifestAccepted("manifest_accepted", 5),
+    FirstPayload("first_payload", 6),
+    PayloadComplete("payload_complete", 7),
+    DeliveryComplete("delivery_complete", 8),
+    Canceled("canceled", 9),
+    Failed("failed", 9),
+    ;
+
+    companion object {
+        fun fromWire(wire: String): TransferStage? = entries.firstOrNull { it.wire == wire }
+    }
+
+    internal val isTerminal: Boolean
+        get() = this == DeliveryComplete || this == Canceled || this == Failed
+}
+
+/** One structured monotonic timing sample from the Rust transfer engine. */
+data class TransferStageTiming(
+    val transferId: String?,
+    val direction: Direction,
+    val attemptId: Long,
+    val stage: TransferStage,
+    val elapsedUs: Long,
+    val deltaUs: Long,
+)
+
+internal object TransferStageTimingParser {
+    fun parse(
+        stageWire: String?,
+        directionWire: String?,
+        attemptId: Long?,
+        transferId: String?,
+        elapsedUs: Long?,
+        deltaUs: Long?,
+    ): TransferStageTiming? {
+        val stage = stageWire?.let(TransferStage::fromWire) ?: return null
+        val direction = directionWire?.let(Direction::fromWire) ?: return null
+        val checkedAttemptId = attemptId?.takeIf { it >= 0L } ?: return null
+        val checkedElapsedUs = elapsedUs?.takeIf { it >= 0L } ?: return null
+        val checkedDeltaUs =
+            deltaUs
+                ?.takeIf { it >= 0L && it <= checkedElapsedUs }
+                ?: return null
+        val checkedTransferId =
+            transferId?.trim()?.takeIf(String::isNotEmpty)
+                ?: if (transferId == null) null else return null
+        return TransferStageTiming(
+            transferId = checkedTransferId,
+            direction = direction,
+            attemptId = checkedAttemptId,
+            stage = stage,
+            elapsedUs = checkedElapsedUs,
+            deltaUs = checkedDeltaUs,
+        )
+    }
+}
+
+internal data class TransferStageTimingAppendResult(
+    val samples: List<TransferStageTiming>,
+    val accepted: Boolean,
+)
+
+internal object TransferStageTimingHistory {
+    const val SAMPLE_CAP = 64
+
+    fun append(
+        current: List<TransferStageTiming>,
+        sample: TransferStageTiming,
+        cap: Int = SAMPLE_CAP,
+    ): TransferStageTimingAppendResult {
+        require(cap > 0) { "Stage timing sample cap must be positive" }
+        val previous =
+            current.lastOrNull {
+                it.attemptId == sample.attemptId && it.direction == sample.direction
+            }
+        if (previous != null && !sample.follows(previous)) {
+            return TransferStageTimingAppendResult(current, accepted = false)
+        }
+        return TransferStageTimingAppendResult(
+            samples = (current + sample).takeLast(cap),
+            accepted = true,
+        )
+    }
+
+    private fun TransferStageTiming.follows(previous: TransferStageTiming): Boolean {
+        if (previous.stage.isTerminal) return false
+        if (stage.order <= previous.stage.order || elapsedUs < previous.elapsedUs) return false
+        if (deltaUs != elapsedUs - previous.elapsedUs) return false
+        if (previous.transferId != null && transferId != previous.transferId) return false
+        return true
+    }
+}
 
 data class TransferInventoryEntry(
     val entryId: Int,
@@ -56,7 +169,13 @@ enum class RecoveryAction(
 data class Transfer(
     val id: Long,
     val direction: Direction,
+    /** Process-private rendezvous handle used by the transport. Never use it as
+     * a user-visible room identity. */
     val room: String,
+    /** Stable presentation identity for grouping transfers in Activity. */
+    val activityGroupId: String? = null,
+    /** User-visible room/device label captured independently from [room]. */
+    val activityGroupLabel: String? = null,
     val fileName: String? = null,
     /** Stable canonical Manifest-v2 job identity. */
     val jobId: String? = null,
@@ -97,9 +216,30 @@ data class Transfer(
     val qrPayload: String? = null,
     /** Recent throughput samples (bytes/s), for the detail drawer's speed chart. */
     val speedHistory: List<Double> = emptyList(),
+    /** Bounded, typed stage timings used by transfer experiments and diagnostics. */
+    val stageTimings: List<TransferStageTiming> = emptyList(),
     /** Timestamped log lines scoped to this transfer, for the detail drawer. */
     val log: List<String> = emptyList(),
 )
+
+internal object TransferActivityGroup {
+    private const val ONE_TIME_PREFIX = "one-time:"
+    private const val REMEMBERED_PREFIX = "remembered:"
+
+    fun oneTime(draftId: String): String = scoped(ONE_TIME_PREFIX, draftId, "room draft id")
+
+    fun remembered(relationshipId: String): String = scoped(REMEMBERED_PREFIX, relationshipId, "remembered relationship id")
+
+    private fun scoped(
+        prefix: String,
+        value: String,
+        name: String,
+    ): String {
+        val normalized = value.trim()
+        require(normalized.isNotEmpty()) { "$name is required" }
+        return prefix + normalized
+    }
+}
 
 val Status.isTerminal: Boolean
     get() = TransferPresentationPolicy.isTerminal(this)

@@ -13,8 +13,8 @@ use envoix_client::api::{
     PlatformDuplexTransport, ProviderSourceIssue, RememberedCredentialRef, RootPlanV2,
     SavedEntryV2, SenderManifestV2SessionSummary, SessionError, SourceDecision, SourceIssueKind,
     SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent, TransferJobStore,
-    TransferOptions, acquire_invitation, acquire_remembered_credential, local_allocatable_bytes,
-    parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    TransferOptions, TransferStage, acquire_invitation, acquire_remembered_credential,
+    local_allocatable_bytes, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
     receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
     receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_enable_mdns,
     send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
@@ -334,6 +334,25 @@ impl EventSink for AndroidEvents {
                 };
                 self.send(json!({"notice":"manifest_v2","state":state}));
             }
+            TransferEvent::StageTiming {
+                transfer_id,
+                direction,
+                attempt_id,
+                stage,
+                elapsed_us,
+                delta_us,
+            } => {
+                self.send(json!({
+                    "notice":"manifest_v2",
+                    "kind":"stage_timing",
+                    "stage":transfer_stage_wire(stage),
+                    "direction":transfer_direction_wire(direction),
+                    "attempt_id":attempt_id,
+                    "transfer_id":transfer_id.map(|value| value.to_string()),
+                    "elapsed_us":elapsed_us,
+                    "delta_us":delta_us,
+                }));
+            }
         }
     }
 }
@@ -374,6 +393,20 @@ impl AndroidPendingManifestV2Receive {
                     .receive_with_result_gate(destination, state_directory, result_gate, cancel)
                     .await
             }
+        }
+    }
+
+    async fn cancel(self) {
+        match self {
+            Self::Iroh(pending) => pending.cancel().await,
+            Self::Native(pending) => pending.cancel().await,
+        }
+    }
+
+    async fn close_with_failure(self) {
+        match self {
+            Self::Iroh(pending) => pending.close_with_failure().await,
+            Self::Native(pending) => pending.close_with_failure().await,
         }
     }
 }
@@ -486,10 +519,34 @@ fn connection_path_event(path: &DataPath, event_kind: &'static str) -> Value {
 
 fn data_path_kind(path: &DataPath) -> &'static str {
     match path {
-        DataPath::Direct { .. } => "direct",
+        DataPath::Direct { addr } if addr.is_ipv4() => "direct_ipv4",
+        DataPath::Direct { .. } => "direct_ipv6",
         DataPath::Relay { .. } => "relay",
         DataPath::WifiAware => "wifi_aware",
         DataPath::Other { .. } => "other",
+    }
+}
+
+fn transfer_stage_wire(stage: TransferStage) -> &'static str {
+    match stage {
+        TransferStage::SessionStarted => "session_started",
+        TransferStage::ConnectionReady => "connection_ready",
+        TransferStage::AuthenticationStarted => "authentication_started",
+        TransferStage::AuthenticationComplete => "authentication_complete",
+        TransferStage::ManifestOffer => "manifest_offer",
+        TransferStage::ManifestAccepted => "manifest_accepted",
+        TransferStage::FirstPayload => "first_payload",
+        TransferStage::PayloadComplete => "payload_complete",
+        TransferStage::DeliveryComplete => "delivery_complete",
+        TransferStage::Canceled => "canceled",
+        TransferStage::Failed => "failed",
+    }
+}
+
+fn transfer_direction_wire(direction: envoix_types::TransferDirection) -> &'static str {
+    match direction {
+        envoix_types::TransferDirection::Send => "send",
+        envoix_types::TransferDirection::Receive => "receive",
     }
 }
 
@@ -1341,92 +1398,121 @@ async fn complete_receive(
     cancel: &TransferCancelToken,
     pending: AndroidPendingManifestV2Receive,
 ) -> Result<(), CoreError> {
-    let manifest = &pending.offer().manifest;
-    let inventory = manifest
-        .entries
-        .iter()
-        .map(|entry| OfferEntry {
-            entry_id: entry.entry_id,
-            root_id: entry.root_id,
-            parent_entry_id: entry.parent_entry_id,
-            name: entry.component.clone(),
-            kind: match entry.kind {
-                ManifestEntryKindV2::RegularFile => "file",
-                ManifestEntryKindV2::Directory => "directory",
-            },
-            plaintext_size: entry.plaintext_size,
-        })
-        .collect::<Vec<_>>();
-    offer_inventories()
-        .lock()
-        .map_err(|_| CoreError::Transfer("offer inventory registry unavailable".into()))?
-        .insert(id, inventory);
-    let (decision_sender, decision_receiver) = oneshot::channel();
-    receive_decisions()
-        .lock()
-        .map_err(|_| CoreError::Transfer("receive decision registry unavailable".into()))?
-        .insert(id, decision_sender);
-    let exceptional = manifest.totals.total_plaintext_bytes
-        > envoix_client::api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES;
-    emit(
-        vm.as_ref(),
-        callback.as_ref(),
-        &json!({
-            "notice":"manifest_v2",
-            "state":"offer",
-            "job_id":encode_job_id(manifest.job_id),
-            "root_count":manifest.roots.len(),
-            "file_count":manifest.totals.file_count,
-            "directory_count":manifest.totals.directory_count,
-            "total":manifest.totals.total_plaintext_bytes,
-            "exceptional":exceptional,
-        })
-        .to_string(),
-    );
-    let decision = tokio::select! {
-        decision = decision_receiver => decision.map_err(|_| CoreError::Cancelled)?,
-        () = cancel.cancelled() => return Err(CoreError::Cancelled),
-    };
-    let target_directory = PathBuf::from(&decision.target_directory);
-    let actual_capacity = local_allocatable_bytes(&target_directory)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let capacity = decision.target_allocatable_bytes.min(actual_capacity);
-    let plan_request = json!({
-        "job_id": encode_job_id(manifest.job_id),
-        "generation": manifest.generation,
-        "reserved_names": [".envoix-staging-v2", ".envoix-reservations-v2"],
-        "roots": manifest.roots.iter().map(|root| {
-            let entry = &manifest.entries[root.root_entry_id as usize];
-            json!({
-                "root_id": root.root_id,
-                "requested_name": root.requested_name,
-                "kind": match entry.kind {
-                    ManifestEntryKindV2::RegularFile => "file",
-                    ManifestEntryKindV2::Directory => "directory",
-                },
+    let decision_receiver = {
+        let (inventory, offer_event) = {
+            let manifest = &pending.offer().manifest;
+            let inventory = manifest
+                .entries
+                .iter()
+                .map(|entry| OfferEntry {
+                    entry_id: entry.entry_id,
+                    root_id: entry.root_id,
+                    parent_entry_id: entry.parent_entry_id,
+                    name: entry.component.clone(),
+                    kind: match entry.kind {
+                        ManifestEntryKindV2::RegularFile => "file",
+                        ManifestEntryKindV2::Directory => "directory",
+                    },
+                    plaintext_size: entry.plaintext_size,
+                })
+                .collect::<Vec<_>>();
+            let exceptional = manifest.totals.total_plaintext_bytes
+                > envoix_client::api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES;
+            let offer_event = json!({
+                "notice":"manifest_v2",
+                "state":"offer",
+                "job_id":encode_job_id(manifest.job_id),
+                "root_count":manifest.roots.len(),
+                "file_count":manifest.totals.file_count,
+                "directory_count":manifest.totals.directory_count,
+                "total":manifest.totals.total_plaintext_bytes,
+                "exceptional":exceptional,
             })
-        }).collect::<Vec<_>>(),
-    })
-    .to_string();
-    let public_plan =
-        call_plan_required(vm.as_ref(), callback.as_ref(), &plan_request).map_err(|error| {
-            CoreError::Cause {
+            .to_string();
+            (inventory, offer_event)
+        };
+        let registration = (|| {
+            offer_inventories()
+                .lock()
+                .map_err(|_| CoreError::Transfer("offer inventory registry unavailable".into()))?
+                .insert(id, inventory);
+            let (decision_sender, decision_receiver) = oneshot::channel();
+            receive_decisions()
+                .lock()
+                .map_err(|_| CoreError::Transfer("receive decision registry unavailable".into()))?
+                .insert(id, decision_sender);
+            Ok::<_, CoreError>(decision_receiver)
+        })();
+        let decision_receiver = match registration {
+            Ok(decision_receiver) => decision_receiver,
+            Err(error) => {
+                pending.close_with_failure().await;
+                return Err(error);
+            }
+        };
+        emit(vm.as_ref(), callback.as_ref(), &offer_event);
+        decision_receiver
+    };
+    let decision = tokio::select! {
+        decision = decision_receiver => decision.map_err(|_| CoreError::Cancelled),
+        () = cancel.cancelled() => Err(CoreError::Cancelled),
+    };
+    let decision = match decision {
+        Ok(decision) => decision,
+        Err(error) => {
+            pending.cancel().await;
+            return Err(error);
+        }
+    };
+    let setup = (|| {
+        let manifest = &pending.offer().manifest;
+        let target_directory = PathBuf::from(&decision.target_directory);
+        let actual_capacity = local_allocatable_bytes(&target_directory)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let capacity = decision.target_allocatable_bytes.min(actual_capacity);
+        let plan_request = json!({
+            "job_id": encode_job_id(manifest.job_id),
+            "generation": manifest.generation,
+            "reserved_names": [".envoix-staging-v2", ".envoix-reservations-v2"],
+            "roots": manifest.roots.iter().map(|root| {
+                let entry = &manifest.entries[root.root_entry_id as usize];
+                json!({
+                    "root_id": root.root_id,
+                    "requested_name": root.requested_name,
+                    "kind": match entry.kind {
+                        ManifestEntryKindV2::RegularFile => "file",
+                        ManifestEntryKindV2::Directory => "directory",
+                    },
+                })
+            }).collect::<Vec<_>>(),
+        })
+        .to_string();
+        let public_plan = call_plan_required(vm.as_ref(), callback.as_ref(), &plan_request)
+            .map_err(|error| CoreError::Cause {
                 cause: TransferCause::ReceiverDestinationUnavailable,
                 detail: error.to_string(),
-            }
-        })?;
-    let public_plan: PlanReply =
-        serde_json::from_str(&public_plan).map_err(|error| CoreError::Cause {
-            cause: TransferCause::ReceiverDestinationUnavailable,
-            detail: format!("Android destination plan reply is invalid: {error}"),
-        })?;
-    validate_public_plan(manifest, &public_plan.roots)?;
-    let gate = AndroidResultGate {
-        vm: vm.clone(),
-        callback: callback.clone(),
-        target_directory: target_directory.clone(),
-        public_roots: public_plan.roots.clone(),
-        committed: Mutex::new(None),
+            })?;
+        let public_plan: PlanReply =
+            serde_json::from_str(&public_plan).map_err(|error| CoreError::Cause {
+                cause: TransferCause::ReceiverDestinationUnavailable,
+                detail: format!("Android destination plan reply is invalid: {error}"),
+            })?;
+        validate_public_plan(manifest, &public_plan.roots)?;
+        let gate = AndroidResultGate {
+            vm: vm.clone(),
+            callback: callback.clone(),
+            target_directory: target_directory.clone(),
+            public_roots: public_plan.roots.clone(),
+            committed: Mutex::new(None),
+        };
+        Ok::<_, CoreError>((target_directory, capacity, public_plan, gate))
+    })();
+    let (target_directory, capacity, public_plan, gate) = match setup {
+        Ok(setup) => setup,
+        Err(error) => {
+            pending.close_with_failure().await;
+            return Err(error);
+        }
     };
     let summary = pending
         .receive_with_result_gate(
@@ -2150,7 +2236,7 @@ fn emit_failed_manifest(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use super::*;
 
@@ -2235,6 +2321,9 @@ mod tests {
         let direct = DataPath::Direct {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 4242),
         };
+        let direct_v6 = DataPath::Direct {
+            addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4242),
+        };
         let relay = DataPath::Relay {
             url: "https://sensitive-relay.example".into(),
         };
@@ -2242,13 +2331,14 @@ mod tests {
             description: "sensitive transport details".into(),
         };
 
-        assert_eq!(data_path_kind(&direct), "direct");
+        assert_eq!(data_path_kind(&direct), "direct_ipv4");
+        assert_eq!(data_path_kind(&direct_v6), "direct_ipv6");
         assert_eq!(data_path_kind(&relay), "relay");
         assert_eq!(data_path_kind(&other), "other");
 
         let event = connection_path_event(&direct, "selected");
         assert_eq!(event["event_kind"], "selected");
-        assert_eq!(event["path_kind"], "direct");
+        assert_eq!(event["path_kind"], "direct_ipv4");
         assert!(event.get("path").is_none());
         assert!(event.get("path_event").is_none());
         let rendered = event.to_string();

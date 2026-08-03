@@ -656,8 +656,8 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         RoomControlInvitation(
-            code: "R123456-test-room",
-            payload: "envoix://room/R123456-test-room",
+            code: "123456-test-room",
+            payload: "envoix://room/123456-test-room",
             endpoint: RoomControlEndpoint(broker: broker, relay: relay),
             expiresAt: now.addingTimeInterval(5 * 60)
         )

@@ -1,10 +1,57 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import CoreBluetooth
 import Foundation
 import OSLog
 
+final class AppleBluetoothIdentityReadAttemptLimiter {
+    private struct Attempt {
+        let peerKey: String
+        let startedAtMilliseconds: Int64
+    }
+
+    private let maximumAttempts: Int
+    private let windowMilliseconds: Int64
+    private let peerBackoffMilliseconds: Int64
+    private var attempts: [Attempt] = []
+
+    init(
+        maximumAttempts: Int = 16,
+        windowMilliseconds: Int64 = 30_000,
+        peerBackoffMilliseconds: Int64 = 5_000
+    ) {
+        precondition(maximumAttempts > 0, "maximum attempts must be positive")
+        precondition(windowMilliseconds > 0, "attempt window must be positive")
+        precondition(
+            (1...windowMilliseconds).contains(peerBackoffMilliseconds),
+            "peer backoff must be positive and no greater than the attempt window"
+        )
+        self.maximumAttempts = maximumAttempts
+        self.windowMilliseconds = windowMilliseconds
+        self.peerBackoffMilliseconds = peerBackoffMilliseconds
+    }
+
+    func tryAcquire(peerKey: String, nowMilliseconds: Int64) -> Bool {
+        precondition(nowMilliseconds >= 0, "attempt time must not be negative")
+        attempts.removeAll {
+            nowMilliseconds - $0.startedAtMilliseconds >= windowMilliseconds
+        }
+        guard attempts.count < maximumAttempts,
+              !attempts.contains(where: {
+                  $0.peerKey == peerKey
+                      && nowMilliseconds - $0.startedAtMilliseconds < peerBackoffMilliseconds
+              }) else {
+            return false
+        }
+        attempts.append(Attempt(
+            peerKey: peerKey,
+            startedAtMilliseconds: nowMilliseconds
+        ))
+        return true
+    }
+}
+
 final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
-    NearbyAdvertisingConfigurable {
+    NearbyAdvertisingConfigurable, NearbyIdentityConfigurable {
     let source = NearbyDiscoverySource.bluetooth
 
     private final class OutboundOffer {
@@ -16,6 +63,8 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
         var frames: [Data] = []
         var nextFrame = 0
         var characteristic: CBCharacteristic?
+        var connectionStarted = false
+        var waitingForCleanDisconnect = false
 
         init(
             peerKey: String,
@@ -32,7 +81,18 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
         }
     }
 
-    private let identity: LocalNearbyDiscoveryIdentity
+    private final class IdentityRead {
+        let peerKey: String
+        let peripheral: CBPeripheral
+        var waitingForCleanDisconnect = false
+
+        init(peerKey: String, peripheral: CBPeripheral) {
+            self.peerKey = peerKey
+            self.peripheral = peripheral
+        }
+    }
+
+    private var identity: LocalNearbyDiscoveryIdentity
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.envoix.app",
         category: "ble-rendezvous"
@@ -43,8 +103,17 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
     private var writeCharacteristic: CBMutableCharacteristic?
     private var discoveredPeripherals: [String: CBPeripheral] = [:]
     private var inboundAssemblers: [UUID: BleRendezvousProtocol.Assembler] = [:]
+    private var inboundAssemblerOrder: [UUID] = []
     private var outbound: OutboundOffer?
     private var outboundTimeout: DispatchWorkItem?
+    private var pendingIdentityReads: [IdentityRead] = []
+    private var activeIdentityRead: IdentityRead?
+    private var identityReadTimeout: DispatchWorkItem?
+    private let identityReadAttemptLimiter = AppleBluetoothIdentityReadAttemptLimiter()
+    private var nfcReadinessIdentities = NearbyNFCReadinessIdentityRegistry()
+    private var resolvedDisplayNames: [String: String] = [:]
+    private var lastRSSIByPeerKey: [String: Int] = [:]
+    private var trackedPeerOrder: [String] = []
     private var active = false
     private var scanning = false
     private var advertising = false
@@ -58,6 +127,12 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
     }
 
     func start(sink: @escaping (NearbyDiscoveryEvent) -> Void) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.sync {
+                self.start(sink: sink)
+            }
+            return
+        }
         self.sink = sink
         guard !active else {
             emitOperationalStatus()
@@ -93,12 +168,19 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
     }
 
     func stop() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.sync {
+                self.stop()
+            }
+            return
+        }
         guard active else {
             sink = nil
             return
         }
         active = false
         completeOutbound(error: "Bluetooth discovery stopped", state: "stopped")
+        cancelIdentityReads(clearCache: true)
         if scanning {
             centralManager?.stopScan()
         }
@@ -112,7 +194,10 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
         rendezvousReady = false
         discoveredPeripherals.values.forEach { $0.delegate = nil }
         discoveredPeripherals.removeAll()
+        nfcReadinessIdentities.clear()
+        trackedPeerOrder.removeAll()
         inboundAssemblers.removeAll()
+        inboundAssemblerOrder.removeAll()
         writeCharacteristic = nil
         centralManager?.delegate = nil
         peripheralManager?.delegate = nil
@@ -148,6 +233,7 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
             completion("Another Bluetooth invitation is already being delivered")
             return
         }
+        cancelIdentityReads(clearCache: false)
         let requestID = UInt64.random(in: UInt64.min...UInt64.max)
         let offer = OutboundOffer(
             peerKey: normalizedPeerKey,
@@ -161,16 +247,22 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
         logger.info(
             "BLE_RENDEZVOUS direction=outbound state=connecting request_id=\(self.requestIDText(requestID), privacy: .public) auth=none"
         )
-        centralManager?.connect(peripheral, options: nil)
         let timeout = DispatchWorkItem { [weak self] in
             self?.completeOutbound(error: "Bluetooth invitation delivery timed out", state: "timeout")
         }
         outboundTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.outboundTimeoutSeconds, execute: timeout)
+        beginOutboundConnection(offer)
     }
 
     func canOfferInvite(to selection: NearbyPairingSelection) -> Bool {
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync {
+                self.canOfferInvite(to: selection)
+            }
+        }
         guard active,
+              centralManager?.state == .poweredOn,
               let peerKey = NearbyDiscoveryPeerRegistry.normalizePeerKey(
                   selection.discoveryPeerKey
               ) else {
@@ -180,8 +272,25 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
     }
 
     func setAdvertisingEnabled(_ enabled: Bool) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.sync {
+                self.setAdvertisingEnabled(enabled)
+            }
+            return
+        }
         precondition(!active, "Advertising policy must be configured before discovery starts")
         advertisingEnabled = enabled
+    }
+
+    func setIdentity(_ identity: LocalNearbyDiscoveryIdentity) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.sync {
+                self.setIdentity(identity)
+            }
+            return
+        }
+        precondition(!active, "Identity must be configured before discovery starts")
+        self.identity = identity
     }
 
     private func startScanningIfPossible() {
@@ -207,11 +316,22 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
             value: nil,
             permissions: [.writeable]
         )
+        guard let identityValue = BleRendezvousProtocol.encodeIdentity(identity: identity) else {
+            failureDetail = .bluetoothUnavailable
+            emitOperationalStatus()
+            return
+        }
+        let identityCharacteristic = CBMutableCharacteristic(
+            type: CBUUID(nsuuid: BleRendezvousProtocol.identityCharacteristicUUID),
+            properties: [.read],
+            value: identityValue,
+            permissions: [.readable]
+        )
         let service = CBMutableService(
             type: CBUUID(nsuuid: BleRendezvousProtocol.serviceUUID),
             primary: true
         )
-        service.characteristics = [characteristic]
+        service.characteristics = [characteristic, identityCharacteristic]
         writeCharacteristic = characteristic
         peripheralManager?.add(service)
     }
@@ -229,6 +349,7 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
         advertisingPending = true
         peripheralManager?.startAdvertising([
             CBAdvertisementDataServiceUUIDsKey: [CBUUID(nsuuid: uuid)],
+            CBAdvertisementDataLocalNameKey: identity.displayName,
         ])
     }
 
@@ -260,17 +381,155 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
         )
     }
 
+    private func beginOutboundConnection(_ offer: OutboundOffer) {
+        guard outbound === offer else { return }
+        switch offer.peripheral.state {
+        case .disconnected:
+            offer.connectionStarted = true
+            offer.waitingForCleanDisconnect = false
+            centralManager?.connect(offer.peripheral, options: nil)
+        case .connected, .connecting:
+            offer.waitingForCleanDisconnect = true
+            centralManager?.cancelPeripheralConnection(offer.peripheral)
+        case .disconnecting:
+            offer.waitingForCleanDisconnect = true
+        @unknown default:
+            completeOutbound(error: "Bluetooth connection is unavailable", state: "connection_failed")
+        }
+    }
+
+    private func enqueueIdentityRead(peerKey: String, peripheral: CBPeripheral) {
+        guard active,
+              outbound == nil,
+              resolvedDisplayNames[peerKey] == nil,
+              activeIdentityRead?.peerKey != peerKey,
+              !pendingIdentityReads.contains(where: { $0.peerKey == peerKey }),
+              pendingIdentityReads.count < Self.maximumPendingIdentityReads else {
+            return
+        }
+        pendingIdentityReads.append(IdentityRead(peerKey: peerKey, peripheral: peripheral))
+        startNextIdentityRead()
+    }
+
+    private func trackPeerIfPossible(_ peerKey: String) -> Bool {
+        if discoveredPeripherals[peerKey] != nil {
+            return true
+        }
+        if discoveredPeripherals.count >= Self.maximumTrackedPeers {
+            let protectedPeerKeys = Set([
+                activeIdentityRead?.peerKey,
+                outbound?.peerKey,
+            ].compactMap { $0 })
+            guard let evictedPeerKey = trackedPeerOrder.first(where: {
+                !protectedPeerKeys.contains($0)
+            }) else {
+                return false
+            }
+            trackedPeerOrder.removeAll { $0 == evictedPeerKey }
+            discoveredPeripherals.removeValue(forKey: evictedPeerKey)
+            resolvedDisplayNames.removeValue(forKey: evictedPeerKey)
+            lastRSSIByPeerKey.removeValue(forKey: evictedPeerKey)
+            pendingIdentityReads.removeAll { $0.peerKey == evictedPeerKey }
+        }
+        trackedPeerOrder.append(peerKey)
+        return true
+    }
+
+    private func startNextIdentityRead() {
+        guard active,
+              outbound == nil,
+              activeIdentityRead == nil,
+              centralManager?.state == .poweredOn,
+              !pendingIdentityReads.isEmpty else {
+            return
+        }
+        var read: IdentityRead
+        repeat {
+            guard !pendingIdentityReads.isEmpty else { return }
+            read = pendingIdentityReads.removeFirst()
+        } while !identityReadAttemptLimiter.tryAcquire(
+            peerKey: read.peerKey,
+            nowMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000)
+        )
+        activeIdentityRead = read
+        read.peripheral.delegate = self
+
+        let timeout = DispatchWorkItem { [weak self] in
+            self?.completeIdentityRead(displayName: nil)
+        }
+        identityReadTimeout = timeout
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.identityReadTimeoutSeconds,
+            execute: timeout
+        )
+
+        switch read.peripheral.state {
+        case .disconnected:
+            centralManager?.connect(read.peripheral, options: nil)
+        case .connected:
+            read.peripheral.discoverServices([CBUUID(nsuuid: BleRendezvousProtocol.serviceUUID)])
+        case .connecting:
+            break
+        case .disconnecting:
+            read.waitingForCleanDisconnect = true
+        @unknown default:
+            completeIdentityRead(displayName: nil)
+        }
+    }
+
+    private func completeIdentityRead(displayName: String?) {
+        guard let read = activeIdentityRead else { return }
+        activeIdentityRead = nil
+        identityReadTimeout?.cancel()
+        identityReadTimeout = nil
+
+        if read.peripheral.state != .disconnected {
+            centralManager?.cancelPeripheralConnection(read.peripheral)
+        }
+        read.peripheral.delegate = nil
+        if let displayName {
+            resolvedDisplayNames[read.peerKey] = displayName
+            sink?(.observation(NearbyDiscoveryObservation(
+                peerKey: read.peerKey,
+                source: source,
+                seenAtMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000),
+                displayName: displayName,
+                rssi: lastRSSIByPeerKey[read.peerKey]
+            )))
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.startNextIdentityRead()
+        }
+    }
+
+    private func cancelIdentityReads(clearCache: Bool) {
+        pendingIdentityReads.removeAll()
+        identityReadTimeout?.cancel()
+        identityReadTimeout = nil
+        if let read = activeIdentityRead {
+            activeIdentityRead = nil
+            if read.peripheral.state != .disconnected {
+                centralManager?.cancelPeripheralConnection(read.peripheral)
+            }
+            read.peripheral.delegate = nil
+        }
+        if clearCache {
+            resolvedDisplayNames.removeAll()
+            lastRSSIByPeerKey.removeAll()
+        }
+    }
+
     private func completeOutbound(error: String?, state: String) {
         guard let offer = outbound else { return }
         outbound = nil
         outboundTimeout?.cancel()
         outboundTimeout = nil
+        centralManager?.cancelPeripheralConnection(offer.peripheral)
+        offer.peripheral.delegate = nil
         logger.info(
             "BLE_RENDEZVOUS direction=outbound state=\(state, privacy: .public) request_id=\(self.requestIDText(offer.requestID), privacy: .public) auth=none"
         )
         offer.completion(error)
-        centralManager?.cancelPeripheralConnection(offer.peripheral)
-        offer.peripheral.delegate = nil
     }
 
     private func emitOperationalStatus() {
@@ -311,6 +570,10 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
     }
 
     private static let outboundTimeoutSeconds: TimeInterval = 15
+    private static let identityReadTimeoutSeconds: TimeInterval = 5
+    private static let maximumPendingIdentityReads = 8
+    private static let maximumTrackedPeers = 32
+    private static let maximumInboundAssemblers = 8
 }
 
 extension AppleBluetoothDiscoveryProvider: CBCentralManagerDelegate {
@@ -318,6 +581,7 @@ extension AppleBluetoothDiscoveryProvider: CBCentralManagerDelegate {
         guard active else { return }
         if central.state == .poweredOn {
             startScanningIfPossible()
+            startNextIdentityRead()
         } else {
             scanning = false
         }
@@ -337,6 +601,24 @@ extension AppleBluetoothDiscoveryProvider: CBCentralManagerDelegate {
         ].flatMap { key in
             advertisementData[key] as? [CBUUID] ?? []
         }
+        let nowMilliseconds = Int64(
+            ProcessInfo.processInfo.systemUptime * 1_000
+        )
+        if let offerID = serviceUUIDs.lazy.compactMap({ serviceUUID in
+            UUID(uuidString: serviceUUID.uuidString).flatMap {
+                NearbyNFCReadinessBluetoothUUID.decode($0)
+            }
+        }).first,
+           let presenterPeerKey = nfcReadinessIdentities.boundPeerKey(
+               for: peripheral.identifier,
+               at: nowMilliseconds
+           ) {
+            sink?(.nfcPresenterReadiness(
+                offerID: offerID,
+                presenterPeerKey: presenterPeerKey,
+                presenterID: peripheral.identifier
+            ))
+        }
         guard let peerKey = serviceUUIDs.lazy.compactMap({ serviceUUID in
             UUID(uuidString: serviceUUID.uuidString).flatMap { uuid in
                 NearbyDiscoveryBluetoothUUID.decode(uuid)
@@ -345,22 +627,48 @@ extension AppleBluetoothDiscoveryProvider: CBCentralManagerDelegate {
         peerKey != identity.peerKey else {
             return
         }
+        guard trackPeerIfPossible(peerKey) else { return }
         discoveredPeripherals[peerKey] = peripheral
+        nfcReadinessIdentities.observePresence(
+            peerKey: peerKey,
+            presenterID: peripheral.identifier,
+            at: nowMilliseconds
+        )
         let rssi = RSSI.intValue == 127 ? nil : RSSI.intValue
+        lastRSSIByPeerKey[peerKey] = rssi
+        let presenceUUID = NearbyDiscoveryBluetoothUUID.encode(peerKey: peerKey)
+            .map(CBUUID.init(nsuuid:))
+        let serviceData = presenceUUID.flatMap {
+            (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[$0]
+        }
+        let provisionalName = BleRendezvousProtocol.decodeProvisionalDisplayName(
+            serviceData: serviceData,
+            localName: advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        )
         sink?(.observation(NearbyDiscoveryObservation(
             peerKey: peerKey,
             source: source,
-            seenAtMilliseconds: Int64(ProcessInfo.processInfo.systemUptime * 1_000),
+            seenAtMilliseconds: nowMilliseconds,
+            displayName: resolvedDisplayNames[peerKey] ?? provisionalName,
             rssi: rssi
         )))
+        enqueueIdentityRead(peerKey: peerKey, peripheral: peripheral)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        guard outbound?.peripheral == peripheral else {
-            central.cancelPeripheralConnection(peripheral)
+        if let offer = outbound, offer.peripheral == peripheral {
+            guard offer.connectionStarted, !offer.waitingForCleanDisconnect else {
+                central.cancelPeripheralConnection(peripheral)
+                return
+            }
+            peripheral.discoverServices([CBUUID(nsuuid: BleRendezvousProtocol.serviceUUID)])
             return
         }
-        peripheral.discoverServices([CBUUID(nsuuid: BleRendezvousProtocol.serviceUUID)])
+        if activeIdentityRead?.peripheral == peripheral {
+            peripheral.discoverServices([CBUUID(nsuuid: BleRendezvousProtocol.serviceUUID)])
+        } else {
+            central.cancelPeripheralConnection(peripheral)
+        }
     }
 
     func centralManager(
@@ -368,8 +676,20 @@ extension AppleBluetoothDiscoveryProvider: CBCentralManagerDelegate {
         didFailToConnect peripheral: CBPeripheral,
         error: Error?
     ) {
-        guard outbound?.peripheral == peripheral else { return }
-        completeOutbound(error: "Bluetooth connection failed", state: "connection_failed")
+        if let offer = outbound, offer.peripheral == peripheral {
+            if offer.waitingForCleanDisconnect {
+                beginOutboundConnection(offer)
+            } else {
+                completeOutbound(error: "Bluetooth connection failed", state: "connection_failed")
+            }
+        } else if let read = activeIdentityRead, read.peripheral == peripheral {
+            if read.waitingForCleanDisconnect {
+                read.waitingForCleanDisconnect = false
+                central.connect(peripheral, options: nil)
+            } else {
+                completeIdentityRead(displayName: nil)
+            }
+        }
     }
 
     func centralManager(
@@ -377,14 +697,46 @@ extension AppleBluetoothDiscoveryProvider: CBCentralManagerDelegate {
         didDisconnectPeripheral peripheral: CBPeripheral,
         error: Error?
     ) {
-        guard outbound?.peripheral == peripheral else { return }
-        completeOutbound(error: "Bluetooth connection ended before delivery", state: "disconnected")
+        if let offer = outbound, offer.peripheral == peripheral {
+            if offer.waitingForCleanDisconnect {
+                beginOutboundConnection(offer)
+            } else {
+                completeOutbound(error: "Bluetooth connection ended before delivery", state: "disconnected")
+            }
+        } else if let read = activeIdentityRead, read.peripheral == peripheral {
+            if read.waitingForCleanDisconnect {
+                read.waitingForCleanDisconnect = false
+                central.connect(peripheral, options: nil)
+            } else {
+                completeIdentityRead(displayName: nil)
+            }
+        }
     }
 }
 
 extension AppleBluetoothDiscoveryProvider: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        guard let offer = outbound, offer.peripheral == peripheral, error == nil,
+        if activeIdentityRead?.peripheral == peripheral {
+            guard error == nil,
+                  let service = peripheral.services?.first(where: {
+                      $0.uuid == CBUUID(nsuuid: BleRendezvousProtocol.serviceUUID)
+                  }) else {
+                completeIdentityRead(displayName: nil)
+                return
+            }
+            peripheral.discoverCharacteristics(
+                [CBUUID(nsuuid: BleRendezvousProtocol.identityCharacteristicUUID)],
+                for: service
+            )
+            return
+        }
+        guard let offer = outbound,
+              offer.peripheral == peripheral,
+              offer.connectionStarted,
+              !offer.waitingForCleanDisconnect else {
+            return
+        }
+        guard error == nil,
               let service = peripheral.services?.first(where: {
                   $0.uuid == CBUUID(nsuuid: BleRendezvousProtocol.serviceUUID)
               }) else {
@@ -402,7 +754,24 @@ extension AppleBluetoothDiscoveryProvider: CBPeripheralDelegate {
         didDiscoverCharacteristicsFor service: CBService,
         error: Error?
     ) {
-        guard let offer = outbound, offer.peripheral == peripheral, error == nil,
+        if activeIdentityRead?.peripheral == peripheral {
+            guard error == nil,
+                  let characteristic = service.characteristics?.first(where: {
+                      $0.uuid == CBUUID(nsuuid: BleRendezvousProtocol.identityCharacteristicUUID)
+                  }) else {
+                completeIdentityRead(displayName: nil)
+                return
+            }
+            peripheral.readValue(for: characteristic)
+            return
+        }
+        guard let offer = outbound,
+              offer.peripheral == peripheral,
+              offer.connectionStarted,
+              !offer.waitingForCleanDisconnect else {
+            return
+        }
+        guard error == nil,
               let characteristic = service.characteristics?.first(where: {
                   $0.uuid == CBUUID(nsuuid: BleRendezvousProtocol.writeCharacteristicUUID)
               }) else {
@@ -432,13 +801,37 @@ extension AppleBluetoothDiscoveryProvider: CBPeripheralDelegate {
         didWriteValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
-        guard let offer = outbound, offer.peripheral == peripheral else { return }
+        guard let offer = outbound,
+              offer.peripheral == peripheral,
+              offer.characteristic === characteristic else {
+            return
+        }
         guard error == nil else {
             completeOutbound(error: "Bluetooth invitation delivery failed", state: "write_failed")
             return
         }
         offer.nextFrame += 1
         writeNextFrame()
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard let read = activeIdentityRead,
+              read.peripheral == peripheral,
+              characteristic.uuid == CBUUID(nsuuid: BleRendezvousProtocol.identityCharacteristicUUID),
+              error == nil,
+              let value = characteristic.value,
+              let remoteIdentity = BleRendezvousProtocol.decodeIdentity(value),
+              remoteIdentity.peerKey == read.peerKey else {
+            if activeIdentityRead?.peripheral == peripheral {
+                completeIdentityRead(displayName: nil)
+            }
+            return
+        }
+        completeIdentityRead(displayName: remoteIdentity.displayName)
     }
 }
 
@@ -487,10 +880,27 @@ extension AppleBluetoothDiscoveryProvider: CBPeripheralManagerDelegate {
                 peripheral.respond(to: request, withResult: .requestNotSupported)
                 continue
             }
-            let assembler = inboundAssemblers[request.central.identifier] ?? BleRendezvousProtocol.Assembler()
-            inboundAssemblers[request.central.identifier] = assembler
+            let centralID = request.central.identifier
+            let assembler: BleRendezvousProtocol.Assembler
+            if let existing = inboundAssemblers[centralID] {
+                assembler = existing
+            } else {
+                if inboundAssemblers.count >= Self.maximumInboundAssemblers,
+                   let oldestCentralID = inboundAssemblerOrder.first {
+                    inboundAssemblers.removeValue(forKey: oldestCentralID)
+                    inboundAssemblerOrder.removeFirst()
+                }
+                assembler = BleRendezvousProtocol.Assembler()
+                inboundAssemblers[centralID] = assembler
+                inboundAssemblerOrder.append(centralID)
+            }
             if let invite = assembler.accept(value) {
+                inboundAssemblers.removeValue(forKey: centralID)
+                inboundAssemblerOrder.removeAll { $0 == centralID }
                 handleInboundInvite(invite)
+            } else if !assembler.isAssembling {
+                inboundAssemblers.removeValue(forKey: centralID)
+                inboundAssemblerOrder.removeAll { $0 == centralID }
             }
             peripheral.respond(to: request, withResult: .success)
         }

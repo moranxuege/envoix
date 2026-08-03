@@ -100,7 +100,8 @@ first real client, which is why the pain surfaces now.
 Three axes that the current design conflates, which are actually independent:
 
 1. **Rendezvous** - how the two peers find each other and authenticate:
-   manual descriptor + token, QR invite, mDNS, room code via broker.
+   manual descriptor + token, complete InviteV2 URI, mDNS, or foreground Room
+   Control via broker.
 2. **Connection establishment** - who dials whom, over which candidate paths.
 3. **Data direction** - who sends file bytes (the operation the user asked
    for).

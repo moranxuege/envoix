@@ -157,6 +157,7 @@ jobs:
         run: >-
           scripts/apple-dev.sh ios-test-rerun hosted
           -skip-testing:Envoix-iOSUITests/WifiAwareCapabilityTests/testPhysicalDeviceReportsWifiAwarePairingCapability
+          -skip-testing:Envoix-iOSUITests/WifiAwarePhysicalRendezvousTests
           -skip-testing:Envoix-iOSUITests/WifiAwarePhysicalTransferTests
           -skip-testing:Envoix-iOSUITests/ManifestV2PhysicalTransferTests/testSendScenarioProductActivityRoom
           -skip-testing:Envoix-iOSUITests/ManifestV2PhysicalTransferTests/testReceiveScenarioProductActivityRoom

@@ -592,13 +592,13 @@ reset_app() {
 
 start_sender() {
     local serial="$1"
-    local room="$2"
+    local invitation="$2"
     local path="$3"
     local output
 
     output="$("$adb" -s "$serial" shell am broadcast \
         -n "$NAT_TEST_RECEIVER" -a "$ACTION_START_SENDER" \
-        --es room "$room" --es path "$path" \
+        --es invitation "$invitation" --es path "$path" \
         --es broker "$broker_endpoint" --es relay "$relay_url" 2>&1)"
     if ! printf '%s\n' "$output" | grep -q 'result=-1, data="started"'; then
         die "failed to start sender Manifest V2 session on $serial: $output"
@@ -606,18 +606,18 @@ start_sender() {
 }
 
 start_creator_receiver() {
-    local output room
+    local invitation output
 
     output="$("$adb" -s "$SERIAL_B" shell am broadcast \
         -n "$NAT_TEST_RECEIVER" -a "$ACTION_CREATE_RECEIVER_INVITE" \
         --es broker "$broker_endpoint" --es relay "$relay_url" 2>&1)"
-    room="$(printf '%s\n' "$output" |
+    invitation="$(printf '%s\n' "$output" |
         sed -n 's/.*result=-1, data="\([^"]*\)".*/\1/p' |
         tail -n 1)"
-    if ! [[ "$room" =~ ^[0-9]{6}-[a-z0-9]{4}-[a-z0-9]{4}$ ]]; then
+    if ! [[ "$invitation" =~ ^envoix://invite/v2/[^[:space:]]+$ ]]; then
         die "failed to create receiver InviteV2 on $SERIAL_B: $output"
     fi
-    printf '%s\n' "$room"
+    printf '%s\n' "$invitation"
 }
 
 clear_receiver_outputs() {
@@ -1008,10 +1008,10 @@ setup_network() {
 
 run_test() {
     local profile="$1"
-    local room deadline actual app_uid sender_state receiver_state
+    local invitation deadline actual app_uid sender_state receiver_state
     local sender_peer_type receiver_peer_type failure_reason
 
-    room=""
+    invitation=""
     actual=""
     sender_state=""
     receiver_state=""
@@ -1042,12 +1042,12 @@ run_test() {
     "$adb" -s "$SERIAL_A" shell \
         "cp /data/local/tmp/nat-test-input '$DEVICE_INPUT'; chown $app_uid:$app_uid '$DEVICE_INPUT'"
 
-    room="$(start_creator_receiver)"
+    invitation="$(start_creator_receiver)"
     wait_for_transfer_record "$SERIAL_B" receiver "$profile"
     sleep 2
     printf '[%s] Limiting sender Wi-Fi to approximately 512 KiB/s...\n' "$profile"
     limit_bandwidth "$SERIAL_A"
-    start_sender "$SERIAL_A" "$room" "$DEVICE_INPUT"
+    start_sender "$SERIAL_A" "$invitation" "$DEVICE_INPUT"
     wait_for_transfer_record "$SERIAL_A" sender "$profile"
 
     deadline=$((SECONDS + timeout))

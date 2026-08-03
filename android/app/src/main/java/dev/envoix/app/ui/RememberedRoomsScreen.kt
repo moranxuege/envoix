@@ -261,6 +261,9 @@ internal fun RememberedRoomDetailScreen(
                         addFilesSession += 1
                         addFilesOpen = true
                     },
+                    enabled =
+                        transferState?.incomingOffer == null &&
+                            transferState?.incomingBusy != true,
                     modifier =
                         Modifier
                             .testTag("remembered_room_add_files")

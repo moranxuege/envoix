@@ -109,9 +109,9 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
                 )
                 try await waitForProductPreparation(model)
                 evidence.recordJobID(try XCTUnwrap(model.preparedManifestJobID))
-                model.startSendingManifestWithRoom(
+                model.startSendingManifestWithInvite(
                     selectedPaths: materialized.selectedURLs.map(\.path),
-                    code: Self.scenarioCode,
+                    invite: Self.scenarioInvitation,
                     settings: Self.settings
                 )
                 let completed = try await waitForProductTerminal(model, evidence: evidence)
@@ -171,7 +171,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
                 relay: Self.settings.relayUrl
             )
             defer { withExtendedLifetime(invitation) {} }
-            Self.marker("invitation=\(invitation.roomCode)")
+            Self.marker("invitation=\(invitation.payload)")
 
             let model = TransferViewModel()
             let subscription = observeProductActivity(model, evidence: evidence)
@@ -337,14 +337,14 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             relay: Self.settings.relayUrl
         )
         defer { withExtendedLifetime(invitation) {} }
-        Self.marker("invitation=\(invitation.roomCode)")
+        Self.marker("invitation=\(invitation.payload)")
         let observer = ManifestV2PhysicalObserver(evidence: evidence)
         Self.marker("\(Self.platformName) receiver ready scenario=\(fixture.scenario.rawValue)")
         let pending = try await receiveTransferOfferV2(
             settings: Self.settings,
             request: try Self.request(
                 direction: .receive,
-                roomCode: invitation.roomCode
+                creatorRoomCode: invitation.roomCode
             ),
             stateDirectory: stateDirectory.path,
             cancellation: FfiManifestV2Cancellation(),
@@ -523,14 +523,32 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
 
     private static func request(
         direction: FfiTransferDirection,
-        roomCode: String? = nil
+        creatorRoomCode: String? = nil
     ) throws -> FfiTransferRequest {
-        FfiTransferRequest(
+        let mode: FfiTransferMode
+        let invite: String
+        let code: String
+        if let creatorRoomCode {
+            mode = .room
+            invite = ""
+            code = creatorRoomCode
+        } else {
+            let input = scenarioInvitation.trimmed
+            guard input.hasPrefix(inviteV2URLPrefix) else {
+                throw PhysicalTestError.missingInvitation
+            }
+            _ = try parsePairingInvite(input: input)
+            mode = .invite
+            invite = input
+            code = ""
+        }
+
+        return FfiTransferRequest(
             direction: direction,
-            mode: .room,
+            mode: mode,
             peerDescriptor: "",
-            invite: "",
-            code: try normalizeRoomCode(input: roomCode ?? scenarioCode),
+            invite: invite,
+            code: code,
             token: "",
             rememberConsent: false,
             rememberedCredentialRef: "",
@@ -601,9 +619,9 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
     )
     private static let runID = environmentString("ENVOIX_CROSS_DEVICE_RUN_ID", default: "manual")
     private static let scenarioName = environmentString("ENVOIX_CROSS_DEVICE_SCENARIO", default: "single_file")
-    private static let scenarioCode = environmentString(
-        "ENVOIX_CROSS_DEVICE_CODE",
-        default: "741203-ambe-come"
+    private static let scenarioInvitation = environmentString(
+        "ENVOIX_CROSS_DEVICE_INVITATION",
+        default: ""
     )
     private static let largeBytes = environmentUInt64("ENVOIX_CROSS_DEVICE_LARGE_BYTES", default: 128 * 1_024 * 1_024)
     private static let collisionSentinel = Data("pre-existing destination must remain unchanged\n".utf8)
@@ -1446,6 +1464,13 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
         evidence.recordPath(event.pathKind)
         marker("path=\(event.pathKind) event=\(event.eventKind)")
     }
+    func onStageTiming(event: FfiTransferStageTiming) {
+        marker(
+            "stage_timing stage=\(event.stage) direction=\(event.direction) " +
+                "attempt_id=\(event.attemptId) transfer_id=\(event.transferId ?? "pending") " +
+                "elapsed_us=\(event.elapsedUs) delta_us=\(event.deltaUs)"
+        )
+    }
     func onDiagnostic(message: String) { marker("diagnostic=\(message)") }
     func onRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool { false }
 
@@ -1476,6 +1501,7 @@ private enum PhysicalTestError: Error {
     case invalidBuildVariant(String)
     case invalidScenario(String)
     case missingCapacity(String)
+    case missingInvitation
     case productFailed(String)
     case productTimedOut(String)
 }

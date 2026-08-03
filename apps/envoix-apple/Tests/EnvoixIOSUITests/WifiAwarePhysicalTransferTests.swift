@@ -39,6 +39,10 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
             }
             Self.marker("udp receiver completed run=\(context.runID) bytes=\(request.count)")
         }
+        Self.marker(
+            "completion_marker=success test=raw_udp role=\(context.role.rawValue) " +
+                "run=\(context.runID)"
+        )
     }
 
     func testRawTransferServicePath() async throws {
@@ -81,6 +85,10 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
             }
             Self.marker("raw receiver completed run=\(context.runID) bytes=\(request.count)")
         }
+        Self.marker(
+            "completion_marker=success test=raw_transport role=\(context.role.rawValue) " +
+                "run=\(context.runID)"
+        )
     }
 
     func testManifestV2TransferServicePath() async throws {
@@ -112,6 +120,13 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
         forceSenderBootstrapFailure: Bool = false
     ) async throws {
         let context = try requirePhysicalContext()
+        defer {
+            if let invitationSidecarURL = context.invitationSidecarURL,
+               FileManager.default.fileExists(atPath: invitationSidecarURL.path)
+            {
+                try? FileManager.default.removeItem(at: invitationSidecarURL)
+            }
+        }
         guard expectCancellation || context.cancelAtPercent == nil else {
             throw WifiAwarePhysicalTestError.unexpectedCancellationInjection
         }
@@ -165,12 +180,12 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
         case .nearbyHybrid, .nearbyPreferred:
             switch context.role {
             case .send:
-                guard let roomCode = context.roomCode else {
-                    throw WifiAwarePhysicalTestError.missingRoomCode
+                guard let invitation = context.invitation else {
+                    throw WifiAwarePhysicalTestError.missingInvitation
                 }
                 nearbyRoute = try Self.nearbyHybridRoute(
                     direction: .send,
-                    code: roomCode
+                    joinerInvitation: invitation
                 )
             case .receive:
                 let invitation = try makePairingInvite(
@@ -178,10 +193,17 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                     broker: defaultRendezvousBroker,
                     relay: defaultRelayURL
                 )
-                Self.marker("invitation=\(invitation.roomCode)")
+                guard let invitationSidecarURL = context.invitationSidecarURL else {
+                    throw WifiAwarePhysicalTestError.missingInvitationSidecar
+                }
+                try Self.exportInvitationPayload(
+                    invitation.payload,
+                    to: invitationSidecarURL
+                )
+                Self.marker("invitation_ready")
                 nearbyRoute = try Self.nearbyHybridRoute(
                     direction: .receive,
-                    code: invitation.roomCode
+                    creatorRoomCode: invitation.roomCode
                 )
             }
         }
@@ -229,7 +251,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                     completion = nativeCompletion.transfer
                 case .nearbyHybrid:
                     guard let route = nearbyRoute else {
-                        throw WifiAwarePhysicalTestError.missingRoomCode
+                        throw WifiAwarePhysicalTestError.missingRoute
                     }
                     completion = try await withProbeTimeout(context.manifestTimeout) {
                         try await AppleWifiAwareTransportSession.withSenderTransport(
@@ -264,13 +286,9 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                             }
                         }
                     }
-                    XCTAssertTrue(observer.sawWifiAwarePath)
-                    if context.dropAtPercent != nil {
-                        XCTAssertTrue(observer.sawFallbackMigration)
-                    }
                 case .nearbyPreferred:
                     guard let route = nearbyRoute else {
-                        throw WifiAwarePhysicalTestError.missingRoomCode
+                        throw WifiAwarePhysicalTestError.missingRoute
                     }
                     completion = try await withProbeTimeout(context.manifestTimeout) {
                         try await AppleWifiAwareTransportSession.sendNearbyHybrid(
@@ -286,19 +304,33 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                             }
                         )
                     }
-                    XCTAssertTrue(
-                        observer.sawWifiAwarePath || observer.sawBootstrapFallback
-                    )
                 }
             } catch {
                 guard expectCancellation else { throw error }
-                XCTAssertTrue(observer.sawWifiAwarePath)
+                try Self.requirePathEvidence(
+                    observer,
+                    mode: mode,
+                    expectFallbackMigration: context.dropAtPercent != nil,
+                    expectBootstrapFallback: forceSenderBootstrapFailure
+                )
                 if context.cancelAtPercent != nil {
                     XCTAssertTrue(observer.didRequestCancellation)
                 }
                 timeline.mark("expected_cancellation_observed error=\(error)")
+                Self.markManifestCompletion(
+                    context: context,
+                    mode: mode,
+                    expectedCancellation: true,
+                    bootstrapFallback: forceSenderBootstrapFailure
+                )
                 return
             }
+            try Self.requirePathEvidence(
+                observer,
+                mode: mode,
+                expectFallbackMigration: context.dropAtPercent != nil,
+                expectBootstrapFallback: forceSenderBootstrapFailure
+            )
             if expectCancellation {
                 XCTFail("Nearby hybrid transfer completed despite expected cancellation")
                 return
@@ -344,7 +376,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                     }
                 case .nearbyHybrid:
                     guard let route = nearbyRoute else {
-                        throw WifiAwarePhysicalTestError.missingRoomCode
+                        throw WifiAwarePhysicalTestError.missingRoute
                     }
                     completion = try await withProbeTimeout(context.manifestTimeout) {
                         try await AppleWifiAwareTransportSession.withReceiverTransport(
@@ -389,13 +421,9 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                             }
                         }
                     }
-                    XCTAssertTrue(observer.sawWifiAwarePath)
-                    if context.dropAtPercent != nil {
-                        XCTAssertTrue(observer.sawFallbackMigration)
-                    }
                 case .nearbyPreferred:
                     guard let route = nearbyRoute else {
-                        throw WifiAwarePhysicalTestError.missingRoomCode
+                        throw WifiAwarePhysicalTestError.missingRoute
                     }
                     completion = try await withProbeTimeout(context.manifestTimeout) {
                         try await AppleWifiAwareTransportSession.receiveNearbyHybrid(
@@ -418,19 +446,33 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                             )
                         }
                     }
-                    XCTAssertTrue(
-                        observer.sawWifiAwarePath || observer.sawBootstrapFallback
-                    )
                 }
             } catch {
                 guard expectCancellation else { throw error }
-                XCTAssertTrue(observer.sawWifiAwarePath)
+                try Self.requirePathEvidence(
+                    observer,
+                    mode: mode,
+                    expectFallbackMigration: context.dropAtPercent != nil,
+                    expectBootstrapFallback: forceSenderBootstrapFailure
+                )
                 if context.cancelAtPercent != nil {
                     XCTAssertTrue(observer.didRequestCancellation)
                 }
                 timeline.mark("expected_cancellation_observed error=\(error)")
+                Self.markManifestCompletion(
+                    context: context,
+                    mode: mode,
+                    expectedCancellation: true,
+                    bootstrapFallback: forceSenderBootstrapFailure
+                )
                 return
             }
+            try Self.requirePathEvidence(
+                observer,
+                mode: mode,
+                expectFallbackMigration: context.dropAtPercent != nil,
+                expectBootstrapFallback: forceSenderBootstrapFailure
+            )
             if expectCancellation {
                 XCTFail("Nearby hybrid transfer completed despite expected cancellation")
                 return
@@ -451,6 +493,64 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                     "bytes=\(completion.totalPlaintextBytes) mode=\(mode.rawValue)"
             )
         }
+        Self.markManifestCompletion(
+            context: context,
+            mode: mode,
+            expectedCancellation: false,
+            bootstrapFallback: forceSenderBootstrapFailure
+        )
+    }
+
+    private static func requirePathEvidence(
+        _ observer: WifiAwarePhysicalObserver,
+        mode: WifiAwarePhysicalManifestMode,
+        expectFallbackMigration: Bool,
+        expectBootstrapFallback: Bool
+    ) throws {
+        guard mode != .customOnly else { return }
+
+        guard let initialSelectedPath = observer.initialSelectedPath else {
+            throw WifiAwarePhysicalTestError.missingInitialSelectedPath
+        }
+        if expectBootstrapFallback {
+            guard initialSelectedPath == .direct
+                    || initialSelectedPath == .directIpv4
+                    || initialSelectedPath == .directIpv6
+                    || initialSelectedPath == .relay else {
+                throw WifiAwarePhysicalTestError.unexpectedInitialSelectedPath(
+                    initialSelectedPath
+                )
+            }
+        } else if initialSelectedPath != .wifiAware {
+            throw WifiAwarePhysicalTestError.unexpectedInitialSelectedPath(
+                initialSelectedPath
+            )
+        }
+
+        guard observer.sawFallbackMigration == expectFallbackMigration else {
+            throw expectFallbackMigration
+                ? WifiAwarePhysicalTestError.missingFallbackMigration
+                : WifiAwarePhysicalTestError.unexpectedFallbackMigration
+        }
+        guard observer.sawBootstrapFallback == expectBootstrapFallback else {
+            throw expectBootstrapFallback
+                ? WifiAwarePhysicalTestError.missingBootstrapFallback
+                : WifiAwarePhysicalTestError.unexpectedBootstrapFallback
+        }
+    }
+
+    private static func markManifestCompletion(
+        context: WifiAwarePhysicalContext,
+        mode: WifiAwarePhysicalManifestMode,
+        expectedCancellation: Bool,
+        bootstrapFallback: Bool
+    ) {
+        marker(
+            "completion_marker=success test=manifest_v2 " +
+                "mode=\(mode.rawValue) role=\(context.role.rawValue) " +
+                "expected_cancellation=\(expectedCancellation) " +
+                "bootstrap_fallback=\(bootstrapFallback) run=\(context.runID)"
+        )
     }
 
     private static func destinationRequest(
@@ -514,8 +614,28 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
 
     private static func nearbyHybridRoute(
         direction: FfiTransferDirection,
-        code: String
+        creatorRoomCode: String? = nil,
+        joinerInvitation: String? = nil
     ) throws -> (settings: EnvoixRuntimeSettings, request: FfiTransferRequest) {
+        let mode: FfiTransferMode
+        let invite: String
+        let code: String
+        if let creatorRoomCode, joinerInvitation == nil {
+            mode = .room
+            invite = ""
+            code = creatorRoomCode
+        } else if creatorRoomCode == nil, let joinerInvitation {
+            guard joinerInvitation.hasPrefix(inviteV2URLPrefix) else {
+                throw WifiAwarePhysicalTestError.invalidInvitation
+            }
+            _ = try parsePairingInvite(input: joinerInvitation)
+            mode = .invite
+            invite = joinerInvitation
+            code = ""
+        } else {
+            throw WifiAwarePhysicalTestError.invalidInvitation
+        }
+
         let settings = EnvoixRuntimeSettings(
             concurrentTransfers: false,
             language: "en",
@@ -528,10 +648,10 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
             settings,
             FfiTransferRequest(
                 direction: direction,
-                mode: .room,
+                mode: mode,
                 peerDescriptor: "",
-                invite: "",
-                code: try normalizeRoomCode(input: code),
+                invite: invite,
+                code: code,
                 token: "",
                 rememberConsent: false,
                 rememberedCredentialRef: "",
@@ -596,7 +716,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
         let runID = environment[Self.runIDEnvironment]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let pairingToken = environment[Self.pairingTokenEnvironment] ?? ""
-        let roomCodeText = environment[Self.roomCodeEnvironment]?
+        let invitationSidecarFilename = environment[Self.invitationSidecarEnvironment]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let payloadMiBText = environment[Self.payloadMiBEnvironment]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -622,9 +742,39 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
         guard pairingToken.count >= 16 else {
             throw WifiAwarePhysicalTestError.invalidPairingToken
         }
-        let roomCode = roomCodeText.isEmpty
-            ? nil
-            : try normalizeRoomCode(input: roomCodeText)
+        let invitationSidecarURL: URL?
+        if invitationSidecarFilename.isEmpty {
+            invitationSidecarURL = nil
+        } else {
+            guard invitationSidecarFilename.range(
+                of: #"^[A-Za-z0-9._-]{1,96}$"#,
+                options: .regularExpression
+            ) != nil else {
+                throw WifiAwarePhysicalTestError.invalidInvitationSidecar
+            }
+            invitationSidecarURL = try Self.invitationSidecarURL(
+                filename: invitationSidecarFilename
+            )
+        }
+        let invitation: String?
+        if role == .send, let invitationSidecarURL {
+            let payload = try String(
+                contentsOf: invitationSidecarURL,
+                encoding: .utf8
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            if FileManager.default.fileExists(atPath: invitationSidecarURL.path) {
+                try? FileManager.default.removeItem(at: invitationSidecarURL)
+            }
+            guard payload.range(
+                of: #"^[A-Za-z0-9_-]+$"#,
+                options: .regularExpression
+            ) != nil else {
+                throw WifiAwarePhysicalTestError.invalidInvitation
+            }
+            invitation = inviteV2URLPrefix + payload
+        } else {
+            invitation = nil
+        }
         let payloadMiB: UInt64
         if payloadMiBText.isEmpty {
             payloadMiB = Self.defaultManifestPayloadMiB
@@ -682,7 +832,8 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
             peerID: peerID,
             runID: runID,
             pairingToken: pairingToken,
-            roomCode: roomCode,
+            invitation: invitation,
+            invitationSidecarURL: role == .receive ? invitationSidecarURL : nil,
             payloadBytes: payloadMiB * Self.bytesPerMiB,
             manifestTimeout: .seconds(timeoutSeconds),
             dropAtPercent: dropAtPercent,
@@ -703,7 +854,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
         }
         let peer: WAPairedDevice
         if let exactID {
-            guard let exactMatch = devices[exactID], matches.contains(exactMatch) else {
+            guard let exactMatch = devices[exactID] else {
                 throw WifiAwarePhysicalTestError.peerIDNotFound
             }
             peer = exactMatch
@@ -724,6 +875,10 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                     "id=\(String(peer.id, radix: 16)) paired_device_count=\(devices.count)"
             ) { _ in }
         }
+        Self.marker(
+            "pairing=preexisting pin_automation=not_covered " +
+                "peer_id=\(String(peer.id, radix: 16))"
+        )
         return peer
     }
 
@@ -1025,6 +1180,46 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
         return Data(chunk.prefix(payloadChunkBytes))
     }
 
+    private static func invitationSidecarURL(filename: String) throws -> URL {
+        guard let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw WifiAwarePhysicalTestError.invalidInvitationSidecar
+        }
+        try FileManager.default.createDirectory(
+            at: documents,
+            withIntermediateDirectories: true
+        )
+        return documents.appendingPathComponent(filename, isDirectory: false)
+    }
+
+    private static func exportInvitationPayload(_ invitation: String, to url: URL) throws {
+        guard invitation.hasPrefix(inviteV2URLPrefix) else {
+            throw WifiAwarePhysicalTestError.invalidInvitation
+        }
+        let payload = String(invitation.dropFirst(inviteV2URLPrefix.count))
+        guard payload.range(
+            of: #"^[A-Za-z0-9_-]+$"#,
+            options: .regularExpression
+        ) != nil else {
+            throw WifiAwarePhysicalTestError.invalidInvitation
+        }
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        guard FileManager.default.createFile(
+            atPath: url.path,
+            contents: Data(payload.utf8),
+            attributes: [
+                .posixPermissions: 0o600,
+                .protectionKey: FileProtectionType.complete,
+            ]
+        ) else {
+            throw WifiAwarePhysicalTestError.invitationSidecarWriteFailed
+        }
+    }
+
     private static func marker(_ message: String) {
         FileHandle.standardError.write(Data("[wifi-aware-physical] \(message)\n".utf8))
     }
@@ -1035,7 +1230,8 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
     private static let peerIDEnvironment = "ENVOIX_WIFI_AWARE_PEER_ID"
     private static let runIDEnvironment = "ENVOIX_WIFI_AWARE_RUN_ID"
     private static let pairingTokenEnvironment = "ENVOIX_WIFI_AWARE_PAIRING_TOKEN"
-    private static let roomCodeEnvironment = "ENVOIX_WIFI_AWARE_ROOM_CODE"
+    private static let invitationSidecarEnvironment =
+        "ENVOIX_WIFI_AWARE_INVITATION_SIDECAR_FILENAME"
     private static let payloadMiBEnvironment = "ENVOIX_WIFI_AWARE_PAYLOAD_MIB"
     private static let timeoutSecondsEnvironment = "ENVOIX_WIFI_AWARE_TIMEOUT_SECONDS"
     private static let dropAtPercentEnvironment = "ENVOIX_WIFI_AWARE_DROP_AT_PERCENT"
@@ -1073,7 +1269,8 @@ private struct WifiAwarePhysicalContext {
     let peerID: UInt64?
     let runID: String
     let pairingToken: String
-    let roomCode: String?
+    let invitation: String?
+    let invitationSidecarURL: URL?
     let payloadBytes: UInt64
     let manifestTimeout: Duration
     let dropAtPercent: Int?
@@ -1087,7 +1284,12 @@ private enum WifiAwarePhysicalTestError: Error {
     case peerIDNotFound
     case invalidRunID
     case invalidPairingToken
-    case missingRoomCode
+    case missingInvitation
+    case missingInvitationSidecar
+    case invalidInvitationSidecar
+    case invitationSidecarWriteFailed
+    case invalidInvitation
+    case missingRoute
     case invalidPayloadMiB
     case invalidManifestTimeout
     case invalidDropAtPercent
@@ -1098,6 +1300,12 @@ private enum WifiAwarePhysicalTestError: Error {
     case peerMatchCount(Int)
     case unexpectedEndOfStream
     case unexpectedPath
+    case missingInitialSelectedPath
+    case unexpectedInitialSelectedPath(FfiDataPathKind)
+    case missingFallbackMigration
+    case unexpectedFallbackMigration
+    case missingBootstrapFallback
+    case unexpectedBootstrapFallback
     case unexpectedOffer
     case missingCapacity
     case missingUDPResult
@@ -1156,7 +1364,7 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
     private let lock = NSLock()
     private let timeline: WifiAwarePhysicalTimeline
     private var recordedFailure: String?
-    private var observedWifiAwarePath = false
+    private var recordedInitialSelectedPath: FfiDataPathKind?
     private var observedFallbackMigration = false
     private var observedBootstrapFallback = false
     private var cancellationRequested = false
@@ -1175,10 +1383,10 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
         return recordedFailure
     }
 
-    var sawWifiAwarePath: Bool {
+    var initialSelectedPath: FfiDataPathKind? {
         lock.lock()
         defer { lock.unlock() }
-        return observedWifiAwarePath
+        return recordedInitialSelectedPath
     }
 
     var sawFallbackMigration: Bool {
@@ -1265,29 +1473,27 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
     }
     func onConnectionPath(event: FfiConnectionPathEvent) {
         lock.lock()
-        if event.pathKind == .wifiAware {
-            observedWifiAwarePath = true
+        if event.eventKind == .selected,
+           recordedInitialSelectedPath == nil {
+            recordedInitialSelectedPath = event.pathKind
         } else if event.eventKind == .changed,
-                  event.pathKind == .direct || event.pathKind == .relay
-        {
+                  event.pathKind == .direct
+                    || event.pathKind == .directIpv4
+                    || event.pathKind == .directIpv6
+                    || event.pathKind == .relay {
             observedFallbackMigration = true
         }
         lock.unlock()
         timeline.mark("path=\(event.pathKind) event=\(event.eventKind)")
     }
+    func onStageTiming(event: FfiTransferStageTiming) {
+        timeline.mark(
+            "stage_timing stage=\(event.stage) direction=\(event.direction) " +
+                "attempt_id=\(event.attemptId) transfer_id=\(event.transferId ?? "pending") " +
+                "elapsed_us=\(event.elapsedUs) delta_us=\(event.deltaUs)"
+        )
+    }
     func onDiagnostic(message: String) {
-        if message.contains("wifi_aware") {
-            lock.lock()
-            observedWifiAwarePath = true
-            lock.unlock()
-        }
-        if message.hasPrefix("path changed: direct (") ||
-            message.hasPrefix("path changed: relay (")
-        {
-            lock.lock()
-            observedFallbackMigration = true
-            lock.unlock()
-        }
         if message == "Wi-Fi Aware path unavailable; " +
             "continuing over authenticated iroh direct/relay"
         {

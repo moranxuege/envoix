@@ -441,7 +441,7 @@ run_apple_method() {
   local platform="$1"
   local method="$2"
   local scenario="$3"
-  local code="$4"
+  local invitation="$4"
   local run_id="$5"
   local case_id="$6"
   local repetition="$7"
@@ -481,7 +481,9 @@ run_apple_method() {
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_REPETITION "$repetition"
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_BUILD_VARIANT "$build_variant"
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_SCENARIO "$scenario"
-  set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_CODE "$code"
+  if [[ -n "$invitation" ]]; then
+    set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_INVITATION "$invitation"
+  fi
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_LARGE_BYTES "$large_bytes"
   set_xctestrun_environment "$patched" "$target" ENVOIX_LOG "envoix=info,iroh=warn,warn"
 
@@ -511,12 +513,17 @@ run_apple_method() {
 run_android_method() {
   local method="$1"
   local scenario="$2"
-  local code="$3"
+  local invitation="$3"
   local run_id="$4"
   local case_id="$5"
   local repetition="$6"
   local log_file="$7"
   local status=0
+  local -a invitation_args=()
+
+  if [[ -n "$invitation" ]]; then
+    invitation_args=(-e envoixCrossDeviceInvitation "$invitation")
+  fi
 
   adb_command shell am instrument -w \
     -e envoixCrossDevice 1 \
@@ -525,7 +532,7 @@ run_android_method() {
     -e envoixCrossDeviceRepetition "$repetition" \
     -e envoixCrossDeviceBuildVariant "$build_variant" \
     -e envoixCrossDeviceScenario "$scenario" \
-    -e envoixCrossDeviceCode "$code" \
+    ${invitation_args[@]+"${invitation_args[@]}"} \
     -e envoixCrossDeviceLargeBytes "$large_bytes" \
     -e envoixCrossDeviceTimeoutMs "$transfer_timeout_ms" \
     -e class "dev.envoix.app.ManifestV2CrossDeviceInstrumentedTest#$method" \
@@ -544,7 +551,7 @@ run_endpoint_role() {
   local role="$2"
   local scenario="$3"
   local test_layer="$4"
-  local code="$5"
+  local invitation="$5"
   local run_id="$6"
   local case_id="$7"
   local repetition="$8"
@@ -570,10 +577,10 @@ run_endpoint_role() {
 
   if [[ "$platform" == "android" ]]; then
     run_android_method \
-      "$method" "$scenario" "$code" "$run_id" "$case_id" "$repetition" "$log_file"
+      "$method" "$scenario" "$invitation" "$run_id" "$case_id" "$repetition" "$log_file"
   else
     run_apple_method \
-      "$platform" "$method" "$scenario" "$code" "$run_id" \
+      "$platform" "$method" "$scenario" "$invitation" "$run_id" \
       "$case_id" "$repetition" "$role" "$private_case_dir" "$log_file"
   fi
 }
@@ -794,7 +801,7 @@ run_pair() {
   local receiver="$2"
   local scenario="$3"
   local test_layer="$4"
-  local code="$5"
+  local invitation="$5"
   local run_id="$6"
   local case_id="$7"
   local repetition="$8"
@@ -802,7 +809,7 @@ run_pair() {
   local sender_log="$private_case_dir/sender.log"
   local receiver_log="$private_case_dir/receiver.log"
   local logcat_log="$private_case_dir/android-logcat.log"
-  local ready_log ready_pattern pairing_code receiver_pid
+  local ready_log ready_pattern published_invitation receiver_pid
   local sender_status=0 receiver_status=0 sanitization_status=0 evidence_status=0
 
   LAST_FAILURE_STATUS=""
@@ -815,7 +822,7 @@ run_pair() {
   fi
 
   run_endpoint_role \
-    "$receiver" receive "$scenario" "$test_layer" "$code" "$run_id" \
+    "$receiver" receive "$scenario" "$test_layer" "$invitation" "$run_id" \
     "$case_id" "$repetition" "$receiver_log" &
   receiver_pid=$!
   ACTIVE_RECEIVER_PID="$receiver_pid"
@@ -858,7 +865,7 @@ run_pair() {
     return 1
   fi
   if ! wait_for_log "$ready_log" '\[cross-device\] invitation=[^[:space:]]+'; then
-    echo "fail: receiver did not publish its InviteV2 Room Code for $case_id" >&2
+    echo "fail: receiver did not publish its complete InviteV2 URI for $case_id" >&2
     print_log_tail "$receiver receiver" "$receiver_log"
     [[ -f "$logcat_log" ]] && print_log_tail "Android logcat" "$logcat_log"
     kill "$receiver_pid" >/dev/null 2>&1 || true
@@ -876,12 +883,12 @@ run_pair() {
     LAST_FAILURE_CODE="invitation_not_published"
     return 1
   fi
-  pairing_code="$(
+  published_invitation="$(
     sed -nE 's/.*\[cross-device\] invitation=([^[:space:]]+).*/\1/p' "$ready_log" |
       tail -n 1
   )"
-  if [[ -z "$pairing_code" ]]; then
-    echo "fail: receiver published an unreadable InviteV2 Room Code for $case_id" >&2
+  if ! [[ "$published_invitation" =~ ^envoix://invite/v2/[^[:space:]]+$ ]]; then
+    echo "fail: receiver published an unreadable InviteV2 URI for $case_id" >&2
     kill "$receiver_pid" >/dev/null 2>&1 || true
     wait "$receiver_pid" >/dev/null 2>&1 || true
     ACTIVE_RECEIVER_PID=""
@@ -902,10 +909,10 @@ run_pair() {
     sleep "$receiver_settle_seconds"
   fi
   run_endpoint_role \
-    "$sender" send "$scenario" "$test_layer" "$pairing_code" "$run_id" \
+    "$sender" send "$scenario" "$test_layer" "$published_invitation" "$run_id" \
     "$case_id" "$repetition" "$sender_log" ||
     sender_status=$?
-  pairing_code=""
+  published_invitation=""
   if [[ "$sender_status" -ne 0 ]]; then
     kill "$receiver_pid" >/dev/null 2>&1 || true
   fi
@@ -964,7 +971,7 @@ run_pair() {
 
 case_index=0
 CURRENT_RUN_ID=""
-CURRENT_CODE=""
+CURRENT_INVITATION=""
 LAST_FAILURE_STATUS=""
 LAST_FAILURE_CODE=""
 
@@ -972,8 +979,8 @@ next_execution() {
   local repetition="$1"
   case_index=$((case_index + 1))
   CURRENT_RUN_ID="$base_run_id-c$case_index-r$repetition"
-  # The receiver replaces this valid fallback with its ephemeral Room Code.
-  printf -v CURRENT_CODE '%06d-ambe-come' "$((800000 + case_index % 100000))"
+  # The receiver publishes the complete InviteV2 URI before its sender starts.
+  CURRENT_INVITATION=""
 }
 
 record_execution() {
@@ -1025,9 +1032,10 @@ aggregate_and_check() {
   return "$aggregate_status"
 }
 
-mapfile -t execution_rows < <(
-  python3 "$contract" list-executions "$registry" "$plan_file"
-)
+execution_rows=()
+while IFS= read -r row; do
+  execution_rows+=("$row")
+done < <(python3 "$contract" list-executions "$registry" "$plan_file")
 
 MATRIX_USES_MACOS=0
 requires_execution=0
@@ -1106,7 +1114,7 @@ for row in "${execution_rows[@]}"; do
   private_case_dir="$output_dir/private/cases/$case_id/r$repetition"
   echo "case $case_id r$repetition: $sender -> $receiver, scenario=$scenario"
   if run_pair "$sender" "$receiver" "$scenario" "$test_layer" \
-    "$CURRENT_CODE" "$CURRENT_RUN_ID" "$case_id" "$repetition" "$private_case_dir"; then
+    "$CURRENT_INVITATION" "$CURRENT_RUN_ID" "$case_id" "$repetition" "$private_case_dir"; then
     record_execution "$case_id" "$repetition" pass
     echo "pass: $case_id r$repetition"
   else

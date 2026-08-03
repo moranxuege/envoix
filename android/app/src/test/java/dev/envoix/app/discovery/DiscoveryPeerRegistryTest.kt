@@ -141,6 +141,297 @@ class DiscoveryPeerRegistryTest {
     }
 
     @Test
+    fun `out of order callback cannot replace a newer name or route`() {
+        val registry = DiscoveryPeerRegistry()
+        val currentRoute = route(directAddresses = listOf("192.0.2.10:8443"))
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "0011223344556677",
+                source = DiscoverySource.Mdns,
+                seenAtMs = 2_000,
+                displayName = "Current phone",
+                nearbyInviteRoute = currentRoute,
+            ),
+        )
+
+        assertFalse(
+            registry.upsert(
+                DiscoveryObservation(
+                    peerKey = "0011223344556677",
+                    source = DiscoverySource.Mdns,
+                    seenAtMs = 1_000,
+                    displayName = "Stale phone",
+                    nearbyInviteRoute = route(directAddresses = listOf("192.0.2.99:8443")),
+                ),
+            ),
+        )
+
+        val peer = registry.peers(nowMs = 2_000).single()
+        assertEquals("Current phone", peer.displayName)
+        assertEquals(currentRoute, peer.nearbyInviteRoute)
+        assertEquals(2_000, peer.lastSeenAtMs)
+    }
+
+    @Test
+    fun `blank name refresh keeps the last known name from that source`() {
+        val registry = DiscoveryPeerRegistry()
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "0011223344556677",
+                source = DiscoverySource.Mdns,
+                seenAtMs = 1_000,
+                displayName = "Nearby phone",
+            ),
+        )
+
+        assertTrue(
+            registry.upsert(
+                DiscoveryObservation(
+                    peerKey = "0011223344556677",
+                    source = DiscoverySource.Mdns,
+                    seenAtMs = 2_000,
+                    displayName = "   ",
+                ),
+            ),
+        )
+
+        val peer = registry.peers(nowMs = 2_000).single()
+        assertEquals("Nearby phone", peer.displayName)
+        assertEquals(2_000, peer.lastSeenAtMs)
+    }
+
+    @Test
+    fun `peers keep first seen order when names and last seen change`() {
+        val registry = DiscoveryPeerRegistry()
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "1111111111111111",
+                source = DiscoverySource.Mdns,
+                seenAtMs = 1_000,
+                displayName = "beta",
+            ),
+        )
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "2222222222222222",
+                source = DiscoverySource.Mdns,
+                seenAtMs = 2_000,
+                displayName = "Alpha",
+            ),
+        )
+
+        assertEquals(
+            listOf("1111111111111111", "2222222222222222"),
+            registry.peers(nowMs = 2_000).map(DiscoveredPeer::peerKey),
+        )
+
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "1111111111111111",
+                source = DiscoverySource.Bluetooth,
+                seenAtMs = 3_000,
+                displayName = "Zulu",
+            ),
+        )
+
+        val updatedPeers = registry.peers(nowMs = 3_000)
+        assertEquals(
+            listOf("1111111111111111", "2222222222222222"),
+            updatedPeers.map(DiscoveredPeer::peerKey),
+        )
+        assertEquals("beta", updatedPeers.first().displayName)
+        assertEquals(
+            setOf(DiscoverySource.Bluetooth, DiscoverySource.Mdns),
+            updatedPeers.first().sources,
+        )
+    }
+
+    @Test
+    fun `BLE name is used until a complete mDNS name is available`() {
+        val registry = DiscoveryPeerRegistry()
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "1111111111111111",
+                source = DiscoverySource.Bluetooth,
+                seenAtMs = 1_000,
+                displayName = "Nearby Xi",
+            ),
+        )
+
+        assertEquals("Nearby Xi", registry.peers(nowMs = 1_000).single().displayName)
+
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "1111111111111111",
+                source = DiscoverySource.Mdns,
+                seenAtMs = 2_000,
+                displayName = "Nearby Xiaomi Phone",
+            ),
+        )
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "1111111111111111",
+                source = DiscoverySource.Bluetooth,
+                seenAtMs = 3_000,
+                displayName = "Nearby Xi",
+            ),
+        )
+
+        assertEquals("Nearby Xiaomi Phone", registry.peers(nowMs = 3_000).single().displayName)
+    }
+
+    @Test
+    fun `duplicate and missing names remain independent in first seen order`() {
+        val registry = DiscoveryPeerRegistry()
+        listOf(
+            DiscoveryObservation(
+                peerKey = "4444444444444444",
+                source = DiscoverySource.Bluetooth,
+                seenAtMs = 1_000,
+            ),
+            DiscoveryObservation(
+                peerKey = "3333333333333333",
+                source = DiscoverySource.Mdns,
+                seenAtMs = 4_000,
+                displayName = "Phone",
+            ),
+            DiscoveryObservation(
+                peerKey = "2222222222222222",
+                source = DiscoverySource.Mdns,
+                seenAtMs = 3_000,
+                displayName = "phone",
+            ),
+            DiscoveryObservation(
+                peerKey = "1111111111111111",
+                source = DiscoverySource.Bluetooth,
+                seenAtMs = 2_000,
+            ),
+        ).forEach(registry::upsert)
+
+        val peers = registry.peers(nowMs = 4_000)
+
+        assertEquals(4, peers.size)
+        assertEquals(
+            listOf(
+                "4444444444444444",
+                "3333333333333333",
+                "2222222222222222",
+                "1111111111111111",
+            ),
+            peers.map(DiscoveredPeer::peerKey),
+        )
+        assertEquals(listOf(null, "Phone", "phone", null), peers.map(DiscoveredPeer::displayName))
+    }
+
+    @Test
+    fun `peer removed by ttl is appended when it reappears`() {
+        val registry = DiscoveryPeerRegistry(observationTtlMs = 1_000)
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "1111111111111111",
+                source = DiscoverySource.Bluetooth,
+                seenAtMs = 0,
+            ),
+        )
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "2222222222222222",
+                source = DiscoverySource.Bluetooth,
+                seenAtMs = 500,
+            ),
+        )
+
+        assertEquals(
+            listOf("2222222222222222"),
+            registry.peers(nowMs = 1_001).map(DiscoveredPeer::peerKey),
+        )
+
+        registry.upsert(
+            DiscoveryObservation(
+                peerKey = "1111111111111111",
+                source = DiscoverySource.Bluetooth,
+                seenAtMs = 1_002,
+            ),
+        )
+
+        assertEquals(
+            listOf("2222222222222222", "1111111111111111"),
+            registry.peers(nowMs = 1_002).map(DiscoveredPeer::peerKey),
+        )
+    }
+
+    @Test
+    fun `rejects a new peer at capacity but still updates an existing peer`() {
+        val registry = DiscoveryPeerRegistry()
+        repeat(DiscoveryPeerRegistry.MAX_PEERS) { index ->
+            assertTrue(
+                registry.upsert(
+                    DiscoveryObservation(
+                        peerKey = peerKey(index),
+                        source = DiscoverySource.Bluetooth,
+                        seenAtMs = 1_000,
+                    ),
+                ),
+            )
+        }
+
+        assertFalse(
+            registry.upsert(
+                DiscoveryObservation(
+                    peerKey = peerKey(DiscoveryPeerRegistry.MAX_PEERS),
+                    source = DiscoverySource.Bluetooth,
+                    seenAtMs = 1_001,
+                ),
+            ),
+        )
+        assertTrue(
+            registry.upsert(
+                DiscoveryObservation(
+                    peerKey = peerKey(0),
+                    source = DiscoverySource.Bluetooth,
+                    seenAtMs = 1_002,
+                    rssi = -31,
+                ),
+            ),
+        )
+
+        val peers = registry.peers(nowMs = 1_002)
+        assertEquals(DiscoveryPeerRegistry.MAX_PEERS, peers.size)
+        assertEquals(-31, peers.first { it.peerKey == peerKey(0) }.rssi)
+    }
+
+    @Test
+    fun `accepts a new peer after peers removes expired capacity`() {
+        val registry = DiscoveryPeerRegistry(observationTtlMs = 1_000)
+        repeat(DiscoveryPeerRegistry.MAX_PEERS) { index ->
+            assertTrue(
+                registry.upsert(
+                    DiscoveryObservation(
+                        peerKey = peerKey(index),
+                        source = DiscoverySource.Bluetooth,
+                        seenAtMs = 0,
+                    ),
+                ),
+            )
+        }
+
+        assertTrue(registry.peers(nowMs = 1_001).isEmpty())
+        assertTrue(
+            registry.upsert(
+                DiscoveryObservation(
+                    peerKey = peerKey(DiscoveryPeerRegistry.MAX_PEERS),
+                    source = DiscoverySource.Bluetooth,
+                    seenAtMs = 1_001,
+                ),
+            ),
+        )
+        assertEquals(
+            peerKey(DiscoveryPeerRegistry.MAX_PEERS),
+            registry.peers(nowMs = 1_001).single().peerKey,
+        )
+    }
+
+    @Test
     fun `clear removes observations from the previous presence session`() {
         val registry = DiscoveryPeerRegistry()
         registry.upsert(
@@ -150,6 +441,17 @@ class DiscoveryPeerRegistryTest {
         registry.clear()
 
         assertTrue(registry.peers(nowMs = 1).isEmpty())
+
+        registry.upsert(
+            DiscoveryObservation("8899aabbccddeeff", DiscoverySource.Bluetooth, seenAtMs = 2),
+        )
+        registry.upsert(
+            DiscoveryObservation("0011223344556677", DiscoverySource.Bluetooth, seenAtMs = 2),
+        )
+        assertEquals(
+            listOf("8899aabbccddeeff", "0011223344556677"),
+            registry.peers(nowMs = 2).map(DiscoveredPeer::peerKey),
+        )
     }
 
     @Test
@@ -217,6 +519,8 @@ class DiscoveryPeerRegistryTest {
             relayUrl = relayUrl,
             directAddresses = directAddresses,
         )!!
+
+    private fun peerKey(index: Int): String = index.toString(16).padStart(DiscoveryPeerRegistry.PEER_KEY_HEX_LENGTH, '0')
 
     private companion object {
         const val ENDPOINT_ID = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"

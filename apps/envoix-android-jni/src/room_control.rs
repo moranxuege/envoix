@@ -803,12 +803,24 @@ mod tests {
     #[test]
     fn invite_json_contains_epoch_milliseconds() {
         let invite = RoomControlInvite::parse(
-            "envoix://room/R123456-a1b2-c3d4?broker=test&expires=42",
+            "envoix://room/123456-a1b2-c3d4?broker=test&expires=42",
             "fallback",
             None,
         )
         .unwrap();
         assert_eq!(invite_json(invite)["expires_at_epoch_ms"], 42_000);
+    }
+
+    #[test]
+    fn legacy_prefixed_room_control_uri_is_rejected() {
+        assert!(
+            RoomControlInvite::parse(
+                "envoix://room/R123456-a1b2-c3d4?broker=test&expires=42",
+                "fallback",
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

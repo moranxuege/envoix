@@ -25,11 +25,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::{
     CanonicalTransferJob, DeliveryAuthorityErrorV2, DestinationPlanErrorV2,
     ManifestV2DeliveryAuthority, PreparedFileSource, SenderDeliveryRecordV2, SenderDeliveryStoreV2,
-    SenderTransferPhaseV2, TransferJobError,
+    SenderTransferPhaseV2, TransferJobError, TransferStage, delivery_v2::initial_entry_encoding,
 };
 
 const RECEIVER_DATA_PLANE_SCHEMA_VERSION: u16 = 1;
-const SMART_COMPRESSION_SAMPLE_BYTES: usize = 64 * 1024;
+const LEGACY_SMART_COMPRESSION_SAMPLE_BYTES: usize = 64 * 1024;
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 #[derive(Debug, Error)]
 pub enum ManifestV2DataError {
@@ -499,6 +499,7 @@ pub enum ManifestV2ProgressPhase {
 pub trait ManifestV2ProgressSink: Send + Sync {
     fn on_progress(&self, completed_plaintext_bytes: u64, total_plaintext_bytes: u64);
     fn on_phase(&self, phase: ManifestV2ProgressPhase);
+    fn on_stage(&self, _stage: TransferStage) {}
 }
 
 #[async_trait]
@@ -617,6 +618,7 @@ impl ManifestV2DataPlane {
         let offer = build_manifest_offer_v2(manifest.clone()).map_err(|error| {
             ManifestV2DataError::Codec(ManifestV2FrameCodecError::Offer(error.to_string()))
         })?;
+        prepare_sender_entry_encodings(job, delivery_record, &offer).await?;
         delivery_record
             .validate_offer(&offer)
             .map_err(ManifestV2DataError::Delivery)?;
@@ -627,6 +629,7 @@ impl ManifestV2DataPlane {
         let (accept, resume_status) = if delivery_record.phase()
             == SenderTransferPhaseV2::Transferring
         {
+            progress.on_stage(TransferStage::ManifestOffer);
             let status = Self::establish_sender_reconnect(job, delivery_record, connection).await?;
             let mut accept = delivery_record.accept().cloned().ok_or_else(|| {
                 ManifestV2DataError::InvalidLedger("sender Accept is missing".into())
@@ -639,6 +642,7 @@ impl ManifestV2DataPlane {
             }
             (accept, Some(status))
         } else {
+            progress.on_stage(TransferStage::ManifestOffer);
             connection
                 .send_manifest_v2_frame(ManifestV2Frame::Offer(offer.clone()))
                 .await?;
@@ -667,6 +671,7 @@ impl ManifestV2DataPlane {
                 .await
                 .map_err(ManifestV2DataError::Delivery)?;
         }
+        progress.on_stage(TransferStage::ManifestAccepted);
 
         progress.on_phase(ManifestV2ProgressPhase::Transferring);
         let total_plaintext_bytes = manifest.totals.total_plaintext_bytes;
@@ -703,6 +708,9 @@ impl ManifestV2DataPlane {
             let completion = if entry.kind == ManifestEntryKindV2::Directory {
                 send_directory(connection, identity, entry).await?
             } else {
+                let encoding = delivery_record
+                    .frozen_entry_encoding(entry.entry_id)
+                    .map_err(ManifestV2DataError::Delivery)?;
                 let source = job.source_for_sealed_entry(entry.entry_id)?;
                 let resumed_entry_bytes = resume_status
                     .as_ref()
@@ -720,7 +728,7 @@ impl ManifestV2DataPlane {
                     entry,
                     plan,
                     source,
-                    manifest.compression_policy,
+                    encoding,
                     FileTransferProgress {
                         completed_plaintext_bytes: &mut completed_plaintext_bytes,
                         total_plaintext_bytes,
@@ -735,6 +743,7 @@ impl ManifestV2DataPlane {
         }
         let sender_completion_set_digest =
             ContentDigestV2(*completion_hasher.finalize().as_bytes());
+        progress.on_stage(TransferStage::PayloadComplete);
         connection
             .send_manifest_v2_frame(ManifestV2Frame::JobComplete(JobCompleteV2 {
                 identity,
@@ -900,6 +909,7 @@ impl ManifestV2DataPlane {
             None => ledger.sender_completion_set_digest = Some(sender_digest),
         }
         store.save(ledger).await?;
+        progress.on_stage(TransferStage::PayloadComplete);
         if ledger.entries.iter().all(|entry| entry.result.is_some()) {
             let entry_results = ledger
                 .entries
@@ -1032,14 +1042,13 @@ async fn send_file<C>(
     entry: &ManifestEntryV2,
     plan: envoix_protocol::manifest_v2_frames::EntryPlanV2,
     source: PreparedFileSource,
-    compression_policy: CompressionPolicyV2,
+    encoding: EntryEncodingV2,
     progress: FileTransferProgress<'_>,
 ) -> Result<EntryCompleteV2, ManifestV2DataError>
 where
     C: ManifestV2FrameConnection,
 {
     let block_bytes = DEFAULT_MANIFEST_V2_BLOCK_PLAINTEXT_BYTES;
-    let encoding = select_entry_encoding(&source, compression_policy).await?;
     connection
         .send_manifest_v2_frame(ManifestV2Frame::EntryStart(EntryStartV2 {
             identity,
@@ -1122,6 +1131,7 @@ where
             if let Some(frame) = response {
                 handle_sender_control(frame, identity)?;
             }
+            progress.sink.on_stage(TransferStage::FirstPayload);
             *progress.completed_plaintext_bytes = progress
                 .completed_plaintext_bytes
                 .checked_add(length as u64)
@@ -1442,6 +1452,7 @@ where
                     .checked_add(block.plaintext_length as u64)
                     .ok_or(ManifestV2DataError::ArithmeticOverflow)?;
                 store.save(ledger).await?;
+                progress.on_stage(TransferStage::FirstPayload);
                 *completed_plaintext_bytes = completed_plaintext_bytes
                     .checked_add(block.plaintext_length as u64)
                     .ok_or(ManifestV2DataError::ArithmeticOverflow)?;
@@ -1866,16 +1877,60 @@ fn validate_block(
 #[path = "manifest_v2_engine_tests.rs"]
 mod tests;
 
-async fn select_entry_encoding(
-    source: &PreparedFileSource,
+#[cfg(test)]
+fn select_entry_encoding(entry: &ManifestEntryV2, policy: CompressionPolicyV2) -> EntryEncodingV2 {
+    initial_entry_encoding(entry, policy)
+}
+
+async fn prepare_sender_entry_encodings(
+    job: &CanonicalTransferJob,
+    delivery_record: &mut SenderDeliveryRecordV2,
+    offer: &ManifestOfferV2,
+) -> Result<(), ManifestV2DataError> {
+    if !delivery_record.requires_entry_encoding_migration() {
+        return Ok(());
+    }
+    let encodings = match delivery_record.phase() {
+        SenderTransferPhaseV2::Offering => offer
+            .manifest
+            .entries
+            .iter()
+            .map(|entry| initial_entry_encoding(entry, offer.manifest.compression_policy))
+            .collect(),
+        SenderTransferPhaseV2::Transferring => {
+            let mut encodings = Vec::with_capacity(offer.manifest.entries.len());
+            for entry in &offer.manifest.entries {
+                encodings.push(
+                    legacy_entry_encoding(job, entry, offer.manifest.compression_policy).await?,
+                );
+            }
+            encodings
+        }
+        SenderTransferPhaseV2::WaitingForReceiverSave
+        | SenderTransferPhaseV2::Delivered
+        | SenderTransferPhaseV2::Failed
+        | SenderTransferPhaseV2::Canceled => return Ok(()),
+    };
+    delivery_record
+        .freeze_entry_encodings(offer, encodings)
+        .map_err(ManifestV2DataError::Delivery)
+}
+
+async fn legacy_entry_encoding(
+    job: &CanonicalTransferJob,
+    entry: &ManifestEntryV2,
     policy: CompressionPolicyV2,
 ) -> Result<EntryEncodingV2, ManifestV2DataError> {
+    if entry.kind == ManifestEntryKindV2::Directory {
+        return Ok(EntryEncodingV2::Identity);
+    }
     match policy {
         CompressionPolicyV2::Never => Ok(EntryEncodingV2::Identity),
         CompressionPolicyV2::Always => Ok(EntryEncodingV2::Zstd),
         CompressionPolicyV2::Smart => {
+            let source = job.source_for_sealed_entry(entry.entry_id)?;
             let mut file = source.open().await?;
-            let mut sample = vec![0_u8; SMART_COMPRESSION_SAMPLE_BYTES];
+            let mut sample = vec![0_u8; LEGACY_SMART_COMPRESSION_SAMPLE_BYTES];
             let read = file.read(&mut sample).await?;
             sample.truncate(read);
             if sample.is_empty() {

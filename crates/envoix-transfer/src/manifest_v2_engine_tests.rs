@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use envoix_protocol::ProtocolError;
 use envoix_protocol::manifest_v2::{CompressionPolicyV2, build_manifest_offer_v2};
+use envoix_protocol::manifest_v2_frames::{EntryPlanV2, ProofCapabilityV2, RootPlanV2};
+use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -11,6 +13,7 @@ use crate::test_support::{accept, offer};
 use crate::{
     DestinationDecisionV2, DestinationRequestV2, DestinationWritePlanV2,
     LocalDestinationProviderV2, POST_SAVE_RESERVE_BYTES,
+    delivery_v2::LEGACY_SENDER_DELIVERY_SCHEMA_VERSION,
 };
 
 struct ChannelConnection {
@@ -71,6 +74,287 @@ impl ManifestV2ProgressSink for RecordingProgress {
     fn on_phase(&self, phase: ManifestV2ProgressPhase) {
         self.phases.lock().unwrap().push(phase);
     }
+}
+
+#[test]
+fn smart_compression_uses_only_the_case_insensitive_final_extension() {
+    for component in [
+        "report.txt",
+        "REPORT.JSON",
+        "report.backup.JsOn",
+        ".config.YAML",
+    ] {
+        assert_eq!(
+            encoding_for_component(component, CompressionPolicyV2::Smart),
+            EntryEncodingV2::Zstd,
+            "{component}"
+        );
+    }
+
+    for component in [
+        ".env",
+        "README",
+        "unknown.bin",
+        "archive.zip",
+        "archive.tar.gz",
+        "photo.JPG",
+        "report.txt.zst",
+    ] {
+        assert_eq!(
+            encoding_for_component(component, CompressionPolicyV2::Smart),
+            EntryEncodingV2::Identity,
+            "{component}"
+        );
+    }
+}
+
+#[test]
+fn explicit_compression_policies_ignore_the_extension() {
+    assert_eq!(
+        encoding_for_component("archive.zip", CompressionPolicyV2::Always),
+        EntryEncodingV2::Zstd
+    );
+    assert_eq!(
+        encoding_for_component("report.txt", CompressionPolicyV2::Never),
+        EntryEncodingV2::Identity
+    );
+}
+
+fn encoding_for_component(component: &str, policy: CompressionPolicyV2) -> EntryEncodingV2 {
+    let mut entry = offer().manifest.entries[0].clone();
+    entry.component = component.into();
+    select_entry_encoding(&entry, policy)
+}
+
+#[tokio::test]
+async fn schema_two_transfer_migration_replays_the_legacy_smart_heuristic_once() {
+    let temporary = tempdir().unwrap();
+    let text_path = temporary.path().join("random.txt");
+    let binary_path = temporary.path().join("repetitive.bin");
+    let mut random_text = Vec::with_capacity(LEGACY_SMART_COMPRESSION_SAMPLE_BYTES);
+    for counter in 0_u32..2048 {
+        random_text.extend_from_slice(blake3::hash(&counter.to_le_bytes()).as_bytes());
+    }
+    fs::write(&text_path, random_text).await.unwrap();
+    fs::write(
+        &binary_path,
+        vec![b'x'; LEGACY_SMART_COMPRESSION_SAMPLE_BYTES],
+    )
+    .await
+    .unwrap();
+
+    let mut job = CanonicalTransferJob::new(CompressionPolicyV2::Smart).unwrap();
+    job.add_local_path(text_path).await.unwrap();
+    job.add_local_path(binary_path).await.unwrap();
+    job.prepare_all().await.unwrap();
+    let offer = build_manifest_offer_v2(job.seal_for_send().unwrap().clone()).unwrap();
+    let accept = accept_all_entries(&offer);
+    let accept_digest =
+        canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::Accept(accept.clone())).unwrap();
+    let mut record = SenderDeliveryRecordV2::new(&offer);
+
+    let text_entry = offer
+        .manifest
+        .entries
+        .iter()
+        .find(|entry| entry.component == "random.txt")
+        .unwrap();
+    let binary_entry = offer
+        .manifest
+        .entries
+        .iter()
+        .find(|entry| entry.component == "repetitive.bin")
+        .unwrap();
+    assert_eq!(
+        record.frozen_entry_encoding(text_entry.entry_id).unwrap(),
+        EntryEncodingV2::Zstd
+    );
+    assert_eq!(
+        record.frozen_entry_encoding(binary_entry.entry_id).unwrap(),
+        EntryEncodingV2::Identity
+    );
+    record.commit_accept(&accept, accept_digest).unwrap();
+
+    let mut legacy = serde_json::to_value(record).unwrap();
+    legacy["schema_version"] = json!(LEGACY_SENDER_DELIVERY_SCHEMA_VERSION);
+    legacy.as_object_mut().unwrap().remove("entry_encodings");
+    let mut legacy: SenderDeliveryRecordV2 = serde_json::from_value(legacy).unwrap();
+    prepare_sender_entry_encodings(&job, &mut legacy, &offer)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        legacy.frozen_entry_encoding(text_entry.entry_id).unwrap(),
+        EntryEncodingV2::Identity
+    );
+    assert_eq!(
+        legacy.frozen_entry_encoding(binary_entry.entry_id).unwrap(),
+        EntryEncodingV2::Zstd
+    );
+
+    let store = SenderDeliveryStoreV2::new(temporary.path().join("sender-state"));
+    store.save(&legacy).await.unwrap();
+    let restored = store.load(legacy.identity()).await.unwrap().unwrap();
+    assert_eq!(
+        restored.frozen_entry_encoding(text_entry.entry_id).unwrap(),
+        EntryEncodingV2::Identity
+    );
+    assert_eq!(
+        restored
+            .frozen_entry_encoding(binary_entry.entry_id)
+            .unwrap(),
+        EntryEncodingV2::Zstd
+    );
+}
+
+#[tokio::test]
+async fn entry_start_and_resumed_send_use_the_same_frozen_encoding() {
+    let temporary = tempdir().unwrap();
+    let source_path = temporary.path().join("payload.txt");
+    fs::write(
+        &source_path,
+        vec![b'x'; DEFAULT_MANIFEST_V2_BLOCK_PLAINTEXT_BYTES as usize * 2 + 7],
+    )
+    .await
+    .unwrap();
+    let mut job = CanonicalTransferJob::new(CompressionPolicyV2::Smart).unwrap();
+    job.add_local_path(source_path).await.unwrap();
+    job.prepare_all().await.unwrap();
+    let item_id = job.list_roots()[0].item_id;
+    job.hash_entry(item_id).await.unwrap();
+    let offer = build_manifest_offer_v2(job.seal_for_send().unwrap().clone()).unwrap();
+    let entry = &offer.manifest.entries[0];
+    let record = SenderDeliveryRecordV2::new(&offer);
+    let frozen = record.frozen_entry_encoding(entry.entry_id).unwrap();
+    assert_eq!(frozen, EntryEncodingV2::Zstd);
+
+    let mut first_connection = CapturingConnection::default();
+    let mut first_completed = 0;
+    send_file(
+        &mut first_connection,
+        record.identity(),
+        entry,
+        EntryPlanV2 {
+            entry_id: entry.entry_id,
+            disposition: EntryDispositionV2::ReceivePayload,
+            next_plaintext_block: 0,
+        },
+        job.source_for_sealed_entry(entry.entry_id).unwrap(),
+        frozen,
+        FileTransferProgress {
+            completed_plaintext_bytes: &mut first_completed,
+            total_plaintext_bytes: entry.plaintext_size,
+            sink: &RecordingProgress::default(),
+            resumed_entry_bytes: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut resumed_connection = CapturingConnection::default();
+    let mut resumed_completed = DEFAULT_MANIFEST_V2_BLOCK_PLAINTEXT_BYTES as u64;
+    send_file(
+        &mut resumed_connection,
+        record.identity(),
+        entry,
+        EntryPlanV2 {
+            entry_id: entry.entry_id,
+            disposition: EntryDispositionV2::ReceivePayload,
+            next_plaintext_block: 1,
+        },
+        job.source_for_sealed_entry(entry.entry_id).unwrap(),
+        frozen,
+        FileTransferProgress {
+            completed_plaintext_bytes: &mut resumed_completed,
+            total_plaintext_bytes: entry.plaintext_size,
+            sink: &RecordingProgress::default(),
+            resumed_entry_bytes: DEFAULT_MANIFEST_V2_BLOCK_PLAINTEXT_BYTES as u64,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(entry_start_encoding(&first_connection.sent), Some(frozen));
+    assert_eq!(entry_start_encoding(&resumed_connection.sent), Some(frozen));
+    assert!(resumed_connection.sent.iter().any(|frame| matches!(
+        frame,
+        ManifestV2Frame::EntryBlock(block) if block.block_index == 1
+    )));
+    assert!(!resumed_connection.sent.iter().any(|frame| matches!(
+        frame,
+        ManifestV2Frame::EntryBlock(block) if block.block_index == 0
+    )));
+}
+
+fn accept_all_entries(offer: &ManifestOfferV2) -> ManifestAcceptV2 {
+    ManifestAcceptV2 {
+        identity: JobGenerationV2 {
+            job_id: offer.manifest.job_id,
+            generation: offer.manifest.generation,
+        },
+        manifest_digest: offer.structural_digest,
+        accept_nonce: [0x31; 32],
+        proof_capability: ProofCapabilityV2([0x41; 32]),
+        plan_revision: 1,
+        root_plans: offer
+            .manifest
+            .roots
+            .iter()
+            .map(|root| RootPlanV2 {
+                root_id: root.root_id,
+                planned_name: root.requested_name.clone(),
+            })
+            .collect(),
+        entry_plans: offer
+            .manifest
+            .entries
+            .iter()
+            .map(|entry| EntryPlanV2 {
+                entry_id: entry.entry_id,
+                disposition: EntryDispositionV2::ReceivePayload,
+                next_plaintext_block: 0,
+            })
+            .collect(),
+    }
+}
+
+#[derive(Default)]
+struct CapturingConnection {
+    sent: Vec<ManifestV2Frame>,
+}
+
+#[async_trait]
+impl ManifestV2FrameConnection for CapturingConnection {
+    async fn send_manifest_v2_frame(
+        &mut self,
+        frame: ManifestV2Frame,
+    ) -> Result<(), ProtocolError> {
+        self.sent.push(frame);
+        Ok(())
+    }
+
+    async fn recv_manifest_v2_frame(&mut self) -> Result<ManifestV2Frame, ProtocolError> {
+        panic!("the test uses a known digest and does not receive control frames")
+    }
+
+    fn export_keying_material(
+        &self,
+        _label: &[u8],
+        _context: &[u8],
+    ) -> Result<[u8; 32], ProtocolError> {
+        Ok([0x91; 32])
+    }
+
+    async fn close(&mut self) -> Result<(), ProtocolError> {
+        Ok(())
+    }
+}
+
+fn entry_start_encoding(frames: &[ManifestV2Frame]) -> Option<EntryEncodingV2> {
+    frames.iter().find_map(|frame| match frame {
+        ManifestV2Frame::EntryStart(start) => Some(start.encoding),
+        _ => None,
+    })
 }
 
 #[tokio::test]
