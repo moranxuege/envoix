@@ -13,6 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import apple_matrix_evidence  # noqa: E402
 import matrix_contract  # noqa: E402
 
 
@@ -94,11 +95,153 @@ class MatrixContractTests(unittest.TestCase):
             "metrics": {"plaintext_bytes": 7, "elapsed_ms": 1_000},
         }
 
+    def product_endpoint_result(self, role: str = "sender") -> dict:
+        value = self.endpoint_result()
+        value["case_id"] = "l2.baseline.room.android-ios.single-file"
+        value["test_layer"] = "l2_physical"
+        value["driver"] = "product_activity"
+        value["build_variant"] = "release_equivalent"
+        value["activity_id"] = "activity-1"
+        if role == "receiver":
+            value["role"] = "receiver"
+            value["source_summary"] = None
+            value["destination_summary"] = {
+                "root_count": 1,
+                "file_count": 1,
+                "directory_count": 0,
+                "plaintext_bytes": 7,
+                "manifest_digest": None,
+                "tree_digest": "a" * 64,
+                "entries": [
+                    {
+                        "relative_path": "single.txt",
+                        "kind": "file",
+                        "plaintext_bytes": 7,
+                        "sha256": "b" * 64,
+                        "disposition": "completed",
+                    }
+                ],
+                "publication": {
+                    "mechanism": "media_store",
+                    "committed": True,
+                },
+            }
+        return value
+
     def test_android_l1_endpoint_result_is_valid(self) -> None:
         self.assertEqual(
             matrix_contract.validate_endpoint_result(self.endpoint_result()),
             [],
         )
+
+    def test_apple_l1_endpoint_result_is_valid(self) -> None:
+        value = self.endpoint_result()
+        value["platform"] = "ios"
+        value["driver"] = "direct_ffi"
+        value["device_model"] = "iPhone"
+        value["os_version"] = "iOS 18.5"
+        self.assertEqual(matrix_contract.validate_endpoint_result(value), [])
+
+    def test_direct_ffi_endpoint_result_requires_apple_l1(self) -> None:
+        value = self.endpoint_result()
+        value["driver"] = "direct_ffi"
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "direct_ffi endpoint results must be Apple L1")
+
+    def test_product_activity_endpoint_result_is_valid(self) -> None:
+        self.assertEqual(
+            matrix_contract.validate_endpoint_result(
+                self.product_endpoint_result("sender")
+            ),
+            [],
+        )
+        self.assertEqual(
+            matrix_contract.validate_endpoint_result(
+                self.product_endpoint_result("receiver")
+            ),
+            [],
+        )
+
+    def test_product_activity_requires_release_activity_and_typed_path(self) -> None:
+        value = self.product_endpoint_result()
+        value["build_variant"] = "debug"
+        value["activity_id"] = None
+        value["selected_path"] = None
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "require a release-equivalent build")
+        self.assert_error(errors, "require activity_id")
+        self.assert_error(errors, "require selected_path")
+
+    def test_product_activity_receiver_requires_native_publication(self) -> None:
+        value = self.product_endpoint_result("receiver")
+        value["destination_summary"]["publication"] = {
+            "mechanism": "test_local_directory",
+            "committed": True,
+        }
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "cannot use test-local publication")
+
+        value["destination_summary"]["publication"] = None
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "requires publication")
+
+        value["destination_summary"]["publication"] = {
+            "mechanism": "files_directory",
+            "committed": False,
+        }
+        errors = matrix_contract.validate_endpoint_result(value)
+        self.assert_error(errors, "requires committed publication")
+
+    def test_apple_typed_failure_phases_are_valid(self) -> None:
+        value = self.endpoint_result()
+        value["platform"] = "macos"
+        value["driver"] = "direct_ffi"
+        value["terminal_state"] = "failed"
+        value["ordered_phases"][-1] = "failed"
+        value["delivery_proof"] = False
+        value["failure"] = {
+            "code": "authentication_failed",
+            "phase": "authenticating",
+            "recovery_action": "re_pair",
+        }
+        self.assertEqual(matrix_contract.validate_endpoint_result(value), [])
+
+    def test_apple_attachment_extractor_selects_expected_identity(self) -> None:
+        value = self.endpoint_result()
+        value["platform"] = "ios"
+        value["driver"] = "direct_ffi"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "manifest.json").write_text("{}", encoding="utf-8")
+            attachment = root / "0_Test_envoix-matrix-sender.json"
+            attachment.write_text(json.dumps(value), encoding="utf-8")
+            selected = apple_matrix_evidence.find_endpoint_attachment(
+                root,
+                run_id=value["run_id"],
+                case_id=value["case_id"],
+                repetition=value["repetition"],
+                role=value["role"],
+                platform=value["platform"],
+            )
+        self.assertEqual(selected.name, attachment.name)
+
+    def test_apple_attachment_extractor_rejects_duplicate_identity(self) -> None:
+        value = self.endpoint_result()
+        value["platform"] = "ios"
+        value["driver"] = "direct_ffi"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("first", "second"):
+                (root / name).write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaises(apple_matrix_evidence.EvidenceExtractionError):
+                apple_matrix_evidence.find_endpoint_attachment(
+                    root,
+                    run_id=value["run_id"],
+                    case_id=value["case_id"],
+                    repetition=value["repetition"],
+                    role=value["role"],
+                    platform=value["platform"],
+                )
 
     def test_endpoint_result_identity_mismatch_is_rejected(self) -> None:
         errors = matrix_contract.validate_endpoint_result(
@@ -324,7 +467,7 @@ class MatrixContractTests(unittest.TestCase):
     def test_case_selection_uses_explicit_filters(self) -> None:
         selected = matrix_contract.select_cases(
             self.registry,
-            statuses={"planned"},
+            statuses={"experimental"},
             gate="cross-platform-baseline",
             tag="multi-entry",
         )
@@ -427,6 +570,39 @@ class MatrixContractTests(unittest.TestCase):
         )
         self.assertEqual(matrix_contract.validate_run_plan(plan, self.registry), [])
 
+    def test_product_baseline_executes_only_automated_file_profiles(self) -> None:
+        selected, _, selection = matrix_contract.resolve_cases(
+            self.registry,
+            gate="cross-platform-baseline",
+        )
+        plan = matrix_contract.build_run_plan(
+            self.registry,
+            selected,
+            run_id="fixture-run",
+            tested_commit="0123456789abcdef",
+            build_variant="release_equivalent",
+            selection=selection,
+            dry_run=False,
+        )
+        executable = [
+            execution
+            for execution in plan["executions"]
+            if execution["disposition"] == "execute"
+        ]
+        deferred = [
+            execution
+            for execution in plan["executions"]
+            if execution["disposition"] == "not_run"
+        ]
+        self.assertEqual(len(executable), 12)
+        self.assertEqual(len(deferred), 6)
+        self.assertTrue(
+            all(execution["scenario"] != "multi_root" for execution in executable)
+        )
+        self.assertTrue(
+            all(execution["scenario"] == "multi_root" for execution in deferred)
+        )
+
     def test_repetition_override_cannot_weaken_the_registry(self) -> None:
         selected, _, selection = matrix_contract.resolve_cases(
             self.registry,
@@ -463,6 +639,38 @@ class MatrixContractTests(unittest.TestCase):
             matrix_contract.validate_run_plan(plan, self.registry),
             "disposition does not match support and run state",
         )
+
+    def test_execution_rows_include_registry_test_layer(self) -> None:
+        selected, _, selection = matrix_contract.resolve_cases(
+            self.registry,
+            case_ids=["l2.baseline.room.android-ios.single-file"],
+        )
+        plan = matrix_contract.build_run_plan(
+            self.registry,
+            selected,
+            run_id="fixture-run",
+            tested_commit="0123456789abcdef",
+            build_variant="release_equivalent",
+            selection=selection,
+            dry_run=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts/matrix_contract.py"),
+                    "list-executions",
+                    str(REGISTRY_PATH),
+                    str(plan_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        fields = completed.stdout.splitlines()[0].split("\t")
+        self.assertEqual(fields[-2:], ["l2_physical", "not_run"])
 
     def test_fixture_aggregate_is_deterministic_and_keeps_failure_classes(self) -> None:
         fixture = json.loads(RUNNER_FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -591,6 +799,40 @@ class MatrixContractTests(unittest.TestCase):
         self.assertEqual(result["summary"]["pass"], 0)
         self.assertEqual(result["summary"]["not_run"], 2)
         self.assertTrue(result["dry_run"])
+
+    def test_runner_dry_run_accepts_gate_without_explicit_cases(self) -> None:
+        runner = REPO_ROOT / "scripts/cross-device-transfer-matrix.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(
+                [
+                    str(runner),
+                    "--dry-run",
+                    "--gate",
+                    "cross-platform-baseline",
+                    "--run-id",
+                    "fixture-run",
+                    "--commit",
+                    "0123456789abcdef",
+                    "--output-directory",
+                    directory,
+                    "--build-variant",
+                    "release_equivalent",
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            plan = json.loads(
+                (Path(directory) / "matrix-plan.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(plan["selection"], "gate:cross-platform-baseline")
+        self.assertEqual(len(plan["executions"]), 18)
+        self.assertEqual(
+            {execution["disposition"] for execution in plan["executions"]},
+            {"not_run"},
+        )
 
     def test_runner_records_missing_device_input_as_infrastructure_failure(
         self,
