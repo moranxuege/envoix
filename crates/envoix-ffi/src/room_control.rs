@@ -114,11 +114,12 @@ pub struct FfiRoomControlEvent {
     pub nonce: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record)]
 pub struct FfiRoomControlSnapshot {
     pub peer_name: String,
     pub creator: bool,
     pub remembered_generation: Option<u64>,
+    pub pairing_credential: Vec<u8>,
     pub lifetime: FfiRoomLifetimeState,
 }
 
@@ -157,8 +158,17 @@ impl FfiRoomControlSession {
             peer_name: self.session.peer_name().to_string(),
             creator: self.session.is_creator(),
             remembered_generation: self.session.remembered_generation(),
+            pairing_credential: self
+                .session
+                .pairing_credential()
+                .map(|credential| credential.to_opaque())
+                .unwrap_or_default(),
             lifetime: ffi_lifetime(self.session.lifetime_state()),
         }
+    }
+
+    pub fn lifetime_snapshot(&self) -> FfiRoomLifetimeState {
+        ffi_lifetime(self.session.lifetime_state())
     }
 
     pub async fn next_event(&self) -> Result<FfiRoomControlEvent, EnvoixError> {
@@ -301,6 +311,7 @@ pub async fn connect_room_control_session(
     input: String,
     display_name: String,
     mode: FfiRoomConnectMode,
+    verified_pairing: bool,
     identity_path: String,
     fallback_broker: String,
     fallback_relay: String,
@@ -322,6 +333,7 @@ pub async fn connect_room_control_session(
             invite,
             display_name,
             mode == FfiRoomConnectMode::Host,
+            verified_pairing,
             client.session_config(&options),
             &cancellation.token,
         )
@@ -739,9 +751,9 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v5_ffi_v12() {
+    fn core_info_advertises_room_control_v5_ffi_v13() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 12);
+        assert_eq!(info.ffi_api_version, 13);
         assert!(
             info.capabilities
                 .iter()

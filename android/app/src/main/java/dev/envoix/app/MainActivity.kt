@@ -9,6 +9,7 @@ import android.os.BadParcelableException
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -22,7 +23,9 @@ import androidx.core.content.IntentCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveryMode
+import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.ui.AppText
 import dev.envoix.app.ui.ConnectionHubScreen
@@ -95,6 +98,7 @@ class MainActivity : ComponentActivity() {
                 EnvoixTheme {
                     val transfers by vm.transfers.collectAsState()
                     val workflow by workflowVm.uiState.collectAsState()
+                    val discovery by discoveryVm.uiState.collectAsState()
                     val rememberedRooms by rememberedRoomsVm.uiState.collectAsState()
                     val nfcInvitation by nfcInvitationController.state.collectAsState()
                     val nfcPhoneHosting by nfcInvitationHostController.state.collectAsState()
@@ -126,6 +130,19 @@ class MainActivity : ComponentActivity() {
                     // or the Hub is covering the room screen.
                     LaunchedEffect(activeRoomTransferCount, workflow.room?.id) {
                         workflowVm.updateRoomTransferActivity(activeRoomTransferCount)
+                    }
+                    val protectsVerificationCode =
+                        workflow.control.verificationCode != null ||
+                            discovery.incomingRendezvousOffers.any {
+                                it.source == DiscoverySource.Bluetooth &&
+                                    BleVerificationInvitation.isPublicOffer(it.invite)
+                            }
+                    LaunchedEffect(protectsVerificationCode) {
+                        if (protectsVerificationCode) {
+                            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                        } else {
+                            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                        }
                     }
 
                     if (workflow.screen != WorkflowScreen.Hub) {
@@ -637,6 +654,7 @@ internal fun activeHostedNfcInvitation(
 ): String? {
     if (workflow.screen != WorkflowScreen.Hub) return null
     if (workflow.control.phase != RoomControlPhase.Hosting) return null
+    if (workflow.control.verificationCode != null) return null
     val invitation = workflow.control.invite ?: return null
     val payload = invitation.payload
     return payload.takeIf {

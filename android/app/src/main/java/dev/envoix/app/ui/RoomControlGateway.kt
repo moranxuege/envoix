@@ -128,10 +128,26 @@ internal interface RoomControlGateway {
         relay: String,
     )
 
+    suspend fun hostVerified(
+        input: String,
+        displayName: String,
+        peerLabel: String,
+    ) {
+        error("Verified room hosting is unavailable")
+    }
+
     suspend fun join(
         input: String,
         displayName: String,
     )
+
+    suspend fun joinVerified(
+        input: String,
+        displayName: String,
+        peerLabel: String,
+    ) {
+        error("Verified room joining is unavailable")
+    }
 
     suspend fun connectRemembered(
         credentialReference: String,

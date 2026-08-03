@@ -1,5 +1,6 @@
 package dev.envoix.app.ui
 
+import dev.envoix.app.discovery.BleVerificationInvitation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -22,6 +23,7 @@ internal data class RoomControlUiState(
     val invite: RoomControlInvite? = null,
     val endpoint: RoomControlEndpoint? = null,
     val inviteRevealed: Boolean = false,
+    val verificationCode: String? = null,
     val peerName: String? = null,
     val creator: Boolean = false,
     val lifetimeRevision: Long = -1L,
@@ -95,6 +97,8 @@ internal class RoomControlWorkflow(
         displayName: String,
         broker: String,
         relay: String,
+        verification: BleVerificationInvitation? = null,
+        peerLabel: String? = null,
     ) {
         if (!gateway.available) {
             showError("Room connections are unavailable in this build")
@@ -105,11 +109,20 @@ internal class RoomControlWorkflow(
             RoomControlUiState(
                 phase = RoomControlPhase.Hosting,
                 inviteRevealed = shouldRevealInvite,
+                verificationCode = verification?.verificationCode,
                 nowEpochMs = clockEpochMs(),
             )
         }
         launchGateway(onError = ::failLifecycle) {
-            gateway.host(displayName, broker, relay)
+            if (verification == null) {
+                gateway.host(displayName, broker, relay)
+            } else {
+                gateway.hostVerified(
+                    verification.privateInvitation,
+                    displayName,
+                    requireNotNull(peerLabel),
+                )
+            }
         }
     }
 
@@ -117,6 +130,7 @@ internal class RoomControlWorkflow(
         input: String,
         displayName: String,
         peerName: String?,
+        verifiedPeerLabel: String? = null,
     ) {
         if (!gateway.available) {
             showError("Room connections are unavailable in this build")
@@ -130,12 +144,21 @@ internal class RoomControlWorkflow(
             )
         }
         launchGateway(onError = ::failLifecycle) {
-            gateway.join(input, displayName)
+            if (verifiedPeerLabel == null) {
+                gateway.join(input, displayName)
+            } else {
+                gateway.joinVerified(input, displayName, verifiedPeerLabel)
+            }
         }
     }
 
     fun refreshInvite() {
-        if (state.phase != RoomControlPhase.Hosting || !gateway.available) return
+        if (state.phase != RoomControlPhase.Hosting ||
+            !gateway.available ||
+            state.verificationCode != null
+        ) {
+            return
+        }
         // Keep the current invitation/session valid until the replacement has
         // actually been generated. A refresh failure is recoverable.
         update { it.copy(error = null) }
@@ -385,6 +408,7 @@ internal class RoomControlWorkflow(
                     it.copy(
                         phase = RoomControlPhase.Failed,
                         invite = null,
+                        verificationCode = null,
                         incomingOffer = null,
                         outgoingOfferPending = false,
                         idleDeadlineEpochMs = null,
@@ -414,6 +438,7 @@ internal class RoomControlWorkflow(
                 phase = RoomControlPhase.Failed,
                 invite = null,
                 inviteRevealed = false,
+                verificationCode = null,
                 incomingOffer = null,
                 outgoingOfferPending = false,
                 idleDeadlineEpochMs = null,
@@ -438,6 +463,7 @@ internal class RoomControlWorkflow(
                 phase = RoomControlPhase.Closed,
                 invite = null,
                 inviteRevealed = false,
+                verificationCode = null,
                 incomingOffer = null,
                 outgoingOfferPending = false,
                 idleDeadlineEpochMs = null,

@@ -371,6 +371,9 @@ struct MobileConnectionFlowView: View {
     @State private var scannerIsPresented = false
     @State private var manualEntryIsPresented = false
     @State private var manualPairingInput = ""
+    @State private var outgoingBleVerification: BleVerificationInvitation?
+    @State private var pendingBleVerificationOffer: NearbyRendezvousOffer?
+    @State private var bleVerificationInput = ""
     @State private var isCloseRoomConfirmationPresented = false
     @State private var roomInvitationIsRevealed = false
     @State private var now = Date()
@@ -476,6 +479,61 @@ struct MobileConnectionFlowView: View {
                 }
                 return error
             }
+        }
+        .alert(
+            AppText.value("Verify nearby device", "验证附近设备", language: language),
+            isPresented: Binding(
+                get: { outgoingBleVerification != nil },
+                set: {
+                    if !$0, outgoingBleVerification != nil {
+                        outgoingBleVerification = nil
+                        closeRoomNow()
+                    }
+                }
+            )
+        ) {
+            Button(AppText.value("Cancel verification", "取消验证", language: language), role: .destructive) {
+                outgoingBleVerification = nil
+                closeRoomNow()
+            }
+        } message: {
+            Text(AppText.value(
+                "Enter \(outgoingBleVerification?.verificationCode ?? "") on the other device. The code is never sent over Bluetooth.",
+                "请在另一台设备上输入 \(outgoingBleVerification?.verificationCode ?? "")。验证码不会通过蓝牙发送。",
+                language: language
+            ))
+            .privacySensitive()
+        }
+        .alert(
+            AppText.value("Enter verification code", "输入验证码", language: language),
+            isPresented: Binding(
+                get: { pendingBleVerificationOffer != nil },
+                set: { if !$0 { pendingBleVerificationOffer = nil } }
+            )
+        ) {
+            SecureField("000000", text: Binding(
+                get: { bleVerificationInput },
+                set: { bleVerificationInput = String($0.filter { $0.isASCII && $0.isNumber }.prefix(6)) }
+            ))
+            .privacySensitive()
+            Button(AppText.value("Verify and connect", "验证并连接", language: language)) {
+                guard let offer = pendingBleVerificationOffer else { return }
+                if let error = acceptBleVerificationOffer(offer, code: bleVerificationInput) {
+                    ToastCenter.shared.show(error)
+                }
+                bleVerificationInput = ""
+            }
+            .disabled(bleVerificationInput.count != 6)
+            Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {
+                pendingBleVerificationOffer = nil
+                bleVerificationInput = ""
+            }
+        } message: {
+            Text(AppText.value(
+                "Ask the other person for the six-digit code shown in Envoix.",
+                "请向对方确认 Envoix 中显示的六位验证码。",
+                language: language
+            ))
         }
         .alert(item: pendingOfferBinding) { pending in
             let isRoomInvite = connectionInputKind(
@@ -677,6 +735,8 @@ struct MobileConnectionFlowView: View {
                 roomInvitationIsRevealed = false
             }
             if phase == .connected {
+                outgoingBleVerification = nil
+                pendingBleVerificationOffer = nil
                 presentPendingSendSelection()
             }
             if case .failed(let message) = phase {
@@ -689,6 +749,7 @@ struct MobileConnectionFlowView: View {
                 transferRoute = nil
             }
             if isEndedOrFailed(phase) {
+                outgoingBleVerification = nil
                 roomDestinationRepair = nil
             }
             synchronizeRememberedOutbox()
@@ -1091,6 +1152,32 @@ struct MobileConnectionFlowView: View {
     }
 
     private func openNearbyRoom(_ selection: NearbyPairingSelection) {
+        if usesBluetoothVerification(selection) {
+            if workflow.canReuseHostingInvitation(for: selection),
+               let verification = outgoingBleVerification {
+                deliverRoomInvitation(verification.publicOffer, to: selection)
+                return
+            }
+            guardRoomReplacement {
+                do {
+                    let verification = try BleVerificationInvitation.make(
+                        broker: serverURL,
+                        relay: relayURL
+                    )
+                    guard startHostingRoom(
+                        nearbySelection: selection,
+                        invitationInput: verification.privateInvitation,
+                        verifiedPeerLabel: selection.displayName ?? "Nearby Envoix device"
+                    ) else { return }
+                    outgoingBleVerification = verification
+                    deliverRoomInvitation(verification.publicOffer, to: selection)
+                } catch {
+                    ToastCenter.shared.show(error.localizedDescription)
+                }
+            }
+            return
+        }
+        outgoingBleVerification = nil
         if workflow.canReuseHostingInvitation(for: selection),
            let payload = workflow.roomInvitation?.payload {
             deliverRoomInvitation(payload, to: selection)
@@ -1112,6 +1199,10 @@ struct MobileConnectionFlowView: View {
             invite: payload
         ) { error in
             if let error {
+                if outgoingBleVerification?.publicOffer == payload {
+                    outgoingBleVerification = nil
+                    closeRoomNow()
+                }
                 ToastCenter.shared.show(error)
             }
         }
@@ -1544,6 +1635,12 @@ struct MobileConnectionFlowView: View {
            offer.senderPeerKey != selectedPeerKey {
             return
         }
+        if BleVerificationInvitation.isPublicOffer(offer.invite) {
+            guard offer.source == .bluetooth else { return }
+            bleVerificationInput = ""
+            pendingBleVerificationOffer = offer
+            return
+        }
         guard connectionInputKind(
             offer.invite,
             allowBareRoomControl: false
@@ -1618,6 +1715,52 @@ struct MobileConnectionFlowView: View {
             case .choose: break
             }
         }
+    }
+
+    private func acceptBleVerificationOffer(
+        _ offer: NearbyRendezvousOffer,
+        code: String
+    ) -> String? {
+        guard offer.source == .bluetooth,
+              let invitation = BleVerificationInvitation.resolve(
+                  publicOffer: offer.invite,
+                  verificationCode: code
+              ) else {
+            return AppText.value(
+                "Enter the current six-digit code shown on the other device.",
+                "请输入另一台设备当前显示的六位验证码。",
+                language: language
+            )
+        }
+        guard let identityPath = roomIdentityPath else {
+            return AppText.value(
+                "Application Support is unavailable.",
+                "无法访问应用支持目录。",
+                language: language
+            )
+        }
+        pendingBleVerificationOffer = nil
+        guardRoomReplacement {
+            if let error = workflow.joinRoomControl(
+                input: invitation,
+                broker: serverURL,
+                relay: relayURL,
+                displayName: presence.displayName,
+                identityPath: identityPath,
+                existingActivityIDs: Set(model.activities.map(\.activityId)),
+                nearbySelection: nearbySelection(for: offer),
+                verifiedPeerLabel: offer.senderDisplayName ?? "Nearby Envoix device"
+            ) {
+                ToastCenter.shared.show(error)
+            }
+        }
+        return nil
+    }
+
+    private func usesBluetoothVerification(_ selection: NearbyPairingSelection) -> Bool {
+        selection.nearbyWifiAwareDeviceID == nil
+            && !(selection.sources.contains(.mdns) && selection.nearbyInviteRoute != nil)
+            && selection.sources.contains(.bluetooth)
     }
 
     private func nearbySelection(
@@ -1981,7 +2124,9 @@ struct MobileConnectionFlowView: View {
 
     @discardableResult
     private func startHostingRoom(
-        nearbySelection: NearbyPairingSelection? = nil
+        nearbySelection: NearbyPairingSelection? = nil,
+        invitationInput: String? = nil,
+        verifiedPeerLabel: String? = nil
     ) -> Bool {
         guard let identityPath = roomIdentityPath else {
             ToastCenter.shared.show(AppText.value(
@@ -1997,7 +2142,9 @@ struct MobileConnectionFlowView: View {
             displayName: presence.displayName,
             identityPath: identityPath,
             existingActivityIDs: Set(model.activities.map(\.activityId)),
-            nearbySelection: nearbySelection
+            nearbySelection: nearbySelection,
+            invitationInput: invitationInput,
+            verifiedPeerLabel: verifiedPeerLabel
         )
         if let error {
             ToastCenter.shared.show(error)

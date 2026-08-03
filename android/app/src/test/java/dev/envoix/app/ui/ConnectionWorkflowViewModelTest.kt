@@ -3,6 +3,7 @@ package dev.envoix.app.ui
 import dev.envoix.app.ParsedInvite
 import dev.envoix.app.Settings
 import dev.envoix.app.discovery.DiscoverySource
+import dev.envoix.app.discovery.NearbyInviteRoute
 import dev.envoix.app.discovery.NearbyPairingSelection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -223,6 +224,30 @@ class ConnectionWorkflowViewModelTest {
             assertFalse(viewModel.uiState.value.control.inviteRevealed)
             viewModel.endWaitingRoom()
             runCurrent()
+        }
+
+    @Test
+    fun `Bluetooth delivery exposes only locator and displays verification code`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel = ConnectionWorkflowViewModel(gateway, { TEST_SETTINGS })
+            runCurrent()
+            var delivered: String? = null
+
+            viewModel.startNearbyRoom(BLE_SELECTION) { invite, completion ->
+                delivered = invite
+                completion(null)
+            }
+            runCurrent()
+
+            assertTrue(delivered?.startsWith("envoix://ble/v1/") == true)
+            assertTrue(gateway.verifiedHostInput?.startsWith("envoix://room/") == true)
+            assertFalse(gateway.verifiedHostInput == delivered)
+            assertEquals(
+                6,
+                viewModel.uiState.value.control.verificationCode
+                    ?.length,
+            )
         }
 
     @Test
@@ -589,7 +614,18 @@ class ConnectionWorkflowViewModelTest {
             NearbyPairingSelection(
                 discoveryPeerKey = "nearby-peer",
                 displayName = "Nearby phone",
+                sources = setOf(DiscoverySource.Mdns, DiscoverySource.Bluetooth),
+                nearbyInviteRoute =
+                    NearbyInviteRoute.normalized(
+                        endpointId = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst",
+                        relayUrl = "https://relay.example",
+                        directAddresses = emptyList(),
+                    ),
+            )
+        val BLE_SELECTION =
+            TEST_SELECTION.copy(
                 sources = setOf(DiscoverySource.Bluetooth),
+                nearbyInviteRoute = null,
             )
         val TEST_TRANSFER_OFFER =
             RoomTransferOffer(
@@ -612,6 +648,7 @@ private class HostedInviteGateway : RoomControlGateway {
     var closedWith: RoomCloseReason? = null
     var respondedOffer: Pair<String, Boolean>? = null
     var joinedInput: String? = null
+    var verifiedHostInput: String? = null
 
     fun emit(event: RoomControlEvent) {
         check(mutableEvents.tryEmit(event))
@@ -641,6 +678,25 @@ private class HostedInviteGateway : RoomControlGateway {
     ) {
         joinedInput = input
         mutableEvents.emit(RoomControlEvent.Joining(TEST_ROOM_ENDPOINT))
+    }
+
+    override suspend fun hostVerified(
+        input: String,
+        displayName: String,
+        peerLabel: String,
+    ) {
+        hostCalls += 1
+        verifiedHostInput = input
+        mutableEvents.emit(
+            RoomControlEvent.Hosting(
+                RoomControlInvite(
+                    code = "123456-v100-0000",
+                    payload = input,
+                    endpoint = TEST_ROOM_ENDPOINT,
+                    expiresAtEpochMs = Long.MAX_VALUE,
+                ),
+            ),
+        )
     }
 
     override suspend fun refreshInvite() = Unit

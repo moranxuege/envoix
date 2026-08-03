@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Transfer
+import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.discovery.NearbyRendezvousOffer
 import dev.envoix.app.isTerminal
@@ -66,7 +67,7 @@ internal fun DeviceRoomScreen(
     onDismissEndedRoom: () -> Unit,
     onRoomActiveTransfers: (Int) -> Unit,
     onExternalActivityChanged: (Boolean) -> Unit,
-    onAcceptIncomingOffer: (NearbyRendezvousOffer) -> Boolean,
+    onAcceptIncomingOffer: (NearbyRendezvousOffer, String?) -> Boolean,
     onReceive: (String, String, String, String?, Boolean, String?, String?) -> Unit,
     onSend: (String, String, String, String, String?, String?, String?) -> Unit,
     onOpenReceived: (Transfer) -> Unit,
@@ -397,12 +398,14 @@ internal fun DeviceRoomScreen(
     if (legacyRoom && transferDraft == null) {
         discoveryState.incomingRendezvousOffers.firstOrNull()?.let { offer ->
             IncomingNearbyInvitationDialog(
+                offerId = offer.requestId,
                 roomInvitation = RoomControlInviteFormat.looksLikeRoomInvite(offer.invite),
+                verificationOffer = BleVerificationInvitation.isPublicOffer(offer.invite),
                 peerName =
                     offer.senderDisplayName
                         ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
-                onAccept = {
-                    onAcceptIncomingOffer(offer)
+                onAccept = { code ->
+                    onAcceptIncomingOffer(offer, code)
                     discoveryViewModel.consumeRendezvousOffer(offer.requestId)
                 },
                 onReject = {

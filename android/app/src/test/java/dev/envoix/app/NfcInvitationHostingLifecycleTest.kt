@@ -61,6 +61,14 @@ class NfcInvitationHostingLifecycleTest {
         )
         assertNull(
             activeHostedNfcInvitation(
+                hosting.copy(
+                    control = hosting.control.copy(verificationCode = "123456"),
+                ),
+                nowEpochMs = 1,
+            ),
+        )
+        assertNull(
+            activeHostedNfcInvitation(
                 hosting,
                 nowEpochMs = Long.MAX_VALUE,
             ),
