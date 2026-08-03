@@ -4,6 +4,7 @@
 //! The demo covers one route: a directional invitation through the deployed
 //! rendezvous, which is what the mobile clients ship with.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -52,14 +53,25 @@ pub struct OfferSummary {
     pub bytes: u64,
 }
 
-pub struct Engine {
-    runtime: tokio::runtime::Runtime,
-    events: Receiver<UiEvent>,
-    sink: Sender<UiEvent>,
-    context: egui::Context,
+/// Identifies one transfer for the lifetime of the process. Events carry it so
+/// the UI can route them to the right card while several run at once.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TransferId(pub(crate) u64);
+
+/// Per-transfer control the UI needs after the transfer has started.
+struct Handle {
     cancel: TransferCancelToken,
     /// Fired by the UI to release a receive that is parked on its offer.
     accept: Option<oneshot::Sender<bool>>,
+}
+
+pub struct Engine {
+    runtime: tokio::runtime::Runtime,
+    events: Receiver<(TransferId, UiEvent)>,
+    sink: Sender<(TransferId, UiEvent)>,
+    context: egui::Context,
+    next_id: u64,
+    handles: HashMap<TransferId, Handle>,
 }
 
 impl Engine {
@@ -73,51 +85,72 @@ impl Engine {
             events,
             sink,
             context,
-            cancel: TransferCancelToken::new(),
-            accept: None,
+            next_id: 0,
+            handles: HashMap::new(),
         }
     }
 
-    pub fn poll(&self) -> impl Iterator<Item = UiEvent> + '_ {
+    pub fn poll(&self) -> impl Iterator<Item = (TransferId, UiEvent)> + '_ {
         self.events.try_iter()
     }
 
-    pub fn cancel(&self) {
-        self.cancel.cancel();
+    pub fn cancel(&self, transfer: TransferId) {
+        if let Some(handle) = self.handles.get(&transfer) {
+            handle.cancel.cancel();
+        }
     }
 
-    pub fn accept_offer(&mut self) {
-        if let Some(accept) = self.accept.take() {
+    pub fn accept_offer(&mut self, transfer: TransferId) {
+        if let Some(handle) = self.handles.get_mut(&transfer)
+            && let Some(accept) = handle.accept.take()
+        {
             let _ = accept.send(true);
         }
     }
 
+    fn next_transfer(&mut self) -> (TransferId, TransferCancelToken) {
+        let id = TransferId(self.next_id);
+        self.next_id += 1;
+        // Each transfer owns its token: a cancelled one stays cancelled, so a
+        // shared token would abort every later transfer the instant it began.
+        let cancel = TransferCancelToken::new();
+        self.handles.insert(
+            id,
+            Handle {
+                cancel: cancel.clone(),
+                accept: None,
+            },
+        );
+        (id, cancel)
+    }
+
     /// Creates a receiver-side invitation, waits for a sender, then parks on the
     /// authenticated offer until the UI accepts it.
-    pub fn start_receive(&mut self, save_directory: PathBuf) {
-        let sink = Sink::new(self.sink.clone(), self.context.clone());
-        // A cancelled token stays cancelled, so each run needs its own.
-        self.cancel = TransferCancelToken::new();
-        let cancel = self.cancel.clone();
+    pub fn start_receive(&mut self, save_directory: PathBuf) -> TransferId {
+        let (id, cancel) = self.next_transfer();
+        let sink = Sink::new(id, self.sink.clone(), self.context.clone());
         let (accept_tx, accept_rx) = oneshot::channel();
-        self.accept = Some(accept_tx);
+        if let Some(handle) = self.handles.get_mut(&id) {
+            handle.accept = Some(accept_tx);
+        }
         self.runtime.spawn(async move {
             if let Err(error) = receive(save_directory, sink.clone(), cancel, accept_rx).await {
                 sink.fail(error);
             }
         });
+        id
     }
 
     /// Joins an invitation payload produced by the peer and sends the selection.
-    pub fn start_send(&mut self, files: Vec<PathBuf>, invite: String) {
-        let sink = Sink::new(self.sink.clone(), self.context.clone());
-        self.cancel = TransferCancelToken::new();
-        let cancel = self.cancel.clone();
+    pub fn start_send(&mut self, files: Vec<PathBuf>, invite: String) -> TransferId {
+        let (id, cancel) = self.next_transfer();
+        let sink = Sink::new(id, self.sink.clone(), self.context.clone());
         self.runtime.spawn(async move {
             if let Err(error) = send(files, invite, sink.clone(), cancel).await {
                 sink.fail(error);
             }
         });
+        id
     }
 }
 
@@ -139,17 +172,26 @@ impl api::AuthenticationHandler for OneTimeInvitation {
 
 #[derive(Clone)]
 struct Sink {
-    sender: Sender<UiEvent>,
+    transfer: TransferId,
+    sender: Sender<(TransferId, UiEvent)>,
     context: egui::Context,
 }
 
 impl Sink {
-    fn new(sender: Sender<UiEvent>, context: egui::Context) -> Arc<Self> {
-        Arc::new(Self { sender, context })
+    fn new(
+        transfer: TransferId,
+        sender: Sender<(TransferId, UiEvent)>,
+        context: egui::Context,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            transfer,
+            sender,
+            context,
+        })
     }
 
     fn emit(&self, event: UiEvent) {
-        let _ = self.sender.send(event);
+        let _ = self.sender.send((self.transfer, event));
         self.context.request_repaint();
     }
 
@@ -397,10 +439,10 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Waits for the receiver's invitation payload, failing rather than hanging.
-    fn await_invite(events: &Receiver<UiEvent>) -> String {
+    /// Waits for a transfer's invitation payload, failing rather than hanging.
+    fn await_invite(events: &Receiver<(TransferId, UiEvent)>) -> String {
         for _ in 0..600 {
-            while let Ok(event) = events.try_recv() {
+            while let Ok((_, event)) = events.try_recv() {
                 match event {
                     UiEvent::Invite { payload, .. } => return payload,
                     UiEvent::Failed(message) => panic!("receiver failed early: {message}"),
@@ -428,9 +470,9 @@ mod tests {
 
         let context = egui::Context::default();
         let (receiver_tx, receiver_events) = channel();
-        let receiver_sink = Sink::new(receiver_tx, context.clone());
+        let receiver_sink = Sink::new(TransferId(0), receiver_tx, context.clone());
         let (sender_tx, sender_events) = channel();
-        let sender_sink = Sink::new(sender_tx, context);
+        let sender_sink = Sink::new(TransferId(1), sender_tx, context);
         let cancel = TransferCancelToken::new();
 
         // The offer is accepted unconditionally here; the UI gates it on a click.
@@ -479,7 +521,7 @@ mod tests {
         let save_directory = env_path("ENVOIX_INTEROP_SAVE");
 
         let (events_tx, events) = channel();
-        let sink = Sink::new(events_tx, egui::Context::default());
+        let sink = Sink::new(TransferId(0), events_tx, egui::Context::default());
         let cancel = TransferCancelToken::new();
         let (accept, accept_rx) = oneshot::channel();
         accept.send(true).expect("arm accept");
@@ -527,7 +569,7 @@ mod tests {
         .expect("invite task");
 
         let (events_tx, _events) = channel();
-        let sink = Sink::new(events_tx, egui::Context::default());
+        let sink = Sink::new(TransferId(0), events_tx, egui::Context::default());
         let cancel = TransferCancelToken::new();
         send(vec![source], invite, sink, cancel)
             .await
@@ -560,38 +602,13 @@ mod tests {
         std::fs::canonicalize(workspace.path()).expect("canonicalize a directory");
     }
 
-    /// Drains both engines until the round finishes, releasing the offer when
-    /// it arrives the way the Accept button does.
-    fn drive_round(receiver: &mut Engine, sender: &mut Engine) -> Result<(), String> {
-        let mut receiver_done = false;
-        let mut sender_done = false;
-        for _ in 0..1200 {
-            for event in receiver.poll().collect::<Vec<_>>() {
-                match event {
-                    UiEvent::Offer(_) => receiver.accept_offer(),
-                    UiEvent::Finished { .. } => receiver_done = true,
-                    UiEvent::Failed(message) => return Err(format!("receiver: {message}")),
-                    _ => {}
-                }
-            }
-            for event in sender.poll().collect::<Vec<_>>() {
-                match event {
-                    UiEvent::Finished { .. } => sender_done = true,
-                    UiEvent::Failed(message) => return Err(format!("sender: {message}")),
-                    _ => {}
-                }
-            }
-            if receiver_done && sender_done {
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        Err("round did not finish within 60s".into())
-    }
-
-    fn wait_for_invite(engine: &mut Engine) -> Result<String, String> {
+    /// Waits for one engine to publish an invitation for `transfer`.
+    fn wait_for_invite(engine: &mut Engine, transfer: TransferId) -> Result<String, String> {
         for _ in 0..600 {
-            for event in engine.poll().collect::<Vec<_>>() {
+            for (id, event) in engine.poll().collect::<Vec<_>>() {
+                if id != transfer {
+                    continue;
+                }
                 match event {
                     UiEvent::Invite { payload, .. } => return Ok(payload),
                     UiEvent::Failed(message) => return Err(message),
@@ -601,6 +618,66 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         Err("no invitation within 30s".into())
+    }
+
+    /// Drains both engines once, reporting whether payload moved and how many
+    /// sides ended, split by outcome so a cancel cannot be confused with a
+    /// completion that beat it. Releases any offer the way the Accept button does.
+    #[derive(Default)]
+    struct Drained {
+        moved: bool,
+        failed: usize,
+        finished: usize,
+    }
+
+    impl Drained {
+        fn terminal(&self) -> usize {
+            self.failed + self.finished
+        }
+    }
+
+    fn drain(receiver: &mut Engine, sender: &mut Engine) -> Drained {
+        let mut drained = Drained::default();
+        let events: Vec<(TransferId, UiEvent)> = receiver
+            .poll()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(id, event)| (id, event, true))
+            .chain(
+                sender
+                    .poll()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|(id, event)| (id, event, false)),
+            )
+            .map(|(id, event, _)| (id, event))
+            .collect();
+        for (id, event) in events {
+            match event {
+                UiEvent::Progress { bytes, .. } if bytes > 0 => drained.moved = true,
+                UiEvent::Offer(_) => receiver.accept_offer(id),
+                UiEvent::Failed(_) => drained.failed += 1,
+                UiEvent::Finished { .. } => drained.finished += 1,
+                _ => {}
+            }
+        }
+        drained
+    }
+
+    fn drive_round(receiver: &mut Engine, sender: &mut Engine) -> Result<(), String> {
+        let mut terminal = 0;
+        for _ in 0..1200 {
+            let drained = drain(receiver, sender);
+            if drained.failed > 0 {
+                return Err("a side failed".into());
+            }
+            terminal += drained.terminal();
+            if terminal >= 2 {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err("round did not finish within 60s".into())
     }
 
     /// A demo does not stop after one transfer. This drives two rounds through
@@ -623,8 +700,8 @@ mod tests {
                 .collect();
             std::fs::write(&source, &payload).expect("write source");
 
-            receiver.start_receive(save_directory.clone());
-            let invite = wait_for_invite(&mut receiver)
+            let incoming = receiver.start_receive(save_directory.clone());
+            let invite = wait_for_invite(&mut receiver, incoming)
                 .unwrap_or_else(|error| panic!("round {round}: {error}"));
             sender.start_send(vec![source], invite);
             drive_round(&mut receiver, &mut sender)
@@ -636,39 +713,57 @@ mod tests {
         }
     }
 
-    /// Drains both engines once, reporting whether payload moved and how many
-    /// sides ended, split by outcome so a cancel cannot be confused with a
-    /// completion that beat it.
-    #[derive(Default)]
-    struct Drained {
-        moved: bool,
-        failed: usize,
-        finished: usize,
-    }
+    /// Two transfers running at the same time, which is what the card list
+    /// exists for. Each must land its own bytes; a shared cancel token or a
+    /// mis-routed event would cross them over.
+    #[test]
+    #[ignore = "requires the deployed rendezvous to be reachable"]
+    fn two_transfers_at_once() {
+        let context = egui::Context::default();
+        let mut receiver = Engine::new(context.clone());
+        let mut sender = Engine::new(context);
+        let workspace = tempfile::tempdir().expect("tempdir");
 
-    impl Drained {
-        fn terminal(&self) -> usize {
-            self.failed + self.finished
+        let mut expected = Vec::new();
+        for lane in 0..2_u8 {
+            let save_directory = workspace.path().join(format!("lane-{lane}"));
+            let source = workspace.path().join(format!("lane-{lane}.bin"));
+            // Distinct contents, so a crossed transfer fails the comparison.
+            let payload: Vec<u8> = (0..48 * 1024)
+                .map(|index| ((index * 7 + usize::from(lane) * 101) % 251) as u8)
+                .collect();
+            std::fs::write(&source, &payload).expect("write source");
+
+            let incoming = receiver.start_receive(save_directory.clone());
+            let invite = wait_for_invite(&mut receiver, incoming)
+                .unwrap_or_else(|error| panic!("lane {lane}: {error}"));
+            sender.start_send(vec![source], invite);
+            expected.push((save_directory.join(format!("lane-{lane}.bin")), payload));
         }
-    }
 
-    fn drain(receiver: &mut Engine, sender: &mut Engine) -> Drained {
-        let mut drained = Drained::default();
-        for event in receiver
-            .poll()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .chain(sender.poll().collect::<Vec<_>>())
-        {
-            match event {
-                UiEvent::Progress { bytes, .. } if bytes > 0 => drained.moved = true,
-                UiEvent::Offer(_) => receiver.accept_offer(),
-                UiEvent::Failed(_) => drained.failed += 1,
-                UiEvent::Finished { .. } => drained.finished += 1,
-                _ => {}
+        // Both lanes are in flight together; wait for four terminal events.
+        let mut terminal = 0;
+        for _ in 0..2400 {
+            let drained = drain(&mut receiver, &mut sender);
+            assert_eq!(drained.failed, 0, "a concurrent lane failed");
+            terminal += drained.terminal();
+            if terminal >= 4 {
+                break;
             }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        drained
+        assert!(terminal >= 4, "concurrent lanes did not both finish");
+
+        for (path, payload) in expected {
+            let landed =
+                std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            assert_eq!(
+                landed,
+                payload,
+                "{} received the wrong bytes",
+                path.display()
+            );
+        }
     }
 
     /// A demo that goes wrong has to recover. Cancelling mid-flight must end
@@ -685,9 +780,9 @@ mod tests {
 
         let source = workspace.path().join("large.bin");
         std::fs::write(&source, vec![7_u8; 32 * 1024 * 1024]).expect("write source");
-        receiver.start_receive(workspace.path().join("abandoned"));
-        let invite = wait_for_invite(&mut receiver).expect("first invitation");
-        sender.start_send(vec![source], invite);
+        let incoming = receiver.start_receive(workspace.path().join("abandoned"));
+        let invite = wait_for_invite(&mut receiver, incoming).expect("first invitation");
+        let outgoing = sender.start_send(vec![source], invite);
 
         let mut moved = false;
         let mut early_finished = 0;
@@ -707,8 +802,8 @@ mod tests {
              raise the payload size so the cancel lands mid-flight"
         );
 
-        sender.cancel();
-        receiver.cancel();
+        sender.cancel(outgoing);
+        receiver.cancel(incoming);
 
         let mut terminal = 0;
         let mut failed = 0;
@@ -735,8 +830,8 @@ mod tests {
         let source = workspace.path().join("small.bin");
         let payload: Vec<u8> = (0..32 * 1024).map(|index| (index % 251) as u8).collect();
         std::fs::write(&source, &payload).expect("write source");
-        receiver.start_receive(save_directory.clone());
-        let invite = wait_for_invite(&mut receiver).expect("second invitation");
+        let incoming = receiver.start_receive(save_directory.clone());
+        let invite = wait_for_invite(&mut receiver, incoming).expect("second invitation");
         sender.start_send(vec![source], invite);
         drive_round(&mut receiver, &mut sender).expect("transfer after a cancel");
 

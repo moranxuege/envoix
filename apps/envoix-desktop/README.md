@@ -35,10 +35,14 @@ A directional invitation through the deployed rendezvous, using the same
     Receiver                          Sender
     ---------------------------       ---------------------------
     Receive tab -> "Receive"          Send tab -> "Choose files"
-    QR + room code appear             paste the invite
+    a card appears with QR + code     paste the invite
     "Copy invite" -> send to peer     -> "Send"
-    offer arrives
+    offer arrives on the card
     "Accept and save"
+
+Each transfer is a card in the activity pane, and several run at once. The
+invitation belongs to its own card rather than the composer, so two waiting
+receives show two distinct codes.
 
 The receiver parks on the authenticated offer until it is accepted, which is
 the product's inspect-before-payload behaviour rather than an auto-accept.
@@ -78,15 +82,16 @@ Visual C++ redistributable.
 Two machines, one transfer, roughly ninety seconds.
 
 1. **Receiver**: launch, leave the composer on **Receive**, set **Save to** if
-   the default is wrong, press **Receive**. A QR and a room code appear.
+   the default is wrong, press **Receive**. A card appears carrying its QR and
+   room code.
 2. **Sender**: launch, press **Send**, then drag the files onto the window (or
    **Choose files**). The card reports the item count and total size.
-3. **Receiver**: press **Copy invite** - the button confirms with "Copied" -
-   and get that string to the sender by any means. The QR carries the same
+3. **Receiver**: press **Copy invite** on that card - it confirms with "Copied"
+   - and get the string to the sender by any means. The QR carries the same
    payload for a phone.
 4. **Sender**: paste into **Invite from the receiver**, press **Send**.
-5. **Receiver**: the card reaches *Needs approval* with the inventory. Press
-   **Accept and save**; the QR withdraws, because the invitation is spent.
+5. **Receiver**: that card reaches *Needs approval* with the inventory. Press
+   **Accept and save**; its QR withdraws, because the invitation is spent.
 6. The bar turns green on delivery and **Open folder** reveals the files.
 
 If the venue's NAT defeats hole punching, start both sides with
@@ -169,6 +174,6 @@ defeats hole punching, or to separate a transport fault from an application one.
 
 ## Not covered
 
-mDNS/LAN discovery, manual peer descriptors, resume, cancel mid-payload beyond
-dropping the session, multi-transfer history, settings, and QR *scanning*
-(display only). The transfer list holds one transfer at a time.
+mDNS/LAN discovery, manual peer descriptors, resume, settings, persistence
+across restarts, and QR *scanning* (display only). Cancelling drops the session
+rather than pausing it, and dismissed cards are gone rather than archived.
