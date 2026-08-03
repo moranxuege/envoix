@@ -3,6 +3,7 @@ package dev.envoix.app.ui
 import android.content.Context
 import dev.envoix.app.Native
 import dev.envoix.app.OpLog
+import dev.envoix.app.RememberedPeerStore
 import dev.envoix.app.RoomControlCallback
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
@@ -37,6 +38,7 @@ internal class NativeRoomControlGateway(
 
     private val identityPath =
         roomControlIdentityPath(context.filesDir, rememberedRelationshipId)
+    private val rememberedStore = RememberedPeerStore.get(context)
     private val sessionLock = Any()
 
     @Volatile
@@ -49,6 +51,7 @@ internal class NativeRoomControlGateway(
     @Volatile
     private var localCloseReason: RoomCloseReason? = null
     private var hostSettings: HostSettings? = null
+    private var pendingDeviceVerification: DeviceVerificationPersistence? = null
     private val pendingOfferResponses = ConcurrentHashMap<String, PendingOfferResponse>()
 
     override suspend fun host(
@@ -67,6 +70,15 @@ internal class NativeRoomControlGateway(
             endpoint = invite.endpoint,
             initialEvent = RoomControlEvent.Hosting(invite),
         )
+    }
+
+    override suspend fun hostVerified(
+        input: String,
+        displayName: String,
+        peerLabel: String,
+    ) {
+        hostSettings = null
+        startVerifiedSession("host", input, displayName, peerLabel)
     }
 
     override suspend fun join(
@@ -91,6 +103,43 @@ internal class NativeRoomControlGateway(
             fallbackRelay = settings.relay,
             endpoint = invite.endpoint,
             initialEvent = RoomControlEvent.Joining(invite.endpoint),
+        )
+    }
+
+    override suspend fun joinVerified(
+        input: String,
+        displayName: String,
+        peerLabel: String,
+    ) {
+        hostSettings = null
+        startVerifiedSession("join", input, displayName, peerLabel)
+    }
+
+    private fun startVerifiedSession(
+        mode: String,
+        input: String,
+        displayName: String,
+        peerLabel: String,
+    ) {
+        val settings = dev.envoix.app.SettingsStore.settings.value
+        val invite =
+            parseInviteResponse(
+                Native.parseRoomControlInvite(input, settings.broker, settings.relay),
+            )
+        startSession(
+            mode = mode,
+            input = invite.payload,
+            displayName = displayName,
+            fallbackBroker = settings.broker,
+            fallbackRelay = settings.relay,
+            endpoint = invite.endpoint,
+            initialEvent =
+                if (mode == "host") {
+                    RoomControlEvent.Hosting(invite)
+                } else {
+                    RoomControlEvent.Joining(invite.endpoint)
+                },
+            pendingVerification = DeviceVerificationPersistence(peerLabel, invite.endpoint),
         )
     }
 
@@ -230,6 +279,7 @@ internal class NativeRoomControlGateway(
         initialEvent: RoomControlEvent?,
         rememberedCredentialReference: String? = null,
         rememberedGeneration: Long? = null,
+        pendingVerification: DeviceVerificationPersistence? = null,
     ) = synchronized(sessionLock) {
         cancelCurrentLocked()
         val id = nextSessionId.getAndIncrement()
@@ -237,6 +287,7 @@ internal class NativeRoomControlGateway(
         latestSessionId = id
         connected = false
         localCloseReason = null
+        pendingDeviceVerification = pendingVerification
         initialEvent?.let { emit(id, it) }
         val params =
             JSONObject()
@@ -246,6 +297,7 @@ internal class NativeRoomControlGateway(
                 .put("identity_path", identityPath)
                 .put("fallback_broker", fallbackBroker)
                 .put("fallback_relay", fallbackRelay)
+                .put("verified_pairing", pendingVerification != null)
                 .apply {
                     rememberedCredentialReference?.let {
                         put("remembered_credential_ref", it)
@@ -312,12 +364,41 @@ internal class NativeRoomControlGateway(
                             failInvalidLifetimeLocked(id)
                             return@synchronized
                         }
+                val peerName = value.optString("peer_name").takeIf(String::isNotBlank)
+                pendingDeviceVerification?.let { pending ->
+                    val credential = value.byteArray("pairing_credential")
+                    val rememberedPeer =
+                        runCatching {
+                            rememberedStore.prepare(
+                                peerName ?: pending.fallbackLabel,
+                                pending.endpoint.broker,
+                                pending.endpoint.relay,
+                            )
+                        }.getOrNull()
+                    if (credential == null ||
+                        rememberedPeer == null ||
+                        !rememberedStore.create(rememberedPeer, credential, 0L)
+                    ) {
+                        pendingDeviceVerification = null
+                        cancelGenerationLocked(id)
+                        OpLog.add("ROOM_CONTROL state=failed cause=verification_persistence")
+                        emit(
+                            id,
+                            RoomControlEvent.Failed(
+                                "The verified device credential could not be protected on this device",
+                                peerAuthenticated = true,
+                            ),
+                        )
+                        return@synchronized
+                    }
+                    pendingDeviceVerification = null
+                }
                 connected = true
                 OpLog.add("ROOM_CONTROL state=connected")
                 emit(
                     id,
                     RoomControlEvent.Connected(
-                        peerName = value.optString("peer_name").takeIf(String::isNotBlank),
+                        peerName = peerName,
                         creator = value.optBoolean("creator"),
                         endpoint = endpoint,
                         lifetime = lifetime,
@@ -407,6 +488,7 @@ internal class NativeRoomControlGateway(
                 failPendingResponses("The room closed before the response was delivered")
                 connected = false
                 activeSessionId = null
+                pendingDeviceVerification = null
                 val localReason = localCloseReason
                 localCloseReason = null
                 val nativeReason = value.optString("reason").roomCloseReason()
@@ -431,6 +513,7 @@ internal class NativeRoomControlGateway(
                 )
                 connected = false
                 activeSessionId = null
+                pendingDeviceVerification = null
                 Native.cancelRoomControlSession(id)
                 OpLog.add("ROOM_CONTROL state=failed message=$message")
                 emit(
@@ -466,6 +549,7 @@ internal class NativeRoomControlGateway(
             failPendingResponses("The room-control session was canceled")
             connected = false
             localCloseReason = null
+            pendingDeviceVerification = null
         }
     }
 
@@ -480,6 +564,7 @@ internal class NativeRoomControlGateway(
         activeSessionId = null
         connected = false
         localCloseReason = null
+        pendingDeviceVerification = null
         Native.cancelRoomControlSession(id)
     }
 
@@ -535,6 +620,24 @@ internal class NativeRoomControlGateway(
     private companion object {
         val nextSessionId = AtomicLong(1L)
     }
+}
+
+private data class DeviceVerificationPersistence(
+    val fallbackLabel: String,
+    val endpoint: RoomControlEndpoint,
+)
+
+private fun JSONObject.byteArray(name: String): ByteArray? {
+    val values = optJSONArray(name) ?: return null
+    if (values.length() !in 1..256) return null
+    val output = ByteArray(values.length())
+    for (index in output.indices) {
+        val value = values.opt(index) as? Number ?: return null
+        val byte = value.toInt()
+        if (byte !in 0..255 || value.toLong() != byte.toLong()) return null
+        output[index] = byte.toByte()
+    }
+    return output
 }
 
 /**

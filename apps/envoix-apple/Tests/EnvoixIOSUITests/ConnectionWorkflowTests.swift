@@ -734,7 +734,7 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 12)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 13)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
         XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v5")
         XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
@@ -981,6 +981,29 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(workflow.room?.origin, .roomControl)
         XCTAssertEqual(workflow.room?.nearbySelection, selection)
         XCTAssertEqual(workflow.room?.endpoint, endpoint)
+    }
+
+    func testVerifiedNearbyHostPreparesProtectedPersistence() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: "https://relay.example.test"
+        )
+
+        XCTAssertNil(workflow.startHosting(
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: [],
+            nearbySelection: wifiAwareSelection(),
+            invitationInput: "envoix://room/123456-v165-4321",
+            verifiedPeerLabel: "Nearby iPad"
+        ))
+        XCTAssertEqual(gateway.preparedVerification?.label, "Nearby iPad")
+        XCTAssertEqual(gateway.preparedVerification?.endpoint, endpoint)
+        await Task.yield()
     }
 
     func testHostingInvitationScopeCannotBeReassignedBeforeConnected() async {
@@ -1660,6 +1683,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     private(set) var rememberedAttempts: [RememberedRoomConnectAttempt] = []
     private(set) var idleExpiryAttempts = 0
     private(set) var closeReasons: [RoomControlCloseReason] = []
+    private(set) var preparedVerification: (label: String, endpoint: RoomControlEndpoint)?
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         if let invitationError {
@@ -1680,6 +1704,13 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
         now: Date
     ) throws -> RoomControlInvitation {
         try makeInvitation(broker: broker, relay: relay, now: now)
+    }
+
+    func prepareDeviceVerification(
+        label: String,
+        endpoint: RoomControlEndpoint
+    ) throws {
+        preparedVerification = (label, endpoint)
     }
 
     func host(

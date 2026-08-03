@@ -547,6 +547,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
             join_invite,
             "Bob's Android".into(),
             false,
+            true,
             test_config(),
             &TransferCancelToken::new(),
         )
@@ -563,6 +564,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
         connect_room_control(
             host_invite,
             "Alice's iPhone".into(),
+            true,
             true,
             test_config(),
             &TransferCancelToken::new(),
@@ -590,6 +592,12 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
     assert_eq!(joiner.peer_name(), "Alice's iPhone");
     assert!(host.is_creator());
     assert!(!joiner.is_creator());
+    assert_eq!(
+        host.pairing_credential().expect("host pairing credential"),
+        joiner
+            .pairing_credential()
+            .expect("joiner pairing credential")
+    );
     assert!(
         registry.metrics_snapshot().room_not_found_rejections >= 1,
         "joiner-first connection should exercise the broker retry path"

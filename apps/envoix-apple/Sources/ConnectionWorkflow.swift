@@ -264,6 +264,7 @@ final class ConnectionWorkflowState: ObservableObject {
     private var controlGeneration = 0
     private var baselineActivityIDs: Set<String> = []
     private var pendingControlNearbySelection: NearbyPairingSelection?
+    private var pendingDeviceVerification = false
     private var outgoingDecisions: [String: (Bool) -> Void] = [:]
     private var incomingRoomOfferDeadline: Date?
     private var lifetimeRevision: UInt64?
@@ -979,23 +980,42 @@ final class ConnectionWorkflowState: ObservableObject {
         displayName: String,
         identityPath: String,
         existingActivityIDs: Set<String>,
-        nearbySelection: NearbyPairingSelection? = nil
+        nearbySelection: NearbyPairingSelection? = nil,
+        invitationInput: String? = nil,
+        verifiedPeerLabel: String? = nil
     ) -> String? {
         guard let gateway else {
             return "Room control is unavailable in this build."
         }
         do {
             let now = clock()
-            let invitation = try gateway.makeInvitation(
-                broker: broker,
-                relay: relay,
-                now: now
-            )
+            let invitation: RoomControlInvitation
+            if let invitationInput {
+                invitation = try gateway.parseInvitation(
+                    invitationInput,
+                    broker: broker,
+                    relay: relay,
+                    now: now
+                )
+            } else {
+                invitation = try gateway.makeInvitation(
+                    broker: broker,
+                    relay: relay,
+                    now: now
+                )
+            }
             // Generate the replacement before touching the active host. A
             // refresh failure must not invalidate a room code that still
             // works on the other device.
             gateway.close(reason: .userEnded)
             endLocalState()
+            if let verifiedPeerLabel {
+                try gateway.prepareDeviceVerification(
+                    label: verifiedPeerLabel,
+                    endpoint: invitation.endpoint
+                )
+            }
+            pendingDeviceVerification = verifiedPeerLabel != nil
             roomInvitation = invitation
             controlPhase = .hosting
             isRoomCreator = true
@@ -1038,7 +1058,8 @@ final class ConnectionWorkflowState: ObservableObject {
         displayName: String,
         identityPath: String,
         existingActivityIDs: Set<String>,
-        nearbySelection: NearbyPairingSelection? = nil
+        nearbySelection: NearbyPairingSelection? = nil,
+        verifiedPeerLabel: String? = nil
     ) -> String? {
         guard let gateway else {
             return "Room control is unavailable in this build."
@@ -1052,6 +1073,13 @@ final class ConnectionWorkflowState: ObservableObject {
                 relay: relay,
                 now: clock()
             )
+            if let verifiedPeerLabel {
+                try gateway.prepareDeviceVerification(
+                    label: verifiedPeerLabel,
+                    endpoint: invitation.endpoint
+                )
+            }
+            pendingDeviceVerification = verifiedPeerLabel != nil
             roomInvitation = invitation
             controlPhase = .joining
             isRoomCreator = false
@@ -1281,6 +1309,7 @@ final class ConnectionWorkflowState: ObservableObject {
         incomingRoomOfferDeadline = nil
         roomInvitation = nil
         pendingControlNearbySelection = nil
+        pendingDeviceVerification = false
         idleDeadline = nil
         lifetimeRevision = nil
         requestedLocalTransferActive = nil
@@ -1301,6 +1330,10 @@ final class ConnectionWorkflowState: ObservableObject {
         case .connected(let name, let creator, let lifetime):
             guard controlPhase == .hosting || controlPhase == .joining else { return }
             let endpoint = roomInvitation?.endpoint
+            if pendingDeviceVerification {
+                refreshRememberedRooms()
+                pendingDeviceVerification = false
+            }
             peerDisplayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(name)
                 ?? "Nearby device"
             isRoomCreator = creator
@@ -1313,6 +1346,7 @@ final class ConnectionWorkflowState: ObservableObject {
                 baselineActivityIDs: baselineActivityIDs
             )
             pendingControlNearbySelection = nil
+            pendingDeviceVerification = false
             applyLifetime(lifetime)
         case .incomingOffer(let offer):
             guard controlPhase == .connected, incomingRoomOffer == nil else { return }
@@ -1342,6 +1376,7 @@ final class ConnectionWorkflowState: ObservableObject {
             incomingRoomOfferDeadline = nil
             roomInvitation = nil
             pendingControlNearbySelection = nil
+            pendingDeviceVerification = false
             idleDeadline = nil
             lifetimeRevision = nil
             requestedLocalTransferActive = nil
@@ -1539,6 +1574,7 @@ final class ConnectionWorkflowState: ObservableObject {
         incomingRoomOfferDeadline = nil
         roomInvitation = nil
         pendingControlNearbySelection = nil
+        pendingDeviceVerification = false
         idleDeadline = nil
         lifetimeRevision = nil
         requestedLocalTransferActive = nil
@@ -1574,6 +1610,7 @@ final class ConnectionWorkflowState: ObservableObject {
         incomingRoomOfferDeadline = nil
         roomInvitation = nil
         pendingControlNearbySelection = nil
+        pendingDeviceVerification = false
         peerDisplayName = nil
         idleDeadline = nil
         lifetimeRevision = nil

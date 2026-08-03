@@ -570,7 +570,9 @@ private final class FixtureNearbyDiscoveryProvider: NearbyRendezvousProvider {
         let validPeer = NearbyDiscoveryPeerRegistry.normalizePeerKey(
             selection.discoveryPeerKey
         ) != nil
-        let validInvite = BleRendezvousProtocol.isSupportedInvite(invite.trimmed)
+        let validInvite = source == .bluetooth
+            ? BleRendezvousProtocol.isSupportedBluetoothVerificationOffer(invite.trimmed)
+            : BleRendezvousProtocol.isSupportedInvite(invite.trimmed)
         completion(validPeer && validInvite ? nil : "Invalid fixture invitation")
     }
 

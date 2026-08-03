@@ -218,6 +218,10 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
             }
             return
         }
+        guard BleRendezvousProtocol.isSupportedBluetoothVerificationOffer(invite) else {
+            completion("Bluetooth accepts only a public device-verification offer")
+            return
+        }
         guard active, centralManager?.state == .poweredOn else {
             completion("Experimental Bluetooth pairing is not ready")
             return
@@ -245,7 +249,7 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
         outbound = offer
         peripheral.delegate = self
         logger.info(
-            "BLE_RENDEZVOUS direction=outbound state=connecting request_id=\(self.requestIDText(requestID), privacy: .public) auth=none"
+            "BLE_RENDEZVOUS direction=outbound state=connecting request_id=\(self.requestIDText(requestID), privacy: .public) verification=pending payload=public"
         )
         let timeout = DispatchWorkItem { [weak self] in
             self?.completeOutbound(error: "Bluetooth invitation delivery timed out", state: "timeout")
@@ -354,9 +358,13 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
     }
 
     private func handleInboundInvite(_ invite: BleRendezvousInvite) {
-        guard active, invite.senderPeerKey != identity.peerKey else { return }
+        guard active,
+              invite.senderPeerKey != identity.peerKey,
+              BleRendezvousProtocol.isSupportedBluetoothVerificationOffer(invite.invite) else {
+            return
+        }
         logger.info(
-            "BLE_RENDEZVOUS direction=inbound state=received request_id=\(invite.requestID, privacy: .public) auth=none"
+            "BLE_RENDEZVOUS direction=inbound state=received request_id=\(invite.requestID, privacy: .public) verification=pending payload=public"
         )
         sink?(.rendezvousOffer(NearbyRendezvousOffer(
             requestID: invite.requestID,
@@ -527,7 +535,7 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyRendezvousProvider,
         centralManager?.cancelPeripheralConnection(offer.peripheral)
         offer.peripheral.delegate = nil
         logger.info(
-            "BLE_RENDEZVOUS direction=outbound state=\(state, privacy: .public) request_id=\(self.requestIDText(offer.requestID), privacy: .public) auth=none"
+            "BLE_RENDEZVOUS direction=outbound state=\(state, privacy: .public) request_id=\(self.requestIDText(offer.requestID), privacy: .public) verification=pending payload=public"
         )
         offer.completion(error)
     }

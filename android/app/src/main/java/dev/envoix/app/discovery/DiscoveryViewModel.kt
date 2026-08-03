@@ -317,9 +317,7 @@ internal class DiscoveryViewModel(
                     if (!started || generation != activeGeneration || offer.senderPeerKey == identity.peerKey) {
                         return@launch
                     }
-                    if (InviteCodec.parseForRouting(offer.invite) == null &&
-                        !RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)
-                    ) {
+                    if (!isSupportedIncomingRendezvousOffer(offer)) {
                         OpLog.add("DISCOVERY provider=${offer.source.logName()} state=invalid_offer")
                         return@launch
                     }
@@ -390,6 +388,17 @@ internal class DiscoveryViewModel(
         private val UPPERCASE_BOUNDARY = Regex("(?<=[a-z])(?=[A-Z])")
     }
 }
+
+internal fun isSupportedIncomingRendezvousOffer(offer: NearbyRendezvousOffer): Boolean =
+    when (offer.source) {
+        DiscoverySource.Bluetooth -> BleVerificationInvitation.isPublicOffer(offer.invite)
+        else ->
+            !BleVerificationInvitation.isPublicOffer(offer.invite) &&
+                (
+                    InviteCodec.parseForRouting(offer.invite) != null ||
+                        RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)
+                )
+    }
 
 private data class PresenceSettings(
     val displayName: String,

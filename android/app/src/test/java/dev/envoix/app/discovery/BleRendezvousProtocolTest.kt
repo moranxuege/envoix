@@ -1,14 +1,15 @@
 package dev.envoix.app.discovery
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BleRendezvousProtocolTest {
     private val identity = LocalDiscoveryIdentity("0011223344556677", "Android phone")
-    private val invite = "envoix://invite/v2/test-payload"
-    private val roomInvite = "envoix://room/123456-a1b2-c3d4?broker=example.test&expires=42"
+
+    private fun offer(): String = "envoix://ble/v1/123456?broker=example.test&expires=${System.currentTimeMillis() / 1_000L + 300}"
 
     @Test
     fun `round trips a full BLE discovery identity`() {
@@ -67,6 +68,7 @@ class BleRendezvousProtocolTest {
 
     @Test
     fun `round trips a fragmented invite`() {
+        val invite = offer()
         val frames =
             requireNotNull(
                 BleRendezvousProtocol.encodeInvite(identity, invite, REQUEST_ID, maximumFrameBytes = 31),
@@ -83,25 +85,21 @@ class BleRendezvousProtocolTest {
     }
 
     @Test
-    fun `round trips a room control invite`() {
-        val frames =
-            requireNotNull(
-                BleRendezvousProtocol.encodeInvite(
-                    identity,
-                    roomInvite,
-                    REQUEST_ID,
-                    maximumFrameBytes = 31,
-                ),
-            )
-        val assembler = BleRendezvousProtocol.Assembler()
-
-        val decoded = frames.mapNotNull(assembler::accept).single()
-
-        assertEquals(roomInvite, decoded.invite)
+    fun `rejects plaintext room and transfer invitations`() {
+        assertNull(
+            BleRendezvousProtocol.encodeInvite(
+                identity,
+                "envoix://room/123456-a1b2-c3d4?broker=example.test",
+                REQUEST_ID,
+                128,
+            ),
+        )
+        assertNull(BleRendezvousProtocol.encodeInvite(identity, "envoix://invite/v2/secret", REQUEST_ID, 128))
     }
 
     @Test
     fun `rejects an out of order continuation and resets`() {
+        val invite = offer()
         val frames =
             requireNotNull(
                 BleRendezvousProtocol.encodeInvite(identity, invite, REQUEST_ID, maximumFrameBytes = 31),
@@ -126,6 +124,7 @@ class BleRendezvousProtocolTest {
                 "envoix://invite/v2/",
                 "envoix://room/R123456-a1b2-c3d4",
                 "envoix://room/123456-alpha-bravo",
+                "envoix://invite/v2/secret",
             )
         unsupported.forEach {
             assertNull(BleRendezvousProtocol.encodeInvite(identity, it, REQUEST_ID, 64))
@@ -133,7 +132,7 @@ class BleRendezvousProtocolTest {
         assertNull(
             BleRendezvousProtocol.encodeInvite(
                 identity,
-                "envoix://invite/v2/" + "x".repeat(BleRendezvousProtocol.MAX_INVITE_BYTES),
+                "envoix://ble/v1/123456?broker=" + "x".repeat(BleRendezvousProtocol.MAX_INVITE_BYTES),
                 REQUEST_ID,
                 64,
             ),
@@ -141,7 +140,7 @@ class BleRendezvousProtocolTest {
         assertNull(
             BleRendezvousProtocol.encodeInvite(
                 identity,
-                invite,
+                offer(),
                 REQUEST_ID,
                 BleRendezvousProtocol.FRAME_HEADER_SIZE,
             ),
@@ -150,6 +149,7 @@ class BleRendezvousProtocolTest {
 
     @Test
     fun `rejects a mismatched security mode`() {
+        val invite = offer()
         val frames =
             requireNotNull(
                 BleRendezvousProtocol.encodeInvite(identity, invite, REQUEST_ID, maximumFrameBytes = 128),
@@ -157,6 +157,47 @@ class BleRendezvousProtocolTest {
         frames.first()[BleRendezvousProtocol.FRAME_HEADER_SIZE] = 1
 
         assertNull(BleRendezvousProtocol.Assembler().accept(frames.single()))
+    }
+
+    @Test
+    fun `verification code reconstructs the private PAKE invitation`() {
+        val now = 1_700_000_000_000L
+        val publicOffer =
+            "envoix://ble/v1/123456?broker=example.test&relay=https%3A%2F%2Frelay.test&expires=1700000300"
+
+        val invitation = requireNotNull(BleVerificationInvitation.resolve(publicOffer, "654321", now))
+        val query = java.net.URI(invitation).rawQuery
+
+        assertEquals("/123456-db32-0129", java.net.URI(invitation).path)
+        assertTrue(query.contains("broker=example.test"))
+        assertTrue(BleVerificationInvitation.isPublicOffer(publicOffer, now))
+        assertNull(BleVerificationInvitation.resolve(publicOffer, "65432", now))
+        assertNull(BleVerificationInvitation.resolve(publicOffer, "654321", now + 300_000L))
+        assertNull(BleVerificationInvitation.resolve("$publicOffer&relay", "654321", now))
+        assertNull(BleVerificationInvitation.resolve("$publicOffer&relay=%", "654321", now))
+        val tamperedOffer = publicOffer.replace("broker=example.test", "broker=other.test")
+        assertNotEquals(
+            java.net.URI(invitation).path,
+            java.net.URI(requireNotNull(BleVerificationInvitation.resolve(tamperedOffer, "654321", now))).path,
+        )
+    }
+
+    @Test
+    fun `generated verification offer round trips without reusing the public locator as code`() {
+        val now = 1_700_000_000_000L
+        val verification = BleVerificationInvitation.create("example.test", "", now)
+
+        assertEquals(
+            verification.privateInvitation,
+            BleVerificationInvitation.resolve(verification.publicOffer, verification.verificationCode, now),
+        )
+        assertNotEquals(
+            verification.verificationCode,
+            java.net
+                .URI(verification.publicOffer)
+                .path
+                .substringAfterLast('/'),
+        )
     }
 
     companion object {

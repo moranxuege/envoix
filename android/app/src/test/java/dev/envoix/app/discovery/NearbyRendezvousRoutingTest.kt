@@ -79,6 +79,37 @@ class NearbyRendezvousRoutingTest {
     }
 
     @Test
+    fun `public verification offers are admitted only from Bluetooth`() {
+        val expires = System.currentTimeMillis() / 1_000L + 300
+        val publicOffer = "envoix://ble/v1/123456?broker=example.test&expires=$expires"
+
+        fun offer(source: DiscoverySource) =
+            NearbyRendezvousOffer(
+                "request",
+                "0011223344556677",
+                "Phone",
+                publicOffer,
+                source = source,
+            )
+
+        assertTrue(isSupportedIncomingRendezvousOffer(offer(DiscoverySource.Bluetooth)))
+        assertFalse(isSupportedIncomingRendezvousOffer(offer(DiscoverySource.Mdns)))
+        assertFalse(isSupportedIncomingRendezvousOffer(offer(DiscoverySource.WifiAware)))
+        assertFalse(
+            isSupportedIncomingRendezvousOffer(
+                offer(DiscoverySource.Bluetooth).copy(
+                    invite = "envoix://room/123456-a1b2-c3d4?broker=example.test",
+                ),
+            ),
+        )
+        assertFalse(
+            isSupportedIncomingRendezvousOffer(
+                offer(DiscoverySource.Bluetooth).copy(invite = "envoix://invite/v2/secret"),
+            ),
+        )
+    }
+
+    @Test
     fun `endpoint ids are normalized before native routing`() {
         assertEquals(
             ENDPOINT_ID,

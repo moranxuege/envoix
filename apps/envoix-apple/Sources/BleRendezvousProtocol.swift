@@ -8,7 +8,7 @@ protocol BleRendezvousSecurity {
     func open(_ payload: Data) -> Data?
 }
 
-/// Experimental carrier only. This mode provides no peer authentication or confidentiality.
+/// Plaintext is intentional here: BLE may carry only a secret-free verification locator.
 struct InsecureBleRendezvousSecurity: BleRendezvousSecurity {
     let mode: UInt8 = 0
     let logName = "none"
@@ -107,7 +107,7 @@ enum BleRendezvousProtocol {
         guard let peerKey = NearbyDiscoveryPeerRegistry.normalizePeerKey(identity.peerKey) else { return nil }
         let normalizedInvite = invite.trimmingCharacters(in: .whitespacesAndNewlines)
         let inviteBytes = Array(normalizedInvite.utf8)
-        guard isSupportedInvite(normalizedInvite),
+        guard isSupportedBluetoothVerificationOffer(normalizedInvite),
               !inviteBytes.isEmpty,
               inviteBytes.count <= maximumInviteBytes else {
             return nil
@@ -221,7 +221,7 @@ enum BleRendezvousProtocol {
         guard let name = String(bytes: bytes[nameStart..<inviteStart], encoding: .utf8),
               let invite = String(bytes: bytes[inviteStart...], encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-              isSupportedInvite(invite) else {
+              isSupportedBluetoothVerificationOffer(invite) else {
             return nil
         }
         return BleRendezvousInvite(
@@ -241,6 +241,10 @@ enum BleRendezvousProtocol {
         let suffix = value.dropFirst(roomControlURLPrefix.count)
         let code = String(suffix.prefix { $0 != "?" })
         return canonicalBareRoomControlCode(code) == code
+    }
+
+    static func isSupportedBluetoothVerificationOffer(_ value: String) -> Bool {
+        BleVerificationInvitation.isPublicOffer(value)
     }
 
     private static func normalizedDisplayName(_ value: String?) -> String? {

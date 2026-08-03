@@ -907,7 +907,19 @@ struct ConnectionHubView: View {
                     .lineLimit(2)
 
                 Text(invitationAvailable
-                    ? AppText.value("Unverified", "未经验证", language: language)
+                    ? AppText.value(
+                        peer.sources.contains(.bluetooth)
+                            && peer.inviteRoute == nil
+                            && peer.nearbyWifiAwareDeviceID == nil
+                            ? "Tap to verify"
+                            : "Unverified",
+                        peer.sources.contains(.bluetooth)
+                            && peer.inviteRoute == nil
+                            && peer.nearbyWifiAwareDeviceID == nil
+                            ? "轻触验证"
+                            : "未经验证",
+                        language: language
+                    )
                     : AppText.value(
                         "Invitation path not ready",
                         "邀请路径尚未就绪",

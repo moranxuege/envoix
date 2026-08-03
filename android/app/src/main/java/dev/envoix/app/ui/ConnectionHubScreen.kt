@@ -34,6 +34,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.envoix.app.NfcPhoneHostingState
 import dev.envoix.app.NfcPhoneReaderState
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveredPeer
 import dev.envoix.app.discovery.DiscoveryPermissions
 import dev.envoix.app.discovery.DiscoverySource
@@ -66,7 +67,7 @@ internal fun ConnectionHubScreen(
     onActivity: () -> Unit,
     onRooms: () -> Unit,
     onSettings: () -> Unit,
-    onAcceptIncomingOffer: (NearbyRendezvousOffer) -> Boolean,
+    onAcceptIncomingOffer: (NearbyRendezvousOffer, String?) -> Boolean,
     onCancelReplacement: () -> Unit,
     onConfirmReplacement: () -> Unit,
     onExternalActivityChanged: (Boolean) -> Unit,
@@ -322,13 +323,16 @@ internal fun ConnectionHubScreen(
         )
     }
     discovery.incomingRendezvousOffers.firstOrNull()?.let { offer ->
+        val verificationOffer = BleVerificationInvitation.isPublicOffer(offer.invite)
         IncomingNearbyInvitationDialog(
+            offerId = offer.requestId,
             roomInvitation = RoomControlInviteFormat.looksLikeRoomInvite(offer.invite),
+            verificationOffer = verificationOffer,
             peerName =
                 offer.senderDisplayName
                     ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
-            onAccept = {
-                if (!onAcceptIncomingOffer(offer)) {
+            onAccept = { code ->
+                if (!onAcceptIncomingOffer(offer, code)) {
                     localError =
                         AppText.value(
                             "This invitation is not supported.",

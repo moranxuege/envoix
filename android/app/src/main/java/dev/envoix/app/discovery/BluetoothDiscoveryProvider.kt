@@ -712,6 +712,10 @@ internal class BluetoothDiscoveryProvider(
         invite: String,
         completion: (String?) -> Unit,
     ) {
+        if (!BleRendezvousProtocol.supportsBluetoothVerificationOffer(invite)) {
+            completion("Bluetooth accepts only a public device-verification offer")
+            return
+        }
         val normalizedPeerKey = DiscoveryPeerRegistry.normalizePeerKey(selection.discoveryPeerKey)
         val device = normalizedPeerKey?.let(discoveredDevices::get)
         if (!active || !scanning) {
@@ -735,7 +739,7 @@ internal class BluetoothDiscoveryProvider(
         currentIdentityRead?.gatt?.let(::closeGatt)
         pendingIdentityReads.clear()
         val requestIdText = requestId.toULong().toString(16).padStart(16, '0')
-        OpLog.add("BLE_RENDEZVOUS direction=outbound state=connecting request_id=$requestIdText auth=none")
+        OpLog.add("BLE_RENDEZVOUS direction=outbound state=connecting request_id=$requestIdText verification=pending payload=public")
         val gatt =
             runCatching {
                 device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
@@ -774,9 +778,14 @@ internal class BluetoothDiscoveryProvider(
     }
 
     private fun handleInboundInvite(invite: BleRendezvousInvite) {
-        if (!active || invite.senderPeerKey == localIdentity.peerKey) return
+        if (!active ||
+            invite.senderPeerKey == localIdentity.peerKey ||
+            !BleRendezvousProtocol.supportsBluetoothVerificationOffer(invite.invite)
+        ) {
+            return
+        }
         OpLog.add(
-            "BLE_RENDEZVOUS direction=inbound state=received request_id=${invite.requestId} auth=none",
+            "BLE_RENDEZVOUS direction=inbound state=received request_id=${invite.requestId} verification=pending payload=public",
         )
         listener?.onRendezvousOffer(
             NearbyRendezvousOffer(
@@ -958,7 +967,7 @@ internal class BluetoothDiscoveryProvider(
                 .toULong()
                 .toString(16)
                 .padStart(16, '0')
-        OpLog.add("BLE_RENDEZVOUS direction=outbound state=$state request_id=$requestId auth=none")
+        OpLog.add("BLE_RENDEZVOUS direction=outbound state=$state request_id=$requestId verification=pending payload=public")
         offer.gatt?.let(::closeGatt)
         offer.completion(error)
         startNextIdentityRead()

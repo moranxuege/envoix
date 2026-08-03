@@ -6,7 +6,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use envoix_auth::RememberedSession;
+use envoix_auth::{RememberedCredential, RememberedSession};
 use envoix_error::CoreError;
 use envoix_invite::{
     BootstrapKind, InvitationControlContext, InvitationSide, InviteV2, ROOM_CONTROL_LOCATOR_PREFIX,
@@ -593,6 +593,7 @@ pub struct RoomControlSession {
     relay: Option<String>,
     peer_name: String,
     mode: RoomControlSessionMode,
+    pairing_credential: Option<RememberedCredential>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -667,6 +668,12 @@ impl RoomControlSession {
 
     pub fn remembered_generation(&self) -> Option<u64> {
         self.mode.remembered_generation()
+    }
+
+    /// Candidate credential for a caller-authorized first-contact verification.
+    /// Ordinary Room sessions must not persist it without explicit UI policy.
+    pub fn pairing_credential(&self) -> Option<&RememberedCredential> {
+        self.pairing_credential.as_ref()
     }
 
     pub fn lifetime_state(&self) -> RoomLifetimeState {
@@ -1111,10 +1118,16 @@ pub async fn connect_room_control(
     invite: RoomControlInvite,
     display_name: String,
     creator: bool,
-    config: SessionConfig,
+    verified_pairing: bool,
+    mut config: SessionConfig,
     cancel: &TransferCancelToken,
 ) -> Result<RoomControlSession, SessionError> {
     invite.ensure_fresh()?;
+    if verified_pairing {
+        // A displayed verification code is a one-shot authentication factor.
+        // Do not give an online guesser several PAKE attempts against it.
+        config.rendezvous_retry.pairing_attempts = 1;
+    }
     let room_id = invite.room_id();
     let context = InvitationControlContext::room_control(room_id.clone())
         .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
@@ -1129,6 +1142,7 @@ pub async fn connect_room_control(
             pairing_responder: creator,
             bootstrap_kind: BootstrapKind::RoomCode,
             mode: RoomControlSessionMode::Invitation { creator },
+            derive_pairing_credential: verified_pairing,
         },
         display_name,
         config,
@@ -1187,6 +1201,7 @@ pub async fn connect_remembered_room_control(
             pairing_responder: role.is_responder(),
             bootstrap_kind: BootstrapKind::FullTicket,
             mode: RoomControlSessionMode::Remembered { generation },
+            derive_pairing_credential: false,
         },
         display_name,
         config,
@@ -1217,6 +1232,7 @@ struct RoomControlConnectRequest {
     pairing_responder: bool,
     bootstrap_kind: BootstrapKind,
     mode: RoomControlSessionMode,
+    derive_pairing_credential: bool,
 }
 
 async fn connect_room_control_inner(
@@ -1264,6 +1280,12 @@ async fn connect_room_control_inner(
     )
     .await?;
     *peer_authenticated = true;
+    let pairing_credential = request.derive_pairing_credential.then(|| {
+        RememberedCredential::from_control_pairing(
+            pairing.control_key(),
+            pairing.control_transcript_hash,
+        )
+    });
     let pairing_binding = pairing.control_transcript_hash.as_bytes().to_vec();
     let (connection, mut send, mut recv) =
         establish_control_connection(&bound.local_endpoint, role, pairing.peer, cancel).await?;
@@ -1306,6 +1328,7 @@ async fn connect_room_control_inner(
         relay: request.relay,
         peer_name,
         mode: request.mode,
+        pairing_credential,
     })
 }
 

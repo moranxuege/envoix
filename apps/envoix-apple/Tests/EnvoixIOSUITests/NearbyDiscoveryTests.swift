@@ -2,12 +2,16 @@ import XCTest
 @testable import Envoix_iOS
 
 final class NearbyDiscoveryTests: XCTestCase {
+    private func bleOffer(now: Date = Date()) -> String {
+        "envoix://ble/v1/123456?broker=example&expires=\(Int(now.timeIntervalSince1970) + 300)"
+    }
+
     func testBleRendezvousRoundTripsFragmentedInvite() throws {
         let identity = LocalNearbyDiscoveryIdentity(
             peerKey: "0011223344556677",
             displayName: "iPhone"
         )
-        let invite = "envoix://invite/v2/opaque-fragmented-payload"
+        let invite = bleOffer()
         let frames = try XCTUnwrap(BleRendezvousProtocol.encodeInvite(
             identity: identity,
             invite: invite,
@@ -27,7 +31,7 @@ final class NearbyDiscoveryTests: XCTestCase {
 
     func testBleRendezvousRejectsOutOfOrderContinuationAndResets() throws {
         let identity = LocalNearbyDiscoveryIdentity(peerKey: "0011223344556677", displayName: "iPhone")
-        let invite = "envoix://invite/v2/opaque-out-of-order-payload"
+        let invite = bleOffer()
         let frames = try XCTUnwrap(BleRendezvousProtocol.encodeInvite(
             identity: identity,
             invite: invite,
@@ -53,7 +57,7 @@ final class NearbyDiscoveryTests: XCTestCase {
         ))
         var frame = try XCTUnwrap(BleRendezvousProtocol.encodeInvite(
             identity: identity,
-            invite: "envoix://invite/v2/opaque-security-payload",
+            invite: bleOffer(),
             requestID: 7,
             maximumFrameBytes: 512
         )?.first)
@@ -61,12 +65,12 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertNil(BleRendezvousProtocol.Assembler().accept(frame))
     }
 
-    func testBleRendezvousCarriesDirectionNeutralRoomInvite() throws {
+    func testBleRendezvousCarriesOnlyPublicVerificationOffer() throws {
         let identity = LocalNearbyDiscoveryIdentity(
             peerKey: "0011223344556677",
             displayName: "iPhone"
         )
-        let invite = "envoix://room/123456-a1b2-c3d4?broker=example"
+        let invite = bleOffer()
         let frames = try XCTUnwrap(BleRendezvousProtocol.encodeInvite(
             identity: identity,
             invite: invite,
@@ -77,6 +81,76 @@ final class NearbyDiscoveryTests: XCTestCase {
         let assembler = BleRendezvousProtocol.Assembler()
         let decoded = try XCTUnwrap(frames.compactMap(assembler.accept).first)
         XCTAssertEqual(decoded.invite, invite)
+        XCTAssertNil(BleRendezvousProtocol.encodeInvite(
+            identity: identity,
+            invite: "envoix://room/123456-a1b2-c3d4?broker=example",
+            requestID: 10,
+            maximumFrameBytes: 128
+        ))
+        XCTAssertNil(BleRendezvousProtocol.encodeInvite(
+            identity: identity,
+            invite: "envoix://invite/v2/secret",
+            requestID: 11,
+            maximumFrameBytes: 128
+        ))
+    }
+
+    func testBleVerificationCodeReconstructsPrivatePakeInvitation() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let offer = "envoix://ble/v1/123456?broker=example&expires=1700000300"
+        let invitation = try XCTUnwrap(BleVerificationInvitation.resolve(
+            publicOffer: offer,
+            verificationCode: "654321",
+            now: now
+        ))
+
+        XCTAssertTrue(invitation.hasPrefix("envoix://room/123456-cd5e-bd5d?"))
+        XCTAssertTrue(BleVerificationInvitation.isPublicOffer(offer, now: now))
+        XCTAssertNil(BleVerificationInvitation.resolve(
+            publicOffer: offer,
+            verificationCode: "65432",
+            now: now
+        ))
+        XCTAssertFalse(BleVerificationInvitation.isPublicOffer(
+            offer,
+            now: now.addingTimeInterval(300)
+        ))
+        XCTAssertNil(BleVerificationInvitation.resolve(
+            publicOffer: offer + "&relay",
+            verificationCode: "654321",
+            now: now
+        ))
+        let tampered = offer.replacingOccurrences(of: "broker=example", with: "broker=other")
+        XCTAssertNotEqual(
+            URLComponents(string: invitation)?.path,
+            URLComponents(string: try XCTUnwrap(BleVerificationInvitation.resolve(
+                publicOffer: tampered,
+                verificationCode: "654321",
+                now: now
+            )))?.path
+        )
+    }
+
+    func testBleVerificationGeneratorRoundTripsWithDistinctPublicLocator() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let verification = try BleVerificationInvitation.make(
+            broker: "example",
+            relay: "",
+            now: now
+        )
+
+        XCTAssertEqual(
+            verification.privateInvitation,
+            BleVerificationInvitation.resolve(
+                publicOffer: verification.publicOffer,
+                verificationCode: verification.verificationCode,
+                now: now
+            )
+        )
+        XCTAssertNotEqual(
+            verification.verificationCode,
+            URLComponents(string: verification.publicOffer)?.path.split(separator: "/").last.map(String.init)
+        )
     }
 
     func testBleRendezvousRejectsLegacyAndNakedInvitationForms() {

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
@@ -61,6 +62,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -221,7 +223,10 @@ internal fun MainRoomInviteCard(
     val revealed =
         control.phase == RoomControlPhase.Hosting &&
             control.inviteRevealed &&
+            control.verificationCode == null &&
             control.invite != null
+    val verifying =
+        control.phase == RoomControlPhase.Hosting && control.verificationCode != null
     val joining = control.phase == RoomControlPhase.Joining
     val creating =
         control.phase == RoomControlPhase.Hosting &&
@@ -229,6 +234,7 @@ internal fun MainRoomInviteCard(
             control.invite == null
     val roomStatus =
         when {
+            verifying -> appText("Verify nearby device", "验证附近设备")
             revealed -> requireNotNull(control.invite).code
             creating -> appText("Creating room…", "正在创建房间…")
             joining -> appText("Joining room…", "正在加入房间…")
@@ -286,7 +292,7 @@ internal fun MainRoomInviteCard(
                     )
                 }
             }
-            if (control.phase == RoomControlPhase.Hosting && control.invite != null) {
+            if (control.phase == RoomControlPhase.Hosting && control.invite != null && !verifying) {
                 IconButton(
                     onClick = onRefresh,
                     modifier = Modifier.testTag("hub_refresh_room_code"),
@@ -318,28 +324,53 @@ internal fun MainRoomInviteCard(
             }
         }
         Spacer(Modifier.height(8.dp))
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val layout = resolveMainRoomInviteQrLayout(maxWidth, revealed)
+        if (verifying) {
             Box(
-                Modifier.fillMaxWidth().height(layout.viewportHeight),
+                Modifier.fillMaxWidth().height(RoomInviteViewportHeight),
                 contentAlignment = Alignment.Center,
             ) {
-                if (layout.showsActions) {
-                    MainRoomInviteActions(
-                        control = control,
-                        joining = joining,
-                        creating = creating,
-                        onReveal = onReveal,
-                        onScan = onScan,
-                        onEnterCode = onEnterCode,
-                        modifier = Modifier.size(layout.side),
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        requireNotNull(control.verificationCode).let {
+                            "${it.take(3)} ${it.takeLast(3)}"
+                        },
+                        color = colors.accentStrong,
+                        fontSize = 38.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.testTag("ble_verification_code"),
                     )
-                } else {
-                    MainRoomQrToggle(
-                        control = control,
-                        side = layout.side,
-                        onHide = onHide,
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        appText(
+                            "Enter this code on the other device. It is never sent over Bluetooth.",
+                            "请在另一台设备上输入此验证码。验证码不会通过蓝牙发送。",
+                        ),
+                        color = colors.muted,
+                        textAlign = TextAlign.Center,
                     )
+                }
+            }
+        } else {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val layout = resolveMainRoomInviteQrLayout(maxWidth, revealed)
+                Box(
+                    Modifier.fillMaxWidth().height(layout.viewportHeight),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (layout.showsActions) {
+                        MainRoomInviteActions(
+                            control = control,
+                            joining = joining,
+                            creating = creating,
+                            onReveal = onReveal,
+                            onScan = onScan,
+                            onEnterCode = onEnterCode,
+                            modifier = Modifier.size(layout.side),
+                        )
+                    } else {
+                        MainRoomQrToggle(control, layout.side, onHide)
+                    }
                 }
             }
         }
@@ -905,7 +936,11 @@ internal fun NearbyDeviceCard(
                     nearbyDiscoverySourceLabel(peer.sources, LocalAppLanguage.current)
                 } · ${
                     if (enabled) {
-                        appText("Unverified", "未验证")
+                        if (DiscoverySource.Bluetooth in peer.sources && peer.nearbyInviteRoute == null) {
+                            appText("Tap to verify", "轻触验证")
+                        } else {
+                            appText("Unverified", "未验证")
+                        }
                     } else {
                         appText("Discovery only", "仅可发现")
                     }
@@ -1124,16 +1159,21 @@ private fun NearbyVisibility.description(): String =
 
 @Composable
 internal fun IncomingNearbyInvitationDialog(
+    offerId: String,
     roomInvitation: Boolean,
+    verificationOffer: Boolean = false,
     peerName: String,
-    onAccept: () -> Unit,
+    onAccept: (String?) -> Unit,
     onReject: () -> Unit,
 ) {
+    var code by remember(offerId) { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onReject,
         title = {
             Text(
-                if (roomInvitation) {
+                if (verificationOffer) {
+                    appText("Verify nearby device", "验证附近设备")
+                } else if (roomInvitation) {
                     appText("Room invitation", "房间邀请")
                 } else {
                     appText("File invitation", "文件邀请")
@@ -1141,23 +1181,53 @@ internal fun IncomingNearbyInvitationDialog(
             )
         },
         text = {
-            Text(
-                if (roomInvitation) {
-                    appText(
-                        "$peerName wants to open a room with you.",
-                        "$peerName 想与你建立房间。",
+            if (verificationOffer) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        appText(
+                            "Ask $peerName for the six-digit code shown in Envoix.",
+                            "请向 $peerName 确认 Envoix 中显示的六位验证码。",
+                        ),
                     )
-                } else {
-                    appText(
-                        "$peerName wants to transfer files.",
-                        "$peerName 想要传输文件。",
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { value ->
+                            code = value.filter { it in '0'..'9' }.take(6)
+                        },
+                        label = { Text(appText("Verification code", "验证码")) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        textStyle =
+                            androidx.compose.ui.text.TextStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 24.sp,
+                                textAlign = TextAlign.Center,
+                            ),
+                        modifier = Modifier.fillMaxWidth().testTag("ble_verification_code_input"),
                     )
-                },
-            )
+                }
+            } else {
+                Text(
+                    if (roomInvitation) {
+                        appText(
+                            "$peerName wants to open a room with you.",
+                            "$peerName 想与你建立房间。",
+                        )
+                    } else {
+                        appText(
+                            "$peerName wants to transfer files.",
+                            "$peerName 想要传输文件。",
+                        )
+                    },
+                )
+            }
         },
         confirmButton = {
-            TextButton(onClick = onAccept) {
-                Text(appText("Accept", "接受"))
+            TextButton(
+                onClick = { onAccept(code.takeIf { verificationOffer }) },
+                enabled = !verificationOffer || code.length == 6,
+            ) {
+                Text(if (verificationOffer) appText("Verify", "验证") else appText("Accept", "接受"))
             }
         },
         dismissButton = {
