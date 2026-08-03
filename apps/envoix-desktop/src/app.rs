@@ -70,6 +70,8 @@ pub struct App {
 
     /// Clicking copy is silent otherwise, so the button reports back briefly.
     copied_at: Option<Instant>,
+    /// Last title pushed to the window manager, so it is only sent on change.
+    title: String,
     /// Summed once per selection change rather than stat-ing every frame.
     selection_bytes: u64,
 }
@@ -101,6 +103,7 @@ impl App {
             last_sample: None,
             theme_applied: None,
             copied_at: None,
+            title: String::new(),
             selection_bytes: 0,
         }
     }
@@ -251,6 +254,7 @@ impl App {
         }
 
         self.absorb_dropped_files(ui.ctx());
+        self.publish_title(ui.ctx());
 
         self.rail(ui, &palette);
         self.composer(ui, &palette);
@@ -260,6 +264,16 @@ impl App {
         if self.busy() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
+    /// Mirrors the transfer's state into the window title, so a minimised or
+    /// occluded window still reports from the taskbar.
+    fn publish_title(&mut self, ctx: &egui::Context) {
+        let wanted = title_for(&self.stage, self.progress);
+        if wanted != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(wanted.clone()));
+            self.title = wanted;
         }
     }
 
@@ -808,6 +822,26 @@ impl App {
     }
 }
 
+/// The window title for a transfer state. Split out from the viewport call so
+/// the wording and the percentage arithmetic can be tested directly.
+fn title_for(stage: &Stage, progress: Option<(u64, u64)>) -> String {
+    match stage {
+        Stage::Idle => "Envoix".to_owned(),
+        Stage::Waiting => "Envoix - waiting for a peer".to_owned(),
+        Stage::Offered => "Envoix - needs approval".to_owned(),
+        Stage::Running => match progress {
+            // Scale before dividing, and only when the multiply cannot wrap.
+            Some((done, total)) if total > 0 => {
+                let percent = (done.min(total) as f64 / total as f64 * 100.0).round() as u64;
+                format!("Envoix - {percent}%")
+            }
+            _ => "Envoix - transferring".to_owned(),
+        },
+        Stage::Done => "Envoix - delivered".to_owned(),
+        Stage::Failed => "Envoix - failed".to_owned(),
+    }
+}
+
 /// Opens `path` in the platform file manager.
 ///
 /// Deliberately fire-and-forget: the file manager is not this app's problem,
@@ -1007,5 +1041,30 @@ mod tests {
                     .to_owned(),
             );
         });
+    }
+
+    #[test]
+    fn title_reports_transfer_state() {
+        assert_eq!(title_for(&Stage::Idle, None), "Envoix");
+        assert_eq!(
+            title_for(&Stage::Waiting, None),
+            "Envoix - waiting for a peer"
+        );
+        assert_eq!(
+            title_for(&Stage::Running, Some((5_242_880, 10_485_760))),
+            "Envoix - 50%"
+        );
+        // A zero total is the state before the manifest lands, not 0%.
+        assert_eq!(
+            title_for(&Stage::Running, Some((0, 0))),
+            "Envoix - transferring"
+        );
+        // Byte counts big enough that scaling by 100 would wrap a u64.
+        assert_eq!(
+            title_for(&Stage::Running, Some((u64::MAX / 2, u64::MAX))),
+            "Envoix - 50%"
+        );
+        assert_eq!(title_for(&Stage::Done, None), "Envoix - delivered");
+        assert_eq!(title_for(&Stage::Failed, None), "Envoix - failed");
     }
 }
