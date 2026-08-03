@@ -983,7 +983,7 @@ mod tests {
             .expect("write preview");
     }
 
-    const SAMPLE_INVITE: &str = "envoix://invite/v2/eyJyIjoiMDc1Mjg3LWluZGlnby1vcGFsIn0";
+    const SAMPLE_INVITE: &str = "envoix://invite/v2/eyJyIjoiNDgwOTY2LXU5ZmMtOWM2aCJ9";
 
     #[test]
     fn idle_light() {
@@ -1000,7 +1000,7 @@ mod tests {
             let mut transfer = seed(1, Mode::Receive, "Incoming transfer", Stage::Waiting);
             transfer.qr_matrix = QrMatrix::encode(SAMPLE_INVITE);
             transfer.invite = Some(SAMPLE_INVITE.to_owned());
-            transfer.room_code = Some("075287-indigo-opal".to_owned());
+            transfer.room_code = Some("480966-u9fc-9c6h".to_owned());
             transfer.status = "Waiting for a sender".to_owned();
             app.transfers.push(transfer);
         });
@@ -1071,7 +1071,7 @@ mod tests {
             app.dark = false;
             let mut transfer = seed(1, Mode::Receive, "Incoming transfer", Stage::Failed);
             transfer.status = "Failed".to_owned();
-            transfer.room_code = Some("075287-indigo-opal".to_owned());
+            transfer.room_code = Some("480966-u9fc-9c6h".to_owned());
             transfer.progress = Some((3_145_728, 8_388_608));
             transfer.error = Some(
                 "one-time invitation was consumed after authentication: \
@@ -1088,7 +1088,7 @@ mod tests {
             app.dark = true;
             app.tab = Tab::Logs;
             app.logs = vec![
-                "invite 075287-indigo-opal".to_owned(),
+                "invite 480966-u9fc-9c6h".to_owned(),
                 "Waiting for a sender".to_owned(),
                 "Pairing: Joined".to_owned(),
                 "connected via direct".to_owned(),

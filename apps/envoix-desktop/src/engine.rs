@@ -838,4 +838,34 @@ mod tests {
         let landed = std::fs::read(save_directory.join("small.bin")).expect("received file");
         assert_eq!(landed, payload, "bytes differ after a cancelled round");
     }
+    /// Pins the shape of the code a card has to render: six digits and two
+    /// four-character Base36 groups. The word list in `envoix-rendezvous-iroh`
+    /// belongs to a different code path, so a card must not be laid out for
+    /// word-length segments.
+    #[test]
+    fn room_codes_are_digits_and_base36() {
+        let created = api::create_invitation(
+            BROKER.to_string(),
+            vec![RELAY.to_string()],
+            TransferRole::Receiver,
+            unix_now(),
+        )
+        .expect("invitation");
+        let code = created.room_code.to_string();
+        let parts: Vec<&str> = code.split('-').collect();
+        assert_eq!(parts.len(), 3, "unexpected shape: {code}");
+        assert!(
+            parts[0].len() == 6 && parts[0].chars().all(|c| c.is_ascii_digit()),
+            "nameplate is not six digits: {code}"
+        );
+        for part in &parts[1..] {
+            assert!(
+                part.len() == 4
+                    && part
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "secret group is not four Base36 chars: {code}"
+            );
+        }
+    }
 }
