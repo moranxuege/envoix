@@ -334,9 +334,14 @@ async fn receive(
         bytes: total,
     }));
 
-    if !accept.await.unwrap_or(false) {
+    if !await_offer_acceptance(accept, &cancel).await {
+        let message = if cancel.is_cancelled() {
+            "transfer cancelled"
+        } else {
+            "offer declined"
+        };
         pending.reject().await;
-        return Err("offer declined".into());
+        return Err(message.into());
     }
 
     let state_directory = target_directory.join(".envoix-state-v2");
@@ -363,6 +368,16 @@ async fn receive(
         bytes: total,
     });
     Ok(())
+}
+
+async fn await_offer_acceptance(
+    accept: oneshot::Receiver<bool>,
+    cancel: &TransferCancelToken,
+) -> bool {
+    tokio::select! {
+        decision = accept => decision.unwrap_or(false),
+        () = cancel.cancelled() => false,
+    }
 }
 
 async fn send(
@@ -867,5 +882,24 @@ mod tests {
                 "secret group is not four Base36 chars: {code}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_releases_the_pending_offer_gate() {
+        let cancel = TransferCancelToken::new();
+        let (_accept, accept_rx) = oneshot::channel();
+        let waiting = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { await_offer_acceptance(accept_rx, &cancel).await }
+        });
+
+        tokio::task::yield_now().await;
+        cancel.cancel();
+
+        let accepted = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("offer gate did not wake after cancellation")
+            .expect("offer gate task failed");
+        assert!(!accepted, "a cancelled offer must not be accepted");
     }
 }

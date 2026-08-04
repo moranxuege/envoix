@@ -469,57 +469,59 @@ impl App {
         };
 
         let screen = ui.ctx().viewport_rect();
-        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("qr-enlarged"));
-        let painter = ui.ctx().layer_painter(layer);
-        painter.rect_filled(screen, 0, palette.bg);
-
         let (module, size) = matrix.fit((screen.height() - 120.0).min(screen.width() - 60.0));
-        let origin = egui::pos2(
-            screen.center().x - size / 2.0,
-            screen.center().y - size / 2.0 - 24.0,
-        );
-        let image = matrix.to_image();
         let texture = self
             .textures
             .entry(id)
             .or_insert_with(|| {
                 ui.ctx()
-                    .load_texture("qr", image, egui::TextureOptions::NEAREST)
+                    .load_texture("qr", matrix.to_image(), egui::TextureOptions::NEAREST)
             })
             .clone();
-        painter.image(
-            texture.id(),
-            Rect::from_min_size(origin, egui::vec2(size, size)),
-            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        let room_code = transfer.room_code.clone();
+        let modal = egui::Modal::new(egui::Id::new("qr-enlarged"))
+            .backdrop_color(palette.bg)
+            .frame(egui::Frame::new())
+            .show(ui.ctx(), |ui| {
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(size, size + 72.0), egui::Sense::click());
+                let qr_rect = Rect::from_min_size(rect.min, egui::vec2(size, size));
+                let painter = ui.painter();
+                painter.image(
+                    texture.id(),
+                    qr_rect,
+                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
 
-        if let Some(code) = &transfer.room_code {
-            painter.text(
-                egui::pos2(screen.center().x, origin.y + size + 26.0),
-                egui::Align2::CENTER_CENTER,
-                code,
-                theme::mono(18.0),
-                palette.text,
-            );
-        }
-        let scannable = if module >= qr::MIN_SCANNABLE_MODULE_PX {
-            "scannable"
-        } else {
-            "still too small to scan - widen the window"
-        };
-        painter.text(
-            egui::pos2(screen.center().x, origin.y + size + 54.0),
-            egui::Align2::CENTER_CENTER,
-            format!("{module:.0} px per module, {scannable} - click anywhere to close"),
-            theme::sans(12.0),
-            palette.muted,
-        );
+                if let Some(code) = &room_code {
+                    painter.text(
+                        egui::pos2(rect.center().x, rect.min.y + size + 26.0),
+                        egui::Align2::CENTER_CENTER,
+                        code,
+                        theme::mono(18.0),
+                        palette.text,
+                    );
+                }
+                let scannable = if module >= qr::MIN_SCANNABLE_MODULE_PX {
+                    "scannable"
+                } else {
+                    "still too small to scan - widen the window"
+                };
+                painter.text(
+                    egui::pos2(rect.center().x, rect.min.y + size + 54.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{module:.0} px per module, {scannable} - click anywhere to close"),
+                    theme::sans(12.0),
+                    palette.muted,
+                );
 
-        if ui.ctx().input(|input| input.pointer.any_click()) {
+                response.clicked()
+            });
+
+        if modal.inner || modal.should_close() {
             self.enlarged = None;
         }
-        ui.ctx().request_repaint();
     }
 
     fn drop_overlay(&mut self, ui: &mut egui::Ui, palette: &Palette) {
@@ -1020,6 +1022,7 @@ fn broker_host() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::Queryable as _;
 
     /// Builds a transfer without an engine behind it, so previews can show
     /// states that would otherwise need a live peer.
@@ -1068,6 +1071,72 @@ mod tests {
     }
 
     const SAMPLE_INVITE: &str = "envoix://invite/v2/eyJyIjoiNDgwOTY2LXU5ZmMtOWM2aCJ9";
+
+    #[test]
+    fn enlarged_qr_blocks_controls_behind_it() {
+        struct TestState {
+            app: Option<App>,
+        }
+
+        let transfer_id = TransferId(1);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1180.0, 720.0))
+            .build_ui_state(
+                move |ui, state: &mut TestState| {
+                    let Some(app) = state.app.as_mut() else {
+                        theme::install_fonts(ui.ctx());
+                        let mut app = App::new(ui.ctx());
+                        app.mode = Mode::Send;
+                        let mut transfer = seed(
+                            transfer_id.0,
+                            Mode::Receive,
+                            "Incoming transfer",
+                            Stage::Waiting,
+                        );
+                        transfer.qr_matrix = QrMatrix::encode(SAMPLE_INVITE);
+                        transfer.room_code = Some("480966-u9fc-9c6h".to_owned());
+                        app.transfers.push(transfer);
+                        state.app = Some(app);
+                        return;
+                    };
+                    app.draw(ui);
+                },
+                TestState { app: None },
+            );
+
+        let input_rect = harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .rect();
+        harness
+            .state_mut()
+            .app
+            .as_mut()
+            .expect("app initialized")
+            .enlarged = Some(transfer_id);
+        harness.run_steps(2);
+
+        let position = input_rect.center();
+        harness.event(egui::Event::PointerMoved(position));
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        harness.event(egui::Event::Text(
+            "must not reach the invite field".to_owned(),
+        ));
+        harness.step();
+
+        let app = harness.state().app.as_ref().expect("app initialized");
+        assert!(
+            app.invite_input.is_empty(),
+            "QR click reached the form below"
+        );
+        assert_eq!(app.enlarged, None, "QR did not close after the click");
+    }
 
     #[test]
     fn idle_light() {
