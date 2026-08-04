@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/envoix-cli",
+    "apps/envoix-desktop",
     "apps/envoix-android-jni",
     "apps/envoix-rendezvous-server",
     "crates/envoix-auth",
@@ -76,6 +77,7 @@ uniffi = "0.31"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 unicode-normalization = "0.1"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 zstd = "0.13"
 
 [patch.crates-io]
