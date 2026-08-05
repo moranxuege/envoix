@@ -4,6 +4,28 @@ import XCTest
 @testable import Envoix
 
 final class RoomCodeInputFormatterTests: XCTestCase {
+    func testBleVerificationUsesBuiltInEndpointsWhenSettingsAreEmpty() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let verification = try BleVerificationInvitation.make(
+            broker: "  ",
+            relay: "",
+            now: now
+        )
+
+        for payload in [verification.publicOffer, verification.privateInvitation] {
+            let components = try XCTUnwrap(URLComponents(string: payload))
+            let query = try XCTUnwrap(components.queryItems)
+            XCTAssertEqual(
+                query.first(where: { $0.name == "broker" })?.value,
+                defaultRendezvousBroker
+            )
+            XCTAssertEqual(
+                query.first(where: { $0.name == "relay" })?.value,
+                defaultRelayURL
+            )
+        }
+    }
+
     func testSeparatorFreeInputIsFormattedWithoutTruncation() {
         XCTAssertEqual(
             formatRoomCodeInput("123456K7M49V2D"),

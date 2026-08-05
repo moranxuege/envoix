@@ -13,18 +13,18 @@ struct BleVerificationInvitation: Equatable, Identifiable {
     var id: String { publicOffer }
 
     static func make(broker: String, relay: String, now: Date = Date()) throws -> Self {
-        let broker = broker.trimmed
-        guard !broker.isEmpty else {
-            throw RuntimeSettingsError("A rendezvous broker is required for Bluetooth verification.")
-        }
+        let configuredBroker = broker.trimmed
+        let broker = configuredBroker.isEmpty ? defaultRendezvousBroker : configuredBroker
+        let configuredRelay = relay.trimmed
+        let relay = configuredRelay.isEmpty ? defaultRelayURL : configuredRelay
         let code = digits()
         var locator = digits()
         while locator == code { locator = digits() }
         let expiry = now.addingTimeInterval(lifetime)
-        let offer = url("ble", ["v1", locator], broker, relay.trimmed, expiry)
+        let offer = url("ble", ["v1", locator], broker, relay, expiry)
         return Self(
             verificationCode: code,
-            privateInvitation: privateURL(locator, code, offer, broker, relay.trimmed, expiry),
+            privateInvitation: privateURL(locator, code, offer, broker, relay, expiry),
             publicOffer: offer,
             expiresAt: expiry
         )
