@@ -85,6 +85,25 @@ struct RememberedRoomReconnectPolicy: Equatable {
     let minimumBackoff: TimeInterval
     let maximumBackoff: TimeInterval
     let passiveConnectedDwell: TimeInterval
+    let maximumAutomaticFailures: Int
+
+    init(
+        connectorAttemptTimeout: TimeInterval,
+        responderAttemptTimeout: TimeInterval,
+        sameLocatorCooldown: TimeInterval,
+        minimumBackoff: TimeInterval,
+        maximumBackoff: TimeInterval,
+        passiveConnectedDwell: TimeInterval,
+        maximumAutomaticFailures: Int = 2
+    ) {
+        self.connectorAttemptTimeout = connectorAttemptTimeout
+        self.responderAttemptTimeout = responderAttemptTimeout
+        self.sameLocatorCooldown = sameLocatorCooldown
+        self.minimumBackoff = minimumBackoff
+        self.maximumBackoff = maximumBackoff
+        self.passiveConnectedDwell = passiveConnectedDwell
+        self.maximumAutomaticFailures = max(1, maximumAutomaticFailures)
+    }
 
     static let live = RememberedRoomReconnectPolicy(
         connectorAttemptTimeout: 75,
@@ -92,7 +111,8 @@ struct RememberedRoomReconnectPolicy: Equatable {
         sameLocatorCooldown: 6,
         minimumBackoff: 30,
         maximumBackoff: 300,
-        passiveConnectedDwell: 45
+        passiveConnectedDwell: 45,
+        maximumAutomaticFailures: 2
     )
 
     func timeout(for mode: RememberedRoomConnectMode) -> TimeInterval {
@@ -107,6 +127,10 @@ struct RememberedRoomReconnectPolicy: Equatable {
 
     func collisionDelay(jitterUnit: Double) -> TimeInterval {
         1 + 5 * min(max(jitterUnit, 0), 1)
+    }
+
+    func automaticFailureBudgetIsExhausted(_ failureCount: Int) -> Bool {
+        failureCount >= max(1, maximumAutomaticFailures)
     }
 
     func requiredCooldown(
@@ -138,6 +162,9 @@ enum ConnectionWorkflowPolicy {
     static let roomOfferLifetime: TimeInterval = 60
     static let roomInvitationLifetime: TimeInterval = 5 * 60
     static let roomIdleLifetime: TimeInterval = 15 * 60
+    static let rememberedRetryExhaustedMessage =
+        "Automatic reconnect stopped after repeated connection failures. "
+        + "Retry by opening this saved device when both devices are available."
 
     static func localAction(forLocalRole role: FfiInviteRole) -> OneTimeRoomAction {
         switch role {
@@ -461,6 +488,10 @@ final class ConnectionWorkflowState: ObservableObject {
         guard room == nil, roomInvitation == nil else {
             return "End the current one-time room before opening this room."
         }
+        blockedRememberedRelationships.remove(relationshipID)
+        rememberedRoomErrors.removeValue(forKey: relationshipID)
+        rememberedFailureCounts[relationshipID] = 0
+        rememberedRetryNotBefore.removeValue(forKey: relationshipID)
         if activeRememberedRelationshipID == relationshipID,
            controlPhase == .connected {
             selectedRememberedRelationshipID = relationshipID
@@ -686,6 +717,18 @@ final class ConnectionWorkflowState: ObservableObject {
                     controlPhase = .ended(.networkLost)
                 } else if rememberedRoom == nil {
                     controlPhase = .idle
+                }
+                if reconnectPolicy.automaticFailureBudgetIsExhausted(failureCount) {
+                    blockedRememberedRelationships.insert(relationshipID)
+                    rememberedRoomErrors[relationshipID] =
+                        ConnectionWorkflowPolicy.rememberedRetryExhaustedMessage
+                    rememberedRetryNotBefore.removeValue(forKey: relationshipID)
+                    if selectedRememberedRelationshipID == relationshipID {
+                        controlPhase = .failed(
+                            ConnectionWorkflowPolicy.rememberedRetryExhaustedMessage
+                        )
+                    }
+                    continue
                 }
                 let scheduledDelay = failureCount == 1
                     && selectedRememberedRelationshipID == relationshipID

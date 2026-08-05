@@ -16,6 +16,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,9 +32,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.envoix.app.AndroidWifiAwareCapabilityProbe
 import dev.envoix.app.NfcPhoneHostingState
 import dev.envoix.app.NfcPhoneReaderState
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.WifiAwareCapabilitySnapshot
 import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveredPeer
 import dev.envoix.app.discovery.DiscoveryPermissions
@@ -84,12 +87,17 @@ internal fun ConnectionHubScreen(
     var visibilityDialogOpen by remember { mutableStateOf(false) }
     var nfcDialogOpen by remember { mutableStateOf(false) }
     var wifiAwareDialogOpen by remember { mutableStateOf(false) }
+    var wifiAwareCapability by remember { mutableStateOf<WifiAwareCapabilitySnapshot?>(null) }
     var nearbyListExpanded by rememberSaveable { mutableStateOf(true) }
     var localError by remember { mutableStateOf<String?>(null) }
     val permissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
         ) { discoveryViewModel.start() }
+
+    LaunchedEffect(context) {
+        wifiAwareCapability = AndroidWifiAwareCapabilityProbe.read(context)
+    }
 
     Column(
         Modifier
@@ -159,11 +167,23 @@ internal fun ConnectionHubScreen(
                 NearbySectionHeader(
                     listExpanded = nearbyListExpanded,
                     wifiAwareStatus = discovery.statuses[DiscoverySource.WifiAware],
+                    wifiAwareCapability = wifiAwareCapability,
                     nfcPhoneHosting = nfcPhoneHosting,
                     nfcPhoneReader = nfcPhoneReader,
                     discoveryActive = discovery.active,
                     onWifiAware = { wifiAwareDialogOpen = true },
-                    onNfc = { nfcDialogOpen = true },
+                    onNfc = {
+                        nfcDialogOpen = true
+                        if (
+                            shouldStartNfcPresentationWhenPanelOpens(
+                                phase = control.phase,
+                                hostingArmed = nfcPhoneHosting.armed,
+                                readerScanning = nfcPhoneReader.scanning,
+                            )
+                        ) {
+                            onShareViaNfc()
+                        }
+                    },
                     onToggleList = { nearbyListExpanded = !nearbyListExpanded },
                     onToggleDiscovery = {
                         if (discovery.active) {
@@ -319,6 +339,7 @@ internal fun ConnectionHubScreen(
     if (wifiAwareDialogOpen) {
         WifiAwareDiscoveryDialog(
             status = discovery.statuses[DiscoverySource.WifiAware],
+            capability = wifiAwareCapability,
             onDismiss = { wifiAwareDialogOpen = false },
         )
     }

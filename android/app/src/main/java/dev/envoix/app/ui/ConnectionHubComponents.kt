@@ -73,6 +73,8 @@ import dev.envoix.app.NfcPhoneHostingState
 import dev.envoix.app.NfcPhoneHostingStatus
 import dev.envoix.app.NfcPhoneReaderState
 import dev.envoix.app.NfcPhoneReaderStatus
+import dev.envoix.app.WifiAwareAvailability
+import dev.envoix.app.WifiAwareCapabilitySnapshot
 import dev.envoix.app.discovery.DiscoveredPeer
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyVisibility
@@ -111,7 +113,7 @@ internal fun ConnectionHubAppBar(
             )
             HubUtilityButton(
                 icon = Icons.Default.Smartphone,
-                description = appText("Rooms", "房间"),
+                description = appText("Saved devices", "已保存设备"),
                 testTag = "hub_rooms",
                 onClick = onRooms,
             )
@@ -583,26 +585,43 @@ private fun NearbyVisibility.label(): String =
         NearbyVisibility.Foreground -> appText("While open", "打开时可见")
     }
 
-internal enum class WifiAwareDiscoveryUiState {
+internal enum class WifiAwareFeatureUiState {
+    Checking,
     Active,
     Starting,
-    Unavailable,
+    Unsupported,
+    PermissionRequired,
+    WifiDisabled,
+    PairingRequired,
+    TemporarilyUnavailable,
+    ExperimentalUnavailable,
 }
 
-internal fun wifiAwareDiscoveryUiState(status: ProviderStatus?): WifiAwareDiscoveryUiState =
-    when (status?.availability) {
-        ProviderAvailability.Ready -> WifiAwareDiscoveryUiState.Active
-        ProviderAvailability.Starting -> WifiAwareDiscoveryUiState.Starting
-        else -> WifiAwareDiscoveryUiState.Unavailable
+internal fun wifiAwareFeatureUiState(
+    capability: WifiAwareCapabilitySnapshot?,
+    status: ProviderStatus?,
+): WifiAwareFeatureUiState {
+    val availability = capability?.availability ?: return WifiAwareFeatureUiState.Checking
+    return when (availability) {
+        WifiAwareAvailability.UNSUPPORTED_OS,
+        WifiAwareAvailability.UNSUPPORTED_HARDWARE,
+        -> WifiAwareFeatureUiState.Unsupported
+        WifiAwareAvailability.PERMISSION_REQUIRED,
+        WifiAwareAvailability.PERMISSION_DENIED,
+        -> WifiAwareFeatureUiState.PermissionRequired
+        WifiAwareAvailability.WIFI_DISABLED -> WifiAwareFeatureUiState.WifiDisabled
+        WifiAwareAvailability.PAIRING_REQUIRED -> WifiAwareFeatureUiState.PairingRequired
+        WifiAwareAvailability.ENTITLEMENT_MISSING,
+        WifiAwareAvailability.TEMPORARILY_UNAVAILABLE,
+        -> WifiAwareFeatureUiState.TemporarilyUnavailable
+        WifiAwareAvailability.READY ->
+            when (status?.availability) {
+                ProviderAvailability.Ready -> WifiAwareFeatureUiState.Active
+                ProviderAvailability.Starting -> WifiAwareFeatureUiState.Starting
+                else -> WifiAwareFeatureUiState.ExperimentalUnavailable
+            }
     }
-
-internal fun shouldShowWifiAwareDiscoveryAction(status: ProviderStatus?): Boolean =
-    when (status?.availability) {
-        ProviderAvailability.Ready,
-        ProviderAvailability.Starting,
-        -> true
-        else -> false
-    }
+}
 
 internal fun canShareRoomViaNfc(phase: RoomControlPhase): Boolean =
     phase == RoomControlPhase.None ||
@@ -610,10 +629,20 @@ internal fun canShareRoomViaNfc(phase: RoomControlPhase): Boolean =
         phase == RoomControlPhase.Closed ||
         phase == RoomControlPhase.Failed
 
+internal fun shouldStartNfcPresentationWhenPanelOpens(
+    phase: RoomControlPhase,
+    hostingArmed: Boolean,
+    readerScanning: Boolean,
+): Boolean =
+    !hostingArmed &&
+        !readerScanning &&
+        canShareRoomViaNfc(phase)
+
 @Composable
 internal fun NearbySectionHeader(
     listExpanded: Boolean,
     wifiAwareStatus: ProviderStatus?,
+    wifiAwareCapability: WifiAwareCapabilitySnapshot?,
     nfcPhoneHosting: NfcPhoneHostingState,
     nfcPhoneReader: NfcPhoneReaderState,
     discoveryActive: Boolean,
@@ -623,8 +652,8 @@ internal fun NearbySectionHeader(
     onToggleDiscovery: () -> Unit,
 ) {
     val colors = Envoix.colors
-    val wifiAwareActive =
-        wifiAwareDiscoveryUiState(wifiAwareStatus) == WifiAwareDiscoveryUiState.Active
+    val wifiAwareState = wifiAwareFeatureUiState(wifiAwareCapability, wifiAwareStatus)
+    val wifiAwareActive = wifiAwareState == WifiAwareFeatureUiState.Active
     val nfcActive = nfcPhoneHosting.armed || nfcPhoneReader.scanning
     Row(
         Modifier.fillMaxWidth(),
@@ -652,28 +681,26 @@ internal fun NearbySectionHeader(
                 fontSize = 12.sp,
             )
         }
-        if (shouldShowWifiAwareDiscoveryAction(wifiAwareStatus)) {
-            TextButton(
-                onClick = onWifiAware,
-                modifier =
-                    Modifier
-                        .heightIn(min = 40.dp)
-                        .testTag("hub_wifi_aware"),
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-            ) {
-                Icon(
-                    Icons.Default.WifiTethering,
-                    appText("Wi-Fi Aware", "Wi-Fi Aware"),
-                    tint = if (wifiAwareActive) colors.accent else colors.muted,
-                    modifier = Modifier.size(16.dp),
-                )
-                Spacer(Modifier.width(3.dp))
-                Text(
-                    appText("Aware", "Aware"),
-                    color = if (wifiAwareActive) colors.accent else colors.muted,
-                    fontSize = 12.sp,
-                )
-            }
+        TextButton(
+            onClick = onWifiAware,
+            modifier =
+                Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("hub_wifi_aware"),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+        ) {
+            Icon(
+                Icons.Default.WifiTethering,
+                appText("Wi-Fi Aware status", "Wi-Fi Aware 状态"),
+                tint = if (wifiAwareActive) colors.accent else colors.muted,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(3.dp))
+            Text(
+                appText("Aware", "Aware"),
+                color = if (wifiAwareActive) colors.accent else colors.muted,
+                fontSize = 12.sp,
+            )
         }
         TextButton(
             onClick = onNfc,
@@ -741,6 +768,14 @@ internal fun NfcNearbyActionsDialog(
                     fontSize = 13.sp,
                 )
                 Text(
+                    appText(
+                        "Phone-to-phone with iPhone is directional: this Android phone shares the invitation and iPhone scans it. Android scanning works with another compatible Android presenter or an Envoix NFC tag; iPhone cannot present itself as an NFC tag.",
+                        "与 iPhone 的手机互碰是单向的：这台 Android 手机展示邀请，由 iPhone 扫描。Android 扫描仅适用于另一台兼容的 Android 展示端或 Envoix NFC 标签；iPhone 不能把自己模拟成 NFC 标签。",
+                    ),
+                    color = Envoix.colors.muted,
+                    fontSize = 12.sp,
+                )
+                Text(
                     nfcHostingStatusLabel(hosting.status),
                     color = if (hosting.armed) Envoix.colors.accentStrong else Envoix.colors.muted,
                     fontSize = 12.sp,
@@ -763,7 +798,7 @@ internal fun NfcNearbyActionsDialog(
                         if (reader.scanning) {
                             appText("Stop NFC scan", "停止 NFC 扫描")
                         } else {
-                            appText("Scan another phone", "扫描另一台手机")
+                            appText("Scan Android or NFC tag", "扫描 Android 或 NFC 标签")
                         },
                     )
                 }
@@ -787,7 +822,7 @@ internal fun NfcNearbyActionsDialog(
                         if (hosting.armed) {
                             appText("Stop sharing by NFC", "停止通过 NFC 分享")
                         } else {
-                            appText("Create or share this room", "创建或分享此房间")
+                            appText("Share for another phone to scan", "展示邀请供另一台手机扫描")
                         },
                     )
                 }
@@ -855,29 +890,60 @@ private fun nfcReaderStatusLabel(state: NfcPhoneReaderState): String =
 @Composable
 internal fun WifiAwareDiscoveryDialog(
     status: ProviderStatus?,
+    capability: WifiAwareCapabilitySnapshot?,
     onDismiss: () -> Unit,
 ) {
-    val state = wifiAwareDiscoveryUiState(status)
+    val state = wifiAwareFeatureUiState(capability, status)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Wi-Fi Aware") },
         text = {
             Text(
                 when (state) {
-                    WifiAwareDiscoveryUiState.Active ->
+                    WifiAwareFeatureUiState.Checking ->
+                        appText(
+                            "Checking this device's Wi-Fi Aware capability…",
+                            "正在检查此设备的 Wi-Fi Aware 能力…",
+                        )
+                    WifiAwareFeatureUiState.Active ->
                         appText(
                             "Wi-Fi Aware discovery is active. Envoix still chooses the data path automatically for each transfer.",
                             "Wi-Fi Aware 发现已启用。Envoix 仍会为每次传输自动选择数据路径。",
                         )
-                    WifiAwareDiscoveryUiState.Starting ->
+                    WifiAwareFeatureUiState.Starting ->
                         appText(
                             "Wi-Fi Aware discovery is starting.",
                             "Wi-Fi Aware 发现正在启动。",
                         )
-                    WifiAwareDiscoveryUiState.Unavailable ->
+                    WifiAwareFeatureUiState.Unsupported ->
                         appText(
-                            "Wi-Fi Aware discovery is not connected in this Android build yet. Nearby continues over Bluetooth and local-network discovery.",
-                            "此 Android 版本尚未接入 Wi-Fi Aware 发现。附近发现仍会通过蓝牙和局域网继续工作。",
+                            "This device or Android version does not support Wi-Fi Aware pairing. Use Bluetooth or local-network discovery instead.",
+                            "此设备或 Android 版本不支持 Wi-Fi Aware 配对。请改用蓝牙或局域网发现。",
+                        )
+                    WifiAwareFeatureUiState.PermissionRequired ->
+                        appText(
+                            "Allow Nearby Wi-Fi devices for Envoix, then reopen this status.",
+                            "请允许 Envoix 访问附近的 Wi-Fi 设备，然后重新打开此状态页。",
+                        )
+                    WifiAwareFeatureUiState.WifiDisabled ->
+                        appText(
+                            "Turn on Wi-Fi before using Wi-Fi Aware.",
+                            "请先打开 Wi-Fi，再使用 Wi-Fi Aware。",
+                        )
+                    WifiAwareFeatureUiState.PairingRequired ->
+                        appText(
+                            "This device supports Wi-Fi Aware, but no device is paired in the system yet.",
+                            "此设备支持 Wi-Fi Aware，但系统中尚未配对其他设备。",
+                        )
+                    WifiAwareFeatureUiState.TemporarilyUnavailable ->
+                        appText(
+                            "Wi-Fi Aware is temporarily unavailable on this device.",
+                            "此设备上的 Wi-Fi Aware 暂时不可用。",
+                        )
+                    WifiAwareFeatureUiState.ExperimentalUnavailable ->
+                        appText(
+                            "This device supports Wi-Fi Aware, but Envoix's Android discovery provider is still experimental and is not active in this build. Nearby continues over Bluetooth and local-network discovery.",
+                            "此设备支持 Wi-Fi Aware，但 Envoix 的 Android 发现功能仍处于实验阶段，本版本尚未启用。附近发现仍会通过蓝牙和局域网继续工作。",
                         )
                 },
                 color = Envoix.colors.muted,

@@ -469,9 +469,10 @@ internal class NfcInvitationHostController(
     fun setInvitation(invitation: String?) {
         if (!presentationActive) {
             session.setInvitation(null)
-        } else if (invitation == null) {
-            cancelPresentation()
         } else {
+            // A null value can be the normal, short-lived state while the room
+            // host request is producing its invitation. Keep the explicit
+            // presentation lease alive so the next non-null update can arm HCE.
             session.setInvitation(invitation)
         }
     }
@@ -506,6 +507,6 @@ internal class NfcInvitationHostController(
     }
 
     companion object {
-        internal const val PRESENTATION_LEASE_MS = 30_000L
+        internal const val PRESENTATION_LEASE_MS = 120_000L
     }
 }

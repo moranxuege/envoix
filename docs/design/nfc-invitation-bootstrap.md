@@ -7,8 +7,10 @@ define a second pairing, authentication, or transfer protocol.
 
 The Android HCE protocol, both AID registrations, private-AID readers, bounded
 role lifecycle, NDEF codec, and rejection rules have automated coverage. A
-private-AID Android-to-iPhone read and room transfer previously passed on the
-attached Xiaomi HyperOS 3 phone and iPhone 15 Pro Max. Xiaomi still intercepts
+private-AID Android-to-iPhone read and room transfer passes on the attached
+Xiaomi HyperOS 3 phone and iPhone 15 Pro Max. The 2026-08-05 regression run
+completed private AID selection, NDEF-file selection, and bounded reads in
+about 80--150 ms, and all 71 focused iPhone tests passed. Xiaomi still intercepts
 the standard NDEF AID before Envoix receives it. The newer BLE-gated automatic
 reader and Android-to-Android paths have automated coverage but await a
 separate physical regression; this document does not claim that unrun gate.
@@ -69,7 +71,7 @@ service.
 ### Private foreground fallback
 
 The fallback uses the exact proprietary AID `F0454E564F495801`. Opening Connect
-does not itself start Core NFC. An Android presenter first arms a 30-second HCE
+does not itself start Core NFC. An Android presenter first arms a 120-second HCE
 lease and broadcasts a separate, secret-free BLE readiness UUID. One fresh
 readiness generation may start one `NFCTagReaderSession` while Connect is
 foreground and unobstructed. Apple first correlates that generation to exactly
@@ -159,7 +161,7 @@ person, or device selected it.
 The URI contains a short-lived secret, just like the matching QR code. Anyone
 close enough to read the endpoint before expiry can attempt to use it. Android
 host-card emulation keeps its NDEF bytes only in process memory, clears them
-after one contiguous full read, after 30 seconds, when Connect is left, when
+after one contiguous full read, after 120 seconds, when Connect is left, when
 the room ends, or when the active invitation is replaced. It invalidates an
 in-progress ISO-DEP read when the generation changes. Hiding the QR only
 changes on-screen disclosure. A passive tag provisioned outside Envoix retains
@@ -174,7 +176,7 @@ Connect does not create a room or arm HCE. On API 35+, Envoix suppresses polling
 while Connect is visible so an idle receiver cannot wake an iPhone Wallet
 surface. Settings, Activity, backgrounding, and leaving Connect restore Android
 defaults. **Share via NFC** creates or reuses a room, enters listen-only mode,
-arms HCE, and starts one 30-second presenter lease. **Show QR/code** does not
+arms HCE, and starts one 120-second presenter lease. **Show QR/code** does not
 arm NFC. The service registers the standard NDEF AID and private Envoix AID and
 exposes the same read-only Type 4 NDEF message through either route. Android 14
 and older cannot provide the same idle suppression or HCE safety guarantee, so
@@ -243,16 +245,29 @@ expose general third-party NDEF tag emulation. The phone-to-phone presenter
 route is therefore one-way: Android may present an invitation to iPhone, but
 iPhone cannot emulate the equivalent tag.
 
+Presenting Apple's Core NFC system sheet may transition the SwiftUI scene from
+`active` to `inactive` even though the application has not entered the
+background. Envoix preserves the active `NFCTagReaderSession` across that
+transition. Cancelling on `inactive` tears down ISO-DEP immediately after the
+private AID is selected and produces a select-only Android trace. The session
+is cancelled for an actual `background` transition or by its explicit terminal
+paths. This lifecycle rule has a focused regression test.
+
 ### macOS
 
 macOS does not expose NFC controls.
 
 ## Physical verification
 
-A prior private-AID Android-to-iPhone transfer succeeded. The dual-path version
-described above has not yet received its requested physical regression. Record
-the device model, OS build, app build marker, selected route, APDU trace shape,
-and result when executing these gates.
+The private-AID Android-to-iPhone route passed again on 2026-08-05 after fixing
+the iOS scene-lifecycle regression. The Xiaomi trace completed application and
+NDEF-file selection followed by two or three bounded reads and normal
+deactivation, and the user confirmed that the room subsequently connected.
+The complete handoff was still perceived as slow, so end-to-end latency remains
+an open performance result rather than an NFC-read correctness failure. The
+remaining standard-AID background and Android-to-Android routes still require
+their separate physical gates. Record the device model, OS build, app build
+marker, selected route, APDU trace shape, and result when executing those gates.
 
 ### Android listen-only and Wallet-safety gate
 

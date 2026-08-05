@@ -399,6 +399,41 @@ final class NFCInvitationNDEFTests: XCTestCase {
         )
     }
 
+    func testPrivateAIDRetriesOnlyBoundedTransientTagLosses() {
+        for code in [
+            NFCReaderError.Code.readerTransceiveErrorTagConnectionLost,
+            .readerTransceiveErrorRetryExceeded,
+            .readerTransceiveErrorTagNotConnected
+        ] {
+            XCTAssertTrue(
+                NFCInvitationTagLossRetryPolicy.shouldRetry(
+                    code: code,
+                    completedAttempts: 0
+                )
+            )
+            XCTAssertFalse(
+                NFCInvitationTagLossRetryPolicy.shouldRetry(
+                    code: code,
+                    completedAttempts:
+                        NFCInvitationTagLossRetryPolicy.maximumAttempts
+                )
+            )
+        }
+
+        XCTAssertFalse(
+            NFCInvitationTagLossRetryPolicy.shouldRetry(
+                code: .readerTransceiveErrorTagResponseError,
+                completedAttempts: 0
+            )
+        )
+        XCTAssertFalse(
+            NFCInvitationTagLossRetryPolicy.shouldRetry(
+                code: nil,
+                completedAttempts: 0
+            )
+        )
+    }
+
     func testPrivateAIDReadRejectsInvalidOffsetsAndChunkLengths() {
         for (offset, length) in [
             (-1, 1),

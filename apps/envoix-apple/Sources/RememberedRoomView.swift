@@ -47,21 +47,21 @@ struct RememberedRoomView: View {
         .background(Theme.bg)
         .accessibilityIdentifier("remembered_room")
         .alert(
-            AppText.value("Forget this room?", "忘记这个房间？", language: language),
+            AppText.value("Forget this device?", "忘记这个设备？", language: language),
             isPresented: $isForgetConfirmationPresented
         ) {
             Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {}
-            Button(AppText.value("Forget room", "忘记房间", language: language), role: .destructive) {
+            Button(AppText.value("Forget device", "忘记设备", language: language), role: .destructive) {
                 onForget()
             }
         } message: {
             Text(AppText.value(
                 outboxEntries.isEmpty
                     ? "You will need to pair with this device again."
-                    : "Queued files for this room will be removed. You will need to pair again.",
+                    : "Queued files for this device will be removed. You will need to pair again.",
                 outboxEntries.isEmpty
                     ? "之后需要与此设备重新配对。"
-                    : "此房间的待发送文件会被移除，之后需要重新配对。",
+                    : "此设备的待发送文件会被移除，之后需要重新配对。",
                 language: language
             ))
         }
@@ -239,8 +239,8 @@ struct RememberedRoomView: View {
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(Theme.text)
                 Text(AppText.value(
-                    "Either member can offer files after the room reconnects.",
-                    "房间重新连接后，任意一方都可以发送文件。",
+                    "Either device can offer files after a connection is established.",
+                    "设备重新建立连接后，任意一方都可以发送文件。",
                     language: language
                 ))
                 .font(.subheadline)
@@ -250,7 +250,7 @@ struct RememberedRoomView: View {
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text(AppText.value("Room activity", "房间活动", language: language))
+                    Text(AppText.value("Device activity", "设备活动", language: language))
                         .font(.headline.weight(.semibold))
                     Spacer()
                     Button(AppText.value("View all", "查看全部", language: language), action: onShowActivity)
@@ -401,7 +401,7 @@ struct RememberedRoomView: View {
             Button(role: .destructive) {
                 isForgetConfirmationPresented = true
             } label: {
-                Text(AppText.value("Forget room", "忘记房间", language: language))
+                Text(AppText.value("Forget device", "忘记设备", language: language))
                     .font(.footnote.weight(.semibold))
             }
         }

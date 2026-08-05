@@ -8,9 +8,17 @@ import dev.envoix.app.ui.RoomControlUiState
 import dev.envoix.app.ui.WorkflowScreen
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NfcInvitationHostingLifecycleTest {
+    @Test
+    fun `phone presentation lease leaves enough time to align both NFC coils`() {
+        assertTrue(
+            NfcInvitationHostController.PRESENTATION_LEASE_MS >= 120_000L,
+        )
+    }
+
     @Test
     fun `unchanged hidden invitation can be recomputed after pause clears process store`() {
         val workflow = hostingWorkflow(inviteRevealed = false)

@@ -72,7 +72,7 @@ internal fun RememberedRoomsScreen(
             .background(colors.bg),
     ) {
         RememberedRoomsAppBar(
-            title = appText("Rooms", "房间"),
+            title = appText("Saved devices", "已保存设备"),
             onBack = onBack,
         )
         LazyColumn(
@@ -178,13 +178,13 @@ internal fun RememberedRoomDetailScreen(
                 .background(colors.bg),
         ) {
             RememberedRoomsAppBar(
-                title = appText("Room", "房间"),
+                title = appText("Saved device", "已保存设备"),
                 onBack = onBack,
             )
             Text(
                 appText(
-                    "This saved room is no longer available.",
-                    "此已保存房间已不可用。",
+                    "This saved device is no longer available.",
+                    "此已保存设备已不可用。",
                 ),
                 color = colors.muted,
                 modifier = Modifier.padding(24.dp),
@@ -307,7 +307,7 @@ internal fun RememberedRoomDetailScreen(
             }
             item {
                 Text(
-                    appText("ROOM CONTROLS", "房间控制"),
+                    appText("DEVICE CONTROLS", "设备控制"),
                     color = colors.muted,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -321,7 +321,7 @@ internal fun RememberedRoomDetailScreen(
                 ) {
                     Icon(Icons.Default.Edit, null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text(appText("Rename room", "重命名房间"))
+                    Text(appText("Rename device", "重命名设备"))
                 }
             }
             item {
@@ -337,7 +337,7 @@ internal fun RememberedRoomDetailScreen(
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        appText("Forget this room", "忘记此房间"),
+                        appText("Forget this device", "忘记此设备"),
                         color = colors.danger,
                     )
                 }
@@ -402,7 +402,7 @@ internal fun RememberedRoomDetailScreen(
     if (forgetOpen) {
         AlertDialog(
             onDismissRequest = { forgetOpen = false },
-            title = { Text(appText("Forget this room?", "忘记此房间？")) },
+            title = { Text(appText("Forget this device?", "忘记此设备？")) },
             text = {
                 Text(
                     appText(
@@ -631,7 +631,7 @@ private fun EmptyRememberedRooms() {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            appText("No saved rooms", "暂无已保存房间"),
+            appText("No saved devices", "暂无已保存设备"),
             color = colors.text,
             fontWeight = FontWeight.SemiBold,
         )
@@ -770,13 +770,13 @@ private fun RenameRememberedRoomDialog(
     var label by remember(initialLabel) { mutableStateOf(initialLabel) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Rename room", "重命名房间")) },
+        title = { Text(appText("Rename device", "重命名设备")) },
         text = {
             OutlinedTextField(
                 value = label,
                 onValueChange = { label = it },
                 singleLine = true,
-                label = { Text(appText("Room name", "房间名称")) },
+                label = { Text(appText("Device name", "设备名称")) },
             )
         },
         confirmButton = {
@@ -802,7 +802,7 @@ private fun RememberedRoomErrorDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Rooms unavailable", "房间不可用")) },
+        title = { Text(appText("Saved devices unavailable", "已保存设备不可用")) },
         text = { Text(message) },
         confirmButton = {
             TextButton(onClick = onDismiss) {

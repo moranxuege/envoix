@@ -2,6 +2,7 @@
 import Combine
 @preconcurrency import CoreNFC
 import Foundation
+import OSLog
 
 enum NFCInvitationContractError: Error, Equatable, LocalizedError {
     case messageCount
@@ -458,9 +459,37 @@ private final class NFCInvitationDeferredDelivery {
     }
 }
 
+enum NFCInvitationTagLossRetryPolicy {
+    static let maximumAttempts = 3
+
+    static func shouldRetry(
+        code: NFCReaderError.Code?,
+        completedAttempts: Int
+    ) -> Bool {
+        guard completedAttempts >= 0,
+              completedAttempts < maximumAttempts,
+              let code else {
+            return false
+        }
+        switch code {
+        case .readerTransceiveErrorTagConnectionLost,
+             .readerTransceiveErrorRetryExceeded,
+             .readerTransceiveErrorTagNotConnected:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 @MainActor
 final class NFCInvitationExchange: NSObject, ObservableObject {
     static var isAvailable: Bool { NFCReaderSession.readingAvailable }
+
+    private static let logger = Logger(
+        subsystem: "com.envoix.app.ios",
+        category: "nfc-invitation"
+    )
 
     @Published private(set) var isActive = false
 
@@ -468,6 +497,8 @@ final class NFCInvitationExchange: NSObject, ObservableObject {
     private var phoneSession: NFCTagReaderSession?
     private var terminalDelivery = NFCInvitationTerminalGate<() -> Void>()
     private var readingTimeout: DispatchWorkItem?
+    private var completedTagLossRetryAttempts = 0
+    private var activePrompt: String?
 
     func beginReadingEnvoixPhone(
         prompt: String,
@@ -492,8 +523,11 @@ final class NFCInvitationExchange: NSObject, ObservableObject {
         }
         self.completion = completion
         phoneSession = session
+        completedTagLossRetryAttempts = 0
+        activePrompt = prompt
         isActive = true
         session.alertMessage = prompt
+        Self.logger.debug("Starting Envoix ISO 7816 reader session")
         session.begin()
         if let timeout, timeout > 0 {
             let work = DispatchWorkItem { [weak self, weak session] in
@@ -533,11 +567,29 @@ final class NFCInvitationExchange: NSObject, ObservableObject {
     }
 
     private func fail(_ error: Error, in session: NFCTagReaderSession) {
-        guard phoneSession === session,
-              let completion,
+        guard phoneSession === session else { return }
+        let code = (error as? NFCReaderError)?.code
+        if NFCInvitationTagLossRetryPolicy.shouldRetry(
+            code: code,
+            completedAttempts: completedTagLossRetryAttempts
+        ) {
+            completedTagLossRetryAttempts += 1
+            Self.logger.notice(
+                "NFC target connection lost; restarting polling attempt \(self.completedTagLossRetryAttempts, privacy: .public)"
+            )
+            if let activePrompt {
+                session.alertMessage = activePrompt
+            }
+            session.restartPolling()
+            return
+        }
+        guard let completion,
               terminalDelivery.stage({
                   completion(.failure(error))
               }) else { return }
+        Self.logger.error(
+            "NFC invitation read failed with code \((code?.rawValue ?? -1), privacy: .public)"
+        )
         session.invalidate(errorMessage: error.localizedDescription)
     }
 
@@ -712,6 +764,7 @@ extension NFCInvitationExchange: @preconcurrency NFCTagReaderSessionDelegate {
         didDetect tags: [NFCTag]
     ) {
         guard phoneSession === session else { return }
+        Self.logger.debug("Detected \(tags.count, privacy: .public) NFC target(s)")
         guard tags.count == 1, let detectedTag = tags.first else {
             session.alertMessage =
                 "More than one NFC device was detected. Try again with one Envoix phone."
@@ -750,6 +803,7 @@ extension NFCInvitationExchange: @preconcurrency NFCTagReaderSessionDelegate {
                     self.fail(error, in: session)
                     return
                 }
+                Self.logger.debug("Connected to Envoix ISO 7816 target")
                 self.readPrivateAID(reference.tag, in: session)
             }
         }
@@ -766,6 +820,8 @@ extension NFCInvitationExchange: @preconcurrency NFCTagReaderSessionDelegate {
         var delivery = terminalDelivery.take()
         self.completion = nil
         phoneSession = nil
+        completedTagLossRetryAttempts = 0
+        activePrompt = nil
         isActive = false
         if delivery == nil, let completion {
             delivery = Self.isUserCancellation(error)

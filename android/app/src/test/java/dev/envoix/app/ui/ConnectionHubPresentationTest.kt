@@ -1,6 +1,8 @@
 package dev.envoix.app.ui
 
 import androidx.compose.ui.unit.dp
+import dev.envoix.app.WifiAwareAvailability
+import dev.envoix.app.WifiAwareCapabilitySnapshot
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.ProviderAvailability
 import dev.envoix.app.discovery.ProviderStatus
@@ -96,39 +98,63 @@ class ConnectionHubPresentationTest {
     }
 
     @Test
-    fun wifiAwareOnlyAppearsActiveWhenTheProviderIsActuallyReady() {
+    fun wifiAwarePresentationRequiresBothCapabilityAndAReadyProvider() {
         assertEquals(
-            WifiAwareDiscoveryUiState.Active,
-            wifiAwareDiscoveryUiState(status(ProviderAvailability.Ready)),
+            WifiAwareFeatureUiState.Checking,
+            wifiAwareFeatureUiState(null, status(ProviderAvailability.Ready)),
         )
         assertEquals(
-            WifiAwareDiscoveryUiState.Starting,
-            wifiAwareDiscoveryUiState(status(ProviderAvailability.Starting)),
+            WifiAwareFeatureUiState.Active,
+            wifiAwareFeatureUiState(
+                capability(WifiAwareAvailability.READY),
+                status(ProviderAvailability.Ready),
+            ),
         )
         assertEquals(
-            WifiAwareDiscoveryUiState.Unavailable,
-            wifiAwareDiscoveryUiState(status(ProviderAvailability.Reserved)),
+            WifiAwareFeatureUiState.Starting,
+            wifiAwareFeatureUiState(
+                capability(WifiAwareAvailability.READY),
+                status(ProviderAvailability.Starting),
+            ),
         )
         assertEquals(
-            WifiAwareDiscoveryUiState.Unavailable,
-            wifiAwareDiscoveryUiState(null),
+            WifiAwareFeatureUiState.ExperimentalUnavailable,
+            wifiAwareFeatureUiState(
+                capability(WifiAwareAvailability.READY),
+                status(ProviderAvailability.Reserved),
+            ),
         )
     }
 
     @Test
-    fun reservedWifiAwareProviderDoesNotExposeADeadAction() {
-        assertFalse(shouldShowWifiAwareDiscoveryAction(null))
-        assertFalse(
-            shouldShowWifiAwareDiscoveryAction(status(ProviderAvailability.Stopped)),
+    fun wifiAwarePresentationExplainsUnsupportedAndActionableCapabilityStates() {
+        assertEquals(
+            WifiAwareFeatureUiState.Unsupported,
+            wifiAwareFeatureUiState(
+                capability(WifiAwareAvailability.UNSUPPORTED_HARDWARE),
+                status(ProviderAvailability.Reserved),
+            ),
         )
-        assertFalse(
-            shouldShowWifiAwareDiscoveryAction(status(ProviderAvailability.Reserved)),
+        assertEquals(
+            WifiAwareFeatureUiState.PermissionRequired,
+            wifiAwareFeatureUiState(
+                capability(WifiAwareAvailability.PERMISSION_REQUIRED),
+                status(ProviderAvailability.Reserved),
+            ),
         )
-        assertTrue(
-            shouldShowWifiAwareDiscoveryAction(status(ProviderAvailability.Starting)),
+        assertEquals(
+            WifiAwareFeatureUiState.WifiDisabled,
+            wifiAwareFeatureUiState(
+                capability(WifiAwareAvailability.WIFI_DISABLED),
+                status(ProviderAvailability.Reserved),
+            ),
         )
-        assertTrue(
-            shouldShowWifiAwareDiscoveryAction(status(ProviderAvailability.Ready)),
+        assertEquals(
+            WifiAwareFeatureUiState.PairingRequired,
+            wifiAwareFeatureUiState(
+                capability(WifiAwareAvailability.PAIRING_REQUIRED),
+                status(ProviderAvailability.Reserved),
+            ),
         )
     }
 
@@ -143,10 +169,56 @@ class ConnectionHubPresentationTest {
         assertFalse(canShareRoomViaNfc(RoomControlPhase.Legacy))
     }
 
+    @Test
+    fun openingNfcPanelStartsTheAndroidPresenterForAnIphone() {
+        assertTrue(
+            shouldStartNfcPresentationWhenPanelOpens(
+                phase = RoomControlPhase.None,
+                hostingArmed = false,
+                readerScanning = false,
+            ),
+        )
+        assertTrue(
+            shouldStartNfcPresentationWhenPanelOpens(
+                phase = RoomControlPhase.Hosting,
+                hostingArmed = false,
+                readerScanning = false,
+            ),
+        )
+        assertFalse(
+            shouldStartNfcPresentationWhenPanelOpens(
+                phase = RoomControlPhase.Hosting,
+                hostingArmed = true,
+                readerScanning = false,
+            ),
+        )
+        assertFalse(
+            shouldStartNfcPresentationWhenPanelOpens(
+                phase = RoomControlPhase.None,
+                hostingArmed = false,
+                readerScanning = true,
+            ),
+        )
+        assertFalse(
+            shouldStartNfcPresentationWhenPanelOpens(
+                phase = RoomControlPhase.Connected,
+                hostingArmed = false,
+                readerScanning = false,
+            ),
+        )
+    }
+
     private fun status(availability: ProviderAvailability) =
         ProviderStatus(
             source = DiscoverySource.WifiAware,
             availability = availability,
             detail = "test-only",
+        )
+
+    private fun capability(availability: WifiAwareAvailability) =
+        WifiAwareCapabilitySnapshot(
+            availability = availability,
+            pairingSupported = availability != WifiAwareAvailability.UNSUPPORTED_HARDWARE,
+            pairedDeviceCount = if (availability == WifiAwareAvailability.READY) 1 else 0,
         )
 }

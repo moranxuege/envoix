@@ -67,6 +67,29 @@ enum MobileSceneLifecyclePolicy {
     }
 }
 
+enum NFCReaderSceneLifecycleAction: Equatable {
+    case beginIfNeeded
+    case preserve
+    case cancel
+}
+
+enum NFCReaderSceneLifecyclePolicy {
+    static func action(
+        for event: MobileSceneLifecycleEvent
+    ) -> NFCReaderSceneLifecycleAction {
+        switch event {
+        case .active:
+            return .beginIfNeeded
+        case .inactive:
+            // Core NFC's system sheet can make the SwiftUI scene inactive.
+            // Cancelling here tears down the tag immediately after detection.
+            return .preserve
+        case .background:
+            return .cancel
+        }
+    }
+}
+
 enum NearbyDiscoveryLeasePolicy {
     static func shouldRun(
         sceneAllowsDiscovery: Bool,
@@ -646,9 +669,8 @@ struct MobileConnectionFlowView: View {
             #endif
         }
         .onChange(of: scenePhase) { phase in
-            let effects = MobileSceneLifecyclePolicy.effects(
-                for: MobileSceneLifecycleEvent(scenePhase: phase)
-            )
+            let lifecycleEvent = MobileSceneLifecycleEvent(scenePhase: phase)
+            let effects = MobileSceneLifecyclePolicy.effects(for: lifecycleEvent)
             #if DEBUG && os(iOS)
             if phase == .background {
                 stageBackgroundShareFixtureIfRequested()
@@ -667,9 +689,12 @@ struct MobileConnectionFlowView: View {
             updateRememberedReconnect()
             synchronizeRememberedOutbox()
             #if os(iOS) && canImport(CoreNFC)
-            if phase == .active {
+            switch NFCReaderSceneLifecyclePolicy.action(for: lifecycleEvent) {
+            case .beginIfNeeded:
                 beginOfferGatedNFCReadIfNeeded()
-            } else {
+            case .preserve:
+                break
+            case .cancel:
                 nfcInvitationExchange.cancelReading()
             }
             #endif

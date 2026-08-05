@@ -211,12 +211,16 @@ struct ConnectionHubView: View {
         if !rememberedRooms.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text(AppText.value("Rooms", "房间", language: language))
+                    Text(AppText.value(
+                        "Saved devices",
+                        "已保存设备",
+                        language: language
+                    ))
                         .font(.headline.weight(.semibold))
                     Spacer()
                     Text(AppText.value(
-                        "\(rememberedRooms.count) saved",
-                        "已保存 \(rememberedRooms.count) 个",
+                        "\(rememberedRooms.count) devices",
+                        "\(rememberedRooms.count) 台",
                         language: language
                     ))
                     .font(.caption)
@@ -719,7 +723,7 @@ struct ConnectionHubView: View {
 
             if nfcIsAvailable {
                 nearbyHeaderButton(
-                    "NFC",
+                    AppText.value("NFC scan", "NFC 扫描", language: language),
                     systemImage: "wave.3.right",
                     isBusy: nfcIsActive,
                     identifier: "connect_scan_nfc",

@@ -730,6 +730,91 @@ final class ConnectionWorkflowTests: XCTestCase {
         )
     }
 
+    func testRememberedReconnectStopsAfterAutomaticFailureBudget() async throws {
+        let credentials = InMemoryRememberedCredentialStore()
+        let metadataURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("remembered.json")
+        let store = RememberedPeerStore(
+            credentialStore: credentials,
+            metadataFileURL: metadataURL
+        )
+        let pending = try store.prepare(
+            label: "Offline phone",
+            broker: "udp://broker.example:8555",
+            relay: ""
+        )
+        try store.acquireSession(pending.relationshipID)
+        try store.create(
+            pending,
+            opaqueCredential: validRememberedCredential(secretByte: 31),
+            generation: 1
+        )
+        store.releaseSession(pending.relationshipID)
+
+        let gateway = RecordingRoomControlGateway()
+        gateway.rememberedConnectHandler = { _, _, _, _ in
+            throw RememberedRoomConnectFailure(
+                reason: "room control connection timed out",
+                peerAuthenticated: false
+            )
+        }
+        let policy = RememberedRoomReconnectPolicy(
+            connectorAttemptTimeout: 0.1,
+            responderAttemptTimeout: 0.1,
+            sameLocatorCooldown: 0.001,
+            minimumBackoff: 0.001,
+            maximumBackoff: 0.001,
+            passiveConnectedDwell: 1,
+            maximumAutomaticFailures: 2
+        )
+        let workflow = ConnectionWorkflowState(
+            gateway: gateway,
+            rememberedStore: store,
+            reconnectPolicy: policy,
+            jitterUnit: { 0 }
+        )
+        workflow.refreshRememberedRooms()
+        XCTAssertNil(workflow.openRememberedRoom(
+            relationshipID: pending.relationshipID,
+            existingActivityIDs: []
+        ))
+        workflow.setRememberedReconnectEnabled(
+            true,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+
+        for _ in 0..<200 {
+            if case .needsRepair = workflow.rememberedRoomStatus(
+                relationshipID: pending.relationshipID
+            ) {
+                break
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        if case .needsRepair(let message) = workflow.rememberedRoomStatus(
+            relationshipID: pending.relationshipID
+        ) {
+            XCTAssertTrue(message.contains("Retry"))
+        } else {
+            XCTFail("Retry-budget exhaustion must become a bounded user action")
+        }
+        XCTAssertEqual(gateway.rememberedAttempts.count, 2)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(gateway.rememberedAttempts.count, 2)
+
+        workflow.setRememberedReconnectEnabled(
+            false,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity"
+        )
+        try? FileManager.default.removeItem(
+            at: metadataURL.deletingLastPathComponent()
+        )
+    }
+
     func testLinkedCoreExposesTheExpectedRoomControlContract() {
         let info = envoixCoreInfo()
 
@@ -755,6 +840,21 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertFalse(effects.shouldHideRoomInvitation)
         XCTAssertTrue(effects.allowsNearbyDiscovery)
         XCTAssertTrue(effects.shouldPresentPendingSendSelection)
+    }
+
+    func testNFCReaderSurvivesSystemSheetInactiveTransition() {
+        XCTAssertEqual(
+            NFCReaderSceneLifecyclePolicy.action(for: .inactive),
+            .preserve
+        )
+        XCTAssertEqual(
+            NFCReaderSceneLifecyclePolicy.action(for: .active),
+            .beginIfNeeded
+        )
+        XCTAssertEqual(
+            NFCReaderSceneLifecyclePolicy.action(for: .background),
+            .cancel
+        )
     }
 
     func testSystemPairingKeepsNearbyDiscoverySuspendedInActiveScene() {

@@ -1,6 +1,6 @@
 # Post-demo client reliability bugfix plan
 
-Status: **planned**
+Status: **in progress**
 
 Branch: `bugfix/client-test-reliability`
 
@@ -47,7 +47,47 @@ needed by those experiments without inferring network causes.
 7. All direct Cargo, Xcode, and Gradle validation follows the repository build
    cache discipline in `AGENTS.md`.
 
-## 3. Bug registry
+## 3. Saved-device and room boundary
+
+The product model is intentionally layered:
+
+```text
+SavedDeviceRecord (durable, one per authenticated remote installation)
+  -> PersistentExchange (durable relationship, credentials and endpoint roles)
+    -> RoomSession (ephemeral, one connection attempt/lifetime)
+      -> TransferTask (explicit draft/activity/attempt ownership)
+```
+
+- Apple, Android, and desktop clients present the durable top-level object as a
+  **Saved device**, not as a room. Each platform stores its own local record;
+  neither endpoint may project the other endpoint's local record as a shared
+  room.
+- A reconnect creates or resumes a `RoomSession`; it does not turn the room
+  instance into the durable device identity. Room status and transfer activity
+  remain scoped to that session/exchange.
+- Existing `RememberedPeerRecord`, `RememberedRoom*`, relationship IDs,
+  credentials, files, and automation identifiers remain readable during the
+  compatibility phase. Their visible UI labels change first; internal names
+  move only through an additive, versioned migration.
+- Migration maps one valid legacy remembered-peer record to one saved-device
+  record and its existing default exchange. Orphaned credentials or identities
+  without metadata are quarantined for deterministic cleanup; they are not
+  recreated from nearby history.
+- Nearby display name, RSSI, Bluetooth address, and the current ephemeral
+  discovery key are hints only. Rediscovery is marked as a saved device only
+  after an authenticated stable installation identity or relationship-derived
+  rotating presence tag matches. A name match must never establish trust.
+- One discovery advertisement cannot be assumed to represent every saved
+  relationship. Multi-relationship presence requires a protocol-defined set of
+  unlinkable rotating tags and bounded matching; until then the UI reports an
+  ordinary nearby device and authenticates before association.
+
+The first implementation slice changes the visible Apple/Android contract to
+Saved devices while preserving legacy storage and API compatibility. The
+protocol/data migration follows behind deterministic NFC and Wi-Fi Aware
+client fixes; it must not be simulated with presentation-only matching.
+
+## 4. Bug registry
 
 | ID | Priority | Observed defect | Existing owner |
 | --- | --- | --- | --- |
@@ -65,7 +105,7 @@ BLE foreground discovery and connection have improved in current physical
 testing. That observation does not close authenticated BLE, history, or
 persistent-room work.
 
-## 4. Definition of done
+## 5. Definition of done
 
 The branch is ready to merge only when all applicable conditions hold:
 
@@ -89,7 +129,7 @@ The branch is ready to merge only when all applicable conditions hold:
   commit, build, endpoint role, source shape, Activity ID, phase timings, byte
   counts, hashes, terminal state, and selected path.
 
-## 5. Execution phases
+## 6. Execution phases
 
 ### Phase 0 — freeze the baseline and register reproductions
 
@@ -217,6 +257,11 @@ physical run publish the exact expected result.
   replay rejection, and handoff-to-transfer results.
 - Fix only bounded client defects with a reproducible physical or protocol
   case. Do not claim generic iPhone-to-iPhone NFC or NFC data transfer.
+- 2026-08-05: fixed the iOS scene-lifecycle regression that cancelled Core NFC
+  when Apple's system sheet made the scene temporarily inactive. The attached
+  Xiaomi-to-iPhone private-AID path completed its APDU reads and the user
+  confirmed that the room eventually connected. Perceived end-to-end latency
+  remains open as a measured performance issue; it is not an NFC read failure.
 
 Gate: #61 rows state the honest support result and first actionable failure.
 Neither carrier blocks the stable Room/QR/BLE/local-network client matrix.
@@ -264,7 +309,7 @@ Critical stable rows require three consecutive strict successes per direction.
 Experimental rows retain failures and skips as results; they never become a
 pass through omission or automatic rerun.
 
-## 6. Commit and review sequence
+## 7. Commit and review sequence
 
 Use small, reviewable commits in this order:
 
@@ -282,7 +327,7 @@ Each implementation commit includes its regression test. Do not mix unrelated
 formatting, refactoring, protocol changes, server/network tuning, or build-cache
 cleanup into this branch.
 
-## 7. Verification ladder
+## 8. Verification ladder
 
 For each phase, run only the smallest applicable layer first, then expand:
 
