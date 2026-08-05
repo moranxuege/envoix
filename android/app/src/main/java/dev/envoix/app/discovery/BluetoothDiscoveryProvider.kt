@@ -305,6 +305,7 @@ internal class BluetoothDiscoveryProvider(
 
     private val identityGattCallback =
         object : BluetoothGattCallback() {
+            @SuppressLint("MissingPermission")
             override fun onConnectionStateChange(
                 gatt: BluetoothGatt,
                 status: Int,
@@ -327,6 +328,7 @@ internal class BluetoothDiscoveryProvider(
                 }
             }
 
+            @SuppressLint("MissingPermission")
             override fun onServicesDiscovered(
                 gatt: BluetoothGatt,
                 status: Int,

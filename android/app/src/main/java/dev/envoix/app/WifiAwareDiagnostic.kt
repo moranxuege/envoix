@@ -1,5 +1,6 @@
 package dev.envoix.app
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
@@ -304,6 +305,7 @@ internal class AndroidWifiAwareDiagnosticController(
         }
     }
 
+    @SuppressLint("MissingPermission")
     @RequiresApi(WIFI_AWARE_PAIRING_MIN_API)
     private fun startDiscovery(
         currentGeneration: Int,
