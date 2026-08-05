@@ -855,6 +855,14 @@ impl CanonicalTransferJob {
         Ok(digest)
     }
 
+    /// Reads a bounded prefix for callers that still implement the pre-schema-3
+    /// Smart compression heuristic.
+    ///
+    /// New transfers freeze their encoding from the final file extension and
+    /// must not use this sampling API.
+    #[deprecated(
+        note = "new Smart compression decisions use the final file extension; retained for compatibility"
+    )]
     pub async fn read_compression_sample(
         &self,
         item_id: SourceItemId,

@@ -7,8 +7,13 @@ import dev.envoix.app.InviteCodec
 import dev.envoix.app.ParsedInvite
 import dev.envoix.app.Settings
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.TransferActivityGroup
+import dev.envoix.app.TransferRepository
+import dev.envoix.app.discovery.BleVerificationInvitation
+import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
+import dev.envoix.app.discovery.preferredRendezvousSource
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,6 +35,8 @@ internal class ConnectionWorkflowViewModel(
     private var pendingReplacement: (() -> Unit)? = null
     private var replaceAfterClose: (() -> Unit)? = null
     private var pendingNearbyDelivery: (((String?) -> Unit) -> Unit)? = null
+    private var activeBleVerification: BleVerificationInvitation? = null
+    private var activeBleSelection: NearbyPairingSelection? = null
     private var foreground = true
     private var externalActivityLeases = 0
     private var incomingOfferAttempt = 0L
@@ -48,6 +55,10 @@ internal class ConnectionWorkflowViewModel(
                     control.phase == RoomControlPhase.Closed ||
                         control.phase == RoomControlPhase.Failed
                 if (terminal) pendingNearbyDelivery = null
+                if (terminal || control.connected) {
+                    activeBleVerification = null
+                    activeBleSelection = null
+                }
                 val transferDraft = current.transferDraft
                 if (terminal &&
                     transferDraft != null &&
@@ -107,6 +118,18 @@ internal class ConnectionWorkflowViewModel(
         }
     }
 
+    fun shareRoomViaNfc() {
+        when (controlWorkflow.state.phase) {
+            RoomControlPhase.None, RoomControlPhase.Closed, RoomControlPhase.Failed -> {
+                controlWorkflow.setInviteRevealed(false)
+                requestRoomAction(::startHosting)
+            }
+            RoomControlPhase.Connected ->
+                _uiState.value = _uiState.value.copy(screen = WorkflowScreen.Room)
+            else -> Unit
+        }
+    }
+
     fun hideRoomInvite() {
         controlWorkflow.setInviteRevealed(false)
     }
@@ -134,6 +157,7 @@ internal class ConnectionWorkflowViewModel(
     fun joinRoom(
         input: String,
         peerName: String? = null,
+        verifiedPeerLabel: String? = null,
     ) {
         val normalized = input.trim()
         if (!RoomControlInviteFormat.looksLikeRoomInvite(normalized)) {
@@ -156,6 +180,7 @@ internal class ConnectionWorkflowViewModel(
                 input = normalized,
                 displayName = currentSettings().nearbyDisplayName,
                 peerName = peerName,
+                verifiedPeerLabel = verifiedPeerLabel,
             )
         }
     }
@@ -164,19 +189,45 @@ internal class ConnectionWorkflowViewModel(
         selection: NearbyPairingSelection,
         deliver: (invite: String, completion: (String?) -> Unit) -> Unit,
     ) {
+        val bluetooth = preferredRendezvousSource(selection) == DiscoverySource.Bluetooth
         if (controlWorkflow.state.phase == RoomControlPhase.Hosting) {
-            prepareNearbyDelivery(selection, deliver)
-            controlWorkflow.state.invite?.payload?.let { payload ->
-                pendingNearbyDelivery = null
-                deliver(payload) { error ->
-                    if (error != null) showControlError(error)
+            if (bluetooth && activeBleSelection == selection) {
+                activeBleVerification?.publicOffer?.let { offer ->
+                    deliver(offer) { error -> if (error != null) showControlError(error) }
+                    return
+                }
+            } else if (!bluetooth && activeBleVerification == null) {
+                controlWorkflow.state.invite?.payload?.let { payload ->
+                    prepareNearbyDelivery(selection, deliver)
+                    pendingNearbyDelivery = null
+                    deliver(payload) { error -> if (error != null) showControlError(error) }
+                    return
                 }
             }
-            return
         }
         requestRoomAction {
-            prepareNearbyDelivery(selection, deliver)
-            startHosting()
+            if (bluetooth) {
+                val settings = currentSettings()
+                val verification =
+                    runCatching {
+                        BleVerificationInvitation.create(settings.broker, settings.relay)
+                    }.getOrElse {
+                        showControlError(it.message ?: "Could not create a verification code")
+                        return@requestRoomAction
+                    }
+                activeBleVerification = verification
+                activeBleSelection = selection
+                prepareNearbyDelivery(selection, deliver, verification.publicOffer)
+                startHosting(
+                    verification,
+                    selection.displayName ?: "Nearby Envoix device",
+                )
+            } else {
+                activeBleVerification = null
+                activeBleSelection = null
+                prepareNearbyDelivery(selection, deliver)
+                startHosting()
+            }
         }
     }
 
@@ -348,14 +399,17 @@ internal class ConnectionWorkflowViewModel(
         val transferDraft = _uiState.value.transferDraft ?: return
         if (!transferDraft.preparation.ownershipWasTransferred()) return
         val usedPending = transferDraft.usesPendingAction
+        TransferRepository.assignActivityGroupByRoom(
+            roomReference = code,
+            groupId = TransferActivityGroup.oneTime(room.id),
+            groupLabel = room.displayName,
+            replaceExisting = true,
+        )
         _uiState.value =
             _uiState.value.copy(
                 room =
                     room.copy(
                         pairingInput = if (usedPending) null else room.pairingInput,
-                        pairingCode = if (usedPending) null else room.pairingCode,
-                        hostedCode = if (usedPending) null else room.hostedCode,
-                        hostedPayload = if (usedPending) null else room.hostedPayload,
                         pendingRoleAdapter = if (usedPending) null else room.pendingRoleAdapter,
                         transferCodes = room.transferCodes + code,
                     ),
@@ -442,6 +496,15 @@ internal class ConnectionWorkflowViewModel(
                 if (receiveId >= 0L) onCancelReceive(receiveId)
                 rejectUnusableIncomingOffer(offer, startError)
                 return@receiveCompletion
+            }
+            val room = _uiState.value.room
+            if (room != null) {
+                TransferRepository.assignActivityGroup(
+                    id = receiveId,
+                    groupId = TransferActivityGroup.oneTime(room.id),
+                    groupLabel = room.displayName,
+                    replaceExisting = true,
+                )
             }
             confirmIncomingRoomOffer(
                 offer = offer,
@@ -574,7 +637,21 @@ internal class ConnectionWorkflowViewModel(
         if (externalActivityLeases == 0 && !foreground) controlWorkflow.setInviteRevealed(false)
     }
 
-    fun acceptIncomingOffer(offer: NearbyRendezvousOffer): Boolean {
+    fun acceptIncomingOffer(
+        offer: NearbyRendezvousOffer,
+        verificationCode: String? = null,
+    ): Boolean {
+        if (BleVerificationInvitation.isPublicOffer(offer.invite)) {
+            if (offer.source != DiscoverySource.Bluetooth || verificationCode == null) return false
+            val invitation =
+                BleVerificationInvitation.resolve(offer.invite, verificationCode) ?: return false
+            joinRoom(
+                invitation,
+                offer.senderDisplayName,
+                offer.senderDisplayName ?: "Nearby Envoix device",
+            )
+            return true
+        }
         if (RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)) {
             if (!controlWorkflow.available) return false
             joinRoom(offer.invite, offer.senderDisplayName)
@@ -600,9 +677,10 @@ internal class ConnectionWorkflowViewModel(
     private fun prepareNearbyDelivery(
         selection: NearbyPairingSelection,
         deliver: (invite: String, completion: (String?) -> Unit) -> Unit,
+        fixedPayload: String? = null,
     ) {
         pendingNearbyDelivery = { completion ->
-            val invite = controlWorkflow.state.invite?.payload
+            val invite = fixedPayload ?: controlWorkflow.state.invite?.payload
             if (invite == null) {
                 completion("Could not create a room invitation")
             } else {
@@ -621,6 +699,13 @@ internal class ConnectionWorkflowViewModel(
     }
 
     private fun startHosting() {
+        startHosting(verification = null, peerLabel = null)
+    }
+
+    private fun startHosting(
+        verification: BleVerificationInvitation?,
+        peerLabel: String?,
+    ) {
         val settings = currentSettings()
         _uiState.value =
             _uiState.value.copy(
@@ -631,6 +716,8 @@ internal class ConnectionWorkflowViewModel(
             displayName = settings.nearbyDisplayName,
             broker = settings.broker,
             relay = settings.relay,
+            verification = verification,
+            peerLabel = peerLabel,
         )
     }
 
@@ -649,8 +736,6 @@ internal class ConnectionWorkflowViewModel(
                             displayName = peerName,
                             controlSession = true,
                             controlEndpoint = _uiState.value.control.endpoint,
-                            hostedCode = null,
-                            hostedPayload = null,
                             pendingRoleAdapter =
                                 "send".takeIf {
                                     _uiState.value.pendingShares.isNotEmpty()
@@ -684,7 +769,7 @@ internal class ConnectionWorkflowViewModel(
             when {
                 _uiState.value.pendingShares.isNotEmpty() -> "send"
                 draft.pendingRoleAdapter != null -> draft.pendingRoleAdapter
-                draft.pairingInput != null || draft.hostedPayload != null -> draft.directionAdapter.validDirection()
+                draft.pairingInput != null -> draft.directionAdapter.validDirection()
                 else -> null
             }
         _uiState.value =
@@ -717,9 +802,6 @@ internal class ConnectionWorkflowViewModel(
                     room =
                         currentRoom.copy(
                             pairingInput = offer.invite,
-                            pairingCode = null,
-                            hostedCode = null,
-                            hostedPayload = null,
                             directionAdapter = role,
                             pendingRoleAdapter = role,
                         ),

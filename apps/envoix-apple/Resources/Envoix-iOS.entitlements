@@ -6,6 +6,14 @@
     <array>
         <string>group.com.envoix.app.shared</string>
     </array>
+    <key>com.apple.developer.nfc.readersession.formats</key>
+    <array>
+        <string>TAG</string>
+    </array>
+    <key>com.apple.developer.associated-domains</key>
+    <array>
+        <string>applinks:ece4410j-nuub.github.io</string>
+    </array>
     <key>com.apple.developer.wifi-aware</key>
     <array>
         <string>Publish</string>

@@ -3,6 +3,7 @@ package dev.envoix.app.ui
 import dev.envoix.app.ParsedInvite
 import dev.envoix.app.Settings
 import dev.envoix.app.discovery.DiscoverySource
+import dev.envoix.app.discovery.NearbyInviteRoute
 import dev.envoix.app.discovery.NearbyPairingSelection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -133,8 +134,7 @@ class ConnectionWorkflowViewModelTest {
         viewModel.openRoom(
             DeviceRoomDraft(
                 displayName = "Waiting room",
-                hostedCode = "4321-alpha-beta",
-                hostedPayload = "payload",
+                pairingInput = "envoix://invite/v2/test-payload",
                 directionAdapter = "receive",
             ),
         )
@@ -202,6 +202,55 @@ class ConnectionWorkflowViewModelTest {
     }
 
     @Test
+    fun `nearby delivery hosts without revealing the room invite`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel =
+                ConnectionWorkflowViewModel(
+                    gateway = gateway,
+                    currentSettings = { TEST_SETTINGS },
+                )
+            runCurrent()
+
+            var deliveredInvite: String? = null
+            viewModel.startNearbyRoom(TEST_SELECTION) { invite, completion ->
+                deliveredInvite = invite
+                completion(null)
+            }
+            runCurrent()
+
+            assertEquals(RoomControlPhase.Hosting, viewModel.uiState.value.control.phase)
+            assertEquals(TEST_INVITE.payload, deliveredInvite)
+            assertFalse(viewModel.uiState.value.control.inviteRevealed)
+            viewModel.endWaitingRoom()
+            runCurrent()
+        }
+
+    @Test
+    fun `Bluetooth delivery exposes only locator and displays verification code`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel = ConnectionWorkflowViewModel(gateway, { TEST_SETTINGS })
+            runCurrent()
+            var delivered: String? = null
+
+            viewModel.startNearbyRoom(BLE_SELECTION) { invite, completion ->
+                delivered = invite
+                completion(null)
+            }
+            runCurrent()
+
+            assertTrue(delivered?.startsWith("envoix://ble/v1/") == true)
+            assertTrue(gateway.verifiedHostInput?.startsWith("envoix://room/") == true)
+            assertFalse(gateway.verifiedHostInput == delivered)
+            assertEquals(
+                6,
+                viewModel.uiState.value.control.verificationCode
+                    ?.length,
+            )
+        }
+
+    @Test
     fun `nearby delivery reuses a valid hosted invite without replacement`() =
         runTest(dispatcher) {
             val gateway = HostedInviteGateway()
@@ -214,6 +263,7 @@ class ConnectionWorkflowViewModelTest {
             viewModel.revealRoomInvite()
             runCurrent()
             assertEquals(RoomControlPhase.Hosting, viewModel.uiState.value.control.phase)
+            assertTrue(viewModel.uiState.value.control.inviteRevealed)
 
             var deliveredInvite: String? = null
             viewModel.startNearbyRoom(TEST_SELECTION) { invite, completion ->
@@ -277,6 +327,24 @@ class ConnectionWorkflowViewModelTest {
 
             assertEquals(RoomControlPhase.Closed, viewModel.uiState.value.control.phase)
             assertEquals(RoomCloseReason.UserEnded, gateway.closedWith)
+        }
+
+    @Test
+    fun `naked no-R code routes only to foreground room control`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel =
+                ConnectionWorkflowViewModel(
+                    gateway = gateway,
+                    currentSettings = { TEST_SETTINGS },
+                )
+            runCurrent()
+
+            viewModel.joinRoom("123456A1B2C3D4")
+            runCurrent()
+
+            assertEquals("123456A1B2C3D4", gateway.joinedInput)
+            assertEquals(RoomControlPhase.Joining, viewModel.uiState.value.control.phase)
         }
 
     @Test
@@ -537,8 +605,8 @@ class ConnectionWorkflowViewModelTest {
     private companion object {
         val TEST_INVITE =
             RoomControlInvite(
-                code = "R123456-amber-comet",
-                payload = "envoix://room/R123456-amber-comet",
+                code = "123456-a1b2-c3d4",
+                payload = "envoix://room/123456-a1b2-c3d4",
                 endpoint = TEST_ROOM_ENDPOINT,
                 expiresAtEpochMs = Long.MAX_VALUE,
             )
@@ -546,7 +614,18 @@ class ConnectionWorkflowViewModelTest {
             NearbyPairingSelection(
                 discoveryPeerKey = "nearby-peer",
                 displayName = "Nearby phone",
+                sources = setOf(DiscoverySource.Mdns, DiscoverySource.Bluetooth),
+                nearbyInviteRoute =
+                    NearbyInviteRoute.normalized(
+                        endpointId = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst",
+                        relayUrl = "https://relay.example",
+                        directAddresses = emptyList(),
+                    ),
+            )
+        val BLE_SELECTION =
+            TEST_SELECTION.copy(
                 sources = setOf(DiscoverySource.Bluetooth),
+                nearbyInviteRoute = null,
             )
         val TEST_TRANSFER_OFFER =
             RoomTransferOffer(
@@ -568,6 +647,8 @@ private class HostedInviteGateway : RoomControlGateway {
     var hostCalls = 0
     var closedWith: RoomCloseReason? = null
     var respondedOffer: Pair<String, Boolean>? = null
+    var joinedInput: String? = null
+    var verifiedHostInput: String? = null
 
     fun emit(event: RoomControlEvent) {
         check(mutableEvents.tryEmit(event))
@@ -582,8 +663,8 @@ private class HostedInviteGateway : RoomControlGateway {
         mutableEvents.emit(
             RoomControlEvent.Hosting(
                 RoomControlInvite(
-                    code = "R123456-amber-comet",
-                    payload = "envoix://room/R123456-amber-comet",
+                    code = "123456-a1b2-c3d4",
+                    payload = "envoix://room/123456-a1b2-c3d4",
                     endpoint = TEST_ROOM_ENDPOINT,
                     expiresAtEpochMs = Long.MAX_VALUE,
                 ),
@@ -595,7 +676,27 @@ private class HostedInviteGateway : RoomControlGateway {
         input: String,
         displayName: String,
     ) {
+        joinedInput = input
         mutableEvents.emit(RoomControlEvent.Joining(TEST_ROOM_ENDPOINT))
+    }
+
+    override suspend fun hostVerified(
+        input: String,
+        displayName: String,
+        peerLabel: String,
+    ) {
+        hostCalls += 1
+        verifiedHostInput = input
+        mutableEvents.emit(
+            RoomControlEvent.Hosting(
+                RoomControlInvite(
+                    code = "123456-v100-0000",
+                    payload = input,
+                    endpoint = TEST_ROOM_ENDPOINT,
+                    expiresAtEpochMs = Long.MAX_VALUE,
+                ),
+            ),
+        )
     }
 
     override suspend fun refreshInvite() = Unit

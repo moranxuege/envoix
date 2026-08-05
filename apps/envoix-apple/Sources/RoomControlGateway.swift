@@ -113,6 +113,10 @@ protocol RoomControlGateway: AnyObject {
         relay: String,
         now: Date
     ) throws -> RoomControlInvitation
+    func prepareDeviceVerification(
+        label: String,
+        endpoint: RoomControlEndpoint
+    ) throws
     func host(
         invitation: RoomControlInvitation,
         displayName: String,
@@ -162,6 +166,13 @@ final class UnavailableRoomControlGateway: RoomControlGateway {
         relay: String,
         now: Date
     ) throws -> RoomControlInvitation {
+        throw RoomControlUnavailableError()
+    }
+
+    func prepareDeviceVerification(
+        label: String,
+        endpoint: RoomControlEndpoint
+    ) throws {
         throw RoomControlUnavailableError()
     }
 
@@ -228,8 +239,14 @@ final class UnavailableRoomControlGateway: RoomControlGateway {
 
 @MainActor
 final class LiveRoomControlGateway: RoomControlGateway {
+    private struct PendingDeviceVerification {
+        let fallbackLabel: String
+        let endpoint: RoomControlEndpoint
+    }
+
     private var session: FfiRoomControlSession?
     private var cancellation: FfiRoomControlCancellation?
+    private var verificationPersistence: PendingDeviceVerification?
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         project(try makeRoomControlInvite(broker: broker, relay: relay))
@@ -250,6 +267,21 @@ final class LiveRoomControlGateway: RoomControlGateway {
             throw RuntimeSettingsError("This room invitation has expired.")
         }
         return invitation
+    }
+
+    func prepareDeviceVerification(
+        label: String,
+        endpoint: RoomControlEndpoint
+    ) throws {
+        verificationPersistence = nil
+        let label = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty, label.count <= 64 else {
+            throw RuntimeSettingsError("The nearby device name is invalid.")
+        }
+        verificationPersistence = PendingDeviceVerification(
+            fallbackLabel: label,
+            endpoint: endpoint
+        )
     }
 
     func host(
@@ -289,6 +321,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
         beforeConnected: @escaping (UInt64) throws -> Void,
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws {
+        verificationPersistence = nil
         cancellation?.cancel()
         let token = FfiRoomControlCancellation()
         cancellation = token
@@ -432,7 +465,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
     }
 
     func lifetimeSnapshot() -> RoomControlLifetimeState? {
-        session.map { project($0.snapshot().lifetime) }
+        session.map { project($0.lifetimeSnapshot()) }
     }
 
     func expireIdleDeadline() async throws {
@@ -448,6 +481,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
     }
 
     func close(reason: RoomControlCloseReason) {
+        verificationPersistence = nil
         let activeCancellation = cancellation
         let activeSession = session
         activeCancellation?.cancel()
@@ -470,6 +504,8 @@ final class LiveRoomControlGateway: RoomControlGateway {
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws {
         cancellation?.cancel()
+        let pendingVerification = verificationPersistence
+        verificationPersistence = nil
         let token = FfiRoomControlCancellation()
         cancellation = token
         do {
@@ -477,6 +513,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
                 input: invitation.payload,
                 displayName: displayName,
                 mode: mode,
+                verifiedPairing: pendingVerification != nil,
                 identityPath: identityPath,
                 fallbackBroker: "",
                 fallbackRelay: "",
@@ -488,8 +525,39 @@ final class LiveRoomControlGateway: RoomControlGateway {
                 clearIfCurrent(token)
                 return
             }
-            session = connectedSession
             let snapshot = connectedSession.snapshot()
+            if let pendingVerification {
+                let credential = Data(snapshot.pairingCredential)
+                let persisted: Bool
+                if credential.isEmpty {
+                    persisted = false
+                } else {
+                    do {
+                        let authenticatedLabel = snapshot.peerName
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        let pending = try RememberedPeerStore.shared.prepare(
+                            label: authenticatedLabel.isEmpty
+                                ? pendingVerification.fallbackLabel
+                                : authenticatedLabel,
+                            broker: pendingVerification.endpoint.broker,
+                            relay: pendingVerification.endpoint.relay
+                        )
+                        let persistence = try RememberPersistenceContext(pending: pending)
+                        persisted = persistence.persist(credential, generation: 0)
+                    } catch {
+                        persisted = false
+                    }
+                }
+                guard persisted else {
+                    token.cancel()
+                    try? await connectedSession.close(reason: .protocolFailure)
+                    clearIfCurrent(token)
+                    throw RuntimeSettingsError(
+                        "The verified device credential could not be protected on this device."
+                    )
+                }
+            }
+            session = connectedSession
             onEvent(.connected(
                 peerDisplayName: snapshot.peerName,
                 creator: snapshot.creator,
@@ -529,6 +597,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
 
     private func clearIfCurrent(_ token: FfiRoomControlCancellation) {
         guard cancellation === token else { return }
+        verificationPersistence = nil
         session = nil
         cancellation = nil
     }
@@ -656,8 +725,8 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         RoomControlInvitation(
-            code: "R123456-test-room",
-            payload: "envoix://room/R123456-test-room",
+            code: "123456-test-room",
+            payload: "envoix://room/123456-test-room",
             endpoint: RoomControlEndpoint(broker: broker, relay: relay),
             expiresAt: now.addingTimeInterval(5 * 60)
         )
@@ -671,6 +740,11 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
     ) throws -> RoomControlInvitation {
         try makeInvitation(broker: broker, relay: relay, now: now)
     }
+
+    func prepareDeviceVerification(
+        label: String,
+        endpoint: RoomControlEndpoint
+    ) throws {}
 
     func host(
         invitation: RoomControlInvitation,

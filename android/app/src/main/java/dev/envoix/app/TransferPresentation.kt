@@ -1,5 +1,33 @@
 package dev.envoix.app
 
+import java.util.Locale
+import kotlin.math.floor
+
+internal fun transferRateString(bytesPerSecond: Double): String {
+    val rate = bytesPerSecond.takeIf { it.isFinite() && it > 0.0 } ?: return "0 B/s"
+    return when {
+        rate >= 1_000_000_000.0 -> formatTransferRate(rate / 1_000_000_000.0, 2, "GB/s")
+        rate >= 1_000_000.0 -> formatTransferRate(rate / 1_000_000.0, 1, "MB/s")
+        rate >= 1_000.0 -> formatTransferRate(rate / 1_000.0, 0, "KB/s")
+        else -> formatTransferRate(rate, 0, "B/s")
+    }
+}
+
+private fun formatTransferRate(
+    value: Double,
+    fractionDigits: Int,
+    unit: String,
+): String {
+    val scale =
+        when (fractionDigits) {
+            2 -> 100.0
+            1 -> 10.0
+            else -> 1.0
+        }
+    val rounded = floor(value * scale + 0.5) / scale
+    return String.format(Locale.ROOT, "%.${fractionDigits}f %s", rounded, unit)
+}
+
 data class TransferActionAvailability(
     val canPause: Boolean = false,
     val canResume: Boolean = false,

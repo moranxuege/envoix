@@ -13,7 +13,7 @@ internal interface BleRendezvousSecurity {
     fun open(payload: ByteArray): ByteArray?
 }
 
-/** Experimental carrier only. This mode provides no peer authentication or confidentiality. */
+/** Plaintext is intentional: BLE may carry only a secret-free verification locator. */
 internal object InsecureBleRendezvousSecurity : BleRendezvousSecurity {
     override val mode: Byte = 0
     override val logName = "none"
@@ -30,9 +30,15 @@ internal data class BleRendezvousInvite(
     val invite: String,
 )
 
+internal data class BleDiscoveryIdentity(
+    val peerKey: String,
+    val displayName: String,
+)
+
 internal object BleRendezvousProtocol {
     val SERVICE_UUID: UUID = UUID.fromString("d5f3a2d8-8f4a-4b33-8a01-000000000001")
     val WRITE_CHARACTERISTIC_UUID: UUID = UUID.fromString("d5f3a2d8-8f4a-4b33-8a01-000000000002")
+    val IDENTITY_CHARACTERISTIC_UUID: UUID = UUID.fromString("d5f3a2d8-8f4a-4b33-8a01-000000000003")
 
     const val FRAME_HEADER_SIZE = 16
     const val MAX_WIRE_PAYLOAD_BYTES = 4_096
@@ -48,7 +54,43 @@ internal object BleRendezvousProtocol {
     private const val ENVELOPE_TYPE_INVITE: Byte = 1
     private const val PEER_KEY_BYTES = 16
     private const val ENVELOPE_FIXED_BYTES = 6 + PEER_KEY_BYTES
-    private val INVITE_PREFIXES = listOf("envoix://pair/", "envoix://room/")
+    private const val IDENTITY_VERSION: Byte = 1
+    private const val IDENTITY_FIXED_BYTES = 1 + PEER_KEY_BYTES + 2
+
+    fun encodeIdentity(identity: LocalDiscoveryIdentity): ByteArray? {
+        val peerKey = DiscoveryPeerRegistry.normalizePeerKey(identity.peerKey) ?: return null
+        val nameBytes =
+            BleDiscoveryName.encode(identity.displayName, MAX_DISPLAY_NAME_BYTES)
+                ?: return null
+        return ByteArrayOutputStream(IDENTITY_FIXED_BYTES + nameBytes.size)
+            .apply {
+                write(IDENTITY_VERSION.toInt())
+                write(peerKey.toByteArray(StandardCharsets.US_ASCII))
+                writeShort(nameBytes.size)
+                write(nameBytes)
+            }.toByteArray()
+    }
+
+    fun decodeIdentity(bytes: ByteArray): BleDiscoveryIdentity? {
+        if (bytes.size < IDENTITY_FIXED_BYTES || bytes[0] != IDENTITY_VERSION) return null
+        val peerKey =
+            String(bytes, 1, PEER_KEY_BYTES, StandardCharsets.US_ASCII)
+                .let(DiscoveryPeerRegistry::normalizePeerKey)
+                ?: return null
+        val nameLength = getUnsignedShort(bytes, 1 + PEER_KEY_BYTES)
+        if (nameLength == 0 ||
+            nameLength > MAX_DISPLAY_NAME_BYTES ||
+            IDENTITY_FIXED_BYTES + nameLength != bytes.size
+        ) {
+            return null
+        }
+        val displayName =
+            BleDiscoveryName.decode(
+                bytes.copyOfRange(IDENTITY_FIXED_BYTES, bytes.size),
+                MAX_DISPLAY_NAME_BYTES,
+            ) ?: return null
+        return BleDiscoveryIdentity(peerKey, displayName)
+    }
 
     fun encodeInvite(
         identity: LocalDiscoveryIdentity,
@@ -59,7 +101,7 @@ internal object BleRendezvousProtocol {
     ): List<ByteArray>? {
         val peerKey = DiscoveryPeerRegistry.normalizePeerKey(identity.peerKey) ?: return null
         val inviteBytes = invite.trim().toByteArray(StandardCharsets.UTF_8)
-        if (!supportedInvite(invite) ||
+        if (!supportsBluetoothVerificationOffer(invite) ||
             inviteBytes.isEmpty() ||
             inviteBytes.size > MAX_INVITE_BYTES
         ) {
@@ -178,7 +220,7 @@ internal object BleRendezvousProtocol {
             decodeUtf8(bytes, ENVELOPE_FIXED_BYTES, nameLength)
                 ?.let(DiscoveryPeerRegistry::sanitizeDisplayName)
         val invite = decodeUtf8(bytes, ENVELOPE_FIXED_BYTES + nameLength, inviteLength)?.trim() ?: return null
-        if (!supportedInvite(invite)) return null
+        if (!supportsBluetoothVerificationOffer(invite)) return null
         return BleRendezvousInvite(
             requestId = requestId.toULong().toString(16).padStart(16, '0'),
             senderPeerKey = peerKey,
@@ -200,12 +242,7 @@ internal object BleRendezvousProtocol {
         return result.toByteArray()
     }
 
-    private fun supportedInvite(invite: String): Boolean {
-        val normalized = invite.trim()
-        return INVITE_PREFIXES.any { prefix ->
-            normalized.startsWith(prefix, ignoreCase = true)
-        }
-    }
+    fun supportsBluetoothVerificationOffer(value: String): Boolean = BleVerificationInvitation.isPublicOffer(value)
 
     private fun decodeUtf8(
         bytes: ByteArray,

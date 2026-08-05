@@ -4,9 +4,257 @@ import XCTest
 
 @MainActor
 final class ConnectionWorkflowTests: XCTestCase {
+    func testRoomControlReceiverInviteRetainsRoomRendezvousForWifiAware() {
+        let invite = TransferViewModel.rendezvousPlan(for: .invite)
+        XCTAssertTrue(invite.useRoom)
+        XCTAssertFalse(invite.useMdns)
+        XCTAssertTrue(invite.internetAvailable)
+
+        let room = TransferViewModel.rendezvousPlan(for: .room)
+        XCTAssertTrue(room.useRoom)
+        XCTAssertFalse(room.useMdns)
+
+        let mdns = TransferViewModel.rendezvousPlan(for: .mdns)
+        XCTAssertFalse(mdns.useRoom)
+        XCTAssertTrue(mdns.useMdns)
+    }
+
     func testInviteJoinerRoleSelectsTheLocalTransferAdapter() {
         XCTAssertEqual(ConnectionWorkflowPolicy.localAction(forLocalRole: .send), .offerFiles)
         XCTAssertEqual(ConnectionWorkflowPolicy.localAction(forLocalRole: .receive), .receiveFiles)
+    }
+
+    func testPendingSharedSendWaitsForAnAuthenticatedRoom() {
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.pendingSharedSendDestination(
+                hasPendingSelection: true,
+                sendIsBusy: false,
+                transferIsPresented: false,
+                selectionWasPresented: false,
+                hasConnectedOneTimeRoom: false,
+                hasConnectedRememberedRoom: false
+            ),
+            .connectionHub
+        )
+    }
+
+    func testPendingSharedSendUsesTheConnectedRoomWithoutCreatingAnotherOne() {
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.pendingSharedSendDestination(
+                hasPendingSelection: true,
+                sendIsBusy: false,
+                transferIsPresented: false,
+                selectionWasPresented: false,
+                hasConnectedOneTimeRoom: true,
+                hasConnectedRememberedRoom: false
+            ),
+            .oneTimeRoom
+        )
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.pendingSharedSendDestination(
+                hasPendingSelection: true,
+                sendIsBusy: false,
+                transferIsPresented: false,
+                selectionWasPresented: false,
+                hasConnectedOneTimeRoom: false,
+                hasConnectedRememberedRoom: true
+            ),
+            .rememberedRoom
+        )
+    }
+
+    func testPendingSharedSendDoesNotPresentTwiceOrInterruptASend() {
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.pendingSharedSendDestination(
+                hasPendingSelection: true,
+                sendIsBusy: false,
+                transferIsPresented: true,
+                selectionWasPresented: false,
+                hasConnectedOneTimeRoom: true,
+                hasConnectedRememberedRoom: false
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.pendingSharedSendDestination(
+                hasPendingSelection: true,
+                sendIsBusy: true,
+                transferIsPresented: false,
+                selectionWasPresented: false,
+                hasConnectedOneTimeRoom: true,
+                hasConnectedRememberedRoom: false
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            ConnectionWorkflowPolicy.pendingSharedSendDestination(
+                hasPendingSelection: true,
+                sendIsBusy: false,
+                transferIsPresented: false,
+                selectionWasPresented: true,
+                hasConnectedOneTimeRoom: true,
+                hasConnectedRememberedRoom: false
+            ),
+            .none
+        )
+    }
+
+    func testExternalInvitationRequiresOneExplicitConfirmationAndDeduplicates() {
+        let invitation = "envoix://room/123456-a1b2-c3d4"
+        XCTAssertTrue(ExternalInvitationRoutingPolicy.shouldStage(
+            invitation: invitation,
+            pendingInvitation: nil,
+            openedInvitation: nil
+        ))
+        XCTAssertFalse(ExternalInvitationRoutingPolicy.shouldStage(
+            invitation: invitation,
+            pendingInvitation: invitation,
+            openedInvitation: nil
+        ))
+        XCTAssertFalse(ExternalInvitationRoutingPolicy.shouldStage(
+            invitation: invitation,
+            pendingInvitation: nil,
+            openedInvitation: invitation
+        ))
+        XCTAssertTrue(ExternalInvitationRoutingPolicy.shouldStage(
+            invitation: "envoix://room/654321-d4c3-b2a1",
+            pendingInvitation: nil,
+            openedInvitation: invitation
+        ))
+    }
+
+    func testNFCAutomaticReadRequiresForegroundConnectAndBoundBluetoothPeer() {
+        var gate = NFCInvitationReadinessGate()
+        let offer = nfcReadinessOffer(
+            id: "0011223344556677",
+            peerKey: "8899aabbccddeeff",
+            firstSeenAtMilliseconds: 100
+        )
+
+        XCTAssertFalse(gate.claim(
+            offer: offer,
+            nowMilliseconds: 100,
+            applicationIsActive: false,
+            isConnectPage: true,
+            eligibleBluetoothPeerKeys: [offer.presenterPeerKey]
+        ))
+        XCTAssertFalse(gate.claim(
+            offer: offer,
+            nowMilliseconds: 100,
+            applicationIsActive: true,
+            isConnectPage: false,
+            eligibleBluetoothPeerKeys: [offer.presenterPeerKey]
+        ))
+        XCTAssertFalse(gate.claim(
+            offer: offer,
+            nowMilliseconds: 100,
+            applicationIsActive: true,
+            isConnectPage: true,
+            eligibleBluetoothPeerKeys: ["0011223344556677"]
+        ))
+        XCTAssertTrue(gate.claim(
+            offer: offer,
+            nowMilliseconds: 100,
+            applicationIsActive: true,
+            isConnectPage: true,
+            eligibleBluetoothPeerKeys: [offer.presenterPeerKey]
+        ))
+    }
+
+    func testNFCAutomaticReadIsOneShotPerConnectActivationAndRateLimited() {
+        var gate = NFCInvitationReadinessGate()
+        let first = nfcReadinessOffer(
+            id: "0011223344556677",
+            firstSeenAtMilliseconds: 1_000
+        )
+        let second = nfcReadinessOffer(
+            id: "8899aabbccddeeff",
+            firstSeenAtMilliseconds: 1_001
+        )
+
+        XCTAssertTrue(claimNFCRead(
+            with: &gate,
+            offer: first,
+            nowMilliseconds: 1_000
+        ))
+        XCTAssertFalse(claimNFCRead(
+            with: &gate,
+            offer: second,
+            nowMilliseconds: 1_001
+        ))
+
+        gate.didLeaveConnectPage()
+        let afterCooldown = nfcReadinessOffer(
+            id: "1021324354657687",
+            firstSeenAtMilliseconds:
+                1_000
+                + NFCInvitationReadinessGate
+                    .automaticReadCooldownMilliseconds - 1_000
+        )
+        XCTAssertFalse(claimNFCRead(
+            with: &gate,
+            offer: afterCooldown,
+            nowMilliseconds:
+                1_000
+                + NFCInvitationReadinessGate
+                    .automaticReadCooldownMilliseconds - 1
+        ))
+        XCTAssertTrue(claimNFCRead(
+            with: &gate,
+            offer: afterCooldown,
+            nowMilliseconds:
+                1_000
+                + NFCInvitationReadinessGate
+                    .automaticReadCooldownMilliseconds
+        ))
+    }
+
+    func testNFCReadinessRejectsReplayStaleOfferAndManualReadUsesActivation() {
+        var gate = NFCInvitationReadinessGate()
+        let first = nfcReadinessOffer(
+            id: "0011223344556677",
+            firstSeenAtMilliseconds: 100
+        )
+
+        XCTAssertTrue(claimNFCRead(
+            with: &gate,
+            offer: first,
+            nowMilliseconds: 100
+        ))
+        gate.didLeaveConnectPage()
+        let replay = nfcReadinessOffer(
+            id: first.id,
+            firstSeenAtMilliseconds:
+                100
+                + NFCInvitationReadinessGate.automaticReadCooldownMilliseconds
+        )
+        XCTAssertFalse(claimNFCRead(
+            with: &gate,
+            offer: replay,
+            nowMilliseconds:
+                100
+                + NFCInvitationReadinessGate.automaticReadCooldownMilliseconds
+        ))
+
+        var manualGate = NFCInvitationReadinessGate()
+        manualGate.didBeginManualRead()
+        XCTAssertFalse(claimNFCRead(
+            with: &manualGate,
+            offer: first,
+            nowMilliseconds: 100
+        ))
+
+        let stale = nfcReadinessOffer(
+            id: "8899aabbccddeeff",
+            firstSeenAtMilliseconds: 100
+        )
+        var staleGate = NFCInvitationReadinessGate()
+        XCTAssertFalse(claimNFCRead(
+            with: &staleGate,
+            offer: stale,
+            nowMilliseconds:
+                100 + NearbyNFCReadinessOffer.lifetimeMilliseconds
+        ))
     }
 
     func testRememberedGenerationSweepNeverProbesCurrentTwice() {
@@ -33,6 +281,35 @@ final class ConnectionWorkflowTests: XCTestCase {
                 mode: .responder
             ),
             [9]
+        )
+    }
+
+    private func nfcReadinessOffer(
+        id: String,
+        peerKey: String = "8899aabbccddeeff",
+        firstSeenAtMilliseconds: Int64
+    ) -> NearbyNFCReadinessOffer {
+        NearbyNFCReadinessOffer(
+            id: id,
+            presenterPeerKey: peerKey,
+            presenterID: UUID(
+                uuidString: "00112233-4455-6677-8899-aabbccddeeff"
+            )!,
+            firstSeenAtMilliseconds: firstSeenAtMilliseconds
+        )
+    }
+
+    private func claimNFCRead(
+        with gate: inout NFCInvitationReadinessGate,
+        offer: NearbyNFCReadinessOffer,
+        nowMilliseconds: Int64
+    ) -> Bool {
+        gate.claim(
+            offer: offer,
+            nowMilliseconds: nowMilliseconds,
+            applicationIsActive: true,
+            isConnectPage: true,
+            eligibleBluetoothPeerKeys: [offer.presenterPeerKey]
         )
     }
 
@@ -457,9 +734,9 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 11)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 13)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
-        XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v4")
+        XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v5")
         XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
         XCTAssertEqual(expectedNearbyInviteCoreCapability, "nearby_invite_inbox_v1")
     }
@@ -478,6 +755,27 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertFalse(effects.shouldHideRoomInvitation)
         XCTAssertTrue(effects.allowsNearbyDiscovery)
         XCTAssertTrue(effects.shouldPresentPendingSendSelection)
+    }
+
+    func testSystemPairingKeepsNearbyDiscoverySuspendedInActiveScene() {
+        XCTAssertFalse(NearbyDiscoveryLeasePolicy.shouldRun(
+            sceneAllowsDiscovery: true,
+            isConnectionPage: true,
+            discoveryIsEnabled: true,
+            systemPairingIsActive: true
+        ))
+        XCTAssertTrue(NearbyDiscoveryLeasePolicy.shouldRun(
+            sceneAllowsDiscovery: true,
+            isConnectionPage: true,
+            discoveryIsEnabled: true,
+            systemPairingIsActive: false
+        ))
+        XCTAssertFalse(NearbyDiscoveryLeasePolicy.shouldRun(
+            sceneAllowsDiscovery: true,
+            isConnectionPage: true,
+            discoveryIsEnabled: false,
+            systemPairingIsActive: false
+        ))
     }
 
     func testRememberedRoomSurvivesAnExternalFilePicker() {
@@ -555,7 +853,7 @@ final class ConnectionWorkflowTests: XCTestCase {
 
         workflow.acceptNearbyOffer(
             selection: selection,
-            pairingInput: "envoix://pair/river-stone-next?role=send",
+            pairingInput: "envoix://invite/v2/river-stone-next?role=send",
             suggestedAction: .receiveFiles,
             existingActivityIDs: ["older", "unrelated"]
         )
@@ -568,24 +866,31 @@ final class ConnectionWorkflowTests: XCTestCase {
     func testPathPresentationIsStructuredAndPrivacySafe() {
         XCTAssertEqual(
             ConnectionPathPresentationPolicy.label(
-                for: FfiConnectionPathEvent(pathKind: .direct, eventKind: .selected),
+                for: FfiConnectionPathEvent(pathKind: .directIpv4, eventKind: .selected),
                 language: "en"
             ),
-            "Direct path"
+            "Data path · Direct · IPv4"
+        )
+        XCTAssertEqual(
+            ConnectionPathPresentationPolicy.label(
+                for: FfiConnectionPathEvent(pathKind: .directIpv6, eventKind: .selected),
+                language: "zh-Hans"
+            ),
+            "数据路径 · 直连 · IPv6"
         )
         XCTAssertEqual(
             ConnectionPathPresentationPolicy.label(
                 for: FfiConnectionPathEvent(pathKind: .relay, eventKind: .changed),
                 language: "zh-Hans"
             ),
-            "中继链路 · 已切换"
+            "数据路径 · 中继 · 已切换"
         )
         XCTAssertEqual(
             ConnectionPathPresentationPolicy.label(
                 for: FfiConnectionPathEvent(pathKind: .wifiAware, eventKind: .selected),
                 language: "en"
             ),
-            "Wi-Fi Aware path"
+            "Data path · Wi‑Fi Aware"
         )
     }
 
@@ -618,6 +923,7 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(workflow.peerDisplayName, "Other phone")
         XCTAssertTrue(workflow.isRoomCreator)
         XCTAssertEqual(workflow.room?.origin, .roomControl)
+        XCTAssertNil(workflow.room?.nearbySelection)
     }
 
     func testConnectedRoomRetainsItsAuthoritativeEndpoint() async {
@@ -647,10 +953,159 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(workflow.room?.endpoint?.relay, "")
     }
 
+    func testNearbyRoomControlHostRetainsSelectionAndEndpointAfterConnected() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let selection = wifiAwareSelection()
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: "https://relay.example.test"
+        )
+
+        XCTAssertNil(workflow.startHosting(
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: [],
+            nearbySelection: selection
+        ))
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Nearby iPad",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+
+        XCTAssertEqual(workflow.room?.origin, .roomControl)
+        XCTAssertEqual(workflow.room?.nearbySelection, selection)
+        XCTAssertEqual(workflow.room?.endpoint, endpoint)
+    }
+
+    func testVerifiedNearbyHostPreparesProtectedPersistence() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: "https://relay.example.test"
+        )
+
+        XCTAssertNil(workflow.startHosting(
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: [],
+            nearbySelection: wifiAwareSelection(),
+            invitationInput: "envoix://room/123456-v165-4321",
+            verifiedPeerLabel: "Nearby iPad"
+        ))
+        XCTAssertEqual(gateway.preparedVerification?.label, "Nearby iPad")
+        XCTAssertEqual(gateway.preparedVerification?.endpoint, endpoint)
+        await Task.yield()
+    }
+
+    func testHostingInvitationScopeCannotBeReassignedBeforeConnected() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let selectedPeer = wifiAwareSelection()
+        let differentPeer = NearbyPairingSelection(
+            discoveryPeerKey: "1021324354657687",
+            displayName: "Different nearby device",
+            sources: [.wifiAware],
+            nearbyWifiAwareDeviceID: "0000000000000043"
+        )
+        let conflictingRoute = NearbyPairingSelection(
+            discoveryPeerKey: selectedPeer.discoveryPeerKey,
+            displayName: selectedPeer.displayName,
+            sources: [.wifiAware],
+            nearbyWifiAwareDeviceID: "0000000000000043"
+        )
+
+        XCTAssertNil(workflow.startHosting(
+            broker: "udp://room.example.test:8555",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: [],
+            nearbySelection: selectedPeer
+        ))
+        XCTAssertTrue(workflow.canReuseHostingInvitation(for: selectedPeer))
+        XCTAssertFalse(workflow.canReuseHostingInvitation(for: differentPeer))
+        XCTAssertFalse(workflow.canReuseHostingInvitation(for: conflictingRoute))
+
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Nearby iPad",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+
+        XCTAssertEqual(workflow.room?.nearbySelection, selectedPeer)
+    }
+
+    func testGenericHostingInvitationCannotBeAnnotatedAsNearby() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let selection = wifiAwareSelection()
+
+        XCTAssertNil(workflow.startHosting(
+            broker: "udp://room.example.test:8555",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        ))
+        XCTAssertFalse(workflow.canReuseHostingInvitation(for: selection))
+
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Nearby iPad",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+
+        XCTAssertNil(workflow.room?.nearbySelection)
+    }
+
+    func testNearbyRoomControlJoinRetainsSelectionAndEndpointAfterConnected() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let selection = wifiAwareSelection()
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: "https://relay.example.test"
+        )
+
+        XCTAssertNil(workflow.joinRoomControl(
+            input: "envoix://room/123456-test-room",
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: [],
+            nearbySelection: selection
+        ))
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Nearby iPad",
+            creator: false,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+
+        XCTAssertEqual(workflow.room?.origin, .roomControl)
+        XCTAssertEqual(workflow.room?.nearbySelection, selection)
+        XCTAssertEqual(workflow.room?.endpoint, endpoint)
+    }
+
     func testTransferInvitationEndpointPreservesAnEmptyRelay() {
         let invitation = FfiPairingInvite(
             roomCode: "123456-test-room",
-            payload: "envoix://pair/test",
+            payload: "envoix://invite/v2/test",
             broker: "udp://room.example.test:8555",
             relayUrls: [],
             creatorRole: .send,
@@ -1011,7 +1466,7 @@ final class ConnectionWorkflowTests: XCTestCase {
         await Task.yield()
         gateway.emit(.incomingOffer(RoomControlTransferOffer(
             id: "offer-at-deadline",
-            transferInvite: "envoix://pair/river-stone-test?role=send",
+            transferInvite: "envoix://invite/v2/river-stone-test?role=send",
             rootNames: ["report.pdf"],
             itemCount: 1,
             directoryCount: 0,
@@ -1034,6 +1489,54 @@ final class ConnectionWorkflowTests: XCTestCase {
         let accepted = await acceptance.value
         XCTAssertEqual(accepted?.id, "offer-at-deadline")
         XCTAssertEqual(workflow.controlPhase, .connected)
+    }
+
+    func testAcceptedOfferIsHeldWhileReceiverListenerStarts() async throws {
+        let start = Date(timeIntervalSince1970: 4_000)
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway, clock: { start })
+        _ = workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        )
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Peer",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        gateway.emit(.incomingOffer(RoomControlTransferOffer(
+            id: "offer-being-prepared",
+            transferInvite: "envoix://invite/v2/river-stone-test?role=send",
+            rootNames: ["report.pdf"],
+            itemCount: 1,
+            directoryCount: 0,
+            totalBytes: 1_024
+        )))
+        await Task.yield()
+
+        XCTAssertTrue(
+            workflow.holdIncomingRoomOfferForDestination(
+                id: "offer-being-prepared"
+            )
+        )
+        workflow.tick(
+            now: start.addingTimeInterval(
+                ConnectionWorkflowPolicy.roomOfferLifetime + 1
+            ),
+            hasActiveTransfer: false
+        )
+        await Task.yield()
+
+        XCTAssertEqual(workflow.incomingRoomOffer?.id, "offer-being-prepared")
+        XCTAssertTrue(gateway.rejectedOfferIDs.isEmpty)
+        let accepted = await workflow.acceptIncomingRoomOffer()
+        XCTAssertEqual(accepted?.id, "offer-being-prepared")
+        XCTAssertEqual(gateway.acceptedOfferIDs, ["offer-being-prepared"])
     }
 
     func testRoomOfferAcceptanceWaitsForExplicitReceiverLaunchSignal() async {
@@ -1099,7 +1602,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             senderDisplayName: "Nearby phone",
             source: .bluetooth,
             senderInboxEndpointID: nil,
-            invite: "envoix://pair/river-stone-\(invitationID)?role=send"
+            invite: "envoix://invite/v2/river-stone-\(invitationID)?role=send"
         )
     }
 
@@ -1112,6 +1615,15 @@ final class ConnectionWorkflowTests: XCTestCase {
             revision: revision,
             policy: policy,
             idleDeadline: deadline
+        )
+    }
+
+    private func wifiAwareSelection() -> NearbyPairingSelection {
+        NearbyPairingSelection(
+            discoveryPeerKey: "8899aabbccddeeff",
+            displayName: "Nearby iPad",
+            sources: [.wifiAware],
+            nearbyWifiAwareDeviceID: "0000000000000042"
         )
     }
 }
@@ -1171,14 +1683,15 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     private(set) var rememberedAttempts: [RememberedRoomConnectAttempt] = []
     private(set) var idleExpiryAttempts = 0
     private(set) var closeReasons: [RoomControlCloseReason] = []
+    private(set) var preparedVerification: (label: String, endpoint: RoomControlEndpoint)?
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         if let invitationError {
             throw invitationError
         }
         return RoomControlInvitation(
-            code: "R123456-test-room",
-            payload: "envoix://room/R123456-test-room",
+            code: "123456-test-room",
+            payload: "envoix://room/123456-test-room",
             endpoint: RoomControlEndpoint(broker: broker, relay: relay),
             expiresAt: now.addingTimeInterval(ConnectionWorkflowPolicy.roomInvitationLifetime)
         )
@@ -1191,6 +1704,13 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
         now: Date
     ) throws -> RoomControlInvitation {
         try makeInvitation(broker: broker, relay: relay, now: now)
+    }
+
+    func prepareDeviceVerification(
+        label: String,
+        endpoint: RoomControlEndpoint
+    ) throws {
+        preparedVerification = (label, endpoint)
     }
 
     func host(

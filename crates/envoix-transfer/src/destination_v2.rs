@@ -47,12 +47,44 @@ pub enum DestinationDecisionV2 {
 /// domain containing `path`. The provider must already have authorized and
 /// created the directory; an unknown result is never treated as unlimited.
 pub fn local_allocatable_bytes(path: &Path) -> Result<u64, DestinationPlanErrorV2> {
-    let stats = rustix::fs::statvfs(path)
-        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
-    stats
-        .f_bavail
-        .checked_mul(stats.f_frsize)
-        .ok_or(DestinationPlanErrorV2::SpaceOverflow)
+    #[cfg(not(windows))]
+    {
+        let stats = rustix::fs::statvfs(path)
+            .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+        stats
+            .f_bavail
+            .checked_mul(stats.f_frsize)
+            .ok_or(DestinationPlanErrorV2::SpaceOverflow)
+    }
+    #[cfg(windows)]
+    {
+        // `rustix::fs` is gated out on Windows, so the quota-aware free space
+        // has to come from Win32 directly.
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+        let mut directory: Vec<u16> = path.as_os_str().encode_wide().collect();
+        directory.push(0);
+        let mut available_to_caller: u64 = 0;
+        // SAFETY: `directory` is a NUL-terminated UTF-16 buffer that outlives
+        // the call, and the out-parameter is a live `u64`. The two unwanted
+        // out-parameters are optional and documented to accept null. There is
+        // no safe std equivalent: `available_space` is not in std, and this is
+        // the only call that reports the *user's* quota rather than the
+        // volume's raw free space.
+        let queried = unsafe {
+            GetDiskFreeSpaceExW(
+                directory.as_ptr(),
+                &mut available_to_caller,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if queried == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(available_to_caller)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1694,15 +1726,10 @@ async fn object_identity(
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::fs::MetadataExt;
-        if let (Some(volume), Some(object)) =
-            (metadata.volume_serial_number(), metadata.file_index())
-        {
-            return Ok(ObjectIdentityV2::Stable {
-                volume: volume as u64,
-                object,
-            });
-        }
+        // `Metadata::volume_serial_number` and `file_index` are still unstable
+        // (rust-lang/rust#63010), so a stable-toolchain Windows build cannot
+        // read a volume/object pair. This is the same fallback the function
+        // already takes whenever that pair is unavailable.
         Ok(ObjectIdentityV2::ExactContent {
             root_digest: exact_content,
         })

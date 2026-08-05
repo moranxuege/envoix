@@ -26,6 +26,7 @@ internal data class DiscoveryUiState(
     val peers: List<DiscoveredPeer> = emptyList(),
     val statuses: Map<DiscoverySource, ProviderStatus> = emptyMap(),
     val incomingRendezvousOffers: List<NearbyRendezvousOffer> = emptyList(),
+    val nfcReadinessOffer: NfcReadinessOffer? = null,
 )
 
 internal enum class DiscoveryMode {
@@ -45,6 +46,7 @@ internal class DiscoveryViewModel(
     private val offerQueue = NearbyRendezvousOfferQueue()
     private var providers: List<DiscoveryProvider> = emptyList()
     private val lastLoggedAvailability = mutableMapOf<DiscoverySource, ProviderAvailability>()
+    private val seenNfcReadinessOfferIds = LinkedHashSet<String>()
 
     private val _uiState =
         MutableStateFlow(
@@ -62,6 +64,7 @@ internal class DiscoveryViewModel(
     private var started = false
     private var generation = 0
     private var ticker: Job? = null
+    private var advertisedNfcReadinessOfferId: String? = null
     private var currentPresence =
         PresenceSettings(
             displayName = identity.displayName,
@@ -160,7 +163,11 @@ internal class DiscoveryViewModel(
             )
         providers = createProviders()
         val listener = listener(activeGeneration)
-        providers.forEach { provider -> provider.start(listener) }
+        providers.forEach { provider ->
+            (provider as? NfcReadinessProvider)
+                ?.setNfcReadinessOffer(advertisedNfcReadinessOfferId)
+            provider.start(listener)
+        }
         ticker =
             viewModelScope.launch {
                 while (isActive) {
@@ -186,7 +193,25 @@ internal class DiscoveryViewModel(
                 peers = emptyList(),
                 statuses = stoppedStatuses(),
                 incomingRendezvousOffers = emptyList(),
+                nfcReadinessOffer = null,
             )
+    }
+
+    fun startNfcReadinessOffer(): String {
+        val offerId = NfcReadinessUuid.newOfferId()
+        advertisedNfcReadinessOfferId = offerId
+        providers
+            .filterIsInstance<NfcReadinessProvider>()
+            .forEach { provider -> provider.setNfcReadinessOffer(offerId) }
+        return offerId
+    }
+
+    fun stopNfcReadinessOffer(offerId: String? = null) {
+        if (offerId != null && advertisedNfcReadinessOfferId != offerId) return
+        advertisedNfcReadinessOfferId = null
+        providers
+            .filterIsInstance<NfcReadinessProvider>()
+            .forEach { provider -> provider.setNfcReadinessOffer(null) }
     }
 
     fun restart() {
@@ -230,6 +255,12 @@ internal class DiscoveryViewModel(
                 _uiState.value.copy(
                     incomingRendezvousOffers = offerQueue.snapshot(SystemClock.elapsedRealtime()),
                 )
+        }
+    }
+
+    fun consumeNfcReadinessOffer(offerId: String) {
+        if (_uiState.value.nfcReadinessOffer?.offerId == offerId) {
+            _uiState.value = _uiState.value.copy(nfcReadinessOffer = null)
         }
     }
 
@@ -286,9 +317,7 @@ internal class DiscoveryViewModel(
                     if (!started || generation != activeGeneration || offer.senderPeerKey == identity.peerKey) {
                         return@launch
                     }
-                    if (InviteCodec.parseForRouting(offer.invite) == null &&
-                        !RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)
-                    ) {
+                    if (!isSupportedIncomingRendezvousOffer(offer)) {
                         OpLog.add("DISCOVERY provider=${offer.source.logName()} state=invalid_offer")
                         return@launch
                     }
@@ -296,6 +325,24 @@ internal class DiscoveryViewModel(
                         return@launch
                     }
                     if (offerQueue.add(offer, SystemClock.elapsedRealtime())) publishPeers()
+                }
+            }
+
+            override fun onNfcReadinessOffer(offer: NfcReadinessOffer) {
+                viewModelScope.launch {
+                    if (!started ||
+                        generation != activeGeneration ||
+                        requestedMode != DiscoveryMode.BrowseNearby ||
+                        offer.offerId == advertisedNfcReadinessOfferId ||
+                        offer.offerId in seenNfcReadinessOfferIds
+                    ) {
+                        return@launch
+                    }
+                    if (seenNfcReadinessOfferIds.size >= MAX_SEEN_NFC_READINESS_OFFERS) {
+                        seenNfcReadinessOfferIds.remove(seenNfcReadinessOfferIds.first())
+                    }
+                    seenNfcReadinessOfferIds += offer.offerId
+                    _uiState.value = _uiState.value.copy(nfcReadinessOffer = offer)
                 }
             }
         }
@@ -337,9 +384,21 @@ internal class DiscoveryViewModel(
 
     companion object {
         private const val PEER_REFRESH_MS = 1_000L
+        private const val MAX_SEEN_NFC_READINESS_OFFERS = 64
         private val UPPERCASE_BOUNDARY = Regex("(?<=[a-z])(?=[A-Z])")
     }
 }
+
+internal fun isSupportedIncomingRendezvousOffer(offer: NearbyRendezvousOffer): Boolean =
+    when (offer.source) {
+        DiscoverySource.Bluetooth -> BleVerificationInvitation.isPublicOffer(offer.invite)
+        else ->
+            !BleVerificationInvitation.isPublicOffer(offer.invite) &&
+                (
+                    InviteCodec.parseForRouting(offer.invite) != null ||
+                        RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)
+                )
+    }
 
 private data class PresenceSettings(
     val displayName: String,
@@ -366,3 +425,5 @@ internal fun preferredRendezvousSource(
             DiscoverySource.Bluetooth
         else -> null
     }
+
+internal fun canOfferNearbyRoom(selection: NearbyPairingSelection): Boolean = preferredRendezvousSource(selection) != null

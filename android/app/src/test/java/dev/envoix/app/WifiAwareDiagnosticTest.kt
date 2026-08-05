@@ -2,7 +2,9 @@ package dev.envoix.app
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WifiAwareDiagnosticTest {
@@ -47,6 +49,20 @@ class WifiAwareDiagnosticTest {
             "ENVXWA01".encodeToByteArray() + nonce,
             WifiAwareProbeWireProtocol.makeRequest(nonce),
         )
+    }
+
+    @Test
+    fun probeIsRunningOnlyWhileAnOperationCanBeStopped() {
+        assertFalse(WifiAwareProbePhase.IDLE.isRunning)
+        assertFalse(WifiAwareProbePhase.SUCCEEDED.isRunning)
+        assertFalse(WifiAwareProbePhase.FAILED.isRunning)
+
+        WifiAwareProbePhase.entries
+            .filterNot {
+                it == WifiAwareProbePhase.IDLE ||
+                    it == WifiAwareProbePhase.SUCCEEDED ||
+                    it == WifiAwareProbePhase.FAILED
+            }.forEach { assertTrue("phase=$it", it.isRunning) }
     }
 
     private fun assertFailure(

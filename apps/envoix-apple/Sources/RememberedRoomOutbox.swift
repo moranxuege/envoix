@@ -1,5 +1,5 @@
 import Foundation
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import Combine
 import EnvoixCore
 #endif
@@ -419,7 +419,7 @@ final class RememberedRoomOutboxStore: @unchecked Sendable {
     private static let maximumErrorCharacters = 512
 }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 enum RememberedRoomForgetPreparation {
     case ready(cleanupWarning: String?)
     case blocked(String)
@@ -854,6 +854,13 @@ final class RememberedRoomOutboxController: ObservableObject {
             current.activityID = activityID
             self.activeDispatch = current
             workflow.captureActivity(activityID)
+            _ = model.assignActivityGroup(
+                activityID: activityID,
+                groupID: "remembered:\(entry.relationshipID)",
+                label: workflow.rememberedPeers.first {
+                    $0.relationshipID == entry.relationshipID
+                }?.label
+            )
             workflow.setLocalTransferActive(true)
             refresh()
         } catch {

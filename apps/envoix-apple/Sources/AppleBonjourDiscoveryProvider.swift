@@ -1,10 +1,10 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import EnvoixCore
 import Foundation
 import Network
 
 final class AppleBonjourDiscoveryProvider: NearbyRendezvousProvider,
-    NearbyAdvertisingConfigurable {
+    NearbyAdvertisingConfigurable, NearbyIdentityConfigurable {
     let source = NearbyDiscoverySource.mdns
 
     private enum OperationState {
@@ -24,7 +24,7 @@ final class AppleBonjourDiscoveryProvider: NearbyRendezvousProvider,
 
     private static let observationRefreshInterval: TimeInterval = 5
 
-    private let identity: LocalNearbyDiscoveryIdentity
+    private var identity: LocalNearbyDiscoveryIdentity
     private var sink: ((NearbyDiscoveryEvent) -> Void)?
     private var browser: NWBrowser?
     private var listener: NWListener?
@@ -88,6 +88,11 @@ final class AppleBonjourDiscoveryProvider: NearbyRendezvousProvider,
     func setAdvertisingEnabled(_ enabled: Bool) {
         precondition(!active, "Advertising policy must be configured before discovery starts")
         advertisingEnabled = enabled
+    }
+
+    func setIdentity(_ identity: LocalNearbyDiscoveryIdentity) {
+        precondition(!active, "Identity must be configured before discovery starts")
+        self.identity = identity
     }
 
     func stop() {

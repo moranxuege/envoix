@@ -1,4 +1,4 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import Combine
 import EnvoixCore
 import Foundation
@@ -14,7 +14,6 @@ enum OneTimeRoomOrigin: Equatable {
     case roomControl
     case pairingCode
     case showCode
-    case externalShare
 }
 
 struct OneTimeRoomSession: Equatable, Identifiable {
@@ -23,6 +22,7 @@ struct OneTimeRoomSession: Equatable, Identifiable {
     var pairingInput: String?
     var suggestedAction: OneTimeRoomAction
     let endpoint: RoomControlEndpoint?
+    var nearbySelection: NearbyPairingSelection?
     let baselineActivityIDs: Set<String>
     var activityIDs: Set<String>
 
@@ -32,6 +32,7 @@ struct OneTimeRoomSession: Equatable, Identifiable {
         pairingInput: String? = nil,
         suggestedAction: OneTimeRoomAction = .choose,
         endpoint: RoomControlEndpoint? = nil,
+        nearbySelection: NearbyPairingSelection? = nil,
         baselineActivityIDs: Set<String>
     ) {
         self.id = id
@@ -39,13 +40,15 @@ struct OneTimeRoomSession: Equatable, Identifiable {
         self.pairingInput = pairingInput
         self.suggestedAction = suggestedAction
         self.endpoint = endpoint
+        if let nearbySelection {
+            self.nearbySelection = nearbySelection
+        } else if case .nearby(let selection) = origin {
+            self.nearbySelection = selection
+        } else {
+            self.nearbySelection = nil
+        }
         self.baselineActivityIDs = baselineActivityIDs
         self.activityIDs = []
-    }
-
-    var nearbySelection: NearbyPairingSelection? {
-        guard case .nearby(let selection) = origin else { return nil }
-        return selection
     }
 }
 
@@ -143,6 +146,36 @@ enum ConnectionWorkflowPolicy {
         }
     }
 
+    enum PendingSharedSendDestination: Equatable {
+        case none
+        case connectionHub
+        case oneTimeRoom
+        case rememberedRoom
+    }
+
+    static func pendingSharedSendDestination(
+        hasPendingSelection: Bool,
+        sendIsBusy: Bool,
+        transferIsPresented: Bool,
+        selectionWasPresented: Bool,
+        hasConnectedOneTimeRoom: Bool,
+        hasConnectedRememberedRoom: Bool
+    ) -> PendingSharedSendDestination {
+        guard hasPendingSelection,
+              !sendIsBusy,
+              !transferIsPresented,
+              !selectionWasPresented else {
+            return .none
+        }
+        if hasConnectedRememberedRoom {
+            return .rememberedRoom
+        }
+        if hasConnectedOneTimeRoom {
+            return .oneTimeRoom
+        }
+        return .connectionHub
+    }
+
     static func isExpired(_ offer: PendingNearbyInvitation, now: Date) -> Bool {
         now.timeIntervalSince(offer.receivedAt) >= offerLifetime
     }
@@ -230,6 +263,8 @@ final class ConnectionWorkflowState: ObservableObject {
     private var rememberedReconnectTaskID: UUID?
     private var controlGeneration = 0
     private var baselineActivityIDs: Set<String> = []
+    private var pendingControlNearbySelection: NearbyPairingSelection?
+    private var pendingDeviceVerification = false
     private var outgoingDecisions: [String: (Bool) -> Void] = [:]
     private var incomingRoomOfferDeadline: Date?
     private var lifetimeRevision: UInt64?
@@ -539,6 +574,7 @@ final class ConnectionWorkflowState: ObservableObject {
         if var current = room,
            current.nearbySelection?.discoveryPeerKey == selection.discoveryPeerKey {
             current.origin = .nearby(selection)
+            current.nearbySelection = selection
             current.pairingInput = pairingInput
             current.suggestedAction = suggestedAction
             room = current
@@ -943,27 +979,48 @@ final class ConnectionWorkflowState: ObservableObject {
         relay: String,
         displayName: String,
         identityPath: String,
-        existingActivityIDs: Set<String>
+        existingActivityIDs: Set<String>,
+        nearbySelection: NearbyPairingSelection? = nil,
+        invitationInput: String? = nil,
+        verifiedPeerLabel: String? = nil
     ) -> String? {
         guard let gateway else {
             return "Room control is unavailable in this build."
         }
         do {
             let now = clock()
-            let invitation = try gateway.makeInvitation(
-                broker: broker,
-                relay: relay,
-                now: now
-            )
+            let invitation: RoomControlInvitation
+            if let invitationInput {
+                invitation = try gateway.parseInvitation(
+                    invitationInput,
+                    broker: broker,
+                    relay: relay,
+                    now: now
+                )
+            } else {
+                invitation = try gateway.makeInvitation(
+                    broker: broker,
+                    relay: relay,
+                    now: now
+                )
+            }
             // Generate the replacement before touching the active host. A
             // refresh failure must not invalidate a room code that still
             // works on the other device.
             gateway.close(reason: .userEnded)
             endLocalState()
+            if let verifiedPeerLabel {
+                try gateway.prepareDeviceVerification(
+                    label: verifiedPeerLabel,
+                    endpoint: invitation.endpoint
+                )
+            }
+            pendingDeviceVerification = verifiedPeerLabel != nil
             roomInvitation = invitation
             controlPhase = .hosting
             isRoomCreator = true
             baselineActivityIDs = existingActivityIDs
+            pendingControlNearbySelection = nearbySelection
             let generation = controlGeneration
             controlTask = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -1000,7 +1057,9 @@ final class ConnectionWorkflowState: ObservableObject {
         relay: String,
         displayName: String,
         identityPath: String,
-        existingActivityIDs: Set<String>
+        existingActivityIDs: Set<String>,
+        nearbySelection: NearbyPairingSelection? = nil,
+        verifiedPeerLabel: String? = nil
     ) -> String? {
         guard let gateway else {
             return "Room control is unavailable in this build."
@@ -1014,10 +1073,18 @@ final class ConnectionWorkflowState: ObservableObject {
                 relay: relay,
                 now: clock()
             )
+            if let verifiedPeerLabel {
+                try gateway.prepareDeviceVerification(
+                    label: verifiedPeerLabel,
+                    endpoint: invitation.endpoint
+                )
+            }
+            pendingDeviceVerification = verifiedPeerLabel != nil
             roomInvitation = invitation
             controlPhase = .joining
             isRoomCreator = false
             baselineActivityIDs = existingActivityIDs
+            pendingControlNearbySelection = nearbySelection
             let generation = controlGeneration
             controlTask = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -1062,6 +1129,15 @@ final class ConnectionWorkflowState: ObservableObject {
             identityPath: identityPath,
             existingActivityIDs: existingActivityIDs
         )
+    }
+
+    func canReuseHostingInvitation(for selection: NearbyPairingSelection) -> Bool {
+        guard controlPhase == .hosting,
+              roomInvitation != nil,
+              let scopedSelection = pendingControlNearbySelection else {
+            return false
+        }
+        return scopedSelection == selection
     }
 
     func offerTransfer(
@@ -1232,6 +1308,8 @@ final class ConnectionWorkflowState: ObservableObject {
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
         roomInvitation = nil
+        pendingControlNearbySelection = nil
+        pendingDeviceVerification = false
         idleDeadline = nil
         lifetimeRevision = nil
         requestedLocalTransferActive = nil
@@ -1252,6 +1330,10 @@ final class ConnectionWorkflowState: ObservableObject {
         case .connected(let name, let creator, let lifetime):
             guard controlPhase == .hosting || controlPhase == .joining else { return }
             let endpoint = roomInvitation?.endpoint
+            if pendingDeviceVerification {
+                refreshRememberedRooms()
+                pendingDeviceVerification = false
+            }
             peerDisplayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(name)
                 ?? "Nearby device"
             isRoomCreator = creator
@@ -1260,8 +1342,11 @@ final class ConnectionWorkflowState: ObservableObject {
             room = OneTimeRoomSession(
                 origin: .roomControl,
                 endpoint: endpoint,
+                nearbySelection: pendingControlNearbySelection,
                 baselineActivityIDs: baselineActivityIDs
             )
+            pendingControlNearbySelection = nil
+            pendingDeviceVerification = false
             applyLifetime(lifetime)
         case .incomingOffer(let offer):
             guard controlPhase == .connected, incomingRoomOffer == nil else { return }
@@ -1290,6 +1375,8 @@ final class ConnectionWorkflowState: ObservableObject {
             incomingRoomOffer = nil
             incomingRoomOfferDeadline = nil
             roomInvitation = nil
+            pendingControlNearbySelection = nil
+            pendingDeviceVerification = false
             idleDeadline = nil
             lifetimeRevision = nil
             requestedLocalTransferActive = nil
@@ -1486,6 +1573,8 @@ final class ConnectionWorkflowState: ObservableObject {
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
         roomInvitation = nil
+        pendingControlNearbySelection = nil
+        pendingDeviceVerification = false
         idleDeadline = nil
         lifetimeRevision = nil
         requestedLocalTransferActive = nil
@@ -1520,6 +1609,8 @@ final class ConnectionWorkflowState: ObservableObject {
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
         roomInvitation = nil
+        pendingControlNearbySelection = nil
+        pendingDeviceVerification = false
         peerDisplayName = nil
         idleDeadline = nil
         lifetimeRevision = nil

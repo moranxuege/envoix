@@ -46,6 +46,7 @@ const REMEMBERED_ROOM_ID_LABEL: &[u8] = b"envoix room id";
 const REMEMBERED_ROOM_AUTH_LABEL: &[u8] = b"envoix room auth";
 const REMEMBERED_PRESENCE_TAG_LABEL: &[u8] = b"envoix presence tag";
 const REMEMBERED_DATA_AUTH_LABEL: &[u8] = b"envoix remembered data auth";
+const REMEMBERED_CONTROL_PAIRING_LABEL: &[u8] = b"envoix verified device from room control";
 
 pub const REMEMBERED_PRESENCE_TAG_PREFIX: &str = "p1_";
 pub const REMEMBERED_PRESENCE_TAG_LEN: usize = REMEMBERED_PRESENCE_TAG_PREFIX.len() + 43;
@@ -91,6 +92,19 @@ pub struct RememberedCredential {
 }
 
 impl RememberedCredential {
+    /// Derive a long-term relationship credential from an already confirmed
+    /// Room-control PAKE. The transcript binding makes independently completed
+    /// pairings distinct even when users happen to enter the same short code.
+    pub fn from_control_pairing(control_key: &[u8], transcript: Commitment) -> Self {
+        let mut mac = HmacSha256::new_from_slice(control_key)
+            .expect("HMAC-SHA256 accepts keys of any length");
+        update_len_prefixed(&mut mac, REMEMBERED_CONTROL_PAIRING_LABEL);
+        update_len_prefixed(&mut mac, transcript.as_bytes());
+        Self {
+            secret: mac.finalize().into_bytes().into(),
+        }
+    }
+
     /// Parse the opaque credential bytes loaded by a platform secure store.
     pub fn from_opaque(bytes: &[u8]) -> Result<Self, AuthError> {
         if bytes.len() != REMEMBERED_CREDENTIAL_LEN
@@ -896,6 +910,26 @@ mod tests {
         opaque[4] = 2;
         assert!(RememberedCredential::from_opaque(&opaque).is_err());
         assert!(RememberedCredential::from_opaque(&opaque[..opaque.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn confirmed_control_pairing_derives_one_transcript_bound_credential() {
+        let transcript = Commitment::sha256(b"verified room control");
+        let first = RememberedCredential::from_control_pairing(&[0x41; 32], transcript);
+        let same = RememberedCredential::from_control_pairing(&[0x41; 32], transcript);
+        let other_key = RememberedCredential::from_control_pairing(&[0x42; 32], transcript);
+        let other_transcript = RememberedCredential::from_control_pairing(
+            &[0x41; 32],
+            Commitment::sha256(b"different room control"),
+        );
+
+        assert_eq!(first, same);
+        assert_ne!(first, other_key);
+        assert_ne!(first, other_transcript);
+        assert_eq!(
+            RememberedCredential::from_opaque(&first.to_opaque()).unwrap(),
+            first
+        );
     }
 
     #[test]

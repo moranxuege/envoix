@@ -1,7 +1,9 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import Combine
 import Foundation
+#if os(iOS)
 import UIKit
+#endif
 
 enum NearbyVisibilityMode: String, CaseIterable, Equatable {
     case hidden
@@ -28,21 +30,34 @@ final class NearbyPresencePreferences: ObservableObject {
     init(defaults: UserDefaults = .standard, now: Date = Date()) {
         self.defaults = defaults
         let storedName = defaults.string(forKey: Key.displayName)
+#if os(iOS)
+        let platformDisplayName: String? = UIDevice.current.model
+        let fallbackDisplayName = "Apple device"
+#else
+        let platformDisplayName = Host.current().localizedName
+        let fallbackDisplayName = "Mac"
+#endif
         displayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(storedName)
-            ?? NearbyDiscoveryPeerRegistry.sanitizeDisplayName(UIDevice.current.model)
-            ?? "Apple device"
+            ?? NearbyDiscoveryPeerRegistry.sanitizeDisplayName(platformDisplayName)
+            ?? fallbackDisplayName
 
-        let storedVisibility = defaults.string(forKey: Key.visibility)
-            .flatMap(NearbyVisibilityMode.init(rawValue:))
-            ?? .hidden
+        let storedVisibility = defaults.object(forKey: Key.visibility)
+        let resolvedVisibility: NearbyVisibilityMode
+        if let storedVisibility = storedVisibility as? String {
+            resolvedVisibility = NearbyVisibilityMode(rawValue: storedVisibility) ?? .hidden
+        } else if storedVisibility != nil {
+            resolvedVisibility = .hidden
+        } else {
+            resolvedVisibility = .whileAppOpen
+        }
         let storedExpiry = defaults.object(forKey: Key.visibilityExpiresAt) as? Date
-        if storedVisibility == .everyoneTenMinutes,
+        if resolvedVisibility == .everyoneTenMinutes,
            let storedExpiry,
            storedExpiry > now {
-            visibility = storedVisibility
+            visibility = resolvedVisibility
             visibilityExpiresAt = storedExpiry
         } else {
-            visibility = storedVisibility == .whileAppOpen ? .whileAppOpen : .hidden
+            visibility = resolvedVisibility == .whileAppOpen ? .whileAppOpen : .hidden
             visibilityExpiresAt = nil
         }
     }

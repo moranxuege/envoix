@@ -1,4 +1,4 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import QuickLook
 import SwiftUI
 
@@ -10,6 +10,7 @@ struct OneTimeRoomView: View {
 
     let room: OneTimeRoomSession
     let records: [TransferActivityRecord]
+    let metricsByActivityID: [String: ActivityMetrics]
     let controlPhase: RoomControlPhase
     let peerDisplayName: String?
     let incomingOffer: RoomControlTransferOffer?
@@ -198,7 +199,7 @@ struct OneTimeRoomView: View {
 
             HStack(spacing: 10) {
                 Button(role: .cancel, action: onRejectOffer) {
-                    Text(AppText.value("Reject", "拒绝", language: language))
+                    Text(AppText.value("Decline", "拒绝", language: language))
                         .frame(maxWidth: .infinity, minHeight: 42)
                 }
                 .buttonStyle(.bordered)
@@ -206,17 +207,28 @@ struct OneTimeRoomView: View {
                 .accessibilityIdentifier("room_offer_reject")
 
                 Button(action: onAcceptOffer) {
-                    Group {
-                        if isAcceptingOffer {
+                    if isAcceptingOffer {
+                        HStack(spacing: 8) {
                             ProgressView()
-                        } else {
-                            Text(AppText.value("Accept", "接受", language: language))
+                            Text(AppText.value(
+                                "Preparing receiver…",
+                                "正在准备接收…",
+                                language: language
+                            ))
                         }
+                        .frame(maxWidth: .infinity, minHeight: 42)
+                    } else {
+                        Text(AppText.value("Receive", "接收", language: language))
+                            .frame(maxWidth: .infinity, minHeight: 42)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 42)
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
                 .disabled(isAcceptingOffer)
+                .accessibilityLabel(AppText.value(
+                    isAcceptingOffer ? "Preparing receiver…" : "Receive",
+                    isAcceptingOffer ? "正在准备接收…" : "接收",
+                    language: language
+                ))
                 .accessibilityIdentifier("room_offer_accept")
             }
         }
@@ -225,7 +237,9 @@ struct OneTimeRoomView: View {
     }
 
     private func compactActivityCard(_ record: TransferActivityRecord) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let progress = TransferPresentationPolicy.progress(for: record.state)
+        let metrics = metricsByActivityID[record.activityId] ?? ActivityMetrics()
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: record.direction == .send ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
                     .font(.title3)
@@ -249,11 +263,32 @@ struct OneTimeRoomView: View {
 
             if record.totalBytes > 0,
                record.state != .delivered,
-               TransferPresentationPolicy.progress(for: record.state) != .hidden {
+               progress != .hidden {
                 ProgressView(
                     value: Double(record.bytesTransferred),
                     total: Double(record.totalBytes)
                 )
+                Text("\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(Theme.muted)
+            }
+
+            TransferPerformanceLine(
+                currentBytesPerSecond: progress == .active ? metrics.speedBps : 0,
+                averageBytesPerSecond: metrics.averageSpeedBps,
+                etaSeconds: progress == .active ? metrics.etaSeconds : nil,
+                currentSampleDate: metrics.currentRateUpdatedAt,
+                accessibilityPrefix: "room_activity_\(record.activityId)"
+            )
+
+            if let path = record.connectionPath {
+                Label(
+                    ConnectionPathPresentationPolicy.label(for: path, language: language),
+                    systemImage: path == .wifiAware ? "wifi" : "link"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+                .accessibilityIdentifier("room_activity_path_\(record.activityId)")
             }
 
             if record.direction == .receive,
@@ -342,15 +377,27 @@ struct OneTimeRoomView: View {
                 }
             }
 
-            Button(role: .destructive, action: onClose) {
-                Label(
-                    roomCloseTitle,
-                    systemImage: "xmark.circle"
-                )
-                .frame(maxWidth: .infinity, minHeight: 42)
+            if roomIsTerminal {
+                Button(action: onClose) {
+                    Label(
+                        AppText.value("Done", "完成", language: language),
+                        systemImage: "checkmark.circle"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 42)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("close_one_time_room")
+            } else {
+                Button(role: .destructive, action: onClose) {
+                    Label(
+                        AppText.value("End room", "结束房间", language: language),
+                        systemImage: "xmark.circle"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 42)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("close_one_time_room")
             }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("close_one_time_room")
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
@@ -401,11 +448,9 @@ struct OneTimeRoomView: View {
                 ? AppText.value("Looking for this device", "正在查找此设备", language: language)
                 : AppText.value("Nearby discovery paused", "附近发现已暂停", language: language)
         case .pairingCode:
-            return AppText.value("Transfer code loaded", "已载入传输配对码", language: language)
+            return AppText.value("Invite loaded", "已载入邀请", language: language)
         case .showCode:
             return AppText.value("Ready to show a room QR", "可显示房间二维码", language: language)
-        case .externalShare:
-            return AppText.value("Files ready to offer", "文件已准备发送", language: language)
         case .roomControl:
             return AppText.value("Connecting", "正在连接", language: language)
         }
@@ -422,7 +467,7 @@ struct OneTimeRoomView: View {
         switch room.origin {
         case .nearby:
             return selectedPeerIsVisible ? Theme.success : Theme.warning
-        case .pairingCode, .showCode, .externalShare, .roomControl:
+        case .pairingCode, .showCode, .roomControl:
             return Theme.accent
         }
     }
@@ -442,6 +487,15 @@ struct OneTimeRoomView: View {
             return controlPhase == .connected && incomingOffer == nil
         }
         return true
+    }
+
+    private var roomIsTerminal: Bool {
+        switch controlPhase {
+        case .ended, .failed:
+            return true
+        case .idle, .hosting, .joining, .connectingRemembered, .waitingRemembered, .connected:
+            return false
+        }
     }
 
     private var roomLifetimeText: String {
@@ -470,15 +524,6 @@ struct OneTimeRoomView: View {
             "空闲时将在 \(seconds / 60):\(String(format: "%02d", seconds % 60)) 后结束",
             language: language
         )
-    }
-
-    private var roomCloseTitle: String {
-        switch controlPhase {
-        case .ended, .failed:
-            return AppText.value("Close room", "关闭房间", language: language)
-        case .idle, .hosting, .joining, .connectingRemembered, .waitingRemembered, .connected:
-            return AppText.value("End room", "结束房间", language: language)
-        }
     }
 
     private func roomSavedDestination(_ record: TransferActivityRecord) -> String {

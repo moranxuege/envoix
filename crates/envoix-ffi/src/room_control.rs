@@ -114,11 +114,12 @@ pub struct FfiRoomControlEvent {
     pub nonce: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record)]
 pub struct FfiRoomControlSnapshot {
     pub peer_name: String,
     pub creator: bool,
     pub remembered_generation: Option<u64>,
+    pub pairing_credential: Vec<u8>,
     pub lifetime: FfiRoomLifetimeState,
 }
 
@@ -157,8 +158,17 @@ impl FfiRoomControlSession {
             peer_name: self.session.peer_name().to_string(),
             creator: self.session.is_creator(),
             remembered_generation: self.session.remembered_generation(),
+            pairing_credential: self
+                .session
+                .pairing_credential()
+                .map(|credential| credential.to_opaque())
+                .unwrap_or_default(),
             lifetime: ffi_lifetime(self.session.lifetime_state()),
         }
+    }
+
+    pub fn lifetime_snapshot(&self) -> FfiRoomLifetimeState {
+        ffi_lifetime(self.session.lifetime_state())
     }
 
     pub async fn next_event(&self) -> Result<FfiRoomControlEvent, EnvoixError> {
@@ -301,6 +311,7 @@ pub async fn connect_room_control_session(
     input: String,
     display_name: String,
     mode: FfiRoomConnectMode,
+    verified_pairing: bool,
     identity_path: String,
     fallback_broker: String,
     fallback_relay: String,
@@ -322,6 +333,7 @@ pub async fn connect_room_control_session(
             invite,
             display_name,
             mode == FfiRoomConnectMode::Host,
+            verified_pairing,
             client.session_config(&options),
             &cancellation.token,
         )
@@ -597,7 +609,7 @@ mod tests {
     #[test]
     fn invite_projection_uses_epoch_milliseconds() {
         let invite = RoomControlInvite::parse(
-            "envoix://room/R123456-a1b2-c3d4?broker=test&expires=42",
+            "envoix://room/123456-a1b2-c3d4?broker=test&expires=42",
             "fallback",
             None,
         )
@@ -608,7 +620,7 @@ mod tests {
     #[test]
     fn human_room_code_uses_configured_fallback_endpoints() {
         let invite = parse_room_control_invite(
-            "R123456-a1b2-c3d4".into(),
+            "123456-a1b2-c3d4".into(),
             "https://broker.example.test".into(),
             "https://relay.example.test".into(),
         )
@@ -621,6 +633,20 @@ mod tests {
                 .payload
                 .contains("broker=https%3A%2F%2Fbroker.example.test")
         );
+    }
+
+    #[test]
+    fn legacy_prefixed_room_control_codes_are_rejected() {
+        for input in [
+            "R123456-a1b2-c3d4",
+            "r123456-a1b2-c3d4",
+            "envoix://room/R123456-a1b2-c3d4",
+        ] {
+            assert!(
+                parse_room_control_invite(input.into(), "broker".into(), String::new()).is_err(),
+                "accepted legacy Room-Control code {input:?}"
+            );
+        }
     }
 
     #[test]
@@ -725,18 +751,23 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v4_ffi_v11() {
+    fn core_info_advertises_room_control_v5_ffi_v13() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 11);
+        assert_eq!(info.ffi_api_version, 13);
         assert!(
             info.capabilities
                 .iter()
-                .any(|capability| capability == "foreground_room_control_v4")
+                .any(|capability| capability == "foreground_room_control_v5")
         );
         assert!(
             info.capabilities
                 .iter()
                 .any(|capability| capability == "remembered_room_control_v1")
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == "structured_stage_timing_v1")
         );
     }
 }

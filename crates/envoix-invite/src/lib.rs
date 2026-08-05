@@ -32,10 +32,10 @@ pub const MAX_DECODED_PAYLOAD_LEN: usize = 4 * 1024;
 pub const PAKE_SUITE: &str = "spake2-ed25519-sha256-hkdf-hmac";
 /// Complete-invitation bootstrap identifier.
 pub const FULL_TICKET_METHOD: &str = "full-ticket-v1";
-/// Human Room-Code bootstrap identifier.
+/// Retained Room-Code bootstrap identifier.
 pub const ROOM_CODE_METHOD: &str = "room-code-v1";
 /// Broker locator namespace reserved for an authenticated foreground room.
-pub const ROOM_CONTROL_LOCATOR_PREFIX: &str = "c1_";
+pub const ROOM_CONTROL_LOCATOR_PREFIX: &str = "c2_";
 /// Currently implemented optional transfer capability.
 pub const MANIFEST_V1_CAPABILITY: &str = "manifest-v1";
 
@@ -658,7 +658,10 @@ impl fmt::Debug for InviteV2 {
     }
 }
 
-/// Creator output for intentional display and authenticated transfer startup.
+/// Creator output for displaying the complete payload and starting transfer.
+///
+/// `room_code` is retained as internal creator bootstrap state. It is not an
+/// externally accepted InviteV2 join carrier.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CreatedInvitation {
     pub payload: String,
@@ -741,7 +744,7 @@ impl fmt::Debug for ValidatedInvitation {
 }
 
 impl InviteV2 {
-    /// Generate a complete invitation and its independent human Room Code.
+    /// Generate a complete invitation and its retained creator bootstrap code.
     pub fn create(
         broker: String,
         relay_urls: Vec<String>,

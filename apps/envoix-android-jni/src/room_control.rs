@@ -53,6 +53,8 @@ struct StartParams {
     remembered_credential_ref: String,
     #[serde(default)]
     remembered_generation: Option<u64>,
+    #[serde(default)]
+    verified_pairing: bool,
 }
 
 struct ConnectFailure {
@@ -250,6 +252,9 @@ pub extern "system" fn Java_dev_envoix_app_Native_startRoomControlSession(
                 "peer_name":session.peer_name(),
                 "creator":session.is_creator(),
                 "remembered_generation":session.remembered_generation(),
+                "pairing_credential":session
+                    .pairing_credential()
+                    .map(|credential| credential.to_opaque()),
                 "lifetime":lifetime_json(&session.lifetime_state()),
             })
             .to_string(),
@@ -527,6 +532,7 @@ async fn connect_from_params(
         invite,
         params.display_name.clone(),
         params.mode == "host",
+        params.verified_pairing,
         client.session_config(&options),
         cancel,
     )
@@ -803,12 +809,24 @@ mod tests {
     #[test]
     fn invite_json_contains_epoch_milliseconds() {
         let invite = RoomControlInvite::parse(
-            "envoix://room/R123456-a1b2-c3d4?broker=test&expires=42",
+            "envoix://room/123456-a1b2-c3d4?broker=test&expires=42",
             "fallback",
             None,
         )
         .unwrap();
         assert_eq!(invite_json(invite)["expires_at_epoch_ms"], 42_000);
+    }
+
+    #[test]
+    fn legacy_prefixed_room_control_uri_is_rejected() {
+        assert!(
+            RoomControlInvite::parse(
+                "envoix://room/R123456-a1b2-c3d4?broker=test&expires=42",
+                "fallback",
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

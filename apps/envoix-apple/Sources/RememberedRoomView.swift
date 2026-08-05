@@ -1,4 +1,4 @@
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import QuickLook
 import SwiftUI
 
@@ -13,6 +13,7 @@ struct RememberedRoomView: View {
     let outboxEntries: [RememberedRoomOutboxEntry]
     let outboxError: String?
     let records: [TransferActivityRecord]
+    let metricsByActivityID: [String: ActivityMetrics]
     let onAddFiles: () -> Void
     let onAcceptOffer: () -> Void
     let onRejectOffer: () -> Void
@@ -123,8 +124,15 @@ struct RememberedRoomView: View {
 
                 Button(action: onAcceptOffer) {
                     if isAcceptingOffer {
-                        ProgressView()
-                            .frame(maxWidth: .infinity)
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text(AppText.value(
+                                "Preparing receiver…",
+                                "正在准备接收…",
+                                language: language
+                            ))
+                        }
+                        .frame(maxWidth: .infinity)
                     } else {
                         Text(AppText.value("Receive", "接收", language: language))
                             .frame(maxWidth: .infinity)
@@ -133,6 +141,11 @@ struct RememberedRoomView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.accentStrong)
                 .disabled(isAcceptingOffer)
+                .accessibilityLabel(AppText.value(
+                    isAcceptingOffer ? "Preparing receiver…" : "Receive",
+                    isAcceptingOffer ? "正在准备接收…" : "接收",
+                    language: language
+                ))
             }
         }
         .card(raised: true, padding: 16)
@@ -244,6 +257,8 @@ struct RememberedRoomView: View {
                         .font(.subheadline.weight(.semibold))
                 }
                 ForEach(records.prefix(4), id: \.activityId) { record in
+                    let progress = TransferPresentationPolicy.progress(for: record.state)
+                    let metrics = metricsByActivityID[record.activityId] ?? ActivityMetrics()
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Label(
@@ -261,10 +276,38 @@ struct RememberedRoomView: View {
                                 .foregroundStyle(Theme.muted)
                         }
                         if record.totalBytes > 0,
-                           TransferPresentationPolicy.progress(for: record.state) != .hidden {
+                           record.state != .delivered,
+                           progress != .hidden {
                             ProgressView(
                                 value: Double(record.bytesTransferred),
                                 total: Double(record.totalBytes)
+                            )
+                            Text(
+                                "\(byteString(record.bytesTransferred)) / "
+                                    + byteString(record.totalBytes)
+                            )
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Theme.muted)
+                        }
+                        TransferPerformanceLine(
+                            currentBytesPerSecond: progress == .active ? metrics.speedBps : 0,
+                            averageBytesPerSecond: metrics.averageSpeedBps,
+                            etaSeconds: progress == .active ? metrics.etaSeconds : nil,
+                            currentSampleDate: metrics.currentRateUpdatedAt,
+                            accessibilityPrefix: "remembered_room_activity_\(record.activityId)"
+                        )
+                        if let path = record.connectionPath {
+                            Label(
+                                ConnectionPathPresentationPolicy.label(
+                                    for: path,
+                                    language: language
+                                ),
+                                systemImage: path == .wifiAware ? "wifi" : "link"
+                            )
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.muted)
+                            .accessibilityIdentifier(
+                                "remembered_room_activity_path_\(record.activityId)"
                             )
                         }
                         if record.direction == .receive,

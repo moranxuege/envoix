@@ -17,14 +17,14 @@ use crate::{
 #[test]
 fn room_invitation_has_a_distinct_uri_code_and_broker_namespace() {
     let invite = RoomControlInvite::from_parts(
-        "R123456-a1b2-c3d4".into(),
+        "123456-a1b2-c3d4".into(),
         "peer@example:8445".into(),
         Some("https://relay.example".into()),
         u64::MAX,
     )
     .unwrap();
-    assert!(invite.payload().starts_with("envoix://room/R123456-"));
-    assert_eq!(invite.room_id(), "c1_123456");
+    assert!(invite.payload().starts_with("envoix://room/123456-"));
+    assert_eq!(invite.room_id(), "c2_123456");
     assert!(!invite.payload().starts_with("envoix://pair/"));
 }
 
@@ -33,18 +33,27 @@ fn generated_room_invitation_uses_the_full_base36_secret() {
     let invite = RoomControlInvite::generate("peer@example:8445", None).unwrap();
     let code = invite.code().as_bytes();
 
-    assert_eq!(code.len(), 17);
-    assert_eq!(code[0], b'R');
-    assert_eq!(code[7], b'-');
-    assert_eq!(code[12], b'-');
-    assert!(code[1..7].iter().all(u8::is_ascii_digit));
+    assert_eq!(code.len(), 16);
+    assert_eq!(code[6], b'-');
+    assert_eq!(code[11], b'-');
+    assert!(code[..6].iter().all(u8::is_ascii_digit));
     assert!(
-        code[8..12]
+        code[7..11]
             .iter()
-            .chain(&code[13..17])
+            .chain(&code[12..16])
             .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
     );
-    assert_eq!(invite.room_id(), format!("c1_{}", &invite.code()[1..7]));
+    assert_eq!(invite.room_id(), format!("c2_{}", &invite.code()[..6]));
+    assert_eq!(
+        invite
+            .payload()
+            .strip_prefix("envoix://room/")
+            .expect("Room URI prefix")
+            .split_once('?')
+            .expect("Room URI query")
+            .0,
+        invite.code()
+    );
     assert_eq!(
         RoomControlInvite::parse(&invite.payload(), "fallback", None).unwrap(),
         invite
@@ -54,7 +63,7 @@ fn generated_room_invitation_uses_the_full_base36_secret() {
 #[test]
 fn invitation_round_trips_reserved_transport_characters() {
     let invite = RoomControlInvite::from_parts(
-        "R123456-a1b2-c3d4".into(),
+        "123456-a1b2-c3d4".into(),
         "id@[2001:db8::1]:8445".into(),
         Some("https://relay.example/path?a=b".into()),
         u64::MAX,
@@ -68,7 +77,7 @@ fn invitation_round_trips_reserved_transport_characters() {
 #[test]
 fn invitation_canonicalizes_transport_endpoint_whitespace() {
     let invite = RoomControlInvite::from_parts(
-        "R123456-a1b2-c3d4".into(),
+        "123456-a1b2-c3d4".into(),
         "  id@[2001:db8::1]:8445  ".into(),
         Some("  https://relay.example/path?a=b  ".into()),
         u64::MAX,
@@ -84,15 +93,43 @@ fn invitation_canonicalizes_transport_endpoint_whitespace() {
 }
 
 #[test]
-fn unprefixed_pairing_codes_cannot_enter_control_namespace() {
-    assert!(RoomControlInvite::parse("123456-a1b2-c3d4", "broker", None).is_err());
+fn legacy_prefixed_room_codes_are_rejected_in_text_and_uri() {
+    for code in ["R123456-a1b2-c3d4", "r123456-a1b2-c3d4"] {
+        assert!(matches!(
+            RoomControlInvite::parse(code, "broker", None),
+            Err(CoreError::InvalidInput(message))
+                if message == "legacy R-prefixed room codes are not supported"
+        ));
+        assert!(matches!(
+            RoomControlInvite::parse(
+                &format!("envoix://room/{code}?broker=broker&expires={}", u64::MAX),
+                "fallback",
+                None,
+            ),
+            Err(CoreError::InvalidInput(message))
+                if message == "legacy R-prefixed room codes are not supported"
+        ));
+    }
+
+    assert!(matches!(
+        RoomControlInvite::parse(
+            &format!(
+                "envoix://room/%52123456-a1b2-c3d4?broker=broker&expires={}",
+                u64::MAX
+            ),
+            "fallback",
+            None,
+        ),
+        Err(CoreError::InvalidInput(message))
+            if message == "legacy R-prefixed room codes are not supported"
+    ));
 }
 
 #[test]
 fn typed_room_code_is_case_insensitive_and_canonicalized() {
     let invite =
-        RoomControlInvite::parse("r123456-A1B2-C3D4", "broker", None).expect("typed room code");
-    assert_eq!(invite.code(), "R123456-a1b2-c3d4");
+        RoomControlInvite::parse("123456-A1B2-C3D4", "broker", None).expect("typed room code");
+    assert_eq!(invite.code(), "123456-a1b2-c3d4");
 }
 
 #[test]
@@ -139,9 +176,9 @@ fn offer_route_must_exactly_match_room_control_route() {
 }
 
 #[test]
-fn room_control_protocol_identifiers_are_v4() {
-    assert_eq!(ROOM_CONTROL_ALPN, b"envoix-room-control/4");
-    assert_eq!(ROOM_CONTROL_VERSION, 4);
+fn room_control_protocol_identifiers_are_v5() {
+    assert_eq!(ROOM_CONTROL_ALPN, b"envoix-room-control/5");
+    assert_eq!(ROOM_CONTROL_VERSION, 5);
 }
 
 #[test]
@@ -494,7 +531,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
     let registry = Arc::new(RoomRegistry::new());
     let broker_task = tokio::spawn(serve_endpoint(broker.clone(), Arc::clone(&registry), None));
     let invite = RoomControlInvite::from_parts(
-        "R123456-a1b2-c3d4".into(),
+        "123456-a1b2-c3d4".into(),
         broker_text.clone(),
         None,
         u64::MAX,
@@ -510,6 +547,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
             join_invite,
             "Bob's Android".into(),
             false,
+            true,
             test_config(),
             &TransferCancelToken::new(),
         )
@@ -526,6 +564,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
         connect_room_control(
             host_invite,
             "Alice's iPhone".into(),
+            true,
             true,
             test_config(),
             &TransferCancelToken::new(),
@@ -553,6 +592,12 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
     assert_eq!(joiner.peer_name(), "Alice's iPhone");
     assert!(host.is_creator());
     assert!(!joiner.is_creator());
+    assert_eq!(
+        host.pairing_credential().expect("host pairing credential"),
+        joiner
+            .pairing_credential()
+            .expect("joiner pairing credential")
+    );
     assert!(
         registry.metrics_snapshot().room_not_found_rejections >= 1,
         "joiner-first connection should exercise the broker retry path"

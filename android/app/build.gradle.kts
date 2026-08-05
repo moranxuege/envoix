@@ -104,13 +104,18 @@ val buildEnvoixJniAndroid by tasks.registering {
 android {
     namespace = "dev.envoix.app"
     compileSdk = 34
+    testBuildType =
+        providers
+            .gradleProperty("envoix.testBuildType")
+            .orElse("debug")
+            .get()
 
     defaultConfig {
         applicationId = "dev.envoix.app"
         minSdk = 29 // Android 10: scoped storage + MediaStore.Downloads
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.2.2"
         buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {

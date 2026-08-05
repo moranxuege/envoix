@@ -198,6 +198,13 @@ class TransferService : Service() {
             } else {
                 TransferRepository.create(direction, room)
             }
+        sessionRelationshipId?.let { relationshipId ->
+            TransferRepository.assignActivityGroup(
+                id = id,
+                groupId = TransferActivityGroup.remembered(relationshipId),
+                groupLabel = remembered?.summary?.label ?: pendingRemember?.label,
+            )
+        }
         val spec =
             ManifestSpec(
                 id = id,
@@ -306,10 +313,15 @@ class TransferService : Service() {
             RememberedPersistenceState(spec.pendingRemember, spec.rememberedRelationshipId)
 
         override fun onEvent(json: String) {
-            if (callbacks[id] !== this) return
             val event = runCatching { JSONObject(json) }.getOrNull() ?: return
             if (event.optString("notice") != "manifest_v2") return
-            when (event.optString("kind")) {
+            val kind = event.optString("kind")
+            if (kind == "stage_timing") {
+                onStageTiming(id, spec.direction, event)
+                return
+            }
+            if (callbacks[id] !== this) return
+            when (kind) {
                 "progress" -> {
                     progressTrackers[id]
                         ?.update(event.optLong("bytes"), event.optLong("total"))
@@ -759,6 +771,77 @@ class TransferService : Service() {
         }
         if (presentationChanged) updateNotification()
     }
+
+    private fun onStageTiming(
+        id: Long,
+        expectedDirection: Direction,
+        event: JSONObject,
+    ) {
+        val timing = parseStageTiming(event) ?: return
+        if (timing.direction != expectedDirection) return
+        TransferRepository.update(id) { transfer ->
+            val result = TransferStageTimingHistory.append(transfer.stageTimings, timing)
+            if (!result.accepted) {
+                transfer
+            } else {
+                transfer.copy(
+                    stageTimings = result.samples,
+                    log = addLog(transfer.log, timing.logLine()),
+                )
+            }
+        }
+    }
+
+    private fun parseStageTiming(event: JSONObject): TransferStageTiming? {
+        val transferId =
+            when {
+                !event.has("transfer_id") || event.isNull("transfer_id") -> null
+                else -> event.opt("transfer_id") as? String ?: return null
+            }
+        return TransferStageTimingParser.parse(
+            stageWire = event.strictString("stage"),
+            directionWire = event.strictString("direction"),
+            attemptId = event.strictNonNegativeLong("attempt_id"),
+            transferId = transferId,
+            elapsedUs = event.strictNonNegativeLong("elapsed_us"),
+            deltaUs = event.strictNonNegativeLong("delta_us"),
+        )
+    }
+
+    private fun JSONObject.strictString(name: String): String? {
+        if (!has(name) || isNull(name)) return null
+        return opt(name) as? String
+    }
+
+    private fun JSONObject.strictNonNegativeLong(name: String): Long? {
+        if (!has(name) || isNull(name)) return null
+        val value =
+            when (val raw = opt(name)) {
+                is Byte -> raw.toLong()
+                is Short -> raw.toLong()
+                is Int -> raw.toLong()
+                is Long -> raw
+                else -> return null
+            }
+        return value.takeIf { it >= 0L }
+    }
+
+    private fun TransferStageTiming.logLine(): String =
+        buildString {
+            append("stage_timing")
+            append(" stage=")
+            append(stage.wire)
+            append(" direction=")
+            append(direction.wire)
+            append(" attempt_id=")
+            append(attemptId)
+            append(" transfer_id=")
+            append(transferId ?: "-")
+            append(" elapsed_us=")
+            append(elapsedUs)
+            append(" delta_us=")
+            append(deltaUs)
+        }
 
     private fun addLog(
         current: List<String>,

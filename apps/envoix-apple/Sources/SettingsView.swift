@@ -7,7 +7,6 @@ struct SettingsStageView: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
     @AppStorage("envoix.language") private var language = "en"
-    @AppStorage("envoix.defaultRole") private var defaultRole = "send"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
@@ -37,33 +36,6 @@ struct SettingsStageView: View {
                 }
                 .card(padding: 14)
 
-                #if os(macOS)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Default role for a new Room code", "新建配对码的默认角色", language: language))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.muted)
-                    Picker("Default role", selection: $defaultRole) {
-                        Text(AppText.value("Send", "发送", language: language)).tag("send")
-                        Text(AppText.value("Receive", "接收", language: language)).tag("receive")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-                .card(padding: 14)
-                #endif
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Pairing", "配对", language: language))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.muted)
-                    settingToggle(
-                        AppText.value("Avoid Tailscale addresses", "避开 Tailscale 地址", language: language),
-                        subtitle: AppText.value("Prefer the real WAN or relay path instead of 100.x candidates.", "不广播 100.x 候选地址，优先使用真实网络或中继。", language: language),
-                        isOn: avoidTailscaleBinding
-                    )
-                }
-                .card(padding: 14)
-
                 VStack(alignment: .leading, spacing: 8) {
                     Text(AppText.value("Compression", "压缩", language: language))
                         .font(.title3.weight(.semibold))
@@ -76,8 +48,8 @@ struct SettingsStageView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     Text(AppText.value(
-                        "The selected policy is fixed when a new transfer job is created.",
-                        "新建传输任务时会固定当前策略，之后修改不会影响该任务。",
+                        "Smart uses a conservative, case-insensitive final file-extension list. It does not read a sample or probe the network. “Never” keeps the original bytes; “Always” applies Zstandard. The selected policy is fixed when a new transfer job is created.",
+                        "智能模式仅按大小写不敏感的最终文件后缀白名单判断，不读取样本，也不探测网络。从不模式发送原始字节；始终模式应用 Zstandard。新建传输任务时会固定当前策略。",
                         language: language
                     ))
                         .font(.footnote)
@@ -90,6 +62,18 @@ struct SettingsStageView: View {
                 advancedHeader
 
                 if showAdvanced {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(AppText.value("Pairing and network", "配对与网络", language: language))
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(Theme.muted)
+                        settingToggle(
+                            AppText.value("Avoid Tailscale addresses", "避开 Tailscale 地址", language: language),
+                            subtitle: AppText.value("Prefer the real WAN or relay path instead of 100.x candidates.", "不广播 100.x 候选地址，优先使用真实网络或中继。", language: language),
+                            isOn: avoidTailscaleBinding
+                        )
+                    }
+                    .card(padding: 14)
+
                     settingField(
                         AppText.value("Rendezvous broker", "配对服务器", language: language),
                         text: $serverURL,
@@ -115,67 +99,9 @@ struct SettingsStageView: View {
                         text: $candidatesDeny,
                         helper: AppText.value("One CIDR per line. Avoid Tailscale edits this list.", "每行一个 CIDR；避开 Tailscale 会修改此列表。", language: language)
                     )
+                    developerToolsSection
+                    coreBuildInfo
                 }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Developer tools", "开发者工具", language: language))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.muted)
-                    settingToggle(
-                        AppText.value("Enable developer mode", "开启开发者模式", language: language),
-                        subtitle: AppText.value(
-                            "Reveal path selection, IDs, failure details, live logs and diagnostic reports.",
-                            "显示链路选择、ID、失败详情、实时日志和诊断报告。",
-                            language: language
-                        ),
-                        isOn: $developerMode
-                    )
-                    .accessibilityIdentifier("settings_developer_mode")
-                    if developerMode {
-                        Divider().overlay(Theme.line.opacity(0.5))
-                        settingToggle(
-                            AppText.value("Verbose logging", "详细日志", language: language),
-                            subtitle: AppText.value(
-                                "Capture path selection and hole-punching internals. High volume.",
-                                "记录链路选择和打洞内部信息；日志量较大。",
-                                language: language
-                            ),
-                            isOn: $verboseLog
-                        )
-                        #if DEBUG
-                        Divider().overlay(Theme.line.opacity(0.5))
-                        VStack(alignment: .leading, spacing: 8) {
-                            let title = AppText.value("Remote log server", "远程日志服务器", language: language)
-                            settingInput(
-                                title: title,
-                                text: $logServer,
-                                placeholder: defaultLogServer,
-                                isURL: true
-                            )
-                            Text(AppText.value(
-                                "Redacted reports only. HTTPS is tried before HTTP fallback.",
-                                "只上传脱敏报告；优先 HTTPS，失败后回退 HTTP。",
-                                language: language
-                            ))
-                                .font(.footnote)
-                                .foregroundStyle(Theme.muted)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        #endif
-                    }
-                }
-                .card(padding: 14)
-
-                Text(coreBuildLabel)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(
-                        coreMatchesExpectedRoomControlContract(coreInfo)
-                            ? Theme.muted
-                            : Theme.danger
-                    )
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 2)
-                    .accessibilityIdentifier("settings_core_version")
             }
             .padding(.vertical, 12)
         }
@@ -193,6 +119,70 @@ struct SettingsStageView: View {
 
     private var coreBuildLabel: String {
         "\(appDebugBuildLabel) · Core \(coreInfo.coreVersion) · API \(coreInfo.ffiApiVersion)"
+    }
+
+    private var developerToolsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(AppText.value("Developer tools", "开发者工具", language: language))
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+            settingToggle(
+                AppText.value("Enable developer mode", "开启开发者模式", language: language),
+                subtitle: AppText.value(
+                    "Reveal path selection, IDs, failure details, live logs and diagnostic reports.",
+                    "显示链路选择、ID、失败详情、实时日志和诊断报告。",
+                    language: language
+                ),
+                isOn: $developerMode
+            )
+            .accessibilityIdentifier("settings_developer_mode")
+            if developerMode {
+                Divider().overlay(Theme.line.opacity(0.5))
+                settingToggle(
+                    AppText.value("Verbose logging", "详细日志", language: language),
+                    subtitle: AppText.value(
+                        "Capture path selection and hole-punching internals. High volume.",
+                        "记录链路选择和打洞内部信息；日志量较大。",
+                        language: language
+                    ),
+                    isOn: $verboseLog
+                )
+                #if DEBUG
+                Divider().overlay(Theme.line.opacity(0.5))
+                VStack(alignment: .leading, spacing: 8) {
+                    let title = AppText.value("Remote log server", "远程日志服务器", language: language)
+                    settingInput(
+                        title: title,
+                        text: $logServer,
+                        placeholder: defaultLogServer,
+                        isURL: true
+                    )
+                    Text(AppText.value(
+                        "Redacted reports only. HTTPS is tried before HTTP fallback.",
+                        "只上传脱敏报告；优先 HTTPS，失败后回退 HTTP。",
+                        language: language
+                    ))
+                        .font(.footnote)
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                #endif
+            }
+        }
+        .card(padding: 14)
+    }
+
+    private var coreBuildInfo: some View {
+        Text(coreBuildLabel)
+            .font(.caption.monospaced())
+            .foregroundStyle(
+                coreMatchesExpectedRoomControlContract(coreInfo)
+                    ? Theme.muted
+                    : Theme.danger
+            )
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 2)
+            .accessibilityIdentifier("settings_core_version")
     }
 
     private var transferCacheSection: some View {
@@ -313,6 +303,13 @@ struct SettingsStageView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(AppText.value("Advanced", "高级", language: language))
+        .accessibilityValue(
+            showAdvanced
+                ? AppText.value("Expanded", "已展开", language: language)
+                : AppText.value("Collapsed", "已收起", language: language)
+        )
+        .accessibilityIdentifier("settings_advanced_toggle")
     }
 
     private var avoidTailscaleBinding: Binding<Bool> {

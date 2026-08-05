@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -20,10 +19,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -31,24 +31,34 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.envoix.app.NfcPhoneHostingState
+import dev.envoix.app.NfcPhoneReaderState
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveredPeer
 import dev.envoix.app.discovery.DiscoveryPermissions
+import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
 import dev.envoix.app.discovery.NearbyVisibility
 import dev.envoix.app.discovery.ProviderAvailability
+import dev.envoix.app.discovery.canOfferNearbyRoom
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 internal fun ConnectionHubScreen(
     control: RoomControlUiState,
+    onShareViaNfc: () -> Unit,
+    onStopNfcSharing: () -> Unit,
+    onScanNfc: () -> Unit,
     onRevealInvite: () -> Unit,
     onHideInvite: () -> Unit,
     onRefreshInvite: () -> Unit,
     onEndWaitingRoom: () -> Unit,
     onJoinInvite: (String) -> Unit,
+    nfcPhoneHosting: NfcPhoneHostingState,
+    nfcPhoneReader: NfcPhoneReaderState,
     onNearbyRoom: (
         selection: NearbyPairingSelection,
         deliver: (String, (String?) -> Unit) -> Unit,
@@ -57,7 +67,7 @@ internal fun ConnectionHubScreen(
     onActivity: () -> Unit,
     onRooms: () -> Unit,
     onSettings: () -> Unit,
-    onAcceptIncomingOffer: (NearbyRendezvousOffer) -> Boolean,
+    onAcceptIncomingOffer: (NearbyRendezvousOffer, String?) -> Boolean,
     onCancelReplacement: () -> Unit,
     onConfirmReplacement: () -> Unit,
     onExternalActivityChanged: (Boolean) -> Unit,
@@ -67,15 +77,19 @@ internal fun ConnectionHubScreen(
     val colors = Envoix.colors
     val discovery by discoveryViewModel.uiState.collectAsStateWithLifecycle()
     val settings by SettingsStore.settings.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var scannerOpen by remember { mutableStateOf(false) }
     var codeDialogOpen by remember { mutableStateOf(false) }
     var identityDialogOpen by remember { mutableStateOf(false) }
     var visibilityDialogOpen by remember { mutableStateOf(false) }
+    var nfcDialogOpen by remember { mutableStateOf(false) }
+    var wifiAwareDialogOpen by remember { mutableStateOf(false) }
+    var nearbyListExpanded by rememberSaveable { mutableStateOf(true) }
     var localError by remember { mutableStateOf<String?>(null) }
     val permissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
-        ) { discoveryViewModel.restart() }
+        ) { discoveryViewModel.start() }
 
     Column(
         Modifier
@@ -115,15 +129,6 @@ internal fun ConnectionHubScreen(
             item {
                 MainRoomInviteCard(
                     control = control,
-                    onReveal = onRevealInvite,
-                    onHide = onHideInvite,
-                    onRefresh = onRefreshInvite,
-                    onEndWaiting = onEndWaitingRoom,
-                    onReturnToRoom = onReturnToRoom,
-                )
-            }
-            item {
-                ConnectionMethodActions(
                     onScan = {
                         localError = null
                         scannerOpen = true
@@ -132,6 +137,11 @@ internal fun ConnectionHubScreen(
                         localError = null
                         codeDialogOpen = true
                     },
+                    onReveal = onRevealInvite,
+                    onHide = onHideInvite,
+                    onRefresh = onRefreshInvite,
+                    onEndWaiting = onEndWaitingRoom,
+                    onReturnToRoom = onReturnToRoom,
                 )
             }
             item {
@@ -146,89 +156,97 @@ internal fun ConnectionHubScreen(
                 )
             }
             item {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        appText("NEARBY DEVICES", "附近设备"),
-                        color = colors.muted,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.8.sp,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(
-                        onClick = discoveryViewModel::restart,
-                        modifier = Modifier.testTag("hub_restart_nearby"),
-                    ) {
-                        Text(appText("Restart", "重新搜索"), color = colors.accent)
-                    }
-                }
-            }
-            if (discovery.statuses.values.any {
-                    it.availability == ProviderAvailability.PermissionRequired
-                }
-            ) {
-                item {
-                    Button(
-                        onClick = {
+                NearbySectionHeader(
+                    listExpanded = nearbyListExpanded,
+                    wifiAwareStatus = discovery.statuses[DiscoverySource.WifiAware],
+                    nfcPhoneHosting = nfcPhoneHosting,
+                    nfcPhoneReader = nfcPhoneReader,
+                    discoveryActive = discovery.active,
+                    onWifiAware = { wifiAwareDialogOpen = true },
+                    onNfc = { nfcDialogOpen = true },
+                    onToggleList = { nearbyListExpanded = !nearbyListExpanded },
+                    onToggleDiscovery = {
+                        if (discovery.active) {
+                            discoveryViewModel.stop()
+                        } else if (DiscoveryPermissions.hasBluetoothPermissions(context)) {
+                            discoveryViewModel.start()
+                        } else {
                             permissionLauncher.launch(
                                 DiscoveryPermissions.bluetoothRuntimePermissions(),
                             )
-                        },
-                    ) {
-                        Text(appText("Allow nearby access", "允许附近设备访问"))
+                        }
+                    },
+                )
+            }
+            if (nearbyListExpanded) {
+                if (discovery.statuses.values.any {
+                        it.availability == ProviderAvailability.PermissionRequired
+                    }
+                ) {
+                    item {
+                        Button(
+                            onClick = {
+                                permissionLauncher.launch(
+                                    DiscoveryPermissions.bluetoothRuntimePermissions(),
+                                )
+                            },
+                        ) {
+                            Text(appText("Allow nearby access", "允许附近设备访问"))
+                        }
                     }
                 }
-            }
-            if (discovery.peers.isEmpty()) {
-                item {
-                    val message =
-                        when (
-                            nearbyEmptyState(
-                                active = discovery.active,
-                                availabilities =
-                                    discovery.statuses.values.map { it.availability },
-                            )
-                        ) {
-                            NearbyEmptyState.Paused ->
-                                appText(
-                                    "Nearby discovery is paused.",
-                                    "附近发现已暂停。",
+                if (discovery.peers.isEmpty()) {
+                    item {
+                        val message =
+                            when (
+                                nearbyEmptyState(
+                                    active = discovery.active,
+                                    availabilities =
+                                        discovery.statuses.values.map { it.availability },
                                 )
-                            NearbyEmptyState.Unavailable ->
-                                appText(
-                                    "Nearby discovery is currently unavailable.",
-                                    "附近发现当前不可用。",
-                                )
-                            NearbyEmptyState.Looking ->
-                                appText(
-                                    "Looking for nearby devices…",
-                                    "正在寻找附近设备…",
-                                )
-                        }
-                    Text(
-                        message,
-                        color = colors.muted,
-                        fontSize = 14.sp,
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 20.dp)
-                                .testTag("hub_nearby_empty"),
-                    )
-                }
-            } else {
-                items(discovery.peers, key = DiscoveredPeer::peerKey) { peer ->
-                    NearbyDeviceCard(peer) {
+                            ) {
+                                NearbyEmptyState.Paused ->
+                                    appText(
+                                        "Nearby discovery is paused.",
+                                        "附近发现已暂停。",
+                                    )
+                                NearbyEmptyState.Unavailable ->
+                                    appText(
+                                        "Nearby discovery is currently unavailable.",
+                                        "附近发现当前不可用。",
+                                    )
+                                NearbyEmptyState.Looking ->
+                                    appText(
+                                        "Looking for nearby devices…",
+                                        "正在寻找附近设备…",
+                                    )
+                            }
+                        Text(
+                            message,
+                            color = colors.muted,
+                            fontSize = 14.sp,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp)
+                                    .testTag("hub_nearby_empty"),
+                        )
+                    }
+                } else {
+                    items(discovery.peers, key = DiscoveredPeer::peerKey) { peer ->
                         val selection = NearbyPairingSelection.from(peer)
-                        onNearbyRoom(selection) { invite, completion ->
-                            discoveryViewModel.offerInvite(
-                                selection,
-                                invite,
-                                completion,
-                            )
+                        NearbyDeviceCard(
+                            peer = peer,
+                            peers = discovery.peers,
+                            enabled = canOfferNearbyRoom(selection),
+                        ) {
+                            onNearbyRoom(selection) { invite, completion ->
+                                discoveryViewModel.offerInvite(
+                                    selection,
+                                    invite,
+                                    completion,
+                                )
+                            }
                         }
                     }
                 }
@@ -287,14 +305,34 @@ internal fun ConnectionHubScreen(
             },
         )
     }
+    if (nfcDialogOpen) {
+        NfcNearbyActionsDialog(
+            roomPhase = control.phase,
+            hosting = nfcPhoneHosting,
+            reader = nfcPhoneReader,
+            onDismiss = { nfcDialogOpen = false },
+            onScan = onScanNfc,
+            onShare = onShareViaNfc,
+            onStopSharing = onStopNfcSharing,
+        )
+    }
+    if (wifiAwareDialogOpen) {
+        WifiAwareDiscoveryDialog(
+            status = discovery.statuses[DiscoverySource.WifiAware],
+            onDismiss = { wifiAwareDialogOpen = false },
+        )
+    }
     discovery.incomingRendezvousOffers.firstOrNull()?.let { offer ->
+        val verificationOffer = BleVerificationInvitation.isPublicOffer(offer.invite)
         IncomingNearbyInvitationDialog(
+            offerId = offer.requestId,
             roomInvitation = RoomControlInviteFormat.looksLikeRoomInvite(offer.invite),
+            verificationOffer = verificationOffer,
             peerName =
                 offer.senderDisplayName
                     ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
-            onAccept = {
-                if (!onAcceptIncomingOffer(offer)) {
+            onAccept = { code ->
+                if (!onAcceptIncomingOffer(offer, code)) {
                     localError =
                         AppText.value(
                             "This invitation is not supported.",

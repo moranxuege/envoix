@@ -4,6 +4,8 @@ internal class DiscoveryPeerRegistry(
     private val observationTtlMs: Long = DEFAULT_OBSERVATION_TTL_MS,
 ) {
     private val observations = mutableMapOf<String, MutableMap<DiscoverySource, DiscoveryObservation>>()
+    private val peerOrdinals = mutableMapOf<String, Long>()
+    private var nextPeerOrdinal = 0L
 
     init {
         require(observationTtlMs > 0) { "observationTtlMs must be positive" }
@@ -25,28 +27,36 @@ internal class DiscoveryPeerRegistry(
                         )
                     },
             )
+        if (peerKey !in observations && observations.size >= MAX_PEERS) return false
         val bySource = observations.getOrPut(peerKey, ::mutableMapOf)
         val previous = bySource[observation.source]
         if (previous != null && previous.seenAtMs > normalized.seenAtMs) return false
-        bySource[observation.source] = normalized
+        bySource[observation.source] =
+            normalized.copy(displayName = normalized.displayName ?: previous?.displayName)
+        peerOrdinals.getOrPut(peerKey) { nextPeerOrdinal++ }
         return true
     }
 
     fun clear() {
         observations.clear()
+        peerOrdinals.clear()
+        nextPeerOrdinal = 0L
     }
 
     fun peers(nowMs: Long): List<DiscoveredPeer> {
         require(nowMs >= 0) { "nowMs must not be negative" }
         val peerIterator = observations.iterator()
         while (peerIterator.hasNext()) {
-            val bySource = peerIterator.next().value
+            val (peerKey, bySource) = peerIterator.next()
             val sourceIterator = bySource.iterator()
             while (sourceIterator.hasNext()) {
                 val observation = sourceIterator.next().value
                 if (nowMs - observation.seenAtMs > observationTtlMs) sourceIterator.remove()
             }
-            if (bySource.isEmpty()) peerIterator.remove()
+            if (bySource.isEmpty()) {
+                peerIterator.remove()
+                peerOrdinals.remove(peerKey)
+            }
         }
 
         return observations
@@ -54,19 +64,25 @@ internal class DiscoveryPeerRegistry(
                 val values = bySource.values
                 DiscoveredPeer(
                     peerKey = peerKey,
-                    displayName = values.latestNonBlank { it.displayName },
+                    displayName =
+                        DISPLAY_NAME_SOURCE_PREFERENCE
+                            .firstNotNullOfOrNull { source -> bySource[source]?.displayName }
+                            ?: values.latestNonBlank { it.displayName },
                     sources = bySource.keys.toSet(),
                     lastSeenAtMs = values.maxOf { it.seenAtMs },
                     rssi = values.latestValue { it.rssi },
                     nearbyInviteRoute = values.latestValue { it.nearbyInviteRoute },
                 )
-            }.sortedWith(compareByDescending<DiscoveredPeer> { it.lastSeenAtMs }.thenBy { it.peerKey })
+            }.sortedBy { peerOrdinals.getValue(it.peerKey) }
     }
 
     companion object {
         const val DEFAULT_OBSERVATION_TTL_MS = 20_000L
         const val MAX_DISPLAY_NAME_LENGTH = 48
+        const val MAX_PEERS = 64
         const val PEER_KEY_HEX_LENGTH = 16
+        private val DISPLAY_NAME_SOURCE_PREFERENCE =
+            listOf(DiscoverySource.Mdns, DiscoverySource.WifiAware, DiscoverySource.Bluetooth)
 
         fun normalizePeerKey(value: String): String? {
             val normalized = value.trim().lowercase()
