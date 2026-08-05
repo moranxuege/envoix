@@ -66,6 +66,13 @@ only the exact test-owned files. The current Android driver is labeled
 `l1_native` / `direct_jni`; it does not satisfy the product-path L2 Activity
 contract.
 
+An iOS sender receives the receiver-generated Invite V2 payload through a
+test-only sidecar after its hosted test reports readiness. The xctestrun file
+contains only a bounded sidecar filename; the payload remains in the private
+runner directory and the iOS app-data container, and both copies are removed
+after loading. This out-of-band bootstrap is matrix infrastructure, not a
+product discovery or transfer path.
+
 `private/` is mode `0700`, is never an uploadable artifact, and can retain raw
 logs only for local failure triage. Successful case logs are removed after
 sanitized copies are created. The runner scans every retained public file for
