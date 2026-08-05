@@ -14,6 +14,59 @@ import UniformTypeIdentifiers
 /// session path. The suite is hosted by each production Apple app target so
 /// networking, source preparation, and destination writes match the client.
 final class ManifestV2PhysicalTransferTests: XCTestCase {
+    func testDirectInvitationEnvironmentRemainsCompatible() async throws {
+        let invitation = inviteV2URLPrefix + "direct_environment"
+
+        let loaded = try await Self.loadScenarioInvitation(
+            environment: [Self.invitationEnvironment: invitation],
+            timeout: .zero
+        )
+
+        XCTAssertEqual(loaded, invitation)
+    }
+
+    func testInvitationSidecarLoadsPayloadAndRemovesFile() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("envoix-invitation-sidecar-valid-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let filename = "valid-invitation"
+        let sidecar = root.appendingPathComponent(filename)
+        let payload = "abc_DEF-123"
+        try Data(payload.utf8).write(to: sidecar)
+
+        let invitation = try await Self.loadScenarioInvitation(
+            environment: [Self.invitationSidecarEnvironment: filename],
+            documentsDirectory: root,
+            timeout: .milliseconds(10)
+        )
+
+        XCTAssertEqual(invitation, inviteV2URLPrefix + payload)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sidecar.path))
+    }
+
+    func testInvitationSidecarRejectsInvalidPayloadAndRemovesFile() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("envoix-invitation-sidecar-invalid-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let filename = "invalid-invitation"
+        let sidecar = root.appendingPathComponent(filename)
+        try Data("payload with spaces".utf8).write(to: sidecar)
+
+        do {
+            _ = try await Self.loadScenarioInvitation(
+                environment: [Self.invitationSidecarEnvironment: filename],
+                documentsDirectory: root,
+                timeout: .milliseconds(10)
+            )
+            XCTFail("invalid sidecar payload should be rejected")
+        } catch PhysicalTestError.invalidInvitationSidecar {
+            // Expected.
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sidecar.path))
+    }
+
     func testShareSourceFailureDoesNotPoisonNextSelection() throws {
         try requirePhysicalRun()
         #if os(iOS)
@@ -109,9 +162,10 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
                 )
                 try await waitForProductPreparation(model)
                 evidence.recordJobID(try XCTUnwrap(model.preparedManifestJobID))
+                let invitation = try await Self.loadScenarioInvitation()
                 model.startSendingManifestWithInvite(
                     selectedPaths: materialized.selectedURLs.map(\.path),
-                    invite: Self.scenarioInvitation,
+                    invite: invitation,
                     settings: Self.settings
                 )
                 let completed = try await waitForProductTerminal(model, evidence: evidence)
@@ -286,7 +340,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         let completion = try await sendTransferJobV2(
             job: job,
             settings: Self.settings,
-            request: try Self.request(direction: .send),
+            request: try await Self.request(direction: .send),
             stateDirectory: stateDirectory.path,
             cancellation: FfiManifestV2Cancellation(),
             observer: observer
@@ -342,7 +396,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         Self.marker("\(Self.platformName) receiver ready scenario=\(fixture.scenario.rawValue)")
         let pending = try await receiveTransferOfferV2(
             settings: Self.settings,
-            request: try Self.request(
+            request: try await Self.request(
                 direction: .receive,
                 creatorRoomCode: invitation.roomCode
             ),
@@ -524,7 +578,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
     private static func request(
         direction: FfiTransferDirection,
         creatorRoomCode: String? = nil
-    ) throws -> FfiTransferRequest {
+    ) async throws -> FfiTransferRequest {
         let mode: FfiTransferMode
         let invite: String
         let code: String
@@ -533,7 +587,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             invite = ""
             code = creatorRoomCode
         } else {
-            let input = scenarioInvitation.trimmed
+            let input = try await loadScenarioInvitation().trimmed
             guard input.hasPrefix(inviteV2URLPrefix) else {
                 throw PhysicalTestError.missingInvitation
             }
@@ -560,6 +614,69 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             pathPolicy: .auto,
             rendezvous: FfiRendezvousPlan(useRoom: true, useMdns: false, internetAvailable: true)
         )
+    }
+
+    private static func loadScenarioInvitation(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        documentsDirectory: URL? = nil,
+        timeout: Duration = invitationSidecarTimeout
+    ) async throws -> String {
+        let directInvitation = environment[invitationEnvironment]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !directInvitation.isEmpty {
+            return directInvitation
+        }
+
+        let filename = environment[invitationSidecarEnvironment]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard (1 ... maximumInvitationSidecarFilenameLength).contains(filename.count),
+              filename.range(
+                  of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#,
+                  options: .regularExpression
+              ) != nil
+        else {
+            if filename.isEmpty {
+                throw PhysicalTestError.missingInvitation
+            }
+            throw PhysicalTestError.invalidInvitationSidecar
+        }
+        let documents: URL
+        if let documentsDirectory {
+            documents = documentsDirectory
+        } else {
+            guard let resolved = FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+            ).first else {
+                throw PhysicalTestError.invalidInvitationSidecar
+            }
+            documents = resolved
+        }
+        let sidecar = documents.appendingPathComponent(filename, isDirectory: false)
+        marker("iOS sender waiting for invitation sidecar")
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !FileManager.default.fileExists(atPath: sidecar.path) {
+            guard clock.now < deadline else {
+                throw PhysicalTestError.missingInvitationSidecar
+            }
+            try await Task<Never, Never>.sleep(for: invitationSidecarPollInterval)
+        }
+        try await Task<Never, Never>.sleep(for: invitationSidecarSettleInterval)
+
+        defer { try? FileManager.default.removeItem(at: sidecar) }
+        let data = try Data(contentsOf: sidecar)
+        guard (1 ... maximumInvitationSidecarBytes).contains(data.count),
+              let payload = String(data: data, encoding: .utf8),
+              payload.range(
+                  of: #"^[A-Za-z0-9_-]+$"#,
+                  options: .regularExpression
+              ) != nil
+        else {
+            throw PhysicalTestError.invalidInvitationSidecar
+        }
+        marker("iOS sender loaded invitation sidecar")
+        return inviteV2URLPrefix + payload
     }
 
     private static func fixture() throws -> ManifestV2Fixture {
@@ -619,10 +736,14 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
     )
     private static let runID = environmentString("ENVOIX_CROSS_DEVICE_RUN_ID", default: "manual")
     private static let scenarioName = environmentString("ENVOIX_CROSS_DEVICE_SCENARIO", default: "single_file")
-    private static let scenarioInvitation = environmentString(
-        "ENVOIX_CROSS_DEVICE_INVITATION",
-        default: ""
-    )
+    private static let invitationEnvironment = "ENVOIX_CROSS_DEVICE_INVITATION"
+    private static let invitationSidecarEnvironment =
+        "ENVOIX_CROSS_DEVICE_INVITATION_SIDECAR_FILENAME"
+    private static let invitationSidecarTimeout: Duration = .seconds(30)
+    private static let invitationSidecarPollInterval: Duration = .milliseconds(50)
+    private static let invitationSidecarSettleInterval: Duration = .milliseconds(200)
+    private static let maximumInvitationSidecarFilenameLength = 96
+    private static let maximumInvitationSidecarBytes = 16 * 1_024
     private static let largeBytes = environmentUInt64("ENVOIX_CROSS_DEVICE_LARGE_BYTES", default: 128 * 1_024 * 1_024)
     private static let collisionSentinel = Data("pre-existing destination must remain unchanged\n".utf8)
     private static let shareRecoveryBytes = Data("valid source after an unreadable Share item\n".utf8)
@@ -1499,9 +1620,11 @@ private enum AppleMatrixEvidenceError: Error {
 
 private enum PhysicalTestError: Error {
     case invalidBuildVariant(String)
+    case invalidInvitationSidecar
     case invalidScenario(String)
     case missingCapacity(String)
     case missingInvitation
+    case missingInvitationSidecar
     case productFailed(String)
     case productTimedOut(String)
 }

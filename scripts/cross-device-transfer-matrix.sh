@@ -35,6 +35,10 @@ selected_cases=()
 legacy_selection=0
 original_args=("$@")
 test_runner="dev.envoix.app.test/androidx.test.runner.AndroidJUnitRunner"
+apple_app_bundle_identifier="com.envoix.app.ios"
+apple_invitation_sidecar_environment="ENVOIX_CROSS_DEVICE_INVITATION_SIDECAR_FILENAME"
+apple_invitation_sidecar_max_bytes=16384
+apple_invitation_sidecar_confirmation_seconds=3
 android_build_type=""
 android_task_suffix=""
 apple_build_configuration=""
@@ -307,6 +311,21 @@ require_android_network_route() {
   fi
 }
 
+device_id_from_destination() {
+  local destination="$1"
+  local suffix="${destination#*id=}"
+  if [[ "$suffix" == "$destination" ]]; then
+    echo "error: destination does not contain a device id" >&2
+    return 1
+  fi
+  local device_id="${suffix%%,*}"
+  if [[ ! "$device_id" =~ ^[A-Fa-f0-9-]{8,64}$ ]]; then
+    echo "error: destination contains an invalid device id" >&2
+    return 1
+  fi
+  printf '%s' "$device_id"
+}
+
 matrix_uses_macos() {
   [[ "${MATRIX_USES_MACOS:-0}" == "1" ]]
 }
@@ -413,6 +432,7 @@ macos_products="$apple_cache_root/macos-$apple_configuration_slug/Build/Products
 ios_xctestrun=""
 macos_xctestrun=""
 ACTIVE_PATCHED_XCTESTRUN=""
+ACTIVE_INVITATION_SIDECAR_FILE=""
 
 locate_apple_artifacts() {
   ios_xctestrun="$(find "$ios_products" -maxdepth 1 -name 'Envoix-iOS-Hosted_*.xctestrun' -print -quit 2>/dev/null)"
@@ -452,6 +472,9 @@ run_apple_method() {
   local log_file="${10}"
   local endpoint_role="sender"
   local source_xctestrun target destination product_directory derived_data patched result_bundle status=0
+  local sidecar_filename="" sidecar_file="" sidecar_payload="" sidecar_copy_log=""
+  local device_id="" test_pid="" waited=0 confirmation_waited=0
+  local sidecar_ready=0 sidecar_loaded=0
 
   [[ "$role" == "receive" ]] && endpoint_role="receiver"
 
@@ -484,7 +507,34 @@ run_apple_method() {
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_BUILD_VARIANT "$build_variant"
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_SCENARIO "$scenario"
   if [[ -n "$invitation" ]]; then
-    set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_INVITATION "$invitation"
+    if [[ "$platform" == "ios" ]]; then
+      sidecar_payload="${invitation#envoix://invite/v2/}"
+      if [[ "$sidecar_payload" == "$invitation" \
+            || ! "$sidecar_payload" =~ ^[A-Za-z0-9_-]+$ \
+            || "${#sidecar_payload}" -gt "$apple_invitation_sidecar_max_bytes" ]]; then
+        echo "error: refusing to stage an invalid InviteV2 sidecar" > "$log_file"
+        rm -f "$patched"
+        ACTIVE_PATCHED_XCTESTRUN=""
+        return 20
+      fi
+      sidecar_filename="envoix-room-invite-$(
+        printf '%s' "$run_id" | /usr/bin/shasum -a 256 | cut -c 1-32
+      )"
+      sidecar_file="$private_case_dir/$sidecar_filename"
+      sidecar_copy_log="$private_case_dir/apple-$endpoint_role-sidecar-copy.log"
+      if [[ -e "$sidecar_file" ]]; then
+        echo "error: refusing to overwrite an existing invitation sidecar" > "$log_file"
+        rm -f "$patched"
+        ACTIVE_PATCHED_XCTESTRUN=""
+        return 20
+      fi
+      (umask 077; printf '%s' "$sidecar_payload" > "$sidecar_file")
+      ACTIVE_INVITATION_SIDECAR_FILE="$sidecar_file"
+      set_xctestrun_environment \
+        "$patched" "$target" "$apple_invitation_sidecar_environment" "$sidecar_filename"
+    else
+      set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_INVITATION "$invitation"
+    fi
   fi
   set_xctestrun_environment "$patched" "$target" ENVOIX_CROSS_DEVICE_LARGE_BYTES "$large_bytes"
   set_xctestrun_environment "$patched" "$target" ENVOIX_LOG "envoix=info,iroh=warn,warn"
@@ -497,7 +547,66 @@ run_apple_method() {
     -parallel-testing-enabled NO \
     -only-testing:"$target/ManifestV2PhysicalTransferTests/$method" \
     -resultBundlePath "$result_bundle" \
-    > "$log_file" 2>&1 || status=$?
+    > "$log_file" 2>&1 &
+  test_pid=$!
+  if [[ -n "$sidecar_file" ]]; then
+    while [[ "$waited" -lt "$ready_timeout" ]]; do
+      if grep -Fq '[cross-device] iOS sender waiting for invitation sidecar' \
+          "$log_file" 2>/dev/null; then
+        sidecar_ready=1
+        break
+      fi
+      if ! kill -0 "$test_pid" >/dev/null 2>&1; then
+        wait "$test_pid" || status=$?
+        break
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if [[ "$sidecar_ready" -eq 1 ]]; then
+      if device_id="$(device_id_from_destination "$destination")" \
+          && xcrun devicectl device copy to \
+            --quiet \
+            --timeout 20 \
+            --device "$device_id" \
+            --domain-type appDataContainer \
+            --domain-identifier "$apple_app_bundle_identifier" \
+            --source "$sidecar_file" \
+            --destination "Documents/$sidecar_filename" \
+            > "$sidecar_copy_log" 2>&1; then
+        sidecar_loaded=1
+      else
+        while [[ "$confirmation_waited" -lt "$apple_invitation_sidecar_confirmation_seconds" ]]; do
+          if grep -Fq '[cross-device] iOS sender loaded invitation sidecar' \
+              "$log_file" 2>/dev/null; then
+            sidecar_loaded=1
+            break
+          fi
+          sleep 1
+          confirmation_waited=$((confirmation_waited + 1))
+        done
+      fi
+      if [[ "$sidecar_loaded" -eq 1 ]]; then
+        rm -f "$sidecar_file" "$sidecar_copy_log"
+        ACTIVE_INVITATION_SIDECAR_FILE=""
+        wait "$test_pid" || status=$?
+      else
+        echo "error: could not copy the iOS invitation sidecar" >> "$log_file"
+        kill "$test_pid" >/dev/null 2>&1 || true
+        wait "$test_pid" >/dev/null 2>&1 || true
+        status=20
+      fi
+    elif kill -0 "$test_pid" >/dev/null 2>&1; then
+      echo "error: iOS sender did not request its invitation sidecar" >> "$log_file"
+      kill "$test_pid" >/dev/null 2>&1 || true
+      wait "$test_pid" >/dev/null 2>&1 || true
+      status=20
+    fi
+  else
+    wait "$test_pid" || status=$?
+  fi
+  rm -f "$sidecar_file"
+  ACTIVE_INVITATION_SIDECAR_FILE=""
   rm -f "$patched"
   ACTIVE_PATCHED_XCTESTRUN=""
 
@@ -767,6 +876,9 @@ stop_android_tests() {
 }
 
 cleanup_runner() {
+  if [[ -n "$ACTIVE_INVITATION_SIDECAR_FILE" ]]; then
+    rm -f "$ACTIVE_INVITATION_SIDECAR_FILE"
+  fi
   if [[ -n "$ACTIVE_PATCHED_XCTESTRUN" ]]; then
     rm -f "$ACTIVE_PATCHED_XCTESTRUN"
   fi
