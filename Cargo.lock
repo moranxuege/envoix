@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-android-jni"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "envoix-client",
@@ -1875,7 +1875,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-auth"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-cli"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "base64",
  "clap",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-client"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "base64",
  "envoix-auth",
@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-desktop"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "eframe",
  "egui",
@@ -1942,14 +1942,14 @@ dependencies = [
 
 [[package]]
 name = "envoix-error"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "envoix-ffi"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -1970,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-invite"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "base64",
  "getrandom 0.3.4",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-pairing"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-protocol"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2016,14 +2016,14 @@ dependencies = [
 
 [[package]]
 name = "envoix-qr"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "qrcode",
 ]
 
 [[package]]
 name = "envoix-rendezvous"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "envoix-invite",
  "envoix-pairing",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-rendezvous-iroh"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "envoix-invite",
@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-rendezvous-server"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2071,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-session"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-transfer"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-types"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",

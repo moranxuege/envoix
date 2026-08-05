@@ -1,7 +1,8 @@
 name: release
 
-# Builds the envoix CLI (Linux / macOS arm64+x86_64 / Windows) and the Android
-# APK (multi-ABI: arm64-v8a + x86_64, debug-signed).
+# Builds the envoix CLI (Linux / macOS arm64+x86_64 / Windows), the Windows /
+# Linux graphical desktop demo, and the Android APK (multi-ABI: arm64-v8a +
+# x86_64, test-signed release build).
 #   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
 #   - run manually (Actions -> release -> Run workflow) -> builds everything as
 #     downloadable run artifacts, without publishing a release
@@ -15,8 +16,8 @@ permissions:
   contents: write # needed to create the release
 
 jobs:
-  build:
-    name: build ${{ matrix.name }}
+  cli:
+    name: build CLI ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -24,16 +25,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            name: envoix-linux-x86_64
+            name: envoix-cli-linux-x86_64
           - os: macos-14
             target: aarch64-apple-darwin
-            name: envoix-macos-aarch64
+            name: envoix-cli-macos-aarch64
           - os: macos-14
             target: x86_64-apple-darwin
-            name: envoix-macos-x86_64
+            name: envoix-cli-macos-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            name: envoix-windows-x86_64.exe
+            name: envoix-cli-windows-x86_64.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +51,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build envoix CLI
-        run: cargo build --release -p envoix-cli --target ${{ matrix.target }}
+        run: cargo build --locked --release -p envoix-cli --target ${{ matrix.target }}
 
       - name: Stage binary
         shell: bash
@@ -60,6 +61,62 @@ jobs:
             cp "target/${{ matrix.target }}/release/envoix.exe" "dist/${{ matrix.name }}"
           else
             cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.name }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}
+          if-no-files-found: error
+
+  desktop:
+    name: build desktop ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: Envoix-Desktop-Linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: Envoix-Desktop-Windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust (iroh needs >= 1.91)
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustc --version
+
+      - name: Install Linux desktop build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Build graphical desktop app
+        run: cargo build --locked --release -p envoix-desktop --target ${{ matrix.target }}
+
+      - name: Stage desktop binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/envoix-desktop.exe" "dist/${{ matrix.name }}"
+          else
+            cp "target/${{ matrix.target }}/release/envoix-desktop" "dist/${{ matrix.name }}"
           fi
 
       - name: Upload artifact
@@ -102,17 +159,17 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Build debug APK
+      - name: Test, lint, and build release APK
         working-directory: android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
           ENVOIX_ANDROID_ABIS: arm64-v8a,x86_64
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: ./gradlew testReleaseUnitTest lintRelease assembleRelease --no-daemon --stacktrace
 
       - name: Stage APK
         run: |
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/envoix-android.apk
+          cp android/app/build/outputs/apk/release/app-release.apk dist/envoix-android.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -123,17 +180,38 @@ jobs:
 
   release:
     name: publish release
-    needs: [build, android]
+    needs: [cli, desktop, android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes --repo "${{ github.repository }}"
+        shell: bash
+        run: |
+          notes="docs/releases/${{ github.ref_name }}.md"
+          if [ -f "$notes" ]; then
+            gh release create "${{ github.ref_name }}" dist/* \
+              --title "Envoix ${{ github.ref_name }}" \
+              --notes-file "$notes" \
+              --repo "${{ github.repository }}"
+          else
+            gh release create "${{ github.ref_name }}" dist/* \
+              --title "Envoix ${{ github.ref_name }}" \
+              --generate-notes \
+              --repo "${{ github.repository }}"
+          fi

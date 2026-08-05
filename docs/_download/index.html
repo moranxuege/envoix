@@ -540,16 +540,17 @@
     <header class="hero">
       <div>
         <a class="language-switch" href="./en/" lang="en">English version →</a>
-        <p class="eyebrow">Envoix · v0.2.0</p>
+        <p class="eyebrow">Envoix · v0.2.2</p>
         <h1>把文件交给<br><span>离你最近的设备。</span></h1>
         <p class="lede">选择图形客户端快速开始，或使用命令行把 Envoix 接入脚本与自动化工作流。</p>
       </div>
       <aside class="hero-panel" aria-label="发布状态">
         <strong>当前发布状态</strong>
         <ul class="status-list">
-          <li><span class="dot waiting"></span>macOS v0.2.0 未公证内测版可下载</li>
-          <li><span class="dot"></span>Android v0.2.0 (2) 公开测试版可下载</li>
-          <li><span class="dot"></span>iOS v0.2.0 (2) 已开放 TestFlight 内部测试</li>
+          <li><span class="dot waiting"></span>macOS v0.2.2 未公证测试版可下载</li>
+          <li><span class="dot"></span>Android v0.2.2 公开测试版可下载</li>
+          <li><span class="dot"></span>iOS / iPadOS v0.2.2 注册设备安装包可下载</li>
+          <li><span class="dot"></span>Windows / Linux v0.2.2 图形客户端与 CLI 可下载</li>
         </ul>
       </aside>
     </header>
@@ -570,10 +571,10 @@
             <span class="tag waiting">未公证内测</span>
           </div>
           <h3>macOS</h3>
-          <p class="version">v0.2.0 (2) · Universal 内测版</p>
+          <p class="version">v0.2.2 · Universal 测试版</p>
           <p class="description">Nearby 已融合局域网与中继路径；macOS 暂不支持 Wi‑Fi Aware。此构建未使用 Developer ID 签名，也未经过 Apple 公证。</p>
           <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-macOS.zip">下载未公证 macOS ZIP</a>
-          <p class="microcopy">首次尝试打开后，前往“系统设置 → 隐私与安全性 → 仍要打开”。仅在信任本项目且 SHA-256 为 <code class="checksum">8a3b8c4d2dacd16f42e93540269164e1ed1c4d9d96bfc93ce68975cfc3130cc2</code> 时继续；不要全局关闭 Gatekeeper。参见 <a href="https://support.apple.com/zh-cn/102445">Apple 官方说明</a>。</p>
+          <p class="microcopy">首次尝试打开后，前往“系统设置 → 隐私与安全性 → 仍要打开”。安装前请使用 Release 中的 <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/SHA256SUMS">SHA256SUMS</a> 核验文件；不要全局关闭 Gatekeeper。参见 <a href="https://support.apple.com/zh-cn/102445">Apple 官方说明</a>。</p>
         </article>
 
         <article class="card">
@@ -582,34 +583,54 @@
             <span class="tag ready">Sideload</span>
           </div>
           <h3>Android</h3>
-          <p class="version">v0.2.0 (2) · 公开测试版</p>
+          <p class="version">v0.2.2 · 公开测试版</p>
           <p class="description">当前公开测试构建，支持跨平台文件传输，以及用于发现和建立连接的 Nearby 功能。</p>
           <div class="android-options">
             <div class="android-option">
-              <div class="option-label"><span>v0.2.0 (2)</span><strong>当前公开版</strong></div>
+              <div class="option-label"><span>v0.2.2</span><strong>当前公开版</strong></div>
               <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">下载 Android APK</a>
             </div>
           </div>
-          <p class="microcopy">当前 APK 使用测试签名，仅供测试和手动安装。仅在 SHA-256 为 <code class="checksum">d20cbb8f448e232bed295654710f2d71f7984b354a5a9e165f3b5d74a22bc622</code> 时继续。从旧 v0.1.0 演示版升级若提示签名不兼容，需要先卸载旧版；卸载会清除应用本地数据。</p>
+          <p class="microcopy">当前 APK 使用测试签名，仅供测试和手动安装。安装前请使用 Release 中的 <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/SHA256SUMS">SHA256SUMS</a> 核验文件。从旧 v0.1.0 演示版升级若提示签名不兼容，需要先卸载旧版；卸载会清除应用本地数据。</p>
         </article>
 
         <article class="card">
           <div class="card-top">
             <span class="platform-mark">iOS</span>
-            <span class="tag ready">TestFlight</span>
+            <span class="tag ready">注册设备</span>
           </div>
           <h3>iPhone 与 iPad</h3>
-          <p class="version">v0.2.0 (2) · 内部测试可用</p>
-          <p class="description">已加入内部测试的成员可直接在 TestFlight 安装；其他测试者可通过邮件申请邀请。</p>
+          <p class="version">v0.2.2 · Development-signed IPA</p>
+          <p class="description">已在开发者账号中注册的 iPhone 与 iPad 可直接安装 IPA；TestFlight 成员也可通过已开放的内部测试渠道安装可用构建。</p>
           <ul class="testflight-details" aria-label="申请时需要提供的信息">
             <li>Apple Account 邮箱</li>
             <li>设备型号</li>
             <li>iOS / iPadOS 版本</li>
             <li>测试目的</li>
           </ul>
-          <a class="button secondary" href="mailto:moranxuege@outlook.com?subject=Envoix%20iOS%20TestFlight%20申请">发送测试申请</a>
+          <div class="button-stack">
+            <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-iOS.ipa">下载注册设备 IPA</a>
+            <a class="button secondary" href="mailto:moranxuege@outlook.com?subject=Envoix%20iOS%20TestFlight%20申请">发送 TestFlight 申请</a>
+          </div>
           <a class="email" href="mailto:moranxuege@outlook.com">moranxuege@outlook.com</a>
-          <p class="microcopy">发送申请不代表自动获得内部 App Store Connect 权限。</p>
+          <p class="microcopy">IPA 仅能安装到 provisioning profile 中的注册设备；发送申请不代表自动获得内部 App Store Connect 权限。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top"><span class="platform-mark">WIN</span><span class="tag ready">x86_64</span></div>
+          <h3>Windows</h3>
+          <p class="version">v0.2.2 · 图形演示客户端</p>
+          <p class="description">提供聚焦单一路径的桌面图形客户端，适合快速演示基础跨平台传输；完整 Nearby 与移动端体验仍以 Apple / Android 客户端为准。</p>
+          <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-Desktop-Windows-x86_64.exe">下载 Windows EXE</a>
+        </article>
+
+        <article class="card">
+          <div class="card-top"><span class="platform-mark">LNX</span><span class="tag ready">x86_64</span></div>
+          <h3>Linux</h3>
+          <p class="version">v0.2.2 · 图形演示客户端</p>
+          <p class="description">提供与 Windows 对等的聚焦桌面演示客户端；下载后先添加执行权限，再从终端启动。</p>
+          <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-Desktop-Linux-x86_64">下载 Linux 可执行文件</a>
+          <p class="microcopy"><code>chmod +x Envoix-Desktop-Linux-x86_64</code></p>
         </article>
       </div>
     </section>
@@ -620,28 +641,34 @@
           <p class="section-kicker">Command line</p>
           <h2 id="cli-title">Envoix CLI</h2>
         </div>
-        <p class="section-note">适合开发者、服务器和自动化任务。当前从源码安装，不提供不存在的预编译下载链接。</p>
+        <p class="section-note">适合开发者、服务器和自动化任务。v0.2.2 同时提供预编译二进制与源码安装方式。</p>
       </div>
 
       <div class="cli-card">
         <div class="cli-copy">
           <span class="platform-mark">CLI</span>
           <h3>同一个传输核心，交给终端。</h3>
-          <p>命令名为 <strong>envoix</strong>，可在 macOS、Linux 和 Windows 上从源码构建。</p>
+          <p>命令名为 <strong>envoix</strong>，提供 macOS、Linux 和 Windows x86_64 预编译包，也可从源码构建。</p>
           <div class="cli-meta">
             <span class="tag ready">Rust 1.91+</span>
             <span class="tag">macOS</span>
             <span class="tag">Linux</span>
             <span class="tag">Windows</span>
           </div>
-          <a class="cli-link" href="https://github.com/ECE4410J-NUUB/envoix/tree/v0.2.0/apps/envoix-cli">查看 CLI 源码与文档 →</a>
+          <div class="button-stack">
+            <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-cli-macos-aarch64">macOS arm64 CLI</a>
+            <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-cli-macos-x86_64">macOS x86_64 CLI</a>
+            <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-cli-linux-x86_64">Linux x86_64 CLI</a>
+            <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-cli-windows-x86_64.exe">Windows x86_64 CLI</a>
+          </div>
+          <a class="cli-link" href="https://github.com/ECE4410J-NUUB/envoix/tree/v0.2.2/apps/envoix-cli">查看 CLI 源码与文档 →</a>
         </div>
 
         <div class="terminal" aria-label="CLI 安装与使用示例">
           <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
           <div class="command-group">
             <div class="command-label">安装</div>
-            <pre><code><span class="prompt">$</span> git clone --branch v0.2.0 --depth 1 https://github.com/ECE4410J-NUUB/envoix.git
+            <pre><code><span class="prompt">$</span> git clone --branch v0.2.2 --depth 1 https://github.com/ECE4410J-NUUB/envoix.git
 <span class="prompt">$</span> cd envoix
 <span class="prompt">$</span> cargo install --path apps/envoix-cli
 <span class="prompt">$</span> envoix --help</code></pre>
@@ -659,7 +686,7 @@
     </section>
 
     <footer>
-      <span>Envoix v0.2.0 · ECE4410J</span>
+      <span>Envoix v0.2.2 · ECE4410J</span>
       <nav aria-label="项目链接">
         <a href="https://github.com/ECE4410J-NUUB/envoix">GitHub 仓库</a>
         <a href="https://github.com/ECE4410J-NUUB/envoix/releases">全部发布版本</a>
