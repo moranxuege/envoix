@@ -243,7 +243,7 @@
         <strong>Current release status</strong>
         <ul class="status-list">
           <li><span class="dot waiting"></span>macOS v0.2.0 unnotarized test build is available</li>
-          <li><span class="dot"></span>Android v0.2.0 stable build is available</li>
+          <li><span class="dot"></span>Android v0.2.0 (2) public test build is available</li>
           <li><span class="dot"></span>iOS v0.2.0 (2) is available for internal TestFlight testing</li>
         </ul>
       </aside>
@@ -267,15 +267,15 @@
         <article class="card">
           <div class="card-top"><span class="platform-mark">APK</span><span class="tag ready">Sideload</span></div>
           <h3>Android</h3>
-          <p class="version">v0.2.0 · Stable</p>
-          <p class="description">The current stable build for regular testing, including the complete v0.2.0 cross-platform transfer and Nearby features.</p>
+          <p class="version">v0.2.0 (2) · Public test build</p>
+          <p class="description">The current public test build, with cross-platform file transfer and Nearby features for discovery and connection setup.</p>
           <div class="android-options">
             <div class="android-option">
-              <div class="option-label"><span>v0.2.0</span><strong>Recommended stable</strong></div>
-              <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">Download stable APK</a>
+              <div class="option-label"><span>v0.2.0 (2)</span><strong>Current public build</strong></div>
+              <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">Download Android APK</a>
             </div>
           </div>
-          <p class="microcopy">This APK uses a test signing key and is intended for testing and manual installation. If an upgrade from the old v0.1.0 demo reports an incompatible signature, uninstall it first; uninstalling removes local app data.</p>
+          <p class="microcopy">This APK uses a test signing key and is intended for testing and manual installation. Continue only if its SHA-256 is <code class="checksum">d20cbb8f448e232bed295654710f2d71f7984b354a5a9e165f3b5d74a22bc622</code>. If an upgrade from the old v0.1.0 demo reports an incompatible signature, uninstall it first; uninstalling removes local app data.</p>
         </article>
 
         <article class="card">
@@ -310,7 +310,7 @@
           <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
           <div class="command-group">
             <div class="command-label">Install</div>
-            <pre><code><span class="prompt">$</span> git clone https://github.com/ECE4410J-NUUB/envoix.git
+            <pre><code><span class="prompt">$</span> git clone --branch v0.2.0 --depth 1 https://github.com/ECE4410J-NUUB/envoix.git
 <span class="prompt">$</span> cd envoix
 <span class="prompt">$</span> cargo install --path apps/envoix-cli
 <span class="prompt">$</span> envoix --help</code></pre>

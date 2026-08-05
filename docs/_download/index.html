@@ -548,7 +548,7 @@
         <strong>当前发布状态</strong>
         <ul class="status-list">
           <li><span class="dot waiting"></span>macOS v0.2.0 未公证内测版可下载</li>
-          <li><span class="dot"></span>Android v0.2.0 稳定版可下载</li>
+          <li><span class="dot"></span>Android v0.2.0 (2) 公开测试版可下载</li>
           <li><span class="dot"></span>iOS v0.2.0 (2) 已开放 TestFlight 内部测试</li>
         </ul>
       </aside>
@@ -582,15 +582,15 @@
             <span class="tag ready">Sideload</span>
           </div>
           <h3>Android</h3>
-          <p class="version">v0.2.0 · 稳定版</p>
-          <p class="description">适合日常试用的当前稳定构建，包含 v0.2.0 的完整跨平台传输与 Nearby 功能。</p>
+          <p class="version">v0.2.0 (2) · 公开测试版</p>
+          <p class="description">当前公开测试构建，支持跨平台文件传输，以及用于发现和建立连接的 Nearby 功能。</p>
           <div class="android-options">
             <div class="android-option">
-              <div class="option-label"><span>v0.2.0</span><strong>推荐稳定版</strong></div>
-              <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">下载稳定版 APK</a>
+              <div class="option-label"><span>v0.2.0 (2)</span><strong>当前公开版</strong></div>
+              <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">下载 Android APK</a>
             </div>
           </div>
-          <p class="microcopy">当前 APK 使用测试签名，仅供测试和手动安装。从旧 v0.1.0 演示版升级若提示签名不兼容，需要先卸载旧版；卸载会清除应用本地数据。</p>
+          <p class="microcopy">当前 APK 使用测试签名，仅供测试和手动安装。仅在 SHA-256 为 <code class="checksum">d20cbb8f448e232bed295654710f2d71f7984b354a5a9e165f3b5d74a22bc622</code> 时继续。从旧 v0.1.0 演示版升级若提示签名不兼容，需要先卸载旧版；卸载会清除应用本地数据。</p>
         </article>
 
         <article class="card">
@@ -641,7 +641,7 @@
           <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
           <div class="command-group">
             <div class="command-label">安装</div>
-            <pre><code><span class="prompt">$</span> git clone https://github.com/ECE4410J-NUUB/envoix.git
+            <pre><code><span class="prompt">$</span> git clone --branch v0.2.0 --depth 1 https://github.com/ECE4410J-NUUB/envoix.git
 <span class="prompt">$</span> cd envoix
 <span class="prompt">$</span> cargo install --path apps/envoix-cli
 <span class="prompt">$</span> envoix --help</code></pre>
