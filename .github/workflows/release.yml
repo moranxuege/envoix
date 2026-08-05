@@ -11,6 +11,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source ref to package (for release repair, use the immutable tag)
+        required: false
+        type: string
 
 permissions:
   contents: write # needed to create the release
@@ -24,7 +29,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             name: envoix-cli-linux-x86_64
           - os: macos-14
             target: aarch64-apple-darwin
@@ -37,6 +42,8 @@ jobs:
             name: envoix-cli-windows-x86_64.exe
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Set up Rust (iroh needs >= 1.91)
         shell: bash
@@ -45,10 +52,6 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
           rustc --version
-
-      - name: Install musl tools
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build envoix CLI
         run: cargo build --locked --release -p envoix-cli --target ${{ matrix.target }}
@@ -85,6 +88,8 @@ jobs:
             name: Envoix-Desktop-Windows-x86_64.exe
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Set up Rust (iroh needs >= 1.91)
         shell: bash
@@ -131,6 +136,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -185,6 +192,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Download all binaries
         uses: actions/download-artifact@v4
