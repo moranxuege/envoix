@@ -638,6 +638,20 @@ apply_network_profile() {
     shape_link "$SERIAL_B" "$net_downlink_kbits"
 }
 
+# A fixed timeout is meaningless once the link is shaped: 8 MiB needs 67s of
+# wire time at 1 Mbit/s before loss and RTT are counted. Raise the caller's
+# timeout to the transfer's floor when the link is the slower constraint.
+# Measured goodput sits near 55% of the shaped rate, so 0.4 leaves headroom.
+profile_timeout() {
+    local file="$1" configured="$2"
+    python3 - "$(stat -c %s "$file")" "$net_uplink_kbits" "$configured" <<'PYEOF'
+import math, sys
+payload_bytes, uplink_kbits, configured = (int(v) for v in sys.argv[1:4])
+wire_seconds = payload_bytes * 8 / (uplink_kbits * 1000)
+print(max(configured, math.ceil(wire_seconds / 0.4) + 30))
+PYEOF
+}
+
 # End-to-end wall clock for the payload, which is what a speed matrix exists to
 # produce. It spans sender start through delivery, not payload bytes alone.
 report_throughput() {
@@ -749,6 +763,15 @@ record_peer() {
 
 record_peer_type() {
     record_peer "$1" "$2" | sed 's/[[:space:]].*$//'
+}
+
+# The app reports direct paths as direct_ipv4/direct_ipv6; "direct" is the
+# legacy unqualified value still emitted by older builds.
+is_direct_peer_type() {
+    case "$1" in
+        direct | direct_ipv4 | direct_ipv6) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 print_peer_data() {
@@ -1080,7 +1103,7 @@ setup_network() {
 run_test() {
     local profile="$1"
     local invitation deadline actual app_uid sender_state receiver_state
-    local sender_peer_type receiver_peer_type failure_reason
+    local sender_peer_type receiver_peer_type failure_reason effective_timeout
 
     invitation=""
     actual=""
@@ -1122,7 +1145,10 @@ run_test() {
     start_sender "$SERIAL_A" "$invitation" "$DEVICE_INPUT"
     wait_for_transfer_record "$SERIAL_A" sender "$profile"
 
-    deadline=$((SECONDS + timeout))
+    effective_timeout="$(profile_timeout "$test_file" "$timeout")"
+    [ "$effective_timeout" -eq "$timeout" ] ||
+        printf '[%s] timeout raised to %ss for the shaped link\n' "$profile" "$effective_timeout"
+    deadline=$((SECONDS + effective_timeout))
     while [ "$SECONDS" -lt "$deadline" ]; do
         actual="$(device_hashes || true)"
         sender_state="$(record_state "$SERIAL_A" sender || true)"
@@ -1136,7 +1162,8 @@ run_test() {
             sender_peer_type="$(record_peer_type "$SERIAL_A" sender || true)"
             receiver_peer_type="$(record_peer_type "$SERIAL_B" receiver || true)"
             if [ "$profile" = friendly-both-ipv4 ] &&
-                { [ "$sender_peer_type" != direct ] || [ "$receiver_peer_type" != direct ]; }; then
+                { ! is_direct_peer_type "$sender_peer_type" ||
+                    ! is_direct_peer_type "$receiver_peer_type"; }; then
                 failure_reason="completed through sender=${sender_peer_type:-unknown}, receiver=${receiver_peer_type:-unknown}; expected direct"
                 break
             fi
