@@ -20,6 +20,18 @@ Shaping is applied with `tc netem` on each emulator's `wlan0`, which carries
 rate, delay and loss in a single qdisc. Half the profile's round trip is
 applied at each end, so the registry figure is what a packet actually sees.
 
+The relay is deliberately held at a distance. A deployed relay sits tens of
+milliseconds away, but this one runs on the test host, where reaching it costs
+nothing and a direct connection is never the faster option. Left alone the app
+has no reason to leave the relay, and no profile can exercise a direct path.
+So the relay answers on its own address, `198.18.0.10`, and each router delays
+traffic to that address by `--relay-delay-ms` (50 ms by default, 0 to disable).
+
+Only the relay is slowed. The broker keeps its real timing, so pairing is not
+inflated, and phone-to-phone traffic is untouched, so the delay decides which
+path gets chosen without changing what the transfer then measures. Verified:
+adding it moved `home_wifi` from 1299.2 to 1299.6 KiB/s, a 0.03% difference.
+
 ## Profiles
 
 Defined in `tests/e2e/matrix/cases.v1.json` under `network_profiles`.
@@ -81,51 +93,61 @@ cap is decimal, as `tc` reads it: 1 Mbit/s is 1,000,000 bit/s.
 | --- | --- | --- | --- | --- |
 | `congested_edge` | 1 Mbit/s | 57.1 KiB/s | 0.47 Mbit/s | 47% |
 | `mobile_lte` | 5 Mbit/s | 361.1 KiB/s | 2.96 Mbit/s | 59% |
-| `home_wifi` | 20 Mbit/s | 1299.2 KiB/s | 10.64 Mbit/s | 53% |
-| `unshaped`, `lan_1gbit` | 1 Gbit/s | not measurable, see below | | |
+| `home_wifi` | 20 Mbit/s | 1299.6 KiB/s | 10.65 Mbit/s | 53% |
+| `lan_1gbit` | 1 Gbit/s | 3663.8 KiB/s | 30.01 Mbit/s | 3% |
+| `unshaped` | none | 3657.6 KiB/s | 29.96 Mbit/s | n/a |
 
-Throughput tracks the caps and stays monotone across a 20x range, so the
-shaping is the binding constraint rather than some other bottleneck.
+All five now complete over a direct connection rather than the relay.
 
 These are goodput figures: the numerator counts only payload bytes that
 arrived, not the headers, ACKs and retransmissions that also crossed the wire.
 Goodput is always below the link rate.
 
-Two effects put it near half here. `seconds` starts when the sender is
+For the three profiles the shaper actually constrains, throughput tracks the
+cap across a 20x range and the share stays in a narrow band, 47% to 59%. That
+band is what says the shaping is the binding constraint rather than some other
+bottleneck. Two effects hold it near half. `seconds` starts when the sender is
 launched, so pairing and the handshake sit inside the measurement even though
-they move no payload; that fixed cost hurts fast links most. The rest is QUIC
-framing, encryption and virtual-NIC overhead, plus retransmission on the two
-profiles that set loss.
+they move no payload, which costs fast links proportionally more. The rest is
+QUIC framing, encryption and virtual-NIC overhead, plus retransmission on the
+two profiles that set loss.
 
-The share of cap stays in a narrow band, 47% to 59%, across a 20x range of link
-speeds, so the figures compare profiles against each other correctly. Do not
-quote them as link speed.
+Compare profiles against each other with these numbers. Do not quote them as
+link speed.
 
 ## Known limits
 
-### The 1 ms profiles never leave the relay
+### The 1 Gbit profiles measure the harness, not the link
 
-`unshaped` and `lan_1gbit` complete through the relay instead of a direct path,
-so they fail `friendly-both-ipv4`, which asserts a direct connection. This is a
-property of the harness, not of the app.
+`lan_1gbit` reaches 3% of its cap, and it lands within 0.17% of `unshaped`,
+which applies no shaping at all. Two settings that differ by a factor of a
+thousand producing the same number means the shaper is not what limits them.
+The emulator's virtual network and the host CPU are, at roughly 30 Mbit/s.
 
-The relay runs on the test host, next to both emulators. At `rtt_ms = 1` the
-relay path is indistinguishable from the direct path, so there is no reason to
-migrate off it. Every profile that adds latency makes the relay's two hops
-measurably worse than one direct hop, and the upgrade happens.
+So treat 30 Mbit/s as this harness's ceiling. `lan_1gbit` is a useful
+upper-bound case and a control against `unshaped`, but it does not tell you how
+the app behaves on a real gigabit LAN. Any profile set above about 30 Mbit/s
+will report the same figure. The three slower profiles are the ones whose
+numbers describe the link they name.
 
-Isolated by elimination:
+### Why the relay is delayed at all
 
-- Not payload size. A 128 MiB transfer on `unshaped` still relayed, which rules
-  out the transfer finishing before hole punching completes.
-- Not bandwidth. A one-off diagnostic profile at 1 Gbit/s with `rtt_ms = 10`
-  connected directly and passed at 3710.7 KiB/s.
+Before the relay delay existed, `unshaped` and `lan_1gbit` completed through
+the relay rather than a direct path, and failed `friendly-both-ipv4`. Both set
+`rtt_ms = 1`, and the relay ran on the test host next to both emulators, so the
+relay path was indistinguishable from the direct path and there was no reason
+to migrate off it.
 
-Fixing it means making the relay realistically distant, roughly the 20-50 ms a
-deployed relay would sit at. `netem` is currently on the device's `wlan0` root
-qdisc and therefore hits all traffic, so penalising only relay traffic needs a
-classful qdisc with a filter, or shaping on the host side instead. Until then,
-the direct-path assertion is only meaningful for profiles with latency.
+Isolated by elimination at the time:
+
+- Not payload size. A 128 MiB transfer on `unshaped` still relayed, which ruled
+  out the transfer finishing before hole punching completed.
+- Not bandwidth. A diagnostic profile at 1 Gbit/s with `rtt_ms = 10` connected
+  directly and passed.
+
+Setting `--relay-delay-ms 0` restores the old behaviour, which is worth knowing
+if a future change makes a case relay unexpectedly: run it once with the delay
+disabled to tell a path-selection problem apart from a transfer problem.
 
 ### Timeouts follow the link
 

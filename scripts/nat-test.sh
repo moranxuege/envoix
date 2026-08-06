@@ -34,6 +34,11 @@ adb="$sdk_root/platform-tools/adb"
 readonly apk="$repo_root/android/app/build/outputs/apk/debug/app-debug.apk"
 readonly relay_host="relay.nat-test.envoix"
 readonly relay_url="https://$relay_host:8444"
+# The relay answers on an address of its own so that only its traffic can be
+# delayed. The broker keeps 198.18.0.1 and is never slowed, which keeps pairing
+# out of the link measurement.
+readonly relay_ip="198.18.0.10"
+relay_delay_ms=50
 timeout=120
 verbose=0
 run_spec=all
@@ -96,6 +101,7 @@ Options:
   --network PROFILE   Link conditions from the matrix registry (default: $network_profile)
   --list-networks     List available network profiles and exit
   --timeout SECONDS   Per-transfer timeout (default: $timeout)
+  --relay-delay-ms MS Round trip to the relay; 0 disables (default: $relay_delay_ms)
   --run TESTS         Comma-separated test names, or "all" (default: all)
   --list-tests        List available test names and exit
   --verbose           Print transfer states and always capture diagnostics
@@ -286,11 +292,11 @@ write_relay_config() {
 enable_relay = true
 enable_quic_addr_discovery = true
 enable_metrics = false
-http_bind_addr = "198.18.0.1:8080"
+http_bind_addr = "$relay_ip:8080"
 
 [tls]
-https_bind_addr = "198.18.0.1:8444"
-quic_bind_addr = "198.18.0.1:7842"
+https_bind_addr = "$relay_ip:8444"
+quic_bind_addr = "$relay_ip:7842"
 cert_mode = "Manual"
 manual_cert_path = "$cert_dir/relay.pem"
 manual_key_path = "$cert_dir/relay.key"
@@ -305,7 +311,7 @@ start_local_servers() {
     relay_pid=$!
     deadline=$((SECONDS + 30))
     until curl --silent --show-error --output /dev/null \
-        --cacert "$cert_dir/ca.pem" --resolve "$relay_host:8444:198.18.0.1" \
+        --cacert "$cert_dir/ca.pem" --resolve "$relay_host:8444:$relay_ip" \
         "$relay_url/"; do
         kill -0 "$relay_pid" 2>/dev/null || die "local relay exited; see $log_dir/relay.log"
         [ "$SECONDS" -lt "$deadline" ] || die "local relay did not become ready"
@@ -990,6 +996,30 @@ apply_profile() {
     esac
 }
 
+# A deployed relay sits tens of milliseconds away; this one runs on the test
+# host, so reaching it costs nothing and a direct path is never the faster
+# option. Without this the app has no reason to leave the relay, and the
+# profiles that set no latency of their own can never exercise a direct
+# connection.
+#
+# Only traffic addressed to the relay is delayed. Phone-to-phone traffic and
+# the broker keep their real timing, so the delay decides which path gets
+# chosen without touching what the transfer then measures. The priomap sends
+# every unmatched packet to band 1:2, which has no netem attached; the filter
+# lifts relay traffic into band 1:1, which does. The delay is applied on the
+# outbound leg only, so the figure is the whole round trip.
+delay_relay_path() {
+    local ns="$1"
+
+    [ "$relay_delay_ms" -gt 0 ] || return 0
+    in_namespace "$ns" tc qdisc add dev wan0 root handle 1: prio bands 3 \
+        priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    in_namespace "$ns" tc qdisc add dev wan0 parent 1:1 handle 10: \
+        netem delay "${relay_delay_ms}ms"
+    in_namespace "$ns" tc filter add dev wan0 parent 1: protocol ip prio 1 \
+        u32 match ip dst "$relay_ip/32" flowid 1:1
+}
+
 setup_router() {
     local ns="$1"
     local lan_peer="$2"
@@ -1033,6 +1063,7 @@ setup_network() {
     privileged ip link add "$lan_bridge_b" type bridge
     privileged ip link add "$wan_bridge" type bridge
     privileged ip address add 198.18.0.1/24 dev "$wan_bridge"
+    privileged ip address add "$relay_ip/24" dev "$wan_bridge"
     privileged ip link set "$lan_bridge_a" up
     privileged ip link set "$lan_bridge_b" up
     privileged ip link set "$wan_bridge" up
@@ -1065,6 +1096,8 @@ setup_network() {
         192.168.102.1/24 198.18.0.3/24 \
         2001:db8:102::1/64 2001:db8:100::3/64 \
         2001:db8:101::/64 2001:db8:100::2
+    delay_relay_path "$ns_a"
+    delay_relay_path "$ns_b"
 
     host_upstream="$upstream"
     network_ready=1
@@ -1080,7 +1113,7 @@ setup_network() {
         --dhcp-range=192.168.101.10,192.168.101.99,255.255.255.0,1h \
         --enable-ra --dhcp-range=2001:db8:101::,ra-only,64,2h \
         --dhcp-option=option:router,192.168.101.1 --dhcp-option=option:dns-server,192.168.101.1 \
-        --address="/$relay_host/198.18.0.1" --no-resolv --server=8.8.8.8 \
+        --address="/$relay_host/$relay_ip" --no-resolv --server=8.8.8.8 \
         >"$log_dir/dnsmasq-a.log" 2>&1 &
     dnsmasq_a_pid=$!
     in_namespace "$ns_b" dnsmasq --keep-in-foreground --bind-interfaces --interface=lan0 \
@@ -1090,7 +1123,7 @@ setup_network() {
         --dhcp-range=192.168.102.10,192.168.102.99,255.255.255.0,1h \
         --enable-ra --dhcp-range=2001:db8:102::,ra-only,64,2h \
         --dhcp-option=option:router,192.168.102.1 --dhcp-option=option:dns-server,192.168.102.1 \
-        --address="/$relay_host/198.18.0.1" --no-resolv --server=8.8.8.8 \
+        --address="/$relay_host/$relay_ip" --no-resolv --server=8.8.8.8 \
         >"$log_dir/dnsmasq-b.log" 2>&1 &
     dnsmasq_b_pid=$!
     sleep 1
@@ -1257,6 +1290,11 @@ while [ "$#" -gt 0 ]; do
             timeout="$2"
             shift 2
             ;;
+        --relay-delay-ms)
+            [ "$#" -ge 2 ] || die "--relay-delay-ms requires a value"
+            relay_delay_ms="$2"
+            shift 2
+            ;;
         --run)
             [ "$#" -ge 2 ] || die "--run requires a value"
             run_spec="$2"
@@ -1281,6 +1319,8 @@ select_tests "$run_spec"
     exit 2
 }
 [ "$timeout" -gt 0 ] 2>/dev/null || die "--timeout must be a positive integer"
+[ "$relay_delay_ms" -ge 0 ] 2>/dev/null ||
+    die "--relay-delay-ms must be a non-negative integer"
 [ "$(uname -s)" = Linux ] || die "this test requires Linux network namespaces"
 
 avd_a="$1"
