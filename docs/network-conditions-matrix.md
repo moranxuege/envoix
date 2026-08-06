@@ -95,41 +95,83 @@ it on a machine whose networking you care about.
 
 ## Measured results
 
-Two AVDs on one Linux host, 8 MiB payload, 2026-08-06. Every run delivered a
-byte-identical file (SHA-256 of the received copy matched the source).
-
-All four NAT cases against all five link profiles, 20 of 20 passing. Figures
-are KiB/s. The cap is decimal, as `tc` reads it: 1 Mbit/s is 1,000,000 bit/s.
+Two AVDs on one Linux host, 8 MiB payload, 2026-08-06. Every completed run
+delivered a byte-identical file (SHA-256 of the received copy matched the
+source). Each figure is the mean of three repetitions, in KiB/s, with the
+spread between the fastest and slowest run. The cap is decimal, as `tc` reads
+it: 1 Mbit/s is 1,000,000 bit/s.
 
 | link | symmetric-both-ipv4 | friendly-both-ipv4 | symmetric-one-side-ipv4 | symmetric-both-ipv6 |
 | --- | --- | --- | --- | --- |
-| `unshaped` | 1916.8 (relay) | 3667.3 | 3706.1 | 3731.9 |
-| `lan_1gbit` | 1913.5 (relay) | 3697.0 | 3724.3 | 3739.6 |
-| `home_wifi` | 1298.3 (relay) | 1301.8 | 1303.9 | 1305.1 |
-| `mobile_lte` | 330.7 (relay) | 360.6 | 397.3 | 305.7 |
-| `congested_edge` | 71.3 (relay) | 53.3 | 50.0 | 55.5 |
+| `lan_1gbit` | 1922.8 +-0.6% | 3718.0 +-1.3% | 3735.8 +-0.5% | 3722.6 +-0.7% |
+| `home_wifi` | 1087.7 +-29.3% | 1296.5 +-1.2% | 1302.7 +-0.2% | 1299.6 +-0.2% |
+| `mobile_lte` | 377.9 +-29.1% | 342.7 +-16.3% | 353.3 +-18.4% | 342.1 +-16.0% |
+| `congested_edge` | 79.0 +-9.8% | 58.9 +-9.2% | 58.7 +-13.0% | 54.1 +-10.9% |
+
+`unshaped` is absent. All three of its repetitions failed the same way: the
+`symmetric-both-ipv4` case timed out, after which the sender emulator lost its
+Wi-Fi address and took the rest of that invocation with it. The same case had
+passed earlier the same day, so this is unexplained rather than understood. It
+was not investigated further; the host was low on disk at the time, which is a
+candidate but not a finding.
 
 `symmetric-both-ipv4` puts a strict NAT on both sides, so it cannot hole punch
-and is the one case that is expected to run over the relay. It does, on every
-link. The other three complete directly, which is what they exist to prove.
+and is the one case expected to run over the relay. It does, on every link. The
+other three complete directly, which is what they exist to prove.
 
-Reading down a column shows the shaper working. Reading across a row shows what
-the relay costs, and that turns out to depend entirely on the link:
+Repetition changes the reading. Direct transfers are stable, within 1.3% across
+runs, and the relay column is not: it swings up to 29%. Any single relay
+measurement is close to meaningless, and the relay-versus-direct comparison
+below only became trustworthy once averaged.
 
 | link | relay speed as a share of direct |
 | --- | --- |
-| `unshaped` | 52% |
 | `lan_1gbit` | 52% |
-| `home_wifi` | 100% |
-| `mobile_lte` | 92% |
+| `home_wifi` | 84% |
+| `mobile_lte` | 110% |
 | `congested_edge` | 134% |
 
-Only the unshaped pair pays the expected penalty for crossing the host twice.
-Everything shaped pays little or nothing, and that is a harness artifact rather
-than a fact about relays; see the receiver downlink note below. The
-`congested_edge` row, where the relay came out ahead, is one sample on a link
-that discards 2% of packets at random, so treat it as noise until it is
-repeated rather than as a result.
+Only `lan_1gbit` pays the expected penalty for crossing the host twice. The
+penalty shrinks as the link slows and inverts on the two lossy profiles, where
+relaying beat connecting directly across all three repetitions. That is no
+longer dismissible as sampling noise, and it has no explanation here. Part of
+it is certainly the harness: the relay-to-receiver leg runs unshaped, for the
+reason in the receiver downlink note below. Whether that accounts for all of it
+is untested.
+
+The `home_wifi` relay figure is bimodal rather than noisy: 981.5, 981.5, and
+1300.2. The outlying run matches that link's direct speed almost exactly. Three
+samples cannot say whether that is a second code path or a coincidence.
+
+### Payload size dominates everything else
+
+Same link and same NAT case, varying only the file. Three repetitions each.
+
+| size | mean time | of which on the wire | throughput | share of the 20 Mbit/s cap |
+| --- | --- | --- | --- | --- |
+| 1 MiB | 2.21 s | 0.42 s | 3.80 Mbit/s | 19% |
+| 8 MiB | 6.32 s | 3.36 s | 10.61 Mbit/s | 53% |
+| 64 MiB | 31.00 s | 26.84 s | 17.32 Mbit/s | 87% |
+
+Every other measurement in this document used 8 MiB, and that choice cost the
+app a factor of 1.6. At 64 MiB it reaches 87% of the shaped link, which is a
+reasonable figure for an encrypted transport. The 53% reported at 8 MiB, and
+the "roughly half the cap" reading built on it, are artifacts of a payload too
+small to amortise startup.
+
+Two effects produce the ramp. Time spent off the wire is 1.79s, 2.97s and 4.16s
+for the three sizes, so a fixed setup cost of roughly 1.6 to 2 seconds is
+present but does not grow with the payload. The remainder is the transport
+starting slow and accelerating, which is why the effective rate keeps climbing
+rather than flattening once setup is amortised.
+
+Prefer 64 MiB for anything meant to characterise throughput. Keep 8 MiB only
+where run time matters more than accuracy, and do not compare figures taken at
+different sizes.
+
+A fourth size, 64 KiB, is missing from the table because all three of its runs
+failed an assertion rather than a transfer; see the note on small transfers
+below.
 
 These are goodput figures: the numerator counts only payload bytes that
 arrived, not the headers, ACKs and retransmissions that also crossed the wire.
@@ -161,26 +203,38 @@ constrains the transfer. There is no ingress shaping anywhere in the script.
 Two visible consequences. The `downlink` column of every profile is currently
 decorative for a one-way transfer. And a relay run is nearly free on a shaped
 link, because only the sender-to-relay leg is limited while the relay-to-
-receiver leg runs unshaped; that is why the relay costs 48% on `unshaped` but
-nothing on `home_wifi`. Do not read that as evidence that relaying is cheap.
+receiver leg runs unshaped; that is why relaying costs 48% on `lan_1gbit` but
+only 16% on `home_wifi` and nothing at all on the two slower profiles. Do not
+read that as evidence that relaying is cheap.
 
 Enforcing it means redirecting ingress to an `ifb` device and shaping that,
 which is a real addition rather than a parameter change. Until then, read every
 figure as a test of the sender's uplink.
 
-### The IPv6 case disagrees with itself on fast links
+### Short transfers finish before the direct path is ready
 
-On `unshaped` and `lan_1gbit`, `symmetric-both-ipv6` finishes with the sender
-reporting `direct_ipv6` and the receiver reporting `relay`. On the three slower
-links both sides agree on `direct_ipv6`. The transfer passes either way and the
-bytes are correct.
+A transfer that ends quickly enough is delivered over the relay whatever the
+NAT allows, and the two sides then disagree about which path was used: the
+sender reports `direct_ipv4` while the receiver reports `relay`.
 
-That it appears only on the two links where the transfer completes in about two
-seconds points at a reporting race rather than a transport fault: the receiver
-records the path it had when the last byte landed, and on a fast link that can
-precede the upgrade to direct settling on its side. Not confirmed. It is worth
-a look before anyone quotes per-side path data, and it is invisible in the
-`friendly-both-ipv4` column that the earlier measurements used.
+The size sweep isolates this. On `home_wifi` with `friendly-both-ipv4`, a
+relaxed NAT on both sides and nothing else varying, all three 64 KiB runs ended
+in that disagreement and failed the direct-path assertion, while every run at
+1 MiB and above passed with both sides reporting a direct connection. The
+transfers themselves succeeded; the payload arrived intact each time.
+
+This is the same disagreement seen earlier on `symmetric-both-ipv6`, which
+appeared only on the two links where the transfer completed in about two
+seconds and never on the three slower ones. Both observations fit one
+explanation: hole punching has not finished when a short transfer is already
+over, so the data really does travel by relay, and only the sender's record
+catches the subsequent upgrade.
+
+Two consequences. A direct-path assertion is only meaningful once the transfer
+lasts longer than pairing, so a case that asserts one needs a payload no
+smaller than about 1 MiB. And for the product, small files do not benefit from
+hole punching at all; whether that is worth changing is a question for the
+transport, not for this harness.
 
 ### The 1 Gbit profiles do not report a link speed
 
@@ -189,19 +243,23 @@ applies no shaping at all. Two settings a thousand times apart producing the
 same number means the shaper is not what limits them. That much is solid.
 
 What does limit them is not established. At 1 Gbit the payload needs 0.067s of
-wire time against a 2.236s measurement, so 97% of that figure is setup and
-transport ramp rather than the file crossing the link. Whether the real ceiling
-is 50 Mbit/s or 250 Mbit/s depends on a fixed setup cost that has not been
-measured; the arithmetic admits both.
+wire time against a 2.2s measurement, so 97% of that figure is setup and
+transport ramp rather than the file crossing the link.
 
-So `lan_1gbit` is still worth running as a control against `unshaped`, and the
-pair agreeing is itself the evidence that the shaper has stopped binding. Do
-not quote either one as a throughput figure. Settling it needs a payload large
-enough to make setup a rounding error, or a measurement that starts when the
-first payload byte moves; the second is worth doing anyway.
+The size sweep narrows this without closing it. Setup costs roughly 1.6 to 2
+seconds, which is most of a 2.2 second measurement, so the 1 Gbit figures are
+very largely startup. It does not give the ceiling, because the sweep was run
+on `home_wifi` where the shaper still binds; the transport had no reason to go
+faster than 20 Mbit/s there. Repeating the sweep at 64 MiB against `lan_1gbit`
+would settle it and is the obvious next measurement.
 
-The three slower profiles are unaffected. At 1 Mbit/s the payload occupies 67s
-of a 144s measurement, so a setup cost of a second or two cannot distort them.
+Until then, do not quote either 1 Gbit profile as a throughput figure. They
+remain useful as a control pair: the two agreeing is itself the evidence that
+the shaper has stopped binding.
+
+The three slower profiles are unaffected at 8 MiB and above. At 1 Mbit/s the
+payload occupies 67s of a 144s measurement, so a setup cost of a second or two
+cannot distort them.
 
 ### Why the relay is delayed at all
 
