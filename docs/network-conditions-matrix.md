@@ -117,18 +117,26 @@ link speed.
 
 ## Known limits
 
-### The 1 Gbit profiles measure the harness, not the link
+### The 1 Gbit profiles do not report a link speed
 
-`lan_1gbit` reaches 3% of its cap, and it lands within 0.17% of `unshaped`,
-which applies no shaping at all. Two settings that differ by a factor of a
-thousand producing the same number means the shaper is not what limits them.
-The emulator's virtual network and the host CPU are, at roughly 30 Mbit/s.
+`lan_1gbit` reaches 3% of its cap and lands within 0.17% of `unshaped`, which
+applies no shaping at all. Two settings a thousand times apart producing the
+same number means the shaper is not what limits them. That much is solid.
 
-So treat 30 Mbit/s as this harness's ceiling. `lan_1gbit` is a useful
-upper-bound case and a control against `unshaped`, but it does not tell you how
-the app behaves on a real gigabit LAN. Any profile set above about 30 Mbit/s
-will report the same figure. The three slower profiles are the ones whose
-numbers describe the link they name.
+What does limit them is not established. At 1 Gbit the payload needs 0.067s of
+wire time against a 2.236s measurement, so 97% of that figure is setup and
+transport ramp rather than the file crossing the link. Whether the real ceiling
+is 50 Mbit/s or 250 Mbit/s depends on a fixed setup cost that has not been
+measured; the arithmetic admits both.
+
+So `lan_1gbit` is still worth running as a control against `unshaped`, and the
+pair agreeing is itself the evidence that the shaper has stopped binding. Do
+not quote either one as a throughput figure. Settling it needs a payload large
+enough to make setup a rounding error, or a measurement that starts when the
+first payload byte moves; the second is worth doing anyway.
+
+The three slower profiles are unaffected. At 1 Mbit/s the payload occupies 67s
+of a 144s measurement, so a setup cost of a second or two cannot distort them.
 
 ### Why the relay is delayed at all
 
