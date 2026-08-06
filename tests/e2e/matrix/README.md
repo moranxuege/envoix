@@ -79,3 +79,9 @@ sanitized evidence required by the issue.
 
 Registry and report data must never contain Room Codes, invitation payloads,
 tokens, credentials, stable device identifiers, or absolute private paths.
+
+`network_profiles` names the link conditions a case runs under: bandwidth,
+round trip and loss. `scripts/nat-test.sh --network <profile>` applies one to
+the two-emulator harness and records the throughput it produced. See
+`docs/network-conditions-matrix.md` for the topology, how to run it, and
+measured results.
