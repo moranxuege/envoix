@@ -74,21 +74,32 @@ it on a machine whose networking you care about.
 Two AVDs on one Linux host, 8 MiB payload, 2026-08-06. Every run delivered a
 byte-identical file (SHA-256 of the received copy matched the source).
 
-| profile | uplink cap | measured | goodput vs cap |
-| --- | --- | --- | --- |
-| `congested_edge` | 1 Mbit/s | 57.1 KiB/s | 45% |
-| `mobile_lte` | 5 Mbit/s | 361.1 KiB/s | 56% |
-| `home_wifi` | 20 Mbit/s | 1299.2 KiB/s | 51% |
-| `unshaped`, `lan_1gbit` | 1 Gbit/s | not measurable, see below | |
+Percentages compare payload delivered against the uplink the profile sets. The
+cap is decimal, as `tc` reads it: 1 Mbit/s is 1,000,000 bit/s.
+
+| profile | uplink cap | measured | as bit/s | share of cap |
+| --- | --- | --- | --- | --- |
+| `congested_edge` | 1 Mbit/s | 57.1 KiB/s | 0.47 Mbit/s | 47% |
+| `mobile_lte` | 5 Mbit/s | 361.1 KiB/s | 2.96 Mbit/s | 59% |
+| `home_wifi` | 20 Mbit/s | 1299.2 KiB/s | 10.64 Mbit/s | 53% |
+| `unshaped`, `lan_1gbit` | 1 Gbit/s | not measurable, see below | | |
 
 Throughput tracks the caps and stays monotone across a 20x range, so the
 shaping is the binding constraint rather than some other bottleneck.
 
-Two things stop these numbers from being raw link capacity. `seconds` starts
-when the sender is launched, so pairing and the handshake are inside the
-measurement. The rest is QUIC, encryption and virtual-NIC overhead. The ratio
-is stable near half the shaped rate across every profile, so the figures
-compare profiles against each other correctly; do not read them as link speed.
+These are goodput figures: the numerator counts only payload bytes that
+arrived, not the headers, ACKs and retransmissions that also crossed the wire.
+Goodput is always below the link rate.
+
+Two effects put it near half here. `seconds` starts when the sender is
+launched, so pairing and the handshake sit inside the measurement even though
+they move no payload; that fixed cost hurts fast links most. The rest is QUIC
+framing, encryption and virtual-NIC overhead, plus retransmission on the two
+profiles that set loss.
+
+The share of cap stays in a narrow band, 47% to 59%, across a 20x range of link
+speeds, so the figures compare profiles against each other correctly. Do not
+quote them as link speed.
 
 ## Known limits
 
