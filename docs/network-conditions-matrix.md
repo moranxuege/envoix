@@ -65,6 +65,18 @@ scripts/nat-test.sh --verbose --network home_wifi --run friendly-both-ipv4 \
     AVD_Phone AVD_Phone2 /tmp/matrix-payload.bin
 ```
 
+Omit `--run` to take all four NAT cases against that link on one pair of
+emulator boots, which is how the matrix below was produced:
+
+```bash
+for net in unshaped lan_1gbit home_wifi mobile_lte congested_edge; do
+    scripts/nat-test.sh --verbose --network "$net" \
+        AVD_Phone AVD_Phone2 /tmp/matrix-payload.bin
+done
+```
+
+That is 20 transfers and takes roughly 40 minutes, most of it `congested_edge`.
+
 Each completed transfer prints one machine-readable line:
 
 ```text
@@ -126,8 +138,8 @@ Goodput is always below the link rate.
 For the three profiles the shaper actually constrains, throughput tracks the
 cap across a 20x range and the share of the uplink stays in a narrow band, 47%
 to 59% on `friendly-both-ipv4`. That band is what says the shaping is the
-binding constraint rather than some other
-bottleneck. Two effects hold it near half. `seconds` starts when the sender is
+binding constraint rather than some other bottleneck. Two effects hold it near
+half. `seconds` starts when the sender is
 launched, so pairing and the handshake sit inside the measurement even though
 they move no payload, which costs fast links proportionally more. The rest is
 QUIC framing, encryption and virtual-NIC overhead, plus retransmission on the
