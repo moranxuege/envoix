@@ -14,6 +14,9 @@ from typing import Any, Iterable, Sequence
 
 SCHEMA_VERSION = 1
 RUN_SCHEMA_VERSION = 1
+# A speed row's measurement. Bytes and seconds are kept beside the derived rate
+# so a reader can recompute it instead of trusting it.
+THROUGHPUT_KEYS = {"bytes", "seconds", "kib_per_second"}
 MAX_CASES = 512
 MAX_PROFILES = 64
 MAX_TEXT_LENGTH = 400
@@ -62,8 +65,28 @@ REDACTIONS = (
     ),
 )
 
-TOP_LEVEL_KEYS = {"schema_version", "registry_revision", "profiles", "cases"}
+TOP_LEVEL_KEYS = {
+    "schema_version",
+    "registry_revision",
+    "profiles",
+    "network_profiles",
+    "cases",
+}
 PROFILE_KEYS = {"kind", "description", "scenario", "size_bytes"}
+# What the harness imposes on the link, not what the product does. Rates are
+# kilobits per second, `rtt_ms` is the round trip the harness applies (split
+# between the two ends), and loss is a percentage of packets dropped.
+NETWORK_PROFILE_KEYS = {
+    "description",
+    "downlink_kbits",
+    "uplink_kbits",
+    "rtt_ms",
+    "loss_percent",
+}
+MAX_NETWORK_PROFILES = 24
+MAX_LINK_KBITS = 10_000_000
+MAX_RTT_MS = 5_000
+MAX_LOSS_PERCENT = 50.0
 REQUIRED_PROFILE_KEYS = {"kind", "description", "scenario"}
 CASE_KEYS = {
     "case_id",
@@ -74,6 +97,8 @@ CASE_KEYS = {
     "sender",
     "receiver",
     "transfer_profile",
+    "network_profile",
+    "nat_profile",
     "invitation_input",
     "requested_path_policy",
     "fault_profile",
@@ -114,6 +139,16 @@ PATH_POLICIES = {
     "direct_then_relay",
     "serverless_lan",
 }
+# Address translation between the two ends. Orthogonal to
+# requested_path_policy: policy is what the product asks for, this is what the
+# network actually is. `none` covers rows the harness does not translate.
+NAT_PROFILES = {
+    "none",
+    "friendly_both_ipv4",
+    "symmetric_both_ipv4",
+    "symmetric_one_side_ipv4",
+    "symmetric_both_ipv6",
+}
 FAULT_PROFILES = {
     "none",
     "network_interrupt",
@@ -140,6 +175,7 @@ TERMINAL_STATES = {
 }
 EVIDENCE_FIELDS = {
     "activity_id",
+    "throughput",
     "attempt_count",
     "cleanup",
     "delivery_proof",
@@ -179,6 +215,7 @@ HARDWARE_REQUIREMENTS = {
     "same_lan",
     "relay_service",
     "network_control",
+    "emulator_pair",
     "ble_android",
     "ble_ios",
     "wifi_aware_android",
@@ -291,6 +328,39 @@ def _check_string_list(
     return checked
 
 
+def _validate_network_profile(
+    profile_id: object,
+    value: object,
+    errors: list[str],
+) -> None:
+    context = f"network_profiles.{profile_id}"
+    if not isinstance(profile_id, str) or not PROFILE_IDENTIFIER.fullmatch(profile_id):
+        errors.append(f"network_profiles has invalid identifier {profile_id!r}")
+    if not isinstance(value, dict):
+        errors.append(f"{context} must be an object")
+        return
+    unknown = sorted(set(value) - NETWORK_PROFILE_KEYS)
+    missing = sorted(NETWORK_PROFILE_KEYS - set(value))
+    if unknown:
+        errors.append(f"{context} has unknown field(s): {', '.join(unknown)}")
+    if missing:
+        errors.append(f"{context} is missing field(s): {', '.join(missing)}")
+    _check_text(value.get("description"), f"{context}.description", errors)
+    for field, ceiling in (
+        ("downlink_kbits", MAX_LINK_KBITS),
+        ("uplink_kbits", MAX_LINK_KBITS),
+        ("rtt_ms", MAX_RTT_MS),
+    ):
+        amount = value.get(field)
+        if not _is_integer(amount) or not 0 < amount <= ceiling:
+            errors.append(f"{context}.{field} must be between 1 and {ceiling}")
+    loss = value.get("loss_percent")
+    if isinstance(loss, bool) or not isinstance(loss, (int, float)):
+        errors.append(f"{context}.loss_percent must be a number")
+    elif not 0.0 <= float(loss) <= MAX_LOSS_PERCENT:
+        errors.append(f"{context}.loss_percent must be between 0 and {MAX_LOSS_PERCENT}")
+
+
 def _validate_profile(
     profile_id: object,
     value: object,
@@ -341,6 +411,7 @@ def _validate_case(
     value: object,
     index: int,
     profile_ids: set[str],
+    network_profile_ids: set[str],
     errors: list[str],
 ) -> str | None:
     context = f"cases[{index}]"
@@ -383,6 +454,17 @@ def _validate_case(
         f"{context}.requested_path_policy",
         errors,
     )
+    network = _check_text(
+        value.get("network_profile"),
+        f"{context}.network_profile",
+        errors,
+    )
+    if network is not None and network not in network_profile_ids:
+        errors.append(
+            f"{context}.network_profile references unknown profile {network!r}"
+        )
+    _check_enum(value.get("nat_profile"), NAT_PROFILES, f"{context}.nat_profile", errors)
+
     fault_profile = _check_enum(
         value.get("fault_profile"),
         FAULT_PROFILES,
@@ -518,6 +600,19 @@ def validate_registry(value: object) -> list[str]:
         for profile_id, profile in profiles.items():
             _validate_profile(profile_id, profile, errors)
 
+    network_profiles = value.get("network_profiles")
+    network_profile_ids: set[str] = set()
+    if not isinstance(network_profiles, dict) or not network_profiles:
+        errors.append("registry.network_profiles must be a non-empty object")
+    else:
+        if len(network_profiles) > MAX_NETWORK_PROFILES:
+            errors.append(
+                f"registry.network_profiles exceeds {MAX_NETWORK_PROFILES} entries"
+            )
+        network_profile_ids = set(network_profiles)
+        for profile_id, profile in network_profiles.items():
+            _validate_network_profile(profile_id, profile, errors)
+
     cases = value.get("cases")
     if not isinstance(cases, list) or not cases:
         errors.append("registry.cases must be a non-empty list")
@@ -526,7 +621,9 @@ def validate_registry(value: object) -> list[str]:
             errors.append(f"registry.cases exceeds {MAX_CASES} entries")
         seen: set[str] = set()
         for index, case in enumerate(cases):
-            case_id = _validate_case(case, index, profile_ids, errors)
+            case_id = _validate_case(
+                case, index, profile_ids, network_profile_ids, errors
+            )
             if case_id is not None:
                 if case_id in seen:
                     errors.append(
@@ -849,6 +946,7 @@ def execution_record(
     status: str,
     failure_code: str | None = None,
     sanitized_logs: Sequence[str] = (),
+    throughput: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(run_id, str) or not RUN_IDENTIFIER.fullmatch(run_id):
         raise ValueError("run ID must be a stable identifier")
@@ -870,6 +968,16 @@ def execution_record(
     for path in sanitized_logs:
         if not path or Path(path).is_absolute() or ".." in Path(path).parts:
             raise ValueError("sanitized log paths must be artifact-relative")
+    if throughput is not None:
+        missing = sorted(THROUGHPUT_KEYS - set(throughput))
+        unknown = sorted(set(throughput) - THROUGHPUT_KEYS)
+        if missing or unknown:
+            raise ValueError(f"throughput must carry exactly {sorted(THROUGHPUT_KEYS)}")
+        for field, amount in throughput.items():
+            if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+                raise ValueError(f"throughput.{field} must be a number")
+            if amount <= 0:
+                raise ValueError(f"throughput.{field} must be positive")
     return {
         "schema_version": RUN_SCHEMA_VERSION,
         "run_id": run_id,
@@ -879,6 +987,7 @@ def execution_record(
         "classification": classification,
         "failure_code": failure_code,
         "sanitized_logs": list(sanitized_logs),
+        "throughput": dict(throughput) if throughput is not None else None,
     }
 
 
@@ -898,6 +1007,7 @@ def validate_execution_record(
         "classification",
         "failure_code",
         "sanitized_logs",
+        "throughput",
     }
     _check_keys(record, expected_keys, "execution record", errors)
     if record.get("schema_version") != RUN_SCHEMA_VERSION:
@@ -1230,6 +1340,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     record.add_argument("--status", required=True, choices=sorted(EXECUTION_STATUSES))
     record.add_argument("--failure-code")
     record.add_argument("--sanitized-log", action="append", default=[])
+    record.add_argument("--throughput-bytes", type=int)
+    record.add_argument("--throughput-seconds", type=float)
     record.add_argument("--output", required=True, type=Path)
 
     aggregate = subparsers.add_parser(
@@ -1271,6 +1383,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     if args.command == "record-result":
+        throughput = None
+        if args.throughput_bytes is not None or args.throughput_seconds is not None:
+            if args.throughput_bytes is None or args.throughput_seconds is None:
+                print(
+                    "error: --throughput-bytes and --throughput-seconds go together",
+                    file=sys.stderr,
+                )
+                return 1
+            if args.throughput_seconds <= 0:
+                print("error: --throughput-seconds must be positive", file=sys.stderr)
+                return 1
+            throughput = {
+                "bytes": args.throughput_bytes,
+                "seconds": round(args.throughput_seconds, 3),
+                "kib_per_second": round(
+                    args.throughput_bytes / args.throughput_seconds / 1024, 1
+                ),
+            }
         try:
             record = execution_record(
                 run_id=args.run_id,
@@ -1279,6 +1409,7 @@ def main(argv: list[str] | None = None) -> int:
                 status=args.status,
                 failure_code=args.failure_code,
                 sanitized_logs=args.sanitized_log,
+                throughput=throughput,
             )
             _write_json(args.output, record)
         except (OSError, ValueError) as error:

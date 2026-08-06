@@ -11,8 +11,15 @@ readonly ACTION_QUERY_TRANSFER="$PACKAGE.NAT_TEST_QUERY_TRANSFER"
 readonly NAT_TEST_RECEIVER="$PACKAGE/.NatTestReceiver"
 readonly DEVICE_INPUT="/data/user/0/$PACKAGE/cache/nat-test-input"
 readonly DEVICE_OUTPUT_DIR="/sdcard/Download/Envoix"
-readonly TRANSFER_RATE_KBITS=4194 # Approximately 512 KiB/s.
 readonly TRANSFER_QUEUE_BYTES=33554432 # 32 MiB.
+# Link conditions come from the matrix registry so the runner and the contract
+# cannot drift. `unshaped` means the harness imposes nothing at all.
+readonly REGISTRY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tests/e2e/matrix/cases.v1.json"
+network_profile="unshaped"
+net_downlink_kbits=0
+net_uplink_kbits=0
+net_rtt_ms=0
+net_loss_percent=0
 readonly AVAILABLE_TESTS=(
     symmetric-both-ipv4
     friendly-both-ipv4
@@ -79,11 +86,15 @@ OpenSSL, cargo-ndk, and the Android SDK/NDK.
 
 Both AVDs must use x86_64 Google APIs images, not Google Play images.
 Startup removes stale NAT-test resources and stops the global netsimd process.
-The sender's Wi-Fi bandwidth is limited to approximately 512 KiB/s.
+Link conditions come from network_profiles in tests/e2e/matrix/cases.v1.json:
+rate, round-trip delay and loss are applied with netem at both ends, and each
+passing transfer reports its end-to-end throughput.
 In symmetric-one-side-ipv4, side A uses symmetric NAT while side B is directly
 routed on the test WAN with no address translation or inbound firewall.
 
 Options:
+  --network PROFILE   Link conditions from the matrix registry (default: $network_profile)
+  --list-networks     List available network profiles and exit
   --timeout SECONDS   Per-transfer timeout (default: $timeout)
   --run TESTS         Comma-separated test names, or "all" (default: all)
   --list-tests        List available test names and exit
@@ -577,9 +588,69 @@ clear_bandwidth_limit() {
     "$adb" -s "$1" shell 'tc qdisc del dev wlan0 root 2>/dev/null || true'
 }
 
-limit_bandwidth() {
-    "$adb" -s "$1" shell \
-        "tc qdisc replace dev wlan0 root tbf rate ${TRANSFER_RATE_KBITS}kbit burst 64kb limit $TRANSFER_QUEUE_BYTES"
+load_network_profile() {
+    local name="$1" fields
+    fields="$(python3 - "$REGISTRY" "$name" <<'PYEOF' 2>&1
+import json, sys
+profiles = json.load(open(sys.argv[1], encoding="utf-8")).get("network_profiles", {})
+profile = profiles.get(sys.argv[2])
+if profile is None:
+    sys.exit(f"unknown network profile {sys.argv[2]!r}; have: {' '.join(sorted(profiles))}")
+print(profile["downlink_kbits"], profile["uplink_kbits"],
+      profile["rtt_ms"], profile["loss_percent"])
+PYEOF
+)" || die "$fields"
+    read -r net_downlink_kbits net_uplink_kbits net_rtt_ms net_loss_percent <<<"$fields"
+    network_profile="$name"
+}
+
+list_network_profiles() {
+    python3 - "$REGISTRY" <<'PYEOF'
+import json, sys
+for name, p in sorted(json.load(open(sys.argv[1], encoding="utf-8"))
+                      .get("network_profiles", {}).items()):
+    print(f"{name}\t{p['downlink_kbits']}kbit down, {p['uplink_kbits']}kbit up, "
+          f"{p['rtt_ms']}ms rtt, {p['loss_percent']}% loss")
+PYEOF
+}
+
+# netem carries rate, delay and loss in one qdisc. Half the stated round trip is
+# applied at each end, so the registry figure is what a packet actually sees.
+shape_link() {
+    local serial="$1" rate_kbits="$2" spec half_rtt
+    half_rtt=$((net_rtt_ms / 2))
+    spec="rate ${rate_kbits}kbit limit $((TRANSFER_QUEUE_BYTES / 1500))"
+    [ "$half_rtt" -gt 0 ] && spec="delay ${half_rtt}ms $spec"
+    case "$net_loss_percent" in
+        0 | 0.0) ;;
+        *) spec="$spec loss ${net_loss_percent}%" ;;
+    esac
+    "$adb" -s "$serial" shell "tc qdisc replace dev wlan0 root netem $spec"
+}
+
+apply_network_profile() {
+    if [ "$network_profile" = unshaped ]; then
+        clear_bandwidth_limit "$SERIAL_A"
+        clear_bandwidth_limit "$SERIAL_B"
+        return
+    fi
+    shape_link "$SERIAL_A" "$net_uplink_kbits"
+    shape_link "$SERIAL_B" "$net_downlink_kbits"
+}
+
+# End-to-end wall clock for the payload, which is what a speed matrix exists to
+# produce. It spans sender start through delivery, not payload bytes alone.
+report_throughput() {
+    local profile="$1" started="$2" file="$3" bytes
+    bytes="$(stat -c %s "$file")"
+    python3 - "$profile" "$network_profile" "$bytes" "$started" "$(date +%s.%N)" <<'PYEOF'
+import sys
+profile, link, raw, start, end = sys.argv[1:6]
+elapsed = float(end) - float(start)
+rate = int(raw) / elapsed / 1024 if elapsed > 0 else 0.0
+print(f"[{profile}] THROUGHPUT link={link} bytes={raw} "
+      f"seconds={elapsed:.3f} kib_per_second={rate:.1f}")
+PYEOF
 }
 
 reset_app() {
@@ -1045,8 +1116,9 @@ run_test() {
     invitation="$(start_creator_receiver)"
     wait_for_transfer_record "$SERIAL_B" receiver "$profile"
     sleep 2
-    printf '[%s] Limiting sender Wi-Fi to approximately 512 KiB/s...\n' "$profile"
-    limit_bandwidth "$SERIAL_A"
+    printf '[%s] link=%s\n' "$profile" "$network_profile"
+    apply_network_profile
+    transfer_started_at="$(date +%s.%N)"
     start_sender "$SERIAL_A" "$invitation" "$DEVICE_INPUT"
     wait_for_transfer_record "$SERIAL_A" sender "$profile"
 
@@ -1069,6 +1141,7 @@ run_test() {
                 break
             fi
             [ "$verbose" -eq 0 ] || printf '\n'
+            report_throughput "$profile" "$transfer_started_at" "$test_file"
             printf '[%s] PASS: both peers completed; received SHA-256 matches %s\n' \
                 "$profile" "$expected_hash"
             print_peer_data "$profile"
@@ -1163,6 +1236,10 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --list-tests) list_tests; exit 0 ;;
+        --list-networks) list_network_profiles; exit 0 ;;
+        --network)
+            [ $# -ge 2 ] || die "--network needs a profile name"
+            load_network_profile "$2"; shift 2 ;;
         --verbose) verbose=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;

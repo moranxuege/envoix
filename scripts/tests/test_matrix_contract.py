@@ -35,9 +35,65 @@ class MatrixContractTests(unittest.TestCase):
             f"expected {expected!r} in errors:\n" + "\n".join(errors),
         )
 
+    def test_network_profiles_are_required(self) -> None:
+        errors = self.errors_for(lambda value: value.pop("network_profiles"))
+        self.assert_error(errors, "missing field(s): network_profiles")
+
+    def test_case_referencing_unknown_network_profile_is_rejected(self) -> None:
+        errors = self.errors_for(
+            lambda value: value["cases"][0].__setitem__("network_profile", "no_such")
+        )
+        self.assert_error(errors, "network_profile references unknown profile 'no_such'")
+
+    def test_network_profile_bounds_are_enforced(self) -> None:
+        for field, bad in (
+            ("downlink_kbits", 0),
+            ("uplink_kbits", -1),
+            ("rtt_ms", 0),
+            ("loss_percent", 90.0),
+        ):
+            with self.subTest(field=field):
+                errors = self.errors_for(
+                    lambda value, f=field, b=bad: value["network_profiles"][
+                        "home_wifi"
+                    ].__setitem__(f, b)
+                )
+                self.assert_error(errors, f"network_profiles.home_wifi.{field}")
+
+    def test_unknown_nat_profile_is_rejected(self) -> None:
+        errors = self.errors_for(
+            lambda value: value["cases"][0].__setitem__("nat_profile", "double_nat")
+        )
+        self.assert_error(errors, "nat_profile has unsupported value")
+
+    def test_every_case_states_its_link_and_translation(self) -> None:
+        # A speed row without a stated link means nothing, and a NAT row without
+        # stated translation cannot be reproduced.
+        for case in self.registry["cases"]:
+            self.assertIn(case["network_profile"], self.registry["network_profiles"])
+            self.assertIn(case["nat_profile"], matrix_contract.NAT_PROFILES)
+
+    def test_throughput_is_recorded_and_checked(self) -> None:
+        record = matrix_contract.execution_record(
+            run_id="speed-1",
+            case_id="l1.emulator.speed.friendly-both-ipv4.home-wifi",
+            repetition=1,
+            status="pass",
+            throughput={"bytes": 8388608, "seconds": 4.0, "kib_per_second": 2048.0},
+        )
+        self.assertEqual(record["throughput"]["kib_per_second"], 2048.0)
+        with self.assertRaises(ValueError):
+            matrix_contract.execution_record(
+                run_id="speed-1",
+                case_id="l1.emulator.speed.friendly-both-ipv4.home-wifi",
+                repetition=1,
+                status="pass",
+                throughput={"bytes": 1, "seconds": 0, "kib_per_second": 1},
+            )
+
     def test_repository_registry_is_valid(self) -> None:
         self.assertEqual(matrix_contract.validate_registry(self.registry), [])
-        self.assertEqual(len(self.registry["cases"]), 22)
+        self.assertEqual(len(self.registry["cases"]), 32)
         self.assertFalse(
             any(case["support_status"] == "required" for case in self.registry["cases"])
         )
