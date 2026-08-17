@@ -29,6 +29,31 @@ Manifest v1 and the former single-file protocol are not supported.
 
 ## CLI
 
+### Persistent WSL Agent
+
+The Agent turns WSL into a remembered receiver with a durable Inbox while the
+CLI remains its local controller:
+
+```bash
+scripts/with-build-cache-guard.sh cargo build -p envoix-agent -p envoix-cli
+
+# Keep this running in WSL (the deployed relay remains a fallback; direct paths
+# are still preferred when reachable).
+target/debug/envoix-agent
+
+# In another shell, create an ordinary Room plus a one-time verification code.
+target/debug/envoix agent pair --name MacBook
+
+# On the Mac, enter the printed Room code, then enter the six-digit code when
+# Envoix asks to verify WSL. No transfer is required to finish pairing.
+target/debug/envoix devices list
+target/debug/envoix inbox list
+target/debug/envoix inbox latest
+```
+
+See [the Agent MVP design](docs/design/agent-mvp.md) for trust, persistence,
+network-path behavior, and the current WSL NAT limitation.
+
 ### QR/direct invite
 
 ```bash
@@ -87,6 +112,9 @@ deny = ["100.64.0.0/10"]
   destination planning, checkpoints, compression, and delivery authority.
 - `crates/envoix-session`: authenticated iroh, Room, mDNS, and resume sessions.
 - `crates/envoix-ffi`: UniFFI surface for Apple and shared native semantics.
+- `crates/envoix-client::product`: remembered-device, Inbox, and local Agent
+  command contract.
+- `apps/envoix-agent`: persistent Linux/WSL receiver and Inbox owner.
 - `apps/envoix-android-jni`: Android JNI projection and platform save gate.
 - `apps/envoix-apple`, `android`, `apps/envoix-cli`: native front ends.
 

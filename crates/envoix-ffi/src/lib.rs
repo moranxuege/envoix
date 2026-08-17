@@ -8,12 +8,12 @@ use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use envoix_client::PeerDescriptor;
 use envoix_client::api::{
     Capabilities, Client, CreatedInvitation, InvitationError, InvitationErrorCode, InviteV2,
     PathPolicy, PeerSource, RememberedCredentialRef, RoomCode, TransferOptions, TransferRole,
     ValidatedInvitation, register_remembered_credential,
 };
+use envoix_client::{DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, PeerDescriptor};
 
 uniffi::setup_scaffolding!();
 
@@ -30,10 +30,7 @@ pub use nearby_invite::*;
 mod room_control;
 pub use room_control::*;
 
-const DEFAULT_RENDEZVOUS_BROKER: &str =
-    "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
-const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
-const ENVOIX_FFI_API_VERSION: u32 = 13;
+const ENVOIX_FFI_API_VERSION: u32 = 14;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =

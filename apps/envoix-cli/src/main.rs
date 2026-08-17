@@ -8,13 +8,17 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 mod args;
 
-use args::{Cli, Command, SaveModeArg, SourceIssueActionArg, TransferPlan};
+use args::{
+    AgentCommand, Cli, Command, DevicesCommand, InboxCommand, SaveModeArg, SourceIssueActionArg,
+    TransferPlan,
+};
 use clap::Parser;
 use envoix_client::api::{
     self, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
     InvitationConsumption, PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision,
     SourceSelectionState, TransferEvent, TransferJobStore, acquire_invitation,
 };
+use envoix_client::product::{AgentRequest, AgentResponse, default_agent_socket_path};
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 
 type CliResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -64,10 +68,181 @@ fn init_tracing(verbosity: u8) {
 
 async fn run(cli: Cli) -> CliResult<()> {
     let json = cli.json;
+    let agent_socket = cli.agent_socket;
     match cli.command {
         Command::Send(args) => send(args.into_plan()?, json).await,
         Command::Receive(args) => receive(args.into_plan()?, json).await,
+        Command::Agent(args) => match args.command {
+            AgentCommand::Status => {
+                show_agent_status(call_agent(agent_socket, AgentRequest::Status).await?, json)
+            }
+            AgentCommand::Pair { name } => show_pairing(
+                call_agent(agent_socket, AgentRequest::Pair { label: name }).await?,
+                json,
+            ),
+        },
+        Command::Devices(args) => match args.command {
+            DevicesCommand::List => show_devices(
+                call_agent(agent_socket, AgentRequest::ListDevices).await?,
+                json,
+            ),
+        },
+        Command::Inbox(args) => match args.command {
+            InboxCommand::List { limit } => show_inbox(
+                call_agent(agent_socket, AgentRequest::ListInbox { limit }).await?,
+                json,
+            ),
+            InboxCommand::Latest => show_latest_inbox(
+                call_agent(agent_socket, AgentRequest::LatestInbox).await?,
+                json,
+            ),
+        },
     }
+}
+
+#[cfg(unix)]
+async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult<AgentResponse> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let socket = socket.map(Ok).unwrap_or_else(default_agent_socket_path)?;
+    let stream = UnixStream::connect(&socket).await.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot connect to Envoix Agent at {}: {error}; start envoix-agent first",
+                socket.display()
+            ),
+        )
+    })?;
+    let (read, mut write) = stream.into_split();
+    let mut bytes = serde_json::to_vec(&request)?;
+    bytes.push(b'\n');
+    write.write_all(&bytes).await?;
+    write.shutdown().await?;
+    let mut line = String::new();
+    BufReader::new(read).read_line(&mut line).await?;
+    if line.is_empty() {
+        return Err("Envoix Agent closed the socket without a response".into());
+    }
+    Ok(serde_json::from_str(&line)?)
+}
+
+#[cfg(not(unix))]
+async fn call_agent(_socket: Option<PathBuf>, _request: AgentRequest) -> CliResult<AgentResponse> {
+    Err("the local Envoix Agent currently runs inside Linux/WSL".into())
+}
+
+fn agent_error(response: AgentResponse) -> CliResult<AgentResponse> {
+    match response {
+        AgentResponse::Error { code, message } => Err(format!("Agent {code}: {message}").into()),
+        response => Ok(response),
+    }
+}
+
+fn show_agent_status(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Status { status } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("agent: running (pid {})", status.pid);
+    println!("device: {}", status.device_name);
+    println!("inbox: {}", status.inbox_directory);
+    println!(
+        "devices: {} paired, {} listening, {} pairing",
+        status.paired_devices, status.active_receivers, status.active_pairings
+    );
+    println!("broker: {}", status.broker);
+    println!("relay: {}", status.relay.as_deref().unwrap_or("disabled"));
+    Ok(())
+}
+
+fn show_pairing(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Pairing { pairing } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Room code: {}", pairing.room_code);
+    println!("Verification code: {}", pairing.verification_code);
+    eprintln!(
+        "On the Mac, enter the room code in Envoix, then enter the six-digit verification code when prompted."
+    );
+    eprintln!("Keep envoix-agent running until the device appears in `envoix devices list`.");
+    Ok(())
+}
+
+fn show_devices(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Devices { devices } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if devices.is_empty() {
+        println!("No remembered devices.");
+        return Ok(());
+    }
+    for device in devices {
+        println!(
+            "{}\t{}\tgeneration {}",
+            device.id, device.label, device.generation
+        );
+    }
+    Ok(())
+}
+
+fn show_inbox(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Inbox { items } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if items.is_empty() {
+        println!("Inbox is empty.");
+        return Ok(());
+    }
+    for item in items {
+        let paths = item
+            .roots
+            .iter()
+            .map(|root| root.path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{}\t{}\t{} bytes\t{}",
+            item.received_at_unix_ms, item.from_device_label, item.total_bytes, paths
+        );
+    }
+    Ok(())
+}
+
+fn show_latest_inbox(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Latest { item } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    let item = item.ok_or("Inbox is empty")?;
+    for root in item.roots {
+        println!("{}", root.path);
+    }
+    Ok(())
 }
 
 async fn send(plan: TransferPlan, json: bool) -> CliResult<()> {

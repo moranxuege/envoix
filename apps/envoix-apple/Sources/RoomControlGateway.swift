@@ -95,6 +95,9 @@ enum RoomControlEvent: Equatable {
         creator: Bool,
         lifetime: RoomControlLifetimeState
     )
+    case verificationRequested
+    case verificationSucceeded
+    case verificationFailed
     case incomingOffer(RoomControlTransferOffer)
     case offerAccepted(id: String)
     case offerRejected(id: String)
@@ -117,6 +120,7 @@ protocol RoomControlGateway: AnyObject {
         label: String,
         endpoint: RoomControlEndpoint
     ) throws
+    func submitVerificationCode(_ code: String) async throws
     func host(
         invitation: RoomControlInvitation,
         displayName: String,
@@ -173,6 +177,10 @@ final class UnavailableRoomControlGateway: RoomControlGateway {
         label: String,
         endpoint: RoomControlEndpoint
     ) throws {
+        throw RoomControlUnavailableError()
+    }
+
+    func submitVerificationCode(_ code: String) async throws {
         throw RoomControlUnavailableError()
     }
 
@@ -439,6 +447,11 @@ final class LiveRoomControlGateway: RoomControlGateway {
         )).map(project)
     }
 
+    func submitVerificationCode(_ code: String) async throws {
+        guard let session else { throw RoomControlUnavailableError() }
+        try await session.submitVerificationCode(code: code)
+    }
+
     func acceptOffer(id: String) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
         return try await session.acceptOffer(offerId: id).map(project)
@@ -527,34 +540,16 @@ final class LiveRoomControlGateway: RoomControlGateway {
             }
             let snapshot = connectedSession.snapshot()
             if let pendingVerification {
-                let credential = Data(snapshot.pairingCredential)
-                let persisted: Bool
-                if credential.isEmpty {
-                    persisted = false
-                } else {
-                    do {
-                        let authenticatedLabel = snapshot.peerName
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        let pending = try RememberedPeerStore.shared.prepare(
-                            label: authenticatedLabel.isEmpty
-                                ? pendingVerification.fallbackLabel
-                                : authenticatedLabel,
-                            broker: pendingVerification.endpoint.broker,
-                            relay: pendingVerification.endpoint.relay
-                        )
-                        let persistence = try RememberPersistenceContext(pending: pending)
-                        persisted = persistence.persist(credential, generation: 0)
-                    } catch {
-                        persisted = false
-                    }
-                }
-                guard persisted else {
+                do {
+                    try persistVerifiedDevice(
+                        snapshot: snapshot,
+                        pending: pendingVerification
+                    )
+                } catch {
                     token.cancel()
                     try? await connectedSession.close(reason: .protocolFailure)
                     clearIfCurrent(token)
-                    throw RuntimeSettingsError(
-                        "The verified device credential could not be protected on this device."
-                    )
+                    throw error
                 }
             }
             session = connectedSession
@@ -582,6 +577,20 @@ final class LiveRoomControlGateway: RoomControlGateway {
     ) async throws {
         while cancellation === token, !Task.isCancelled {
             let event = try await connectedSession.nextEvent()
+            if event.kind == .verificationSucceeded {
+                guard let pending = verificationPersistence else {
+                    throw RuntimeSettingsError(
+                        "Device verification completed without local approval."
+                    )
+                }
+                try persistVerifiedDevice(
+                    snapshot: connectedSession.snapshot(),
+                    pending: pending
+                )
+                verificationPersistence = nil
+            } else if event.kind == .verificationFailed {
+                verificationPersistence = nil
+            }
             if let projected = project(event) {
                 onEvent(projected)
                 if case .closed = projected {
@@ -602,6 +611,31 @@ final class LiveRoomControlGateway: RoomControlGateway {
         cancellation = nil
     }
 
+    private func persistVerifiedDevice(
+        snapshot: FfiRoomControlSnapshot,
+        pending: PendingDeviceVerification
+    ) throws {
+        let credential = Data(snapshot.pairingCredential)
+        guard !credential.isEmpty else {
+            throw RuntimeSettingsError(
+                "The verified room did not provide a device credential."
+            )
+        }
+        let authenticatedLabel = snapshot.peerName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let prepared = try RememberedPeerStore.shared.prepare(
+            label: authenticatedLabel.isEmpty ? pending.fallbackLabel : authenticatedLabel,
+            broker: pending.endpoint.broker,
+            relay: pending.endpoint.relay
+        )
+        let persistence = try RememberPersistenceContext(pending: prepared)
+        guard persistence.persist(credential, generation: 0) else {
+            throw RuntimeSettingsError(
+                "The verified device credential could not be protected on this device."
+            )
+        }
+    }
+
     private func project(_ invitation: FfiRoomControlInvite) -> RoomControlInvitation {
         RoomControlInvitation(
             code: invitation.code,
@@ -618,6 +652,12 @@ final class LiveRoomControlGateway: RoomControlGateway {
 
     private func project(_ event: FfiRoomControlEvent) -> RoomControlEvent? {
         switch event.kind {
+        case .verificationRequested:
+            return .verificationRequested
+        case .verificationSucceeded:
+            return .verificationSucceeded
+        case .verificationFailed:
+            return .verificationFailed
         case .incomingOffer:
             guard let offer = event.offer else { return nil }
             return .incomingOffer(RoomControlTransferOffer(
@@ -745,6 +785,10 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
         label: String,
         endpoint: RoomControlEndpoint
     ) throws {}
+
+    func submitVerificationCode(_ code: String) async throws {
+        onEvent?(.verificationSucceeded)
+    }
 
     func host(
         invitation: RoomControlInvitation,

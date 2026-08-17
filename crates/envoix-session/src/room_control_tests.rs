@@ -182,12 +182,43 @@ fn room_control_protocol_identifiers_are_v5() {
 }
 
 #[test]
+fn unknown_room_control_capabilities_are_ignored() {
+    assert_eq!(
+        serde_json::from_str::<RoomControlCapability>(r#""future_verification_v2""#).unwrap(),
+        RoomControlCapability::Unknown
+    );
+}
+
+#[test]
+fn verification_code_is_six_ascii_digits_and_one_attempt_only() {
+    for invalid in ["", "12345", "1234567", "１２３４５６", "12345a"] {
+        assert!(validate_verification_code(invalid).is_err(), "{invalid:?}");
+    }
+    assert!(validate_verification_code("012345").is_ok());
+
+    let mut state =
+        VerificationState::new(RoomControlSessionMode::Invitation { creator: true }, false);
+    state.start_local("123456".into()).unwrap();
+    assert!(!state.finish_local("654321").unwrap());
+    assert!(state.start_local("123456".into()).is_err());
+
+    let mut responder =
+        VerificationState::new(RoomControlSessionMode::Invitation { creator: false }, false);
+    assert!(responder.receive_request());
+    responder.submit_remote().unwrap();
+    assert!(responder.submit_remote().is_err());
+    responder.finish_remote(false).unwrap();
+    assert!(!responder.receive_request());
+}
+
+#[test]
 fn remembered_hello_rejects_protocol_and_session_mode_mismatches() {
     let mode = RoomControlSessionMode::Remembered { generation: 7 };
     let binding = [0x42; 32];
     let hello = |protocol_version, session_kind, creator, lifetime| ControlMessage::Hello {
         protocol_version,
         session_kind,
+        capabilities: vec![RoomControlCapability::VerificationV1],
         display_name: "Peer".into(),
         creator,
         pairing_binding: binding.to_vec(),
@@ -241,7 +272,7 @@ fn remembered_hello_rejects_protocol_and_session_mode_mismatches() {
                 == "remembered room peers cannot claim creator or lifetime ownership"
     ));
 
-    let (_, lifetime) = validate_control_hello(
+    let (_, lifetime, capabilities) = validate_control_hello(
         hello(
             ROOM_CONTROL_VERSION,
             ControlSessionKind::Remembered,
@@ -254,6 +285,7 @@ fn remembered_hello_rejects_protocol_and_session_mode_mismatches() {
     )
     .expect("equal-member remembered hello");
     assert_eq!(lifetime, RoomLifetimeState::remembered());
+    assert_eq!(capabilities, [RoomControlCapability::VerificationV1]);
 }
 
 #[tokio::test]
@@ -547,7 +579,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
             join_invite,
             "Bob's Android".into(),
             false,
-            true,
+            false,
             test_config(),
             &TransferCancelToken::new(),
         )
@@ -565,7 +597,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
             host_invite,
             "Alice's iPhone".into(),
             true,
-            true,
+            false,
             test_config(),
             &TransferCancelToken::new(),
         )
@@ -592,6 +624,23 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
     assert_eq!(joiner.peer_name(), "Alice's iPhone");
     assert!(host.is_creator());
     assert!(!joiner.is_creator());
+    assert!(host.pairing_credential().is_none());
+    assert!(joiner.pairing_credential().is_none());
+
+    host.request_verification("123456").await.unwrap();
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::VerificationRequested
+    );
+    joiner.submit_verification_code("123456").await.unwrap();
+    assert_eq!(
+        host.next_event().await.unwrap(),
+        RoomControlEvent::VerificationSucceeded
+    );
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::VerificationSucceeded
+    );
     assert_eq!(
         host.pairing_credential().expect("host pairing credential"),
         joiner

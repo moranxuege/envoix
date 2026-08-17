@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/envoix-agent",
     "apps/envoix-cli",
     "apps/envoix-desktop",
     "apps/envoix-android-jni",

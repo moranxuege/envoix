@@ -95,6 +95,9 @@ pub struct FfiRoomTransferOffer {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum FfiRoomControlEventKind {
+    VerificationRequested,
+    VerificationSucceeded,
+    VerificationFailed,
     IncomingOffer,
     OfferAccepted,
     OfferRejected,
@@ -178,6 +181,28 @@ impl FfiRoomControlSession {
                 .next_event()
                 .await
                 .map(project_event)
+                .map_err(op_err)
+        })
+        .await
+    }
+
+    pub async fn request_verification(&self, expected_code: String) -> Result<(), EnvoixError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .request_verification(&expected_code)
+                .await
+                .map_err(op_err)
+        })
+        .await
+    }
+
+    pub async fn submit_verification_code(&self, code: String) -> Result<(), EnvoixError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .submit_verification_code(&code)
+                .await
                 .map_err(op_err)
         })
         .await
@@ -510,6 +535,15 @@ fn project_event(event: RoomControlEvent) -> FfiRoomControlEvent {
         nonce: 0,
     };
     match event {
+        RoomControlEvent::VerificationRequested => {
+            projected.kind = FfiRoomControlEventKind::VerificationRequested;
+        }
+        RoomControlEvent::VerificationSucceeded => {
+            projected.kind = FfiRoomControlEventKind::VerificationSucceeded;
+        }
+        RoomControlEvent::VerificationFailed => {
+            projected.kind = FfiRoomControlEventKind::VerificationFailed;
+        }
         RoomControlEvent::IncomingOffer(offer) => {
             projected.kind = FfiRoomControlEventKind::IncomingOffer;
             projected.offer = Some(ffi_offer(offer));
@@ -659,6 +693,22 @@ mod tests {
     }
 
     #[test]
+    fn verification_events_cross_the_ffi_boundary() {
+        assert_eq!(
+            project_event(RoomControlEvent::VerificationRequested).kind,
+            FfiRoomControlEventKind::VerificationRequested
+        );
+        assert_eq!(
+            project_event(RoomControlEvent::VerificationSucceeded).kind,
+            FfiRoomControlEventKind::VerificationSucceeded
+        );
+        assert_eq!(
+            project_event(RoomControlEvent::VerificationFailed).kind,
+            FfiRoomControlEventKind::VerificationFailed
+        );
+    }
+
+    #[test]
     fn offer_projection_preserves_directory_count() {
         let offer = FfiRoomTransferOffer {
             offer_id: "opaque_7".into(),
@@ -751,9 +801,9 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v5_ffi_v13() {
+    fn core_info_advertises_room_control_v5_ffi_v14() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 13);
+        assert_eq!(info.ffi_api_version, 14);
         assert!(
             info.capabilities
                 .iter()

@@ -248,6 +248,7 @@ final class ConnectionWorkflowState: ObservableObject {
     @Published private(set) var controlPhase: RoomControlPhase = .idle
     @Published private(set) var roomInvitation: RoomControlInvitation?
     @Published private(set) var peerDisplayName: String?
+    @Published private(set) var verificationRequested = false
     @Published private(set) var incomingRoomOffer: RoomControlTransferOffer?
     @Published private(set) var roomLifetimePolicy: RoomControlLifetimePolicy = .idleFifteenMinutes
     @Published private(set) var idleDeadline: Date?
@@ -1168,6 +1169,48 @@ final class ConnectionWorkflowState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func submitDeviceVerification(_ code: String) -> String? {
+        let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard code.count == 6,
+              code.allSatisfy({ $0.isASCII && $0.isNumber }) else {
+            return "The verification code must contain exactly six digits."
+        }
+        guard verificationRequested,
+              controlPhase == .connected,
+              let endpoint = activeRoomEndpoint,
+              let gateway else {
+            return "This room is not waiting for device verification."
+        }
+        do {
+            try gateway.prepareDeviceVerification(
+                label: peerDisplayName ?? "Nearby device",
+                endpoint: endpoint
+            )
+        } catch {
+            return error.localizedDescription
+        }
+        verificationRequested = false
+        let generation = controlGeneration
+        Task { @MainActor [weak self] in
+            do {
+                try await gateway.submitVerificationCode(code)
+            } catch {
+                self?.handleControlFailure(
+                    error.localizedDescription,
+                    generation: generation
+                )
+            }
+        }
+        return nil
+    }
+
+    func cancelDeviceVerification() {
+        guard verificationRequested else { return }
+        verificationRequested = false
+        finishControl(reason: .userEnded, notifyGateway: true)
+    }
+
     func acceptIncomingRoomOffer() async -> RoomControlTransferOffer? {
         guard let gateway, let offer = incomingRoomOffer else { return nil }
         // Claim the decision synchronously before crossing an await boundary.
@@ -1307,6 +1350,7 @@ final class ConnectionWorkflowState: ObservableObject {
         outgoingDecisions.removeAll()
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
+        verificationRequested = false
         roomInvitation = nil
         pendingControlNearbySelection = nil
         pendingDeviceVerification = false
@@ -1348,6 +1392,19 @@ final class ConnectionWorkflowState: ObservableObject {
             pendingControlNearbySelection = nil
             pendingDeviceVerification = false
             applyLifetime(lifetime)
+        case .verificationRequested:
+            guard controlPhase == .connected,
+                  room != nil,
+                  activeRememberedRelationshipID == nil else {
+                return
+            }
+            verificationRequested = true
+        case .verificationSucceeded:
+            verificationRequested = false
+            refreshRememberedRooms()
+        case .verificationFailed:
+            verificationRequested = false
+            failControl("The device verification code did not match.")
         case .incomingOffer(let offer):
             guard controlPhase == .connected, incomingRoomOffer == nil else { return }
             incomingRoomOffer = offer
@@ -1374,6 +1431,7 @@ final class ConnectionWorkflowState: ObservableObject {
             outgoingDecisions.removeAll()
             incomingRoomOffer = nil
             incomingRoomOfferDeadline = nil
+            verificationRequested = false
             roomInvitation = nil
             pendingControlNearbySelection = nil
             pendingDeviceVerification = false
@@ -1421,6 +1479,11 @@ final class ConnectionWorkflowState: ObservableObject {
             nextRememberedMode[peer.relationshipID] = .responder
             applyLifetime(lifetime)
             schedulePassiveRememberedDwellIfNeeded()
+        case .verificationRequested, .verificationSucceeded, .verificationFailed:
+            handleControlFailure(
+                "A remembered room attempted first-contact verification.",
+                generation: generation
+            )
         case .incomingOffer(let offer):
             guard controlPhase == .connected, incomingRoomOffer == nil else { return }
             cancelPassiveRememberedDwell()
@@ -1572,6 +1635,7 @@ final class ConnectionWorkflowState: ObservableObject {
         outgoingDecisions.removeAll()
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
+        verificationRequested = false
         roomInvitation = nil
         pendingControlNearbySelection = nil
         pendingDeviceVerification = false
@@ -1608,6 +1672,7 @@ final class ConnectionWorkflowState: ObservableObject {
         pendingOffers.removeAll()
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
+        verificationRequested = false
         roomInvitation = nil
         pendingControlNearbySelection = nil
         pendingDeviceVerification = false

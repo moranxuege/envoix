@@ -28,7 +28,7 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-let expectedCoreFFIAPIVersion: UInt32 = 13
+let expectedCoreFFIAPIVersion: UInt32 = 14
 let expectedRoomControlCoreCapability = "foreground_room_control_v5"
 let expectedNearbyInviteCoreCapability = "nearby_invite_inbox_v1"
 let appDebugBuildLabel = "Debug build 2026.07.08.19"

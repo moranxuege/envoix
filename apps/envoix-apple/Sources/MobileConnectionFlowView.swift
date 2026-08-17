@@ -192,6 +192,7 @@ private struct AutomaticNFCPresentationEnvironment: Equatable {
     let nearbyOfferAlertIsPresented: Bool
     let closeRoomAlertIsPresented: Bool
     let replaceRoomAlertIsPresented: Bool
+    let roomVerificationIsPresented: Bool
     let externalConfirmationIsPresented: Bool
     let systemPairingIsPresented: Bool
     let connectionHubModalIsPresented: Bool
@@ -204,6 +205,7 @@ private struct AutomaticNFCPresentationEnvironment: Equatable {
             || nearbyOfferAlertIsPresented
             || closeRoomAlertIsPresented
             || replaceRoomAlertIsPresented
+            || roomVerificationIsPresented
             || externalConfirmationIsPresented
             || systemPairingIsPresented
             || connectionHubModalIsPresented
@@ -374,6 +376,7 @@ struct MobileConnectionFlowView: View {
     @State private var outgoingBleVerification: BleVerificationInvitation?
     @State private var pendingBleVerificationOffer: NearbyRendezvousOffer?
     @State private var bleVerificationInput = ""
+    @State private var roomVerificationInput = ""
     @State private var isCloseRoomConfirmationPresented = false
     @State private var roomInvitationIsRevealed = false
     @State private var now = Date()
@@ -532,6 +535,46 @@ struct MobileConnectionFlowView: View {
             Text(AppText.value(
                 "Ask the other person for the six-digit code shown in Envoix.",
                 "请向对方确认 Envoix 中显示的六位验证码。",
+                language: language
+            ))
+        }
+        .alert(
+            AppText.value("Verify this device", "验证此设备", language: language),
+            isPresented: Binding(
+                get: { workflow.verificationRequested },
+                set: { presented in
+                    if !presented, workflow.verificationRequested {
+                        workflow.cancelDeviceVerification()
+                        roomVerificationInput = ""
+                    }
+                }
+            )
+        ) {
+            SecureField("000000", text: Binding(
+                get: { roomVerificationInput },
+                set: {
+                    roomVerificationInput = String(
+                        $0.filter { $0.isASCII && $0.isNumber }.prefix(6)
+                    )
+                }
+            ))
+            .privacySensitive()
+            Button(AppText.value("Verify device", "验证设备", language: language)) {
+                if let error = workflow.submitDeviceVerification(roomVerificationInput) {
+                    ToastCenter.shared.show(error)
+                }
+                roomVerificationInput = ""
+            }
+            .disabled(roomVerificationInput.count != 6)
+            .accessibilityIdentifier("room_device_verification_submit")
+            Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {
+                workflow.cancelDeviceVerification()
+                roomVerificationInput = ""
+            }
+        } message: {
+            Text(AppText.value(
+                "Enter the six-digit code shown by \(workflow.peerDisplayName ?? "the other device"). A successful match saves this device for future rooms.",
+                "请输入 \(workflow.peerDisplayName ?? "另一台设备") 显示的六位验证码。匹配成功后会保存此设备，以便以后自动连接。",
                 language: language
             ))
         }
@@ -1873,6 +1916,7 @@ struct MobileConnectionFlowView: View {
             nearbyOfferAlertIsPresented: workflow.nextPendingOffer != nil,
             closeRoomAlertIsPresented: isCloseRoomConfirmationPresented,
             replaceRoomAlertIsPresented: isRoomReplacementPresented,
+            roomVerificationIsPresented: workflow.verificationRequested,
             externalConfirmationIsPresented: pendingExternalInvitation != nil,
             systemPairingIsPresented: systemNearbyPairingIsActive,
             connectionHubModalIsPresented: connectionHubModalIsPresented

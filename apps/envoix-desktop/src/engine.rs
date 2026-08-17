@@ -20,9 +20,8 @@ use tokio::sync::oneshot;
 
 /// Deployed broker and relay, matching `Endpoints` in
 /// `android/app/src/main/java/dev/envoix/app/TransferRepository.kt`.
-pub const BROKER: &str =
-    "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
-pub const RELAY: &str = "https://envoix.chkxwlyh.us:8444";
+pub const BROKER: &str = envoix_client::DEFAULT_RENDEZVOUS_BROKER;
+pub const RELAY: &str = envoix_client::DEFAULT_RELAY_URL;
 
 pub enum UiEvent {
     /// The local side created an invitation and is waiting in its room.

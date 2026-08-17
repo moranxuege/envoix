@@ -35,6 +35,9 @@ pub(crate) struct Cli {
     /// internals (path selection, hole-punching). RUST_LOG overrides both.
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true)]
     pub(crate) verbose: u8,
+    /// Override the local Envoix Agent Unix socket.
+    #[arg(long, global = true)]
+    pub(crate) agent_socket: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
@@ -45,6 +48,60 @@ pub(crate) enum Command {
     Send(SendArgs),
     /// Receive one transfer job into an output directory.
     Receive(ReceiveArgs),
+    /// Inspect or pair with the persistent local Agent.
+    Agent(AgentArgs),
+    /// Manage remembered devices owned by the local Agent.
+    Devices(DevicesArgs),
+    /// Inspect files received by the local Agent.
+    Inbox(InboxArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AgentArgs {
+    #[command(subcommand)]
+    pub(crate) command: AgentCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AgentCommand {
+    /// Show whether the Agent is running and listening for remembered peers.
+    Status,
+    /// Create a one-time receive invitation that becomes a remembered device.
+    Pair {
+        /// Name for the Mac or other sending device.
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct DevicesArgs {
+    #[command(subcommand)]
+    pub(crate) command: DevicesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum DevicesCommand {
+    /// List devices that can reconnect without a new invitation.
+    List,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct InboxArgs {
+    #[command(subcommand)]
+    pub(crate) command: InboxCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum InboxCommand {
+    /// List newest completed transfers.
+    List {
+        /// Maximum number of transfers to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Print the saved path(s) from the newest completed transfer.
+    Latest,
 }
 
 /// Arguments for `envoix send`.
@@ -446,5 +503,13 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn agent_and_inbox_commands_are_available_without_transfer_flags() {
+        assert!(Cli::try_parse_from(["envoix", "agent", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "agent", "pair", "--name", "MacBook"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "devices", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "inbox", "latest"]).is_ok());
     }
 }

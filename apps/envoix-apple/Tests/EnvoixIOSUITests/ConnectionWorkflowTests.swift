@@ -734,7 +734,7 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 13)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 14)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
         XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v5")
         XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
@@ -1004,6 +1004,42 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(gateway.preparedVerification?.label, "Nearby iPad")
         XCTAssertEqual(gateway.preparedVerification?.endpoint, endpoint)
         await Task.yield()
+    }
+
+    func testOrdinaryRoomCanAuthorizePersistenceWithOneVerificationRequest() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: "https://relay.example.test"
+        )
+
+        XCTAssertNil(workflow.joinRoomControl(
+            input: "123456-test-room",
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My Mac",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        ))
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "WSL",
+            creator: false,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        gateway.emit(.verificationRequested)
+        await Task.yield()
+
+        XCTAssertTrue(workflow.verificationRequested)
+        XCTAssertNil(workflow.submitDeviceVerification("012345"))
+        await Task.yield()
+
+        XCTAssertEqual(gateway.preparedVerification?.label, "WSL")
+        XCTAssertEqual(gateway.preparedVerification?.endpoint, endpoint)
+        XCTAssertEqual(gateway.submittedVerificationCodes, ["012345"])
+        XCTAssertFalse(workflow.verificationRequested)
     }
 
     func testHostingInvitationScopeCannotBeReassignedBeforeConnected() async {
@@ -1684,6 +1720,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     private(set) var idleExpiryAttempts = 0
     private(set) var closeReasons: [RoomControlCloseReason] = []
     private(set) var preparedVerification: (label: String, endpoint: RoomControlEndpoint)?
+    private(set) var submittedVerificationCodes: [String] = []
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         if let invitationError {
@@ -1711,6 +1748,10 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
         endpoint: RoomControlEndpoint
     ) throws {
         preparedVerification = (label, endpoint)
+    }
+
+    func submitVerificationCode(_ code: String) async throws {
+        submittedVerificationCodes.append(code)
     }
 
     func host(

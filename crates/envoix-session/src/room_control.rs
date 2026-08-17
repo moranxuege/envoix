@@ -4,6 +4,7 @@
 //! a fresh directional InviteV2 and the unchanged Manifest data plane.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_auth::{RememberedCredential, RememberedSession};
@@ -389,6 +390,9 @@ impl RoomTransferOffer {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoomControlEvent {
+    VerificationRequested,
+    VerificationSucceeded,
+    VerificationFailed,
     IncomingOffer(RoomTransferOffer),
     OfferAccepted {
         offer_id: String,
@@ -410,11 +414,19 @@ enum ControlMessage {
         protocol_version: u16,
         #[serde(default)]
         session_kind: ControlSessionKind,
+        #[serde(default)]
+        capabilities: Vec<RoomControlCapability>,
         display_name: String,
         creator: bool,
         pairing_binding: Vec<u8>,
         lifetime: Option<RoomLifetimeState>,
     },
+    VerificationRequest,
+    VerificationResponse {
+        code: String,
+    },
+    VerificationAccepted,
+    VerificationRejected,
     TransferOffer(RoomTransferOffer),
     OfferAccepted {
         offer_id: String,
@@ -443,6 +455,99 @@ enum ControlSessionKind {
     #[default]
     Invitation,
     Remembered,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RoomControlCapability {
+    VerificationV1,
+    #[serde(other)]
+    Unknown,
+}
+
+enum VerificationPhase {
+    Unavailable,
+    Available,
+    LocalPending { expected_code: String },
+    RemotePending,
+    RemoteSubmitted,
+    Succeeded,
+    Failed,
+}
+
+struct VerificationState {
+    phase: VerificationPhase,
+}
+
+impl VerificationState {
+    fn new(mode: RoomControlSessionMode, already_verified: bool) -> Self {
+        let phase = match mode {
+            RoomControlSessionMode::Remembered { .. } => VerificationPhase::Unavailable,
+            RoomControlSessionMode::Invitation { .. } if already_verified => {
+                VerificationPhase::Succeeded
+            }
+            RoomControlSessionMode::Invitation { .. } => VerificationPhase::Available,
+        };
+        Self { phase }
+    }
+
+    fn start_local(&mut self, expected_code: String) -> Result<(), SessionError> {
+        if !matches!(self.phase, VerificationPhase::Available) {
+            return Err(CoreError::InvalidInput(
+                "device verification is unavailable or already attempted".into(),
+            ));
+        }
+        self.phase = VerificationPhase::LocalPending { expected_code };
+        Ok(())
+    }
+
+    fn receive_request(&mut self) -> bool {
+        if matches!(self.phase, VerificationPhase::Available) {
+            self.phase = VerificationPhase::RemotePending;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn submit_remote(&mut self) -> Result<(), SessionError> {
+        if !matches!(self.phase, VerificationPhase::RemotePending) {
+            return Err(CoreError::InvalidInput(
+                "no device verification request is waiting for a code".into(),
+            ));
+        }
+        self.phase = VerificationPhase::RemoteSubmitted;
+        Ok(())
+    }
+
+    fn finish_local(&mut self, code: &str) -> Result<bool, SessionError> {
+        let VerificationPhase::LocalPending { expected_code } = &self.phase else {
+            return Err(CoreError::Protocol(
+                "peer sent an unexpected device verification response".into(),
+            ));
+        };
+        let succeeded = expected_code == code;
+        self.phase = if succeeded {
+            VerificationPhase::Succeeded
+        } else {
+            VerificationPhase::Failed
+        };
+        Ok(succeeded)
+    }
+
+    fn finish_remote(&mut self, succeeded: bool) -> Result<(), SessionError> {
+        if !matches!(self.phase, VerificationPhase::RemoteSubmitted) {
+            return Err(CoreError::Protocol(
+                "peer sent an unexpected device verification decision".into(),
+            ));
+        }
+        self.phase = if succeeded {
+            VerificationPhase::Succeeded
+        } else {
+            VerificationPhase::Failed
+        };
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -594,6 +699,9 @@ pub struct RoomControlSession {
     peer_name: String,
     mode: RoomControlSessionMode,
     pairing_credential: Option<RememberedCredential>,
+    pairing_authorized: AtomicBool,
+    peer_supports_verification: bool,
+    verification: std::sync::Mutex<VerificationState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -670,10 +778,52 @@ impl RoomControlSession {
         self.mode.remembered_generation()
     }
 
-    /// Candidate credential for a caller-authorized first-contact verification.
-    /// Ordinary Room sessions must not persist it without explicit UI policy.
+    /// Returns a first-contact credential only after explicit verification.
     pub fn pairing_credential(&self) -> Option<&RememberedCredential> {
-        self.pairing_credential.as_ref()
+        if self.pairing_authorized.load(Ordering::Acquire) {
+            self.pairing_credential.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Starts the single in-band verification attempt for an invitation room.
+    pub async fn request_verification(&self, expected_code: &str) -> Result<(), SessionError> {
+        validate_verification_code(expected_code)?;
+        if self.mode.is_remembered() {
+            return Err(CoreError::InvalidInput(
+                "remembered rooms do not support first-contact verification".into(),
+            ));
+        }
+        if !self.peer_supports_verification {
+            return Err(CoreError::InvalidInput(
+                "the room peer does not support device verification".into(),
+            ));
+        }
+        self.verification
+            .lock()
+            .map_err(|_| CoreError::Transport("room verification state unavailable".into()))?
+            .start_local(expected_code.to_string())?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::VerificationRequest).await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    /// Answers the peer's verification request. A room accepts only one code.
+    pub async fn submit_verification_code(&self, code: &str) -> Result<(), SessionError> {
+        validate_verification_code(code)?;
+        self.verification
+            .lock()
+            .map_err(|_| CoreError::Transport("room verification state unavailable".into()))?
+            .submit_remote()?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::VerificationResponse {
+            code: code.to_string(),
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
     }
 
     pub fn lifetime_state(&self) -> RoomLifetimeState {
@@ -881,6 +1031,65 @@ impl RoomControlSession {
             match self.receive().await? {
                 ControlMessage::Hello { .. } => {
                     return Err(CoreError::Protocol("duplicate room control hello".into()));
+                }
+                ControlMessage::VerificationRequest => {
+                    if self.mode.is_remembered() || !self.peer_supports_verification {
+                        return Err(CoreError::Protocol(
+                            "device verification is not available in this room".into(),
+                        ));
+                    }
+                    let accepted = self
+                        .verification
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("room verification state unavailable".into())
+                        })?
+                        .receive_request();
+                    if accepted {
+                        return Ok(RoomControlEvent::VerificationRequested);
+                    }
+                    self.send(ControlMessage::VerificationRejected).await?;
+                    return Ok(RoomControlEvent::VerificationFailed);
+                }
+                ControlMessage::VerificationResponse { code } => {
+                    validate_peer_verification_code(&code)?;
+                    let succeeded = self
+                        .verification
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("room verification state unavailable".into())
+                        })?
+                        .finish_local(&code)?;
+                    let decision = if succeeded {
+                        ControlMessage::VerificationAccepted
+                    } else {
+                        ControlMessage::VerificationRejected
+                    };
+                    self.send(decision).await?;
+                    if succeeded {
+                        self.pairing_authorized.store(true, Ordering::Release);
+                        return Ok(RoomControlEvent::VerificationSucceeded);
+                    }
+                    return Ok(RoomControlEvent::VerificationFailed);
+                }
+                ControlMessage::VerificationAccepted => {
+                    self.verification
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("room verification state unavailable".into())
+                        })?
+                        .finish_remote(true)?;
+                    self.pairing_authorized.store(true, Ordering::Release);
+                    return Ok(RoomControlEvent::VerificationSucceeded);
+                }
+                ControlMessage::VerificationRejected => {
+                    self.verification
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("room verification state unavailable".into())
+                        })?
+                        .finish_remote(false)?;
+                    return Ok(RoomControlEvent::VerificationFailed);
                 }
                 ControlMessage::TransferOffer(offer) => {
                     if let Err(error) = offer.validate(&self.broker, self.relay.as_deref()) {
@@ -1142,7 +1351,7 @@ pub async fn connect_room_control(
             pairing_responder: creator,
             bootstrap_kind: BootstrapKind::RoomCode,
             mode: RoomControlSessionMode::Invitation { creator },
-            derive_pairing_credential: verified_pairing,
+            authorize_pairing_credential: verified_pairing,
         },
         display_name,
         config,
@@ -1201,7 +1410,7 @@ pub async fn connect_remembered_room_control(
             pairing_responder: role.is_responder(),
             bootstrap_kind: BootstrapKind::FullTicket,
             mode: RoomControlSessionMode::Remembered { generation },
-            derive_pairing_credential: false,
+            authorize_pairing_credential: false,
         },
         display_name,
         config,
@@ -1232,7 +1441,7 @@ struct RoomControlConnectRequest {
     pairing_responder: bool,
     bootstrap_kind: BootstrapKind,
     mode: RoomControlSessionMode,
-    derive_pairing_credential: bool,
+    authorize_pairing_credential: bool,
 }
 
 async fn connect_room_control_inner(
@@ -1280,12 +1489,13 @@ async fn connect_room_control_inner(
     )
     .await?;
     *peer_authenticated = true;
-    let pairing_credential = request.derive_pairing_credential.then(|| {
-        RememberedCredential::from_control_pairing(
-            pairing.control_key(),
-            pairing.control_transcript_hash,
-        )
-    });
+    let pairing_credential = matches!(request.mode, RoomControlSessionMode::Invitation { .. })
+        .then(|| {
+            RememberedCredential::from_control_pairing(
+                pairing.control_key(),
+                pairing.control_transcript_hash,
+            )
+        });
     let pairing_binding = pairing.control_transcript_hash.as_bytes().to_vec();
     let (connection, mut send, mut recv) =
         establish_control_connection(&bound.local_endpoint, role, pairing.peer, cancel).await?;
@@ -1299,6 +1509,7 @@ async fn connect_room_control_inner(
     let hello = ControlMessage::Hello {
         protocol_version: ROOM_CONTROL_VERSION,
         session_kind: request.mode.session_kind(),
+        capabilities: vec![RoomControlCapability::VerificationV1],
         display_name,
         creator: request.mode.is_creator(),
         pairing_binding: pairing_binding.clone(),
@@ -1314,8 +1525,9 @@ async fn connect_room_control_inner(
         "room control hello",
     )
     .await?;
-    let (peer_name, lifetime) =
+    let (peer_name, lifetime, peer_capabilities) =
         validate_control_hello(peer_hello, request.mode, &pairing_binding, local_lifetime)?;
+    let pairing_authorized = request.authorize_pairing_credential;
     Ok(RoomControlSession {
         _endpoint: bound.local_endpoint,
         connection,
@@ -1329,6 +1541,13 @@ async fn connect_room_control_inner(
         peer_name,
         mode: request.mode,
         pairing_credential,
+        pairing_authorized: AtomicBool::new(pairing_authorized),
+        peer_supports_verification: peer_capabilities
+            .contains(&RoomControlCapability::VerificationV1),
+        verification: std::sync::Mutex::new(VerificationState::new(
+            request.mode,
+            pairing_authorized,
+        )),
     })
 }
 
@@ -1337,38 +1556,41 @@ fn validate_control_hello(
     mode: RoomControlSessionMode,
     expected_pairing_binding: &[u8],
     local_lifetime: Option<RoomLifetimeState>,
-) -> Result<(String, RoomLifetimeState), SessionError> {
-    let (peer_kind, peer_name, peer_creator, peer_binding, peer_lifetime) = match peer_hello {
-        ControlMessage::Hello {
-            protocol_version,
-            session_kind,
-            display_name,
-            creator,
-            pairing_binding,
-            lifetime,
-        } if protocol_version == ROOM_CONTROL_VERSION => {
-            validate_display_name(&display_name)?;
-            (
+) -> Result<(String, RoomLifetimeState, Vec<RoomControlCapability>), SessionError> {
+    let (peer_kind, peer_capabilities, peer_name, peer_creator, peer_binding, peer_lifetime) =
+        match peer_hello {
+            ControlMessage::Hello {
+                protocol_version,
                 session_kind,
+                capabilities,
                 display_name,
                 creator,
                 pairing_binding,
                 lifetime,
-            )
-        }
-        ControlMessage::Hello {
-            protocol_version, ..
-        } => {
-            return Err(CoreError::Protocol(format!(
-                "unsupported room control version {protocol_version}"
-            )));
-        }
-        _ => {
-            return Err(CoreError::Protocol(
-                "room control peer did not send hello first".into(),
-            ));
-        }
-    };
+            } if protocol_version == ROOM_CONTROL_VERSION => {
+                validate_display_name(&display_name)?;
+                (
+                    session_kind,
+                    capabilities,
+                    display_name,
+                    creator,
+                    pairing_binding,
+                    lifetime,
+                )
+            }
+            ControlMessage::Hello {
+                protocol_version, ..
+            } => {
+                return Err(CoreError::Protocol(format!(
+                    "unsupported room control version {protocol_version}"
+                )));
+            }
+            _ => {
+                return Err(CoreError::Protocol(
+                    "room control peer did not send hello first".into(),
+                ));
+            }
+        };
     if peer_kind != mode.session_kind() {
         return Err(CoreError::Protocol(
             "room control peer selected a different session mode".into(),
@@ -1399,7 +1621,22 @@ fn validate_control_hello(
             ));
         }
     };
-    Ok((peer_name, lifetime))
+    Ok((peer_name, lifetime, peer_capabilities))
+}
+
+fn validate_verification_code(code: &str) -> Result<(), SessionError> {
+    if code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()) {
+        Ok(())
+    } else {
+        Err(CoreError::InvalidInput(
+            "device verification code must contain exactly six digits".into(),
+        ))
+    }
+}
+
+fn validate_peer_verification_code(code: &str) -> Result<(), SessionError> {
+    validate_verification_code(code)
+        .map_err(|_| CoreError::Protocol("peer sent an invalid device verification code".into()))
 }
 
 struct RoomControlPairingRequest {

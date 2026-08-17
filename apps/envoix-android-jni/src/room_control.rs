@@ -76,6 +76,12 @@ impl ConnectFailure {
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum RoomCommand {
+    RequestVerification {
+        expected_code: String,
+    },
+    SubmitVerification {
+        code: String,
+    },
     Offer {
         offer_id: String,
         transfer_invite: String,
@@ -268,6 +274,18 @@ pub extern "system" fn Java_dev_envoix_app_Native_startRoomControlSession(
                     emit(vm.as_ref(), callback.as_ref(), &closed_event(reason));
                     break;
                 }
+                Ok(RoomControlEvent::VerificationSucceeded) => emit(
+                    vm.as_ref(),
+                    callback.as_ref(),
+                    &json!({
+                        "notice":"room_control",
+                        "state":"verification_succeeded",
+                        "pairing_credential":session
+                            .pairing_credential()
+                            .map(|credential| credential.to_opaque()),
+                    })
+                    .to_string(),
+                ),
                 Ok(event) => emit(
                     vm.as_ref(),
                     callback.as_ref(),
@@ -545,6 +563,14 @@ async fn execute_command(
     command: &RoomCommand,
 ) -> Result<Option<RoomLifetimeState>, CoreError> {
     match command {
+        RoomCommand::RequestVerification { expected_code } => {
+            session.request_verification(expected_code).await?;
+            Ok(None)
+        }
+        RoomCommand::SubmitVerification { code } => {
+            session.submit_verification_code(code).await?;
+            Ok(None)
+        }
         RoomCommand::Offer {
             offer_id,
             transfer_invite,
@@ -597,6 +623,18 @@ fn invite_json(invite: RoomControlInvite) -> Value {
 
 fn event_json(event: RoomControlEvent) -> Value {
     match event {
+        RoomControlEvent::VerificationRequested => json!({
+            "notice":"room_control",
+            "state":"verification_requested",
+        }),
+        RoomControlEvent::VerificationSucceeded => json!({
+            "notice":"room_control",
+            "state":"verification_succeeded",
+        }),
+        RoomControlEvent::VerificationFailed => json!({
+            "notice":"room_control",
+            "state":"verification_failed",
+        }),
         RoomControlEvent::IncomingOffer(offer) => json!({
             "notice":"room_control",
             "state":"incoming_offer",
@@ -671,6 +709,8 @@ fn failure_projection(error: &CoreError) -> (Option<&'static str>, Option<u64>) 
 
 fn command_failed_event(command: &RoomCommand, error: impl std::fmt::Display) -> String {
     let (kind, offer_id) = match command {
+        RoomCommand::RequestVerification { .. } => ("request_verification", None),
+        RoomCommand::SubmitVerification { .. } => ("submit_verification", None),
         RoomCommand::Offer { offer_id, .. } => ("offer", Some(offer_id.as_str())),
         RoomCommand::Respond { offer_id, .. } => ("respond", Some(offer_id.as_str())),
         RoomCommand::Policy { .. } => ("policy", None),

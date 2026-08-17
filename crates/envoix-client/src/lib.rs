@@ -1,6 +1,7 @@
 //! Public application-facing facade for canonical Manifest v2 transfers.
 
 pub mod api;
+pub mod product;
 
 use std::fs;
 use std::path::Path;
@@ -13,6 +14,12 @@ use envoix_session::{MAX_DATA_STREAM_WINDOW, MIN_DATA_STREAM_WINDOW};
 pub use envoix_session::{TransferCancelToken, TransferDirection};
 pub use envoix_types::PROTOCOL_VERSION;
 use serde::Deserialize;
+
+/// Deployed defaults shared by the native apps, CLI agent, and FFI facade.
+/// A configured relay still allows iroh to select a direct LAN path.
+pub const DEFAULT_RENDEZVOUS_BROKER: &str =
+    "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
+pub const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
 
 type PublicError = CoreError;
 

@@ -1855,6 +1855,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoix-agent"
+version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "envoix-client",
+ "getrandom 0.3.4",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "envoix-android-jni"
 version = "0.2.2"
 dependencies = [
