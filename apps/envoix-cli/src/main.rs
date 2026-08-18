@@ -21,7 +21,7 @@ use envoix_client::api::{
 };
 use envoix_client::product::{
     AgentEventCursor, AgentRequest, AgentRequestEnvelope, AgentResponse, AgentResponseEnvelope,
-    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, default_agent_socket_path,
+    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, default_agent_control_endpoint,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 
@@ -72,16 +72,17 @@ fn init_tracing(verbosity: u8) {
 
 async fn run(cli: Cli) -> CliResult<()> {
     let json = cli.json;
-    let agent_socket = cli.agent_socket;
+    let agent_endpoint = cli.agent_endpoint;
     match cli.command {
         Command::Send(args) => send(args.into_plan()?, json).await,
         Command::Receive(args) => receive(args.into_plan()?, json).await,
         Command::Agent(args) => match args.command {
-            AgentCommand::Status => {
-                show_agent_status(call_agent(agent_socket, AgentRequest::Status).await?, json)
-            }
+            AgentCommand::Status => show_agent_status(
+                call_agent(agent_endpoint, AgentRequest::Status).await?,
+                json,
+            ),
             AgentCommand::Snapshot { inbox_limit } => show_agent_snapshot(
-                call_agent(agent_socket, AgentRequest::Snapshot { inbox_limit }).await?,
+                call_agent(agent_endpoint, AgentRequest::Snapshot { inbox_limit }).await?,
                 json,
             ),
             AgentCommand::Events {
@@ -90,7 +91,7 @@ async fn run(cli: Cli) -> CliResult<()> {
                 limit,
             } => show_agent_events(
                 call_agent(
-                    agent_socket,
+                    agent_endpoint,
                     AgentRequest::Events {
                         after: AgentEventCursor {
                             instance_id,
@@ -110,27 +111,27 @@ async fn run(cli: Cli) -> CliResult<()> {
             AgentCommand::Start => manage_agent_service("started", agent_service::start, json),
             AgentCommand::Stop => manage_agent_service("stopped", agent_service::stop, json),
             AgentCommand::Pair { name } => show_pairing(
-                call_agent(agent_socket, AgentRequest::Pair { label: name }).await?,
+                call_agent(agent_endpoint, AgentRequest::Pair { label: name }).await?,
                 json,
             ),
         },
         Command::Devices(args) => match args.command {
             DevicesCommand::List => show_devices(
-                call_agent(agent_socket, AgentRequest::ListDevices).await?,
+                call_agent(agent_endpoint, AgentRequest::ListDevices).await?,
                 json,
             ),
             DevicesCommand::Forget { device, yes: _ } => show_revoked_device(
-                call_agent(agent_socket, AgentRequest::RevokeDevice { device }).await?,
+                call_agent(agent_endpoint, AgentRequest::RevokeDevice { device }).await?,
                 json,
             ),
         },
         Command::Inbox(args) => match args.command {
             InboxCommand::List { limit } => show_inbox(
-                call_agent(agent_socket, AgentRequest::ListInbox { limit }).await?,
+                call_agent(agent_endpoint, AgentRequest::ListInbox { limit }).await?,
                 json,
             ),
             InboxCommand::Latest => show_latest_inbox(
-                call_agent(agent_socket, AgentRequest::LatestInbox).await?,
+                call_agent(agent_endpoint, AgentRequest::LatestInbox).await?,
                 json,
             ),
         },
@@ -139,10 +140,11 @@ async fn run(cli: Cli) -> CliResult<()> {
 
 #[cfg(unix)]
 async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult<AgentResponse> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
-    let socket = socket.map(Ok).unwrap_or_else(default_agent_socket_path)?;
+    let socket = socket
+        .map(Ok)
+        .unwrap_or_else(default_agent_control_endpoint)?;
     let stream = UnixStream::connect(&socket).await.map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -152,7 +154,52 @@ async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult
             ),
         )
     })?;
-    let (read, mut write) = stream.into_split();
+    call_agent_stream(stream, request).await
+}
+
+#[cfg(windows)]
+async fn call_agent(endpoint: Option<PathBuf>, request: AgentRequest) -> CliResult<AgentResponse> {
+    use std::time::Duration;
+
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let endpoint = endpoint
+        .map(Ok)
+        .unwrap_or_else(default_agent_control_endpoint)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let stream = loop {
+        match ClientOptions::new().open(&endpoint) {
+            Ok(stream) => break stream,
+            Err(error)
+                if error.raw_os_error()
+                    == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32)
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot connect to Envoix Agent at {}: {error}; start envoix-agent for this user",
+                        endpoint.display()
+                    ),
+                )
+                .into());
+            }
+        }
+    };
+    call_agent_stream(stream, request).await
+}
+
+#[cfg(any(unix, windows))]
+async fn call_agent_stream<S>(stream: S, request: AgentRequest) -> CliResult<AgentResponse>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
     let request_id = agent_request_id()?;
     let envelope = AgentRequestEnvelope::new(request_id.clone(), request)?;
     let mut bytes = serde_json::to_vec(&envelope)?;
@@ -166,7 +213,7 @@ async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult
     let mut limited = BufReader::new(read).take(MAX_AGENT_RESPONSE_BYTES + 1);
     limited.read_until(b'\n', &mut response_bytes).await?;
     if response_bytes.is_empty() {
-        return Err("Envoix Agent closed the socket without a response".into());
+        return Err("Envoix Agent closed the control connection without a response".into());
     }
     if response_bytes.len() as u64 > MAX_AGENT_RESPONSE_BYTES {
         return Err("Agent response exceeds the control message limit".into());
@@ -235,9 +282,12 @@ fn manage_agent_service(
     Ok(())
 }
 
-#[cfg(not(unix))]
-async fn call_agent(_socket: Option<PathBuf>, _request: AgentRequest) -> CliResult<AgentResponse> {
-    Err("the local Envoix Agent currently runs inside Linux/WSL".into())
+#[cfg(not(any(unix, windows)))]
+async fn call_agent(
+    _endpoint: Option<PathBuf>,
+    _request: AgentRequest,
+) -> CliResult<AgentResponse> {
+    Err("the local Envoix Agent control transport is unsupported on this platform".into())
 }
 
 fn agent_error(response: AgentResponse) -> CliResult<AgentResponse> {

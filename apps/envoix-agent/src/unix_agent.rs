@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,13 +26,18 @@ use envoix_client::product::{
     AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
     AgentResponseEnvelope, AgentSettings, AgentSnapshot, AgentStatus, InboxItem, InboxRoot,
     MAX_AGENT_EVENT_BATCH, MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation,
-    PreparedRememberedDevice, ProductStore, RememberedDeviceRecord, default_agent_state_directory,
-    is_valid_agent_request_id,
+    PreparedRememberedDevice, ProductStore, RememberedDeviceRecord, default_agent_control_endpoint,
+    default_agent_state_directory, is_valid_agent_request_id,
 };
+#[cfg(windows)]
+use envoix_client::product::{current_windows_user_sid, windows_process_user_sid};
 use envoix_client::{
     DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, IdentityConfig, TransferCancelToken,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
@@ -56,9 +62,9 @@ struct Cli {
     /// Directory where completed incoming roots are saved.
     #[arg(long)]
     inbox: Option<PathBuf>,
-    /// Unix socket used by `envoix agent`, `devices`, and `inbox` commands.
-    #[arg(long)]
-    socket: Option<PathBuf>,
+    /// Unix socket or Windows Named Pipe used by local controllers.
+    #[arg(long, visible_aliases = ["socket", "pipe"])]
+    control_endpoint: Option<PathBuf>,
     /// Human-readable name for this Agent host.
     #[arg(long)]
     device_name: Option<String>,
@@ -80,7 +86,7 @@ struct Cli {
 struct RuntimeConfig {
     state_directory: PathBuf,
     inbox_directory: PathBuf,
-    socket_path: PathBuf,
+    control_endpoint: PathBuf,
     device_name: String,
     broker: String,
     relay: Option<String>,
@@ -252,10 +258,10 @@ pub async fn run() -> Result<()> {
                 .map(|settings| settings.device_name.clone())
         })
         .unwrap_or_else(|| "WSL".into());
-    let socket_path = cli
-        .socket
-        .or_else(|| std::env::var_os("ENVOIX_AGENT_SOCKET").map(PathBuf::from))
-        .unwrap_or_else(|| state_directory.join("agent.sock"));
+    let control_endpoint = cli
+        .control_endpoint
+        .map(Ok)
+        .unwrap_or_else(default_agent_control_endpoint)?;
     let relay = match cli.relay.trim() {
         "" | "none" | "off" => None,
         value => Some(value.to_string()),
@@ -268,7 +274,7 @@ pub async fn run() -> Result<()> {
         config: RuntimeConfig {
             state_directory: state_directory.clone(),
             inbox_directory,
-            socket_path,
+            control_endpoint,
             device_name,
             broker: cli.broker,
             relay,
@@ -324,18 +330,19 @@ fn read_agent_settings(path: &Path) -> Result<AgentSettings> {
     Ok(settings)
 }
 
+#[cfg(unix)]
 async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
-    prepare_socket(&runtime.config.socket_path).await?;
-    let listener = UnixListener::bind(&runtime.config.socket_path)
-        .with_context(|| format!("bind {}", runtime.config.socket_path.display()))?;
+    prepare_socket(&runtime.config.control_endpoint).await?;
+    let listener = UnixListener::bind(&runtime.config.control_endpoint)
+        .with_context(|| format!("bind {}", runtime.config.control_endpoint.display()))?;
     fs::set_permissions(
-        &runtime.config.socket_path,
+        &runtime.config.control_endpoint,
         std::os::unix::fs::PermissionsExt::from_mode(0o600),
     )?;
-    let socket_uid = fs::metadata(&runtime.config.socket_path)?.uid();
-    let _cleanup = SocketCleanup(runtime.config.socket_path.clone());
+    let socket_uid = fs::metadata(&runtime.config.control_endpoint)?.uid();
+    let _cleanup = SocketCleanup(runtime.config.control_endpoint.clone());
     tracing::info!(
-        socket = %runtime.config.socket_path.display(),
+        endpoint = %runtime.config.control_endpoint.display(),
         inbox = %runtime.config.inbox_directory.display(),
         "Envoix Agent ready"
     );
@@ -367,6 +374,187 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
     }
 }
 
+#[cfg(windows)]
+async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
+    let endpoint = validate_windows_pipe_endpoint(&runtime.config.control_endpoint)?.to_string();
+    let owner_sid = current_windows_user_sid()?;
+    let mut server = create_windows_pipe(&endpoint, &owner_sid, true)?;
+    tracing::info!(
+        endpoint,
+        inbox = %runtime.config.inbox_directory.display(),
+        "Envoix Agent ready"
+    );
+
+    let termination = termination_signal();
+    tokio::pin!(termination);
+    loop {
+        tokio::select! {
+            signal = &mut termination => {
+                signal?;
+                tracing::info!("shutting down");
+                shutdown_background_tasks(&runtime).await;
+                return Ok(());
+            }
+            connected = server.connect() => {
+                if let Err(error) = connected {
+                    tracing::warn!(%error, "Windows Agent pipe connection failed");
+                    server = create_windows_pipe(&endpoint, &owner_sid, false)?;
+                    continue;
+                }
+                if let Err(error) = validate_windows_peer(&server, &owner_sid) {
+                    tracing::warn!(%error, "rejected local Agent peer");
+                    server = create_windows_pipe(&endpoint, &owner_sid, false)?;
+                    continue;
+                }
+                let connected = server;
+                server = create_windows_pipe(&endpoint, &owner_sid, false)?;
+                let runtime = runtime.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = serve_connection(runtime, connected).await {
+                        tracing::warn!(%error, "local Agent request failed");
+                    }
+                });
+            }
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn validate_windows_pipe_endpoint(endpoint: &Path) -> io::Result<&str> {
+    const PREFIX: &str = "\\\\.\\pipe\\";
+    let endpoint = endpoint.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows Agent pipe name must be valid UTF-8",
+        )
+    })?;
+    let Some(name) = endpoint.strip_prefix(PREFIX) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            r"Windows Agent endpoint must start with \\.\pipe\",
+        ));
+    };
+    if name.is_empty()
+        || name.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
+        })
+        || endpoint.encode_utf16().count() > 256
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows Agent pipe name is empty, nested, invalid, or too long",
+        ));
+    }
+    Ok(endpoint)
+}
+
+#[cfg(windows)]
+fn create_windows_pipe(endpoint: &str, owner_sid: &str, first: bool) -> Result<NamedPipeServer> {
+    use std::ffi::c_void;
+
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+    let descriptor = WindowsSecurityDescriptor::new(owner_sid)?;
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+            .expect("SECURITY_ATTRIBUTES size fits u32"),
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let mut options = ServerOptions::new();
+    options
+        .first_pipe_instance(first)
+        .reject_remote_clients(true);
+    // SAFETY: `attributes` and its LocalAlloc-owned security descriptor remain
+    // alive for the complete CreateNamedPipeW call. Tokio copies the descriptor
+    // into the kernel object before returning and never retains this pointer.
+    let server = unsafe {
+        options.create_with_security_attributes_raw(
+            endpoint,
+            (&mut attributes as *mut SECURITY_ATTRIBUTES).cast::<c_void>(),
+        )
+    }?;
+    Ok(server)
+}
+
+#[cfg(windows)]
+struct WindowsSecurityDescriptor(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl WindowsSecurityDescriptor {
+    fn new(owner_sid: &str) -> io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::ptr;
+
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+
+        let sddl = std::ffi::OsStr::new(&format!("D:P(A;;GA;;;{owner_sid})"))
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: `sddl` is a live, null-terminated UTF-16 string and
+        // `descriptor` points to writable PSECURITY_DESCRIPTOR storage.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(descriptor.cast()))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsSecurityDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: The descriptor was allocated by
+        // ConvertStringSecurityDescriptorToSecurityDescriptorW and is released
+        // exactly once with LocalFree.
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn validate_windows_peer(server: &NamedPipeServer, owner_sid: &str) -> Result<()> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+
+    let mut client_process_id = 0_u32;
+    // SAFETY: `server` owns a connected Named Pipe server handle and the PID
+    // output points to initialized writable storage for the duration of the call.
+    if unsafe {
+        GetNamedPipeClientProcessId(
+            server.as_raw_handle().cast::<std::ffi::c_void>() as HANDLE,
+            &mut client_process_id,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    let peer_sid = windows_process_user_sid(client_process_id)?;
+    if peer_sid != owner_sid {
+        bail!("Agent peer SID does not match the pipe owner");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn validate_unix_peer(stream: &UnixStream, socket_uid: u32) -> Result<()> {
     let peer_uid = stream.peer_cred()?.uid();
     if peer_uid != socket_uid {
@@ -375,6 +563,7 @@ fn validate_unix_peer(stream: &UnixStream, socket_uid: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn termination_signal() -> io::Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
@@ -383,6 +572,12 @@ async fn termination_signal() -> io::Result<()> {
     }
 }
 
+#[cfg(windows)]
+async fn termination_signal() -> io::Result<()> {
+    tokio::signal::ctrl_c().await
+}
+
+#[cfg(unix)]
 async fn prepare_socket(path: &Path) -> Result<()> {
     let parent = path
         .parent()
@@ -1190,8 +1385,10 @@ impl EventSink for AgentEvents {
     }
 }
 
+#[cfg(unix)]
 struct SocketCleanup(PathBuf);
 
+#[cfg(unix)]
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
@@ -1216,15 +1413,20 @@ fn lock_or_log<'a, T>(mutex: &'a Mutex<T>, label: &str) -> Option<MutexGuard<'a,
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
-    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+    #[cfg(unix)]
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    Ok(())
 }
 
 fn create_directory(path: &Path) -> io::Result<()> {
     let existed = path.exists();
     fs::create_dir_all(path)?;
+    #[cfg(unix)]
     if !existed {
         fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    let _ = existed;
     Ok(())
 }
 
@@ -1417,7 +1619,7 @@ mod tests {
             config: RuntimeConfig {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
-                socket_path: state_directory.join("agent.sock"),
+                control_endpoint: state_directory.join("agent.sock"),
                 device_name: "test-wsl".into(),
                 broker: "broker".into(),
                 relay: None,
@@ -1453,6 +1655,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_socket_round_trips_a_v5_envelope() {
         let directory = tempfile::tempdir().unwrap();
@@ -1461,7 +1664,7 @@ mod tests {
             config: RuntimeConfig {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
-                socket_path: state_directory.join("agent.sock"),
+                control_endpoint: state_directory.join("agent.sock"),
                 device_name: "test-wsl".into(),
                 broker: "broker".into(),
                 relay: None,
@@ -1491,6 +1694,59 @@ mod tests {
         assert!(matches!(response.response, AgentResponse::Status { .. }));
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_named_pipe_round_trips_a_v5_envelope_for_its_owner() {
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let endpoint = format!(
+            r"\\.\pipe\envoix-agent-test-{}-{}",
+            std::process::id(),
+            getrandom::u32().unwrap()
+        );
+        let runtime = Arc::new(AgentRuntime {
+            config: RuntimeConfig {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: PathBuf::from(&endpoint),
+                device_name: "test-windows".into(),
+                broker: "broker".into(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+        let owner_sid = current_windows_user_sid().unwrap();
+        let server = create_windows_pipe(&endpoint, &owner_sid, true).unwrap();
+        assert!(create_windows_pipe(&endpoint, &owner_sid, true).is_err());
+        let client = ClientOptions::new().open(&endpoint).unwrap();
+        server.connect().await.unwrap();
+        validate_windows_peer(&server, &owner_sid).unwrap();
+
+        let server_task = tokio::spawn(serve_connection(runtime, server));
+        let (read, mut write) = tokio::io::split(client);
+        let request = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        write.write_all(&bytes).await.unwrap();
+        write.shutdown().await.unwrap();
+        let mut line = String::new();
+        BufReader::new(read).read_line(&mut line).await.unwrap();
+        server_task.await.unwrap().unwrap();
+
+        let response: AgentResponseEnvelope = serde_json::from_str(&line).unwrap();
+        response.validate_for("request_test").unwrap();
+        assert!(matches!(response.response, AgentResponse::Status { .. }));
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn unix_peer_identity_must_match_the_socket_owner() {
         let (client, _server) = UnixStream::pair().unwrap();
@@ -1521,7 +1777,7 @@ mod tests {
             config: RuntimeConfig {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
-                socket_path: state_directory.join("agent.sock"),
+                control_endpoint: state_directory.join("agent.sock"),
                 device_name: "test-wsl".into(),
                 broker: "broker".into(),
                 relay: None,
@@ -1565,6 +1821,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn socket_preparation_never_removes_a_regular_file() {
         let directory = tempfile::tempdir().unwrap();
@@ -1577,6 +1834,7 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), b"keep me");
     }
 
+    #[cfg(unix)]
     #[test]
     fn existing_custom_directory_permissions_are_preserved() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1599,5 +1857,29 @@ mod tests {
             assert_eq!(code.len(), 6);
             assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
         }
+    }
+
+    #[test]
+    fn windows_pipe_contract_is_local_flat_and_bounded() {
+        assert_eq!(
+            validate_windows_pipe_endpoint(Path::new(
+                r"\\.\pipe\envoix-agent-S-1-5-21-100-200-300-1001"
+            ))
+            .unwrap(),
+            r"\\.\pipe\envoix-agent-S-1-5-21-100-200-300-1001"
+        );
+        for invalid in [
+            r"\\server\pipe\envoix-agent-test",
+            r"\\.\pipe\",
+            r"\\.\pipe\envoix\nested",
+            r"\\.\pipe\envoix-agent:test",
+        ] {
+            assert!(
+                validate_windows_pipe_endpoint(Path::new(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
+        let oversized = format!(r"\\.\pipe\{}", "a".repeat(250));
+        assert!(validate_windows_pipe_endpoint(Path::new(&oversized)).is_err());
     }
 }

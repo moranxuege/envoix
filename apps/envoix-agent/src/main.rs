@@ -1,12 +1,13 @@
 use std::process::ExitCode;
 
-#[cfg(unix)]
-mod unix_agent;
+#[cfg(any(unix, windows))]
+#[path = "unix_agent.rs"]
+mod agent;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::main]
 async fn main() -> ExitCode {
-    match unix_agent::run().await {
+    match agent::run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error:#}");
@@ -15,8 +16,8 @@ async fn main() -> ExitCode {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn main() -> ExitCode {
-    eprintln!("error: envoix-agent currently targets Linux/WSL and requires Unix sockets");
+    eprintln!("error: envoix-agent supports Unix sockets and Windows Named Pipes");
     ExitCode::FAILURE
 }

@@ -20,7 +20,13 @@ pub(crate) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn install(_options: InstallOptions) -> io::Result<InstalledAgent> {
+pub(crate) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
+    let InstallOptions {
+        inbox,
+        device_name,
+        agent_binary,
+    } = options;
+    let _ = (inbox, device_name, agent_binary);
     Err(unsupported())
 }
 

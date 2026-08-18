@@ -35,9 +35,9 @@ pub(crate) struct Cli {
     /// internals (path selection, hole-punching). RUST_LOG overrides both.
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true)]
     pub(crate) verbose: u8,
-    /// Override the local Envoix Agent Unix socket.
-    #[arg(long, global = true)]
-    pub(crate) agent_socket: Option<PathBuf>,
+    /// Override the local Agent Unix socket or Windows Named Pipe.
+    #[arg(long, visible_alias = "agent-socket", global = true)]
+    pub(crate) agent_endpoint: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
@@ -516,6 +516,7 @@ fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
 mod tests {
     use super::Cli;
     use clap::Parser;
+    use std::path::PathBuf;
 
     #[test]
     fn naked_room_code_flag_is_retired() {
@@ -586,5 +587,14 @@ mod tests {
         assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook", "--yes"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook"]).is_err());
         assert!(Cli::try_parse_from(["envoix", "inbox", "latest"]).is_ok());
+    }
+
+    #[test]
+    fn agent_control_endpoint_accepts_the_new_name_and_socket_alias() {
+        for option in ["--agent-endpoint", "--agent-socket"] {
+            let cli = Cli::try_parse_from(["envoix", option, "local-control", "agent", "status"])
+                .unwrap();
+            assert_eq!(cli.agent_endpoint, Some(PathBuf::from("local-control")));
+        }
     }
 }

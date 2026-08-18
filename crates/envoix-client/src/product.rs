@@ -1269,23 +1269,264 @@ pub fn default_agent_state_directory() -> io::Result<PathBuf> {
     if let Some(value) = env::var_os("ENVOIX_STATE_DIR").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value));
     }
+    #[cfg(windows)]
+    {
+        env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(|value| PathBuf::from(value).join("Envoix"))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "cannot locate Envoix state directory; set ENVOIX_STATE_DIR or LOCALAPPDATA",
+                )
+            })
+    }
+    #[cfg(not(windows))]
     if let Some(value) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value).join("envoix"));
     }
+    #[cfg(not(windows))]
     if let Some(value) = env::var_os("HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value).join(".local/state/envoix"));
     }
+    #[cfg(not(windows))]
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         "cannot locate Envoix state directory; set ENVOIX_STATE_DIR",
     ))
 }
 
-pub fn default_agent_socket_path() -> io::Result<PathBuf> {
+pub fn default_agent_control_endpoint() -> io::Result<PathBuf> {
+    if let Some(value) = env::var_os("ENVOIX_AGENT_ENDPOINT").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(value));
+    }
     if let Some(value) = env::var_os("ENVOIX_AGENT_SOCKET").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value));
     }
-    Ok(default_agent_state_directory()?.join("agent.sock"))
+    #[cfg(unix)]
+    {
+        Ok(default_agent_state_directory()?.join("agent.sock"))
+    }
+    #[cfg(windows)]
+    {
+        windows_agent_pipe_name(&current_windows_user_sid()?)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the local Agent control transport is unsupported on this platform",
+        ))
+    }
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_AGENT_PIPE_PREFIX: &str = r"\\.\pipe\envoix-agent-";
+
+#[cfg(any(windows, test))]
+fn windows_agent_pipe_name(user_sid: &str) -> io::Result<PathBuf> {
+    if !is_canonical_windows_sid(user_sid) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows user SID is not canonical",
+        ));
+    }
+    Ok(PathBuf::from(format!(
+        "{WINDOWS_AGENT_PIPE_PREFIX}{user_sid}"
+    )))
+}
+
+#[cfg(any(windows, test))]
+fn is_canonical_windows_sid(value: &str) -> bool {
+    if value.len() > 184 {
+        return false;
+    }
+    let mut components = value.split('-');
+    if components.next() != Some("S") || components.next() != Some("1") {
+        return false;
+    }
+    let Some(authority) = components.next() else {
+        return false;
+    };
+    if !is_canonical_decimal(authority)
+        || !authority
+            .parse::<u64>()
+            .is_ok_and(|authority| authority <= 0x0000_ffff_ffff_ffff)
+    {
+        return false;
+    }
+    let subauthorities = components.collect::<Vec<_>>();
+    !subauthorities.is_empty()
+        && subauthorities.len() <= 15
+        && subauthorities
+            .iter()
+            .all(|component| is_canonical_decimal(component) && component.parse::<u32>().is_ok())
+}
+
+#[cfg(any(windows, test))]
+fn is_canonical_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+#[cfg(windows)]
+pub fn current_windows_user_sid() -> io::Result<String> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // SAFETY: GetCurrentProcess returns a process pseudo-handle that is valid
+    // for the lifetime of this process and must not be closed.
+    windows_user_sid_for_process(unsafe { GetCurrentProcess() })
+}
+
+#[cfg(windows)]
+pub fn windows_process_user_sid(process_id: u32) -> io::Result<String> {
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // SAFETY: OpenProcess receives a PID supplied by the kernel for a connected
+    // pipe client. The returned handle is checked and owned by WinHandle.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    let process = WinHandle::new(process)?;
+    windows_user_sid_for_process(process.0)
+}
+
+#[cfg(windows)]
+fn windows_user_sid_for_process(
+    process: windows_sys::Win32::Foundation::HANDLE,
+) -> io::Result<String> {
+    use std::ptr;
+
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+    let mut token = ptr::null_mut();
+    // SAFETY: process is a valid process handle or the documented current
+    // process pseudo-handle; token points to writable HANDLE storage.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = WinHandle::new(token)?;
+    let mut required = 0_u32;
+    // SAFETY: A null buffer with length zero is the documented size query.
+    let result =
+        unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut required) };
+    let size_query_error = io::Error::last_os_error();
+    if result != 0
+        || size_query_error.raw_os_error()
+            != Some(windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER as i32)
+    {
+        return Err(size_query_error);
+    }
+    if required < u32::try_from(std::mem::size_of::<TOKEN_USER>()).unwrap_or(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Windows token returned an invalid user SID size",
+        ));
+    }
+    let word_size = std::mem::size_of::<usize>();
+    let words = usize::try_from(required)
+        .map_err(|_| io::Error::other("Windows token user SID is too large"))?
+        .div_ceil(word_size);
+    let mut buffer = vec![0_usize; words];
+    // SAFETY: buffer is aligned for TOKEN_USER and contains at least `required`
+    // writable bytes. The token and returned length remain valid for this call.
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: GetTokenInformation successfully initialized a TOKEN_USER at the
+    // aligned start of `buffer`, which remains alive while the SID is converted.
+    let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    windows_sid_to_string(token_user.User.Sid)
+}
+
+#[cfg(windows)]
+fn windows_sid_to_string(sid: windows_sys::Win32::Security::PSID) -> io::Result<String> {
+    use std::ptr;
+
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+
+    let mut value = ptr::null_mut();
+    // SAFETY: sid comes from a live TOKEN_USER buffer. The API writes one
+    // LocalAlloc-owned, null-terminated UTF-16 pointer to `value`.
+    if unsafe { ConvertSidToStringSidW(sid, &mut value) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let value = LocalAllocation(value.cast());
+    let mut length = 0_usize;
+    // SAFETY: ConvertSidToStringSidW guarantees a null-terminated SID string.
+    // Canonical Windows SID strings are at most 184 characters; the explicit
+    // bound prevents an unbounded scan if the OS contract is violated.
+    unsafe {
+        while length <= 184 && *value.0.cast::<u16>().add(length) != 0 {
+            length += 1;
+        }
+    }
+    if length > 184 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Windows user SID exceeds the supported length",
+        ));
+    }
+    // SAFETY: The preceding bounded scan established that these initialized
+    // UTF-16 code units precede the terminating null.
+    let units = unsafe { std::slice::from_raw_parts(value.0.cast::<u16>(), length) };
+    let sid = String::from_utf16(units).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "Windows user SID is not UTF-16")
+    })?;
+    if !is_canonical_windows_sid(&sid) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Windows returned a non-canonical user SID",
+        ));
+    }
+    Ok(sid)
+}
+
+#[cfg(windows)]
+struct WinHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl WinHandle {
+    fn new(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<Self> {
+        if handle.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self(handle))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WinHandle {
+    fn drop(&mut self) {
+        // SAFETY: WinHandle exclusively owns a non-null kernel handle.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct LocalAllocation(windows_sys::Win32::Foundation::HLOCAL);
+
+#[cfg(windows)]
+impl Drop for LocalAllocation {
+    fn drop(&mut self) {
+        // SAFETY: This pointer was allocated by ConvertSidToStringSidW and is
+        // released exactly once with LocalFree.
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(self.0);
+        }
+    }
 }
 
 fn validate_label(label: &str) -> io::Result<String> {
@@ -1915,6 +2156,38 @@ mod tests {
         assert_eq!(
             settings.validate().unwrap_err().kind(),
             io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn windows_agent_pipe_names_are_per_user_and_injection_safe() {
+        assert_eq!(
+            windows_agent_pipe_name("S-1-5-21-100-200-300-1001")
+                .unwrap()
+                .to_str(),
+            Some(r"\\.\pipe\envoix-agent-S-1-5-21-100-200-300-1001")
+        );
+        for invalid in [
+            "",
+            "s-1-5-21-1",
+            "S-",
+            "S--1-5-21-1",
+            "S-01-5-21-1",
+            "S-1-05-21-1",
+            "S-1-5-21-",
+            "S-1-5-21-1\\other",
+            "S-1-5-21-1;D:(A;;GA;;;WD)",
+        ] {
+            assert!(windows_agent_pipe_name(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_sid_matches_the_current_user() {
+        assert_eq!(
+            windows_process_user_sid(std::process::id()).unwrap(),
+            current_windows_user_sid().unwrap()
         );
     }
 }

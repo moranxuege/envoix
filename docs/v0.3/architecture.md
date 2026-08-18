@@ -254,6 +254,14 @@ GUI is a WinUI shell that talks to the Agent through an owner-only Named Pipe.
 The GUI framework is confirmed only after the local control protocol is stable;
 the temporary egui demo is not the foundation of the Windows product.
 
+The Windows adapter derives its default local pipe name from the current user
+SID. It creates the pipe with a protected DACL granting that SID alone, rejects
+remote clients, claims the first pipe instance, and compares every connected
+client process token SID with the owner before decoding a command. Native
+Win32 calls are isolated to the security descriptor and token adapter because
+Tokio exposes `SECURITY_ATTRIBUTES` as an unsafe raw-pointer boundary; no
+protocol or Engine code uses `unsafe`.
+
 ### Linux and WSL
 
 Linux/WSL runs a per-user Agent, normally through a systemd user service, with
@@ -308,7 +316,7 @@ Relationship routes and vault references, Inbox metadata, and migration
 evidence. It stores neither payload bytes nor credential values. The owner
 lock is held for the lifetime of the store, including migration.
 
-The Linux/WSL Agent now projects pairing, generation rotation, revocation, and
+The desktop Agent now projects pairing, generation rotation, revocation, and
 Inbox updates into this schema. Its former ProductStore implementation is
 compiled only as a v0.2 fixture writer; it is not a production runtime path.
 The Unix control adapter sets the socket to owner-only mode and verifies each

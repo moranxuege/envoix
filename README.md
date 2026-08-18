@@ -138,7 +138,7 @@ deny = ["100.64.0.0/10"]
 - `crates/envoix-ffi`: UniFFI surface for Apple and shared native semantics.
 - `crates/envoix-client::product`: remembered-device, Inbox, and local Agent
   command contract.
-- `apps/envoix-agent`: persistent Linux/WSL receiver and Inbox owner.
+- `apps/envoix-agent`: persistent Windows/Linux/WSL receiver and Inbox owner.
 - `apps/envoix-android-jni`: Android JNI projection and platform save gate.
 - `apps/envoix-apple`, `android`, `apps/envoix-cli`: native front ends.
 
