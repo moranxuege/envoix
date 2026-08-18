@@ -61,12 +61,20 @@ fn connect_room(snapshot: &mut EngineSnapshot, ids: &FixtureIds) {
         EngineEvent::RoomOpened {
             room_id: ids.room.clone(),
             relationship_id: Some(ids.relationship.clone()),
+            replaces_room_id: None,
         },
     )
     .unwrap();
     apply_next(
         snapshot,
-        EngineEvent::RoomConnected {
+        EngineEvent::RoomPeerAdmitted {
+            room_id: ids.room.clone(),
+        },
+    )
+    .unwrap();
+    apply_next(
+        snapshot,
+        EngineEvent::RoomAuthenticated {
             room_id: ids.room.clone(),
         },
     )
@@ -206,6 +214,7 @@ fn room_reducer_requires_trust_and_close_is_terminal() {
         EngineEvent::RoomOpened {
             room_id: ids.room.clone(),
             relationship_id: Some(missing),
+            replaces_room_id: None,
         },
     )
     .unwrap_err();
@@ -236,7 +245,7 @@ fn room_reducer_requires_trust_and_close_is_terminal() {
     let before_terminal = snapshot.clone();
     let error = apply_next(
         &mut snapshot,
-        EngineEvent::RoomConnected { room_id: ids.room },
+        EngineEvent::RoomAuthenticated { room_id: ids.room },
     )
     .unwrap_err();
     assert!(matches!(
@@ -247,6 +256,125 @@ fn room_reducer_requires_trust_and_close_is_terminal() {
         }
     ));
     assert_eq!(snapshot, before_terminal);
+}
+
+#[test]
+fn room_admission_authentication_and_replacement_are_explicit_and_atomic() {
+    let ids = fixture_ids("room_lifecycle");
+    let replacement = RoomId::parse("room_lifecycle_replacement").unwrap();
+    let missing = RoomId::parse("room_lifecycle_missing").unwrap();
+    let mut snapshot = EngineSnapshot::new();
+    trust_relationship(&mut snapshot, &ids);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::RoomOpened {
+            room_id: ids.room.clone(),
+            relationship_id: Some(ids.relationship.clone()),
+            replaces_room_id: None,
+        },
+    )
+    .unwrap();
+
+    let before_authentication = snapshot.clone();
+    let error = apply_next(
+        &mut snapshot,
+        EngineEvent::RoomConnected {
+            room_id: ids.room.clone(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), ApplicationErrorCode::UnsupportedEvent);
+    assert_eq!(snapshot, before_authentication);
+
+    assert!(matches!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::RoomAuthenticated {
+                room_id: ids.room.clone(),
+            },
+        ),
+        Err(ApplyError::InvalidTransition {
+            entity: EntityKind::Room,
+            ..
+        })
+    ));
+    assert_eq!(snapshot, before_authentication);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::RoomPeerAdmitted {
+            room_id: ids.room.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(snapshot.rooms[&ids.room].state, RoomState::Authenticating);
+    apply_next(
+        &mut snapshot,
+        EngineEvent::RoomAuthenticated {
+            room_id: ids.room.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(snapshot.rooms[&ids.room].state, RoomState::Connected);
+
+    let before_implicit_replacement = snapshot.clone();
+    assert!(matches!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::RoomOpened {
+                room_id: replacement.clone(),
+                relationship_id: Some(ids.relationship.clone()),
+                replaces_room_id: None,
+            },
+        ),
+        Err(ApplyError::InvalidTransition {
+            entity: EntityKind::Room,
+            ..
+        })
+    ));
+    assert_eq!(snapshot, before_implicit_replacement);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::RoomOpened {
+            room_id: replacement.clone(),
+            relationship_id: Some(ids.relationship.clone()),
+            replaces_room_id: Some(ids.room.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(snapshot.rooms[&replacement].state, RoomState::Connecting);
+    assert_eq!(snapshot.rooms[&ids.room].state, RoomState::Closed);
+    assert_eq!(
+        snapshot.rooms[&ids.room].close_reason,
+        Some(RoomCloseReason::Replaced)
+    );
+    assert_eq!(
+        snapshot.rooms[&ids.room].replacement_room_id,
+        Some(replacement.clone())
+    );
+    assert_eq!(
+        snapshot.relationships[&ids.relationship].state,
+        RelationshipState::Trusted
+    );
+
+    let before_missing_replacement = snapshot.clone();
+    assert!(matches!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::RoomOpened {
+                room_id: RoomId::parse("room_lifecycle_invalid").unwrap(),
+                relationship_id: Some(ids.relationship),
+                replaces_room_id: Some(missing),
+            },
+        ),
+        Err(ApplyError::MissingEntity {
+            entity: EntityKind::Room,
+            ..
+        })
+    ));
+    assert_eq!(snapshot, before_missing_replacement);
 }
 
 #[test]

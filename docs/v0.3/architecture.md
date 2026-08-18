@@ -90,6 +90,16 @@ created from a typed Room code, nearby discovery, or a low-level invitation
 capability. It can authenticate a new Relationship or reconnect an existing
 one.
 
+The product state separates peer admission from successful authentication:
+
+```text
+connecting -> authenticating -> connected -> closed
+```
+
+Opening a replacement Room closes the previous Room in the same state
+transition. It does not revoke the Relationship or remove Transfers attached
+to the previous Room.
+
 Room expiry means that the rendezvous context can no longer admit peers. It
 does not invalidate a completed Relationship and does not define Transfer
 lifetime.

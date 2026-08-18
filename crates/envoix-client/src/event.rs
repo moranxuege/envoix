@@ -43,7 +43,16 @@ pub enum EngineEvent {
     RoomOpened {
         room_id: RoomId,
         relationship_id: Option<RelationshipId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces_room_id: Option<RoomId>,
     },
+    RoomPeerAdmitted {
+        room_id: RoomId,
+    },
+    RoomAuthenticated {
+        room_id: RoomId,
+    },
+    /// Historical v1/v2 event retained only for fixture decoding.
     RoomConnected {
         room_id: RoomId,
     },

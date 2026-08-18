@@ -30,6 +30,7 @@ pub enum ApplicationErrorCode {
     InvalidTransition,
     InvalidProgress,
     GenerationMismatch,
+    UnsupportedEvent,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -72,6 +73,11 @@ pub enum ApplyError {
         current_generation: u64,
         attempted_generation: u64,
     },
+    #[error("application event {event} is not supported by contract {contract_version}")]
+    UnsupportedEvent {
+        event: &'static str,
+        contract_version: u16,
+    },
 }
 
 impl ApplyError {
@@ -87,6 +93,7 @@ impl ApplyError {
             Self::InvalidTransition { .. } => ApplicationErrorCode::InvalidTransition,
             Self::InvalidProgress { .. } => ApplicationErrorCode::InvalidProgress,
             Self::GenerationMismatch { .. } => ApplicationErrorCode::GenerationMismatch,
+            Self::UnsupportedEvent { .. } => ApplicationErrorCode::UnsupportedEvent,
         }
     }
 }
@@ -206,22 +213,38 @@ impl EngineSnapshot {
             EngineEvent::RoomOpened {
                 room_id,
                 relationship_id,
+                replaces_room_id,
             } => {
-                let room = reducers::room::open(
+                let reduction = reducers::room::open(
                     &self.relationships,
-                    self.rooms.get(&room_id),
+                    &self.rooms,
                     Room {
                         id: room_id.clone(),
                         relationship_id,
                         state: RoomState::Connecting,
                         close_reason: None,
+                        replacement_room_id: None,
                     },
+                    replaces_room_id.as_ref(),
                 )?;
+                if let Some(replaced) = reduction.replaced {
+                    self.rooms.insert(replaced.id.clone(), replaced);
+                }
+                self.rooms.insert(room_id, reduction.room);
+            }
+            EngineEvent::RoomPeerAdmitted { room_id } => {
+                let room = reducers::room::admit(self.rooms.get(&room_id), &room_id)?;
                 self.rooms.insert(room_id, room);
             }
-            EngineEvent::RoomConnected { room_id } => {
-                let room = reducers::room::connect(self.rooms.get(&room_id), &room_id)?;
+            EngineEvent::RoomAuthenticated { room_id } => {
+                let room = reducers::room::authenticate(self.rooms.get(&room_id), &room_id)?;
                 self.rooms.insert(room_id, room);
+            }
+            EngineEvent::RoomConnected { .. } => {
+                return Err(ApplyError::UnsupportedEvent {
+                    event: "room_connected",
+                    contract_version: APPLICATION_CONTRACT_VERSION,
+                });
             }
             EngineEvent::RoomClosed { room_id, reason } => {
                 let room = reducers::room::close(self.rooms.get(&room_id), &room_id, reason)?;

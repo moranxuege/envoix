@@ -123,6 +123,7 @@ fn pairing_verification_requires_a_connected_room() {
         EngineEvent::RoomOpened {
             room_id: ids.room.clone(),
             relationship_id: None,
+            replaces_room_id: None,
         },
     );
     let error = expect_error(decide(
@@ -136,7 +137,13 @@ fn pairing_verification_requires_a_connected_room() {
 
     apply_next(
         &mut snapshot,
-        EngineEvent::RoomConnected {
+        EngineEvent::RoomPeerAdmitted {
+            room_id: ids.room.clone(),
+        },
+    );
+    apply_next(
+        &mut snapshot,
+        EngineEvent::RoomAuthenticated {
             room_id: ids.room.clone(),
         },
     );

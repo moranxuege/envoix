@@ -154,6 +154,7 @@ impl RelationshipState {
 #[serde(rename_all = "snake_case")]
 pub enum RoomState {
     Connecting,
+    Authenticating,
     Connected,
     Closed,
 }
@@ -162,6 +163,7 @@ impl RoomState {
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::Connecting => "connecting",
+            Self::Authenticating => "authenticating",
             Self::Connected => "connected",
             Self::Closed => "closed",
         }
@@ -177,6 +179,7 @@ pub enum RoomCloseReason {
     Backgrounded,
     NetworkLost,
     ProtocolFailure,
+    Replaced,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -286,6 +289,8 @@ pub struct Room {
     pub relationship_id: Option<RelationshipId>,
     pub state: RoomState,
     pub close_reason: Option<RoomCloseReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_room_id: Option<RoomId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

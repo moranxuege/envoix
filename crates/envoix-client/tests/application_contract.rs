@@ -80,16 +80,23 @@ fn remembered_transfer_events(ids: &FixtureIds) -> Vec<EventEnvelope> {
             EngineEvent::RoomOpened {
                 room_id: ids.room.clone(),
                 relationship_id: Some(ids.relationship.clone()),
+                replaces_room_id: None,
             },
         ),
         envelope(
             5,
-            EngineEvent::RoomConnected {
+            EngineEvent::RoomPeerAdmitted {
                 room_id: ids.room.clone(),
             },
         ),
         envelope(
             6,
+            EngineEvent::RoomAuthenticated {
+                room_id: ids.room.clone(),
+            },
+        ),
+        envelope(
+            7,
             EngineEvent::TransferCreated {
                 transfer_id: ids.transfer.clone(),
                 relationship_id: ids.relationship.clone(),
@@ -100,40 +107,40 @@ fn remembered_transfer_events(ids: &FixtureIds) -> Vec<EventEnvelope> {
             },
         ),
         envelope(
-            7,
+            8,
             EngineEvent::TransferStarted {
                 transfer_id: ids.transfer.clone(),
             },
         ),
         envelope(
-            8,
+            9,
             EngineEvent::TransferProgressed {
                 transfer_id: ids.transfer.clone(),
                 transferred_bytes: 21,
             },
         ),
         envelope(
-            9,
+            10,
             EngineEvent::RoomClosed {
                 room_id: ids.room.clone(),
                 reason: RoomCloseReason::Expired,
             },
         ),
         envelope(
-            10,
+            11,
             EngineEvent::TransferProgressed {
                 transfer_id: ids.transfer.clone(),
                 transferred_bytes: 42,
             },
         ),
         envelope(
-            11,
+            12,
             EngineEvent::TransferDelivered {
                 transfer_id: ids.transfer.clone(),
             },
         ),
         envelope(
-            12,
+            13,
             EngineEvent::RelationshipRevoked {
                 relationship_id: ids.relationship.clone(),
             },
@@ -147,7 +154,7 @@ fn ordered_events_rebuild_an_identical_snapshot() {
     let events = remembered_transfer_events(&ids);
     let snapshot = replay(EngineSnapshot::new(), events.clone()).unwrap();
 
-    assert_eq!(snapshot.last_sequence, 12);
+    assert_eq!(snapshot.last_sequence, 13);
     assert_eq!(
         snapshot.relationships[&ids.relationship].state,
         RelationshipState::Revoked
@@ -178,30 +185,30 @@ fn ordered_events_rebuild_an_identical_snapshot() {
 fn replay_detects_duplicates_gaps_and_illegal_transitions() {
     let ids = fixture_ids();
     let events = remembered_transfer_events(&ids);
-    let mut snapshot = replay(EngineSnapshot::new(), events[..8].iter().cloned()).unwrap();
+    let mut snapshot = replay(EngineSnapshot::new(), events[..9].iter().cloned()).unwrap();
     let before_duplicate = snapshot.clone();
 
     assert_eq!(
-        snapshot.apply(events[7].clone()).unwrap(),
+        snapshot.apply(events[8].clone()).unwrap(),
         ApplyOutcome::IgnoredDuplicate
     );
     assert_eq!(snapshot, before_duplicate);
     assert!(matches!(
         snapshot.apply(envelope(
-            10,
+            11,
             EngineEvent::TransferProgressed {
                 transfer_id: ids.transfer.clone(),
                 transferred_bytes: 30,
             },
         )),
         Err(ApplyError::SequenceGap {
-            expected: 9,
-            actual: 10,
+            expected: 10,
+            actual: 11,
         })
     ));
     assert!(matches!(
         snapshot.apply(envelope(
-            9,
+            10,
             EngineEvent::TransferProgressed {
                 transfer_id: ids.transfer.clone(),
                 transferred_bytes: 43,
@@ -209,12 +216,12 @@ fn replay_detects_duplicates_gaps_and_illegal_transitions() {
         )),
         Err(ApplyError::InvalidProgress { .. })
     ));
-    assert_eq!(snapshot.last_sequence, 8);
+    assert_eq!(snapshot.last_sequence, 9);
     assert_eq!(snapshot.transfers[&ids.transfer].transferred_bytes, 21);
 
     snapshot
         .apply(envelope(
-            9,
+            10,
             EngineEvent::TransferPaused {
                 transfer_id: ids.transfer.clone(),
             },
@@ -222,7 +229,7 @@ fn replay_detects_duplicates_gaps_and_illegal_transitions() {
         .unwrap();
     assert!(matches!(
         snapshot.apply(envelope(
-            10,
+            11,
             EngineEvent::TransferDelivered {
                 transfer_id: ids.transfer,
             },
@@ -232,7 +239,7 @@ fn replay_detects_duplicates_gaps_and_illegal_transitions() {
             ..
         })
     ));
-    assert_eq!(snapshot.last_sequence, 9);
+    assert_eq!(snapshot.last_sequence, 10);
 
     let mut exhausted = EngineSnapshot::new();
     exhausted.last_sequence = u64::MAX;
@@ -355,7 +362,7 @@ fn commands_and_capabilities_form_a_versioned_typed_boundary() {
 fn failure_and_cancellation_are_typed_terminal_facts() {
     let ids = fixture_ids();
     let base_events = remembered_transfer_events(&ids);
-    let mut snapshot = replay(EngineSnapshot::new(), base_events[..5].iter().cloned()).unwrap();
+    let mut snapshot = replay(EngineSnapshot::new(), base_events[..6].iter().cloned()).unwrap();
     let failure = TransferFailure {
         code: FailureCode::NetworkLost,
         phase: FailurePhase::Transferring,
@@ -365,7 +372,7 @@ fn failure_and_cancellation_are_typed_terminal_facts() {
 
     for event in [
         envelope(
-            6,
+            7,
             EngineEvent::TransferCreated {
                 transfer_id: ids.transfer.clone(),
                 relationship_id: ids.relationship.clone(),
@@ -376,13 +383,13 @@ fn failure_and_cancellation_are_typed_terminal_facts() {
             },
         ),
         envelope(
-            7,
+            8,
             EngineEvent::TransferStarted {
                 transfer_id: ids.transfer.clone(),
             },
         ),
         envelope(
-            8,
+            9,
             EngineEvent::TransferFailed {
                 transfer_id: ids.transfer.clone(),
                 failure: failure.clone(),
@@ -403,7 +410,7 @@ fn failure_and_cancellation_are_typed_terminal_facts() {
     let canceled_transfer = TransferId::parse("transfer_fixture_0002").unwrap();
     for event in [
         envelope(
-            9,
+            10,
             EngineEvent::TransferCreated {
                 transfer_id: canceled_transfer.clone(),
                 relationship_id: ids.relationship,
@@ -414,7 +421,7 @@ fn failure_and_cancellation_are_typed_terminal_facts() {
             },
         ),
         envelope(
-            10,
+            11,
             EngineEvent::TransferCanceled {
                 transfer_id: canceled_transfer.clone(),
             },
@@ -430,7 +437,7 @@ fn failure_and_cancellation_are_typed_terminal_facts() {
     let before_invalid_terminal_event = snapshot.clone();
     let error = snapshot
         .apply(envelope(
-            11,
+            12,
             EngineEvent::TransferProgressed {
                 transfer_id: canceled_transfer,
                 transferred_bytes: 1,

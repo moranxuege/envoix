@@ -21,4 +21,4 @@ pub use envoix_session::{TransferCancelToken, TransferDirection};
 pub use envoix_types::PROTOCOL_VERSION;
 
 /// Version of the typed v0.3 application command/event/snapshot contract.
-pub const APPLICATION_CONTRACT_VERSION: u16 = 2;
+pub const APPLICATION_CONTRACT_VERSION: u16 = 3;
