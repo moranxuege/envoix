@@ -2,7 +2,6 @@
 members = [
     "apps/envoix-agent",
     "apps/envoix-cli",
-    "apps/envoix-desktop",
     "apps/envoix-android-jni",
     "apps/envoix-rendezvous-server",
     "crates/envoix-auth",

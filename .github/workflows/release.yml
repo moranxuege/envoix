@@ -1,8 +1,7 @@
 name: release
 
-# Builds the envoix CLI (Linux / macOS arm64+x86_64 / Windows), the Windows /
-# Linux graphical desktop demo, and the Android APK (multi-ABI: arm64-v8a +
-# x86_64, test-signed release build).
+# Builds the envoix CLI (Linux / macOS arm64+x86_64 / Windows) and the Android
+# APK (multi-ABI: arm64-v8a + x86_64, test-signed release build).
 #   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
 #   - run manually (Actions -> release -> Run workflow) -> builds everything as
 #     downloadable run artifacts, without publishing a release
@@ -73,64 +72,6 @@ jobs:
           path: dist/${{ matrix.name }}
           if-no-files-found: error
 
-  desktop:
-    name: build desktop ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            name: Envoix-Desktop-Linux-x86_64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            name: Envoix-Desktop-Windows-x86_64.exe
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
-
-      - name: Set up Rust (iroh needs >= 1.91)
-        shell: bash
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup target add ${{ matrix.target }}
-          rustc --version
-
-      - name: Install Linux desktop build dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-3-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
-
-      - name: Build graphical desktop app
-        run: cargo build --locked --release -p envoix-desktop --target ${{ matrix.target }}
-
-      - name: Stage desktop binary
-        shell: bash
-        run: |
-          mkdir -p dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/envoix-desktop.exe" "dist/${{ matrix.name }}"
-          else
-            cp "target/${{ matrix.target }}/release/envoix-desktop" "dist/${{ matrix.name }}"
-          fi
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}
-          path: dist/${{ matrix.name }}
-          if-no-files-found: error
-
   android:
     name: build android apk
     runs-on: ubuntu-latest
@@ -187,7 +128,7 @@ jobs:
 
   release:
     name: publish release
-    needs: [cli, desktop, android]
+    needs: [cli, android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
