@@ -1149,12 +1149,14 @@ mod tests {
             server_id,
             [TransportAddr::Custom(server_custom_addr.clone())],
         );
+        let (server_connection_tx, server_connection_rx) = tokio::sync::oneshot::channel();
 
         let server = tokio::spawn({
             let server_endpoint = server_endpoint.clone();
             async move {
                 let incoming = server_endpoint.accept().await.unwrap();
                 let connection = incoming.await.unwrap();
+                server_connection_tx.send(connection.clone()).unwrap();
                 let (mut send, mut receive) = connection.accept_bi().await.unwrap();
                 for expected in [b"before".as_slice(), b"after".as_slice()] {
                     let mut bytes = vec![0; expected.len()];
@@ -1176,20 +1178,36 @@ mod tests {
         let mut before = [0_u8; 6];
         receive.read_exact(&mut before).await.unwrap();
         assert_eq!(&before, b"before");
+        let server_connection = server_connection_rx.await.unwrap();
 
         let mixed_paths_settled = tokio::time::timeout(HYBRID_TEST_PATH_DISCOVERY_TIMEOUT, async {
             loop {
-                let paths = connection.paths();
-                let has_ip = paths.iter().any(|path| path.remote_addr().is_ip());
-                let wifi_aware_selected = paths.iter().any(|path| {
-                    path.is_selected()
-                        && matches!(
-                            path.remote_addr(),
-                            TransportAddr::Custom(addr)
-                                if addr.id() == WIFI_AWARE_TRANSPORT_ID
-                        )
-                });
-                if has_ip && wifi_aware_selected {
+                let both_endpoints_ready =
+                    [&connection, &server_connection]
+                        .into_iter()
+                        .all(|candidate| {
+                            let paths = candidate.paths();
+                            let has_live_ip_backup = paths.iter().any(|path| {
+                                if !path.remote_addr().is_ip() {
+                                    return false;
+                                }
+                                let stats = path.stats();
+                                // Path validation accounts for the first packet in each
+                                // direction. Waiting for another proves the idle backup has
+                                // carried its keepalive before the custom path is removed.
+                                stats.udp_tx.datagrams >= 2 && stats.udp_rx.datagrams >= 2
+                            });
+                            let wifi_aware_selected = paths.iter().any(|path| {
+                                path.is_selected()
+                                    && matches!(
+                                        path.remote_addr(),
+                                        TransportAddr::Custom(addr)
+                                            if addr.id() == WIFI_AWARE_TRANSPORT_ID
+                                    )
+                            });
+                            has_live_ip_backup && wifi_aware_selected
+                        });
+                if both_endpoints_ready {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
