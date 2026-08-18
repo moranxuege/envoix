@@ -19,7 +19,10 @@ use envoix_client::api::{
     InvitationConsumption, PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision,
     SourceSelectionState, TransferEvent, TransferJobStore, acquire_invitation,
 };
-use envoix_client::product::{AgentRequest, AgentResponse, default_agent_socket_path};
+use envoix_client::product::{
+    AgentRequest, AgentRequestEnvelope, AgentResponse, AgentResponseEnvelope,
+    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, default_agent_socket_path,
+};
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 
 type CliResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -77,6 +80,10 @@ async fn run(cli: Cli) -> CliResult<()> {
             AgentCommand::Status => {
                 show_agent_status(call_agent(agent_socket, AgentRequest::Status).await?, json)
             }
+            AgentCommand::Snapshot { inbox_limit } => show_agent_snapshot(
+                call_agent(agent_socket, AgentRequest::Snapshot { inbox_limit }).await?,
+                json,
+            ),
             AgentCommand::Install {
                 inbox,
                 device_name,
@@ -94,8 +101,8 @@ async fn run(cli: Cli) -> CliResult<()> {
                 call_agent(agent_socket, AgentRequest::ListDevices).await?,
                 json,
             ),
-            DevicesCommand::Forget { device, yes: _ } => show_forgotten_device(
-                call_agent(agent_socket, AgentRequest::ForgetDevice { device }).await?,
+            DevicesCommand::Forget { device, yes: _ } => show_revoked_device(
+                call_agent(agent_socket, AgentRequest::RevokeDevice { device }).await?,
                 json,
             ),
         },
@@ -114,7 +121,7 @@ async fn run(cli: Cli) -> CliResult<()> {
 
 #[cfg(unix)]
 async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult<AgentResponse> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
     let socket = socket.map(Ok).unwrap_or_else(default_agent_socket_path)?;
@@ -128,16 +135,34 @@ async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult
         )
     })?;
     let (read, mut write) = stream.into_split();
-    let mut bytes = serde_json::to_vec(&request)?;
+    let request_id = agent_request_id()?;
+    let envelope = AgentRequestEnvelope::new(request_id.clone(), request)?;
+    let mut bytes = serde_json::to_vec(&envelope)?;
+    if bytes.len() as u64 > MAX_AGENT_REQUEST_BYTES {
+        return Err("Agent request exceeds the control message limit".into());
+    }
     bytes.push(b'\n');
     write.write_all(&bytes).await?;
     write.shutdown().await?;
-    let mut line = String::new();
-    BufReader::new(read).read_line(&mut line).await?;
-    if line.is_empty() {
+    let mut response_bytes = Vec::new();
+    let mut limited = BufReader::new(read).take(MAX_AGENT_RESPONSE_BYTES + 1);
+    limited.read_until(b'\n', &mut response_bytes).await?;
+    if response_bytes.is_empty() {
         return Err("Envoix Agent closed the socket without a response".into());
     }
-    Ok(serde_json::from_str(&line)?)
+    if response_bytes.len() as u64 > MAX_AGENT_RESPONSE_BYTES {
+        return Err("Agent response exceeds the control message limit".into());
+    }
+    let response: AgentResponseEnvelope = serde_json::from_slice(&response_bytes)?;
+    response.validate_for(&request_id)?;
+    Ok(response.response)
+}
+
+fn agent_request_id() -> CliResult<String> {
+    let mut random = [0_u8; 12];
+    getrandom::fill(&mut random)
+        .map_err(|error| io::Error::other(format!("request ID entropy unavailable: {error}")))?;
+    Ok(format!("cli_{}", URL_SAFE_NO_PAD.encode(random)))
 }
 
 fn install_agent(
@@ -225,6 +250,23 @@ fn show_agent_status(response: AgentResponse, json: bool) -> CliResult<()> {
     Ok(())
 }
 
+fn show_agent_snapshot(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Snapshot { snapshot } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("engine sequence: {}", snapshot.engine.last_sequence);
+    println!("relationships: {}", snapshot.engine.relationships.len());
+    println!("rooms: {}", snapshot.engine.rooms.len());
+    println!("transfers: {}", snapshot.engine.transfers.len());
+    println!("inbox: {}", snapshot.inbox.len());
+    Ok(())
+}
+
 fn show_pairing(response: AgentResponse, json: bool) -> CliResult<()> {
     let response = agent_error(response)?;
     if json {
@@ -265,16 +307,16 @@ fn show_devices(response: AgentResponse, json: bool) -> CliResult<()> {
     Ok(())
 }
 
-fn show_forgotten_device(response: AgentResponse, json: bool) -> CliResult<()> {
+fn show_revoked_device(response: AgentResponse, json: bool) -> CliResult<()> {
     let response = agent_error(response)?;
     if json {
         println!("{}", serde_json::to_string(&response)?);
         return Ok(());
     }
-    let AgentResponse::DeviceForgotten { device } = response else {
+    let AgentResponse::DeviceRevoked { device } = response else {
         return Err("Agent returned an unexpected response".into());
     };
-    println!("Forgotten device: {} ({})", device.label, device.id);
+    println!("Revoked device: {} ({})", device.label, device.id);
     Ok(())
 }
 

@@ -277,6 +277,13 @@ JSON Lines is acceptable for the initial control encoding because the traffic
 is local and small. Its schema must be represented by Rust types and contract
 fixtures. Encoding can change later without changing the Engine contract.
 
+Agent protocol v4 wraps every command and response in an explicit protocol
+version plus bounded opaque request ID. Requests are limited to 64 KiB and
+responses to 20 MiB, which accommodates the separately bounded Engine
+snapshot. The `snapshot` command returns secret-free Engine, status, and Inbox
+state. A direct v3 JSON command receives `unsupported_protocol_version`; the
+Agent does not run a second legacy decoder.
+
 ## 9. Persistence and secret ownership
 
 The Engine owns the versioned schema for non-secret product state:

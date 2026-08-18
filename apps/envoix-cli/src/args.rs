@@ -66,6 +66,12 @@ pub(crate) struct AgentArgs {
 pub(crate) enum AgentCommand {
     /// Show whether the Agent is running and listening for remembered peers.
     Status,
+    /// Print the Agent's immutable Engine and Inbox snapshot.
+    Snapshot {
+        /// Maximum number of recent Inbox entries to include.
+        #[arg(long, default_value_t = 20)]
+        inbox_limit: usize,
+    },
     /// Install and start the Agent as a systemd user service.
     Install {
         /// Inbox directory; defaults to the Agent state directory's Inbox.
@@ -100,11 +106,11 @@ pub(crate) struct DevicesArgs {
 pub(crate) enum DevicesCommand {
     /// List devices that can reconnect without a new invitation.
     List,
-    /// Revoke and remove one remembered device.
+    /// Revoke one remembered device and delete its credential.
     Forget {
         /// Device ID or exact label shown by `devices list`.
         device: String,
-        /// Confirm deletion of the remembered credential.
+        /// Confirm Relationship revocation and credential deletion.
         #[arg(long, required = true)]
         yes: bool,
     },
@@ -532,6 +538,9 @@ mod tests {
     #[test]
     fn agent_and_inbox_commands_are_available_without_transfer_flags() {
         assert!(Cli::try_parse_from(["envoix", "agent", "status"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["envoix", "agent", "snapshot", "--inbox-limit", "10"]).is_ok()
+        );
         assert!(
             Cli::try_parse_from([
                 "envoix",

@@ -22,14 +22,18 @@ use crate::api::DesktopCredentialStore;
 use crate::api::RememberedCredential;
 use crate::event::{EngineEvent, EventEnvelope};
 use crate::model::{Device, DeviceId, Relationship, RelationshipId, RelationshipState};
+use crate::snapshot::EngineSnapshot;
 use crate::storage::{
     DurableRelationship, EngineState, EngineStore, EngineStoreError, EngineStoreOrigin,
     MAX_DURABLE_ENTITIES, RePairReason, RePairRequiredRelationship, V02ImportRecord,
     VaultReference, read_bounded_file,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 3;
+pub const AGENT_PROTOCOL_VERSION: u16 = 4;
 pub const AGENT_SETTINGS_VERSION: u16 = 1;
+pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
+pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_AGENT_REQUEST_ID_BYTES: usize = 64;
 const PRODUCT_STATE_SCHEMA_VERSION: u16 = 1;
 const PRODUCT_STATE_FILE: &str = "product-state-v1.json";
 const MAX_INBOX_ITEMS: usize = 1_000;
@@ -73,9 +77,10 @@ impl AgentSettings {
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentRequest {
     Status,
+    Snapshot { inbox_limit: usize },
     Pair { label: String },
     ListDevices,
-    ForgetDevice { device: String },
+    RevokeDevice { device: String },
     ListInbox { limit: usize },
     LatestInbox,
 }
@@ -87,9 +92,10 @@ pub enum AgentResponse {
     Status { status: AgentStatus },
     Pairing { pairing: PairingInvitation },
     Devices { devices: Vec<DeviceSummary> },
-    DeviceForgotten { device: DeviceSummary },
+    DeviceRevoked { device: DeviceSummary },
     Inbox { items: Vec<InboxItem> },
     Latest { item: Option<InboxItem> },
+    Snapshot { snapshot: AgentSnapshot },
     Error { code: String, message: String },
 }
 
@@ -99,6 +105,77 @@ impl AgentResponse {
             code: code.into(),
             message: message.into(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRequestEnvelope {
+    pub protocol_version: u16,
+    pub request_id: String,
+    pub request: AgentRequest,
+}
+
+impl AgentRequestEnvelope {
+    pub fn new(request_id: impl Into<String>, request: AgentRequest) -> Result<Self, io::Error> {
+        let request_id = validate_request_id(request_id.into())?;
+        Ok(Self {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            request_id,
+            request,
+        })
+    }
+
+    pub fn validate(&self) -> io::Result<()> {
+        if self.protocol_version != AGENT_PROTOCOL_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "unsupported Agent protocol {}; expected {}",
+                    self.protocol_version, AGENT_PROTOCOL_VERSION
+                ),
+            ));
+        }
+        validate_request_id(self.request_id.clone()).map(|_| ())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentResponseEnvelope {
+    pub protocol_version: u16,
+    pub request_id: String,
+    pub response: AgentResponse,
+}
+
+impl AgentResponseEnvelope {
+    pub fn new(request_id: impl Into<String>, response: AgentResponse) -> io::Result<Self> {
+        let request_id = validate_request_id(request_id.into())?;
+        Ok(Self {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            request_id,
+            response,
+        })
+    }
+
+    pub fn validate_for(&self, request_id: &str) -> io::Result<()> {
+        if self.protocol_version != AGENT_PROTOCOL_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "unsupported Agent protocol {}; expected {}",
+                    self.protocol_version, AGENT_PROTOCOL_VERSION
+                ),
+            ));
+        }
+        validate_request_id(self.request_id.clone())?;
+        if self.request_id != request_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Agent response request ID does not match the command",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -115,6 +192,14 @@ pub struct AgentStatus {
     pub paired_devices: usize,
     pub active_receivers: usize,
     pub active_pairings: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSnapshot {
+    pub status: AgentStatus,
+    pub engine: EngineSnapshot,
+    pub inbox: Vec<InboxItem>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -770,6 +855,10 @@ impl ProductStore {
     pub fn latest_inbox(&self) -> Option<InboxItem> {
         self.engine.state().inbox.last().cloned()
     }
+
+    pub fn engine_snapshot(&self) -> EngineSnapshot {
+        self.engine.state().snapshot.clone()
+    }
 }
 
 fn apply_product_event(
@@ -1014,6 +1103,24 @@ fn validate_label(label: &str) -> io::Result<String> {
         ));
     }
     Ok(label.to_string())
+}
+
+fn validate_request_id(request_id: String) -> io::Result<String> {
+    if !is_valid_agent_request_id(&request_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Agent request ID must be a bounded opaque identifier",
+        ));
+    }
+    Ok(request_id)
+}
+
+pub fn is_valid_agent_request_id(request_id: &str) -> bool {
+    !request_id.is_empty()
+        && request_id.len() <= MAX_AGENT_REQUEST_ID_BYTES
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn random_identifier(prefix: &str) -> io::Result<String> {
@@ -1364,9 +1471,21 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_fixture_round_trips_every_variant() {
+    fn legacy_agent_wire_fixture_remains_frozen() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/v0.2/agent-control-v3.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], 3);
+        assert_eq!(fixture["requests"][3]["command"], "forget_device");
+        assert!(fixture["requests"][0].get("protocol_version").is_none());
+    }
+
+    #[test]
+    fn agent_wire_v4_fixture_round_trips_every_variant() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v4.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
@@ -1380,21 +1499,44 @@ mod tests {
         let requests = request_values
             .iter()
             .cloned()
-            .map(serde_json::from_value::<AgentRequest>)
+            .map(serde_json::from_value::<AgentRequestEnvelope>)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(matches!(
             requests.as_slice(),
             [
-                AgentRequest::Status,
-                AgentRequest::Pair { .. },
-                AgentRequest::ListDevices,
-                AgentRequest::ForgetDevice { .. },
-                AgentRequest::ListInbox { .. },
-                AgentRequest::LatestInbox,
+                AgentRequestEnvelope {
+                    request: AgentRequest::Status,
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::Snapshot { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::Pair { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::ListDevices,
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::RevokeDevice { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::ListInbox { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::LatestInbox,
+                    ..
+                },
             ]
         ));
         for (request, expected) in requests.iter().zip(request_values) {
+            request.validate().unwrap();
             assert_eq!(serde_json::to_value(request).unwrap(), *expected);
         }
 
@@ -1402,29 +1544,82 @@ mod tests {
         let responses = response_values
             .iter()
             .cloned()
-            .map(serde_json::from_value::<AgentResponse>)
+            .map(serde_json::from_value::<AgentResponseEnvelope>)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(matches!(
             responses.as_slice(),
             [
-                AgentResponse::Status { .. },
-                AgentResponse::Pairing { .. },
-                AgentResponse::Devices { .. },
-                AgentResponse::DeviceForgotten { .. },
-                AgentResponse::Inbox { .. },
-                AgentResponse::Latest { item: Some(_) },
-                AgentResponse::Latest { item: None },
-                AgentResponse::Error { .. },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Status { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Snapshot { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Pairing { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Devices { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::DeviceRevoked { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Inbox { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Latest { item: Some(_) },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Latest { item: None },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Error { .. },
+                    ..
+                },
             ]
         ));
         for (response, expected) in responses.iter().zip(response_values) {
+            response.validate_for(&response.request_id).unwrap();
             assert_eq!(serde_json::to_value(response).unwrap(), *expected);
         }
-        let AgentResponse::Pairing { pairing } = &responses[1] else {
+        let AgentResponse::Pairing { pairing } = &responses[2].response else {
             unreachable!("fixture order is checked above");
         };
         assert_eq!(pairing.expires_at_unix_seconds, 1);
+    }
+
+    #[test]
+    fn agent_envelopes_reject_invalid_and_mismatched_request_ids() {
+        assert!(AgentRequestEnvelope::new("../request", AgentRequest::Status).is_err());
+        let response = AgentResponseEnvelope::new(
+            "request_1",
+            AgentResponse::Status {
+                status: AgentStatus {
+                    protocol_version: AGENT_PROTOCOL_VERSION,
+                    pid: 1,
+                    device_name: "test".into(),
+                    state_directory: "/state".into(),
+                    inbox_directory: "/inbox".into(),
+                    broker: "broker".into(),
+                    relay: None,
+                    paired_devices: 0,
+                    active_receivers: 0,
+                    active_pairings: 0,
+                },
+            },
+        )
+        .unwrap();
+        assert!(response.validate_for("request_2").is_err());
     }
 
     #[test]

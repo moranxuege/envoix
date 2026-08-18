@@ -79,6 +79,11 @@ If validation fails, v0.3 starts in a recovery state with these choices:
 There is no silent fallback that runs v0.2 and v0.3 product engines side by
 side.
 
+The v0.3 Agent control protocol starts at version 4. Its request/response
+envelopes and snapshot are frozen in a v0.3 fixture. Unwrapped v3 commands are
+recognized only far enough to return a typed version error; they are never
+executed.
+
 ## 5. Relationship migration
 
 A remembered Relationship is imported only if all of these are true:

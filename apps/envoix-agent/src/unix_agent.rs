@@ -21,9 +21,10 @@ use envoix_client::model::{
     RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
 };
 use envoix_client::product::{
-    AGENT_PROTOCOL_VERSION, AgentRequest, AgentResponse, AgentSettings, AgentStatus, InboxItem,
-    InboxRoot, PairingInvitation, PreparedRememberedDevice, ProductStore, RememberedDeviceRecord,
-    default_agent_state_directory,
+    AGENT_PROTOCOL_VERSION, AgentRequest, AgentRequestEnvelope, AgentResponse,
+    AgentResponseEnvelope, AgentSettings, AgentSnapshot, AgentStatus, InboxItem, InboxRoot,
+    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation, PreparedRememberedDevice,
+    ProductStore, RememberedDeviceRecord, default_agent_state_directory, is_valid_agent_request_id,
 };
 use envoix_client::{
     DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, IdentityConfig, TransferCancelToken,
@@ -32,7 +33,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
-const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 const REMEMBERED_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
 const RECEIVER_RETRY_DELAY: Duration = Duration::from_secs(3);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
@@ -116,6 +116,16 @@ impl AgentRuntime {
         let mut options = TransferOptions::default();
         options.relay = relay.map(str::to_string);
         self.client.session_config(&options)
+    }
+
+    fn snapshot(&self, inbox_limit: usize) -> Result<AgentSnapshot> {
+        let status = self.status()?;
+        let store = lock(&self.store)?;
+        Ok(AgentSnapshot {
+            status,
+            engine: store.engine_snapshot(),
+            inbox: store.inbox(inbox_limit),
+        })
     }
 }
 
@@ -295,19 +305,91 @@ async fn serve_connection(runtime: Arc<AgentRuntime>, stream: UnixStream) -> Res
     let mut request_bytes = Vec::new();
     let mut limited = BufReader::new(read).take(MAX_AGENT_REQUEST_BYTES + 1);
     limited.read_until(b'\n', &mut request_bytes).await?;
-    let response = if request_bytes.len() as u64 > MAX_AGENT_REQUEST_BYTES {
-        AgentResponse::error("request_too_large", "Agent request exceeds 64 KiB")
+    let (request_id, response) = if request_bytes.len() as u64 > MAX_AGENT_REQUEST_BYTES {
+        (
+            "invalid".to_string(),
+            AgentResponse::error("request_too_large", "Agent request exceeds 64 KiB"),
+        )
     } else {
-        match serde_json::from_slice::<AgentRequest>(&request_bytes) {
-            Ok(request) => handle_request(runtime, request).await,
-            Err(error) => AgentResponse::error("invalid_request", error.to_string()),
+        match decode_request(&request_bytes) {
+            Ok(envelope) => {
+                let request_id = envelope.request_id;
+                let response = handle_request(runtime, envelope.request).await;
+                (request_id, response)
+            }
+            Err(error) => (
+                error.request_id,
+                AgentResponse::error(error.code, error.message),
+            ),
         }
     };
-    let mut response_bytes = serde_json::to_vec(&response)?;
+    let mut envelope = AgentResponseEnvelope::new(request_id.clone(), response)?;
+    let mut response_bytes = serde_json::to_vec(&envelope)?;
+    if response_bytes.len() as u64 > MAX_AGENT_RESPONSE_BYTES {
+        envelope = AgentResponseEnvelope::new(
+            request_id,
+            AgentResponse::error(
+                "response_too_large",
+                "Agent response exceeds the control message limit",
+            ),
+        )?;
+        response_bytes = serde_json::to_vec(&envelope)?;
+    }
     response_bytes.push(b'\n');
     write.write_all(&response_bytes).await?;
     write.shutdown().await?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct RequestDecodeError {
+    request_id: String,
+    code: &'static str,
+    message: String,
+}
+
+fn decode_request(bytes: &[u8]) -> Result<AgentRequestEnvelope, RequestDecodeError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|error| RequestDecodeError {
+            request_id: "invalid".into(),
+            code: "invalid_request",
+            message: error.to_string(),
+        })?;
+    let request_id = value
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|request_id| is_valid_agent_request_id(request_id))
+        .unwrap_or("invalid")
+        .to_string();
+    let protocol_version = value
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| value.get("command").map(|_| 3));
+    if protocol_version != Some(u64::from(AGENT_PROTOCOL_VERSION)) {
+        return Err(RequestDecodeError {
+            request_id,
+            code: "unsupported_protocol_version",
+            message: format!(
+                "Agent protocol {} is unsupported; expected {}",
+                protocol_version
+                    .map(|version| version.to_string())
+                    .unwrap_or_else(|| "missing".into()),
+                AGENT_PROTOCOL_VERSION
+            ),
+        });
+    }
+    let envelope: AgentRequestEnvelope =
+        serde_json::from_value(value).map_err(|error| RequestDecodeError {
+            request_id: request_id.clone(),
+            code: "invalid_request",
+            message: error.to_string(),
+        })?;
+    envelope.validate().map_err(|error| RequestDecodeError {
+        request_id,
+        code: "invalid_request",
+        message: error.to_string(),
+    })?;
+    Ok(envelope)
 }
 
 async fn handle_request(runtime: Arc<AgentRuntime>, request: AgentRequest) -> AgentResponse {
@@ -325,15 +407,18 @@ async fn handle_request_result(
         AgentRequest::Status => Ok(AgentResponse::Status {
             status: runtime.status()?,
         }),
+        AgentRequest::Snapshot { inbox_limit } => Ok(AgentResponse::Snapshot {
+            snapshot: runtime.snapshot(inbox_limit)?,
+        }),
         AgentRequest::ListDevices => Ok(AgentResponse::Devices {
             devices: lock(&runtime.store)?.devices(),
         }),
-        AgentRequest::ForgetDevice { device } => {
+        AgentRequest::RevokeDevice { device } => {
             let forgotten = lock(&runtime.store)?.forget_device(&device)?;
             if let Some(cancel) = lock(&runtime.active_receivers)?.get(&forgotten.id) {
                 cancel.cancel();
             }
-            Ok(AgentResponse::DeviceForgotten { device: forgotten })
+            Ok(AgentResponse::DeviceRevoked { device: forgotten })
         }
         AgentRequest::ListInbox { limit } => Ok(AgentResponse::Inbox {
             items: lock(&runtime.store)?.inbox(limit),
@@ -1066,6 +1151,21 @@ mod tests {
         assert!(error.to_string().contains("validate Agent settings"));
     }
 
+    #[test]
+    fn request_decoder_rejects_v3_with_a_typed_version_error() {
+        let error = decode_request(br#"{"command":"status"}"#).unwrap_err();
+        assert_eq!(error.code, "unsupported_protocol_version");
+        assert!(error.message.contains("3"));
+        assert!(error.message.contains(&AGENT_PROTOCOL_VERSION.to_string()));
+    }
+
+    #[test]
+    fn request_decoder_accepts_a_valid_v4_envelope() {
+        let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        assert_eq!(decode_request(&bytes).unwrap(), envelope);
+    }
+
     #[tokio::test]
     async fn empty_runtime_reports_status_and_empty_inbox() {
         let directory = tempfile::tempdir().unwrap();
@@ -1094,10 +1194,54 @@ mod tests {
         assert_eq!(status.device_name, "test-wsl");
         assert_eq!(status.protocol_version, AGENT_PROTOCOL_VERSION);
         assert_eq!(status.paired_devices, 0);
+        let AgentResponse::Snapshot { snapshot } =
+            handle_request(runtime.clone(), AgentRequest::Snapshot { inbox_limit: 20 }).await
+        else {
+            panic!("unexpected response")
+        };
+        assert_eq!(snapshot.engine.contract_version, 6);
+        assert!(snapshot.inbox.is_empty());
         assert_eq!(
             handle_request(runtime, AgentRequest::LatestInbox).await,
             AgentResponse::Latest { item: None }
         );
+    }
+
+    #[tokio::test]
+    async fn local_socket_round_trips_a_v4_envelope() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let runtime = Arc::new(AgentRuntime {
+            config: RuntimeConfig {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                socket_path: state_directory.join("agent.sock"),
+                device_name: "test-wsl".into(),
+                broker: "broker".into(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(serve_connection(runtime, server));
+        let (read, mut write) = client.into_split();
+        let request = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        write.write_all(&bytes).await.unwrap();
+        write.shutdown().await.unwrap();
+        let mut line = String::new();
+        BufReader::new(read).read_line(&mut line).await.unwrap();
+        server_task.await.unwrap().unwrap();
+
+        let response: AgentResponseEnvelope = serde_json::from_str(&line).unwrap();
+        response.validate_for("request_test").unwrap();
+        assert!(matches!(response.response, AgentResponse::Status { .. }));
     }
 
     #[tokio::test]
@@ -1133,13 +1277,13 @@ mod tests {
 
         let response = handle_request(
             runtime.clone(),
-            AgentRequest::ForgetDevice {
+            AgentRequest::RevokeDevice {
                 device: "macbook".into(),
             },
         )
         .await;
 
-        let AgentResponse::DeviceForgotten { device } = response else {
+        let AgentResponse::DeviceRevoked { device } = response else {
             panic!("unexpected response")
         };
         assert_eq!(device.id, device_id);

@@ -24,3 +24,6 @@ absent from that snapshot.
 
 `engine-state-v1.json` freezes the empty, non-secret Engine storage envelope.
 Storage migrations add a new fixture rather than rewriting this file.
+
+`agent-control-v4.json` freezes the first explicitly versioned Agent request
+and response envelopes, including the immutable Engine/Inbox snapshot.
