@@ -39,10 +39,74 @@ val envoixRustTargets =
 
 val envoixAndroidApiLevel = 26
 val generatedJniLibsDir = layout.buildDirectory.dir("generated/envoix/jniLibs")
+val generatedUniFfiKotlinDir = layout.buildDirectory.dir("generated/envoix/uniffiKotlin")
+val hostExecutableSuffix = if (System.getProperty("os.name").startsWith("Windows")) ".exe" else ""
+val hostDynamicLibrary =
+    when {
+        System.getProperty("os.name").startsWith("Windows") -> "envoix_ffi.dll"
+        System.getProperty("os.name").startsWith("Mac") -> "libenvoix_ffi.dylib"
+        else -> "libenvoix_ffi.so"
+    }
+
+val generateEnvoixUniFfiKotlin by tasks.registering {
+    group = "build"
+    description = "Generates the typed Envoix Kotlin binding from Rust metadata."
+
+    inputs.files(
+        rootProject.layout.projectDirectory
+            .dir("../crates/envoix-ffi")
+            .asFileTree,
+        rootProject.layout.projectDirectory
+            .dir("../crates/envoix-client")
+            .asFileTree,
+        rootProject.layout.projectDirectory.file("../Cargo.toml"),
+        rootProject.layout.projectDirectory.file("../Cargo.lock"),
+    )
+    outputs.dir(generatedUniFfiKotlinDir)
+
+    doLast {
+        val repository =
+            rootProject.layout.projectDirectory
+                .dir("..")
+                .asFile
+        exec {
+            workingDir = repository
+            commandLine(
+                "cargo",
+                "build",
+                "-p",
+                "envoix-ffi",
+                "--features",
+                "bindgen-cli",
+                "--lib",
+                "--bin",
+                "envoix-bindgen",
+            )
+        }
+
+        delete(generatedUniFfiKotlinDir)
+        exec {
+            workingDir = repository
+            commandLine(
+                repository.resolve("target/debug/envoix-bindgen$hostExecutableSuffix"),
+                "generate",
+                "--language",
+                "kotlin",
+                "--no-format",
+                "--out-dir",
+                generatedUniFfiKotlinDir.get().asFile,
+                "--config",
+                repository.resolve("crates/envoix-ffi/uniffi.toml"),
+                repository.resolve("target/debug/$hostDynamicLibrary"),
+            )
+        }
+    }
+}
 
 val buildEnvoixJniAndroid by tasks.registering {
     group = "build"
-    description = "Builds and stages the hand-written Android JNI core."
+    description = "Builds and stages the UniFFI core and exceptional JNI boundaries."
+    dependsOn(generateEnvoixUniFfiKotlin)
 
     inputs.files(
         rootProject.layout.projectDirectory
@@ -73,6 +137,8 @@ val buildEnvoixJniAndroid by tasks.registering {
                 "--release",
                 "-p",
                 "envoix-android-jni",
+                "-p",
+                "envoix-ffi",
             )
 
         exec {
@@ -86,16 +152,18 @@ val buildEnvoixJniAndroid by tasks.registering {
         delete(generatedJniLibsDir)
         envoixAndroidAbis.forEach { abi ->
             val rustTarget = envoixRustTargets.getValue(abi)
-            val sharedLibrary =
-                rootProject.layout.projectDirectory
-                    .file("../target/$rustTarget/release/libenvoix_jni.so")
-                    .asFile
-            require(sharedLibrary.isFile) {
-                "cargo-ndk did not produce ${sharedLibrary.absolutePath}"
-            }
-            copy {
-                from(sharedLibrary)
-                into(generatedJniLibsDir.map { it.dir(abi) })
+            listOf("envoix_jni", "envoix_ffi").forEach { library ->
+                val sharedLibrary =
+                    rootProject.layout.projectDirectory
+                        .file("../target/$rustTarget/release/lib$library.so")
+                        .asFile
+                require(sharedLibrary.isFile) {
+                    "cargo-ndk did not produce ${sharedLibrary.absolutePath}"
+                }
+                copy {
+                    from(sharedLibrary)
+                    into(generatedJniLibsDir.map { it.dir(abi) })
+                }
             }
         }
     }
@@ -148,6 +216,7 @@ android {
     }
 
     sourceSets.getByName("main") {
+        java.srcDir(generatedUniFfiKotlinDir)
         jniLibs.setSrcDirs(listOf(generatedJniLibsDir.get().asFile))
     }
 
@@ -160,6 +229,9 @@ android {
 }
 
 tasks.configureEach {
+    if (name.startsWith("compile") && name.endsWith("Kotlin")) {
+        dependsOn(generateEnvoixUniFfiKotlin)
+    }
     if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
         dependsOn(buildEnvoixJniAndroid)
     }
@@ -183,6 +255,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("net.java.dev.jna:jna:5.19.0@aar")
     implementation("com.google.zxing:core:3.5.3") // QR encode + decode
     // CameraX for the custom QR scanner (preview + frame analysis)
     implementation("androidx.camera:camera-core:1.3.4")

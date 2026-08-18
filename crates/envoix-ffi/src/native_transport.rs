@@ -29,7 +29,7 @@ pub trait FfiNativeDuplexTransport: Send + Sync {
         max_bytes: u32,
     ) -> Result<FfiNativeTransportRead, FfiNativeTransportError>;
 
-    async fn close(&self) -> Result<(), FfiNativeTransportError>;
+    async fn shutdown(&self) -> Result<(), FfiNativeTransportError>;
 }
 
 pub(crate) fn core_native_transport(
@@ -66,7 +66,7 @@ impl PlatformDuplexTransport for ForeignNativeTransport {
     }
 
     async fn close(&self) -> Result<(), SessionError> {
-        self.transport.close().await.map_err(platform_error)
+        self.transport.shutdown().await.map_err(platform_error)
     }
 }
 

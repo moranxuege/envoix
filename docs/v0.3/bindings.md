@@ -6,7 +6,7 @@ Status: normative for M5 and later platform migrations.
 
 The native library exposes two independent versions:
 
-- UniFFI API `16` identifies the complete native symbol/type surface;
+- UniFFI API `17` identifies the complete native symbol/type surface;
 - application binding `1` projects application contract `6`.
 
 Callers must check both `envoixCoreInfo()` and
@@ -26,6 +26,10 @@ Swift and Kotlin receive identical ordering. Bulk file bytes, endpoint details,
 relationship credentials, invitation material, and verification values are
 absent from snapshots and events. Invitation and verification values appear
 only in the immediate command/effect pair that must consume them.
+
+Foreign transport and inbox ports use `shutdown()` for their asynchronous
+protocol operation. Generated object-handle disposal remains `close()`; the two
+names must stay distinct because Kotlin objects implement `AutoCloseable`.
 
 ## State and recovery ownership
 
@@ -48,5 +52,7 @@ scripts/check-generated-bindings.sh
 
 The script builds one metadata-bearing native library, generates Swift and
 Kotlin from it, and verifies that Command/Event/Snapshot types exist in both
-outputs. Generated source is build output and is not checked into the
-repository; Apple packaging and Android staging generate from the same crate.
+outputs. It also rejects an asynchronous zero-argument `close()` before UniFFI
+can emit an uncompilable Kotlin overload. Generated source is build output and
+is not checked into the repository; Apple packaging and Android staging
+generate from the same crate.

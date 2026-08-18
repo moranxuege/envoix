@@ -183,6 +183,7 @@ targets:
       - Tests/EnvoixIOSUITests/AppleWifiAwareControlRoleStoreTests.swift
       - Tests/EnvoixIOSUITests/AppleWifiAwareServiceCoordinatorTests.swift
       - Tests/EnvoixIOSUITests/WifiAwareRendezvousProtocolTests.swift
+      - Tests/EnvoixIOSUITests/ApplicationEngineAdapterTests.swift
       - Tests/EnvoixMacOSUITests/ConnectionHubPresentationTests.swift
       - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
       - Tests/EnvoixMacOSUITests/RoomCodeInputFormatterTests.swift

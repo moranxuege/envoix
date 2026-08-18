@@ -115,7 +115,7 @@ final class AppleBonjourDiscoveryProvider: NearbyRendezvousProvider,
         inbox = nil
         if let activeInbox {
             Task {
-                try? await activeInbox.close()
+                try? await activeInbox.shutdown()
             }
         }
         refreshTimer?.invalidate()
@@ -221,7 +221,7 @@ final class AppleBonjourDiscoveryProvider: NearbyRendezvousProvider,
                 guard self.active,
                       self.generation == generation,
                       !Task.isCancelled else {
-                    try? await inbox.close()
+                    try? await inbox.shutdown()
                     return
                 }
                 let endpoint = inbox.endpoint()
@@ -234,7 +234,7 @@ final class AppleBonjourDiscoveryProvider: NearbyRendezvousProvider,
                         )
                     )
                 ) else {
-                    try? await inbox.close()
+                    try? await inbox.shutdown()
                     self.inboxStartTask = nil
                     self.inboxState = .failed
                     self.listenerState = self.advertisingEnabled ? .failed : .cancelled
@@ -354,7 +354,7 @@ final class AppleBonjourDiscoveryProvider: NearbyRendezvousProvider,
     private func failInbox(_ failedInbox: FfiNearbyInviteInbox, generation: Int) {
         guard active, self.generation == generation, inbox === failedInbox else { return }
         Task {
-            try? await failedInbox.close()
+            try? await failedInbox.shutdown()
         }
         inbox = nil
         inboxState = .failed

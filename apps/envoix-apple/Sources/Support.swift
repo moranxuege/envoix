@@ -28,7 +28,7 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-let expectedCoreFFIAPIVersion: UInt32 = 16
+let expectedCoreFFIAPIVersion: UInt32 = 17
 let expectedRoomControlCoreCapability = "foreground_room_control_v5"
 let expectedNearbyInviteCoreCapability = "nearby_invite_inbox_v1"
 let expectedFailureProjectionCoreCapability = "canonical_failure_projection_v1"

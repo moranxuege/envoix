@@ -24,7 +24,7 @@ pub trait FfiNativeDatagramTransport: Send + Sync {
         max_bytes: u32,
     ) -> Result<FfiNativeDatagram, FfiNativeTransportError>;
 
-    async fn close(&self) -> Result<(), FfiNativeTransportError>;
+    async fn shutdown(&self) -> Result<(), FfiNativeTransportError>;
 }
 
 pub(crate) fn core_datagram_transport(
@@ -61,7 +61,7 @@ impl PlatformDatagramTransport for ForeignDatagramTransport {
     }
 
     async fn close(&self) -> Result<(), SessionError> {
-        self.transport.close().await.map_err(platform_error)
+        self.transport.shutdown().await.map_err(platform_error)
     }
 }
 

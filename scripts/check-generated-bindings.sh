@@ -43,6 +43,10 @@ test -s "$swift_binding"
 rg -q 'sealed class FfiApplicationCommand' "$kotlin_binding"
 rg -q 'sealed class FfiApplicationEvent' "$kotlin_binding"
 rg -q 'data class FfiApplicationSnapshot' "$kotlin_binding"
+if rg -q 'suspend fun `close`\(\)' "$kotlin_binding"; then
+  echo "error: async close() conflicts with UniFFI AutoCloseable.close() in Kotlin" >&2
+  exit 1
+fi
 rg -q 'public enum FfiApplicationCommand' "$swift_binding"
 rg -q 'public enum FfiApplicationEvent' "$swift_binding"
 rg -q 'public struct FfiApplicationSnapshot' "$swift_binding"

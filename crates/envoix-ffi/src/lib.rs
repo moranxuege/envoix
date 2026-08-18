@@ -32,7 +32,7 @@ pub use nearby_invite::*;
 mod room_control;
 pub use room_control::*;
 
-const ENVOIX_FFI_API_VERSION: u32 = 16;
+const ENVOIX_FFI_API_VERSION: u32 = 17;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =

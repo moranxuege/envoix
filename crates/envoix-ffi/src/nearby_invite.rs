@@ -60,7 +60,7 @@ impl FfiNearbyInviteInbox {
         .await
     }
 
-    pub async fn close(&self) -> Result<(), EnvoixError> {
+    pub async fn shutdown(&self) -> Result<(), EnvoixError> {
         let inbox = self.inbox.clone();
         spawn_on_ffi_runtime(async move {
             inbox.close().await;
@@ -163,9 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_nearby_invite_inbox_v1_ffi_v16() {
+    fn core_info_advertises_nearby_invite_inbox_v1_ffi_v17() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 16);
+        assert_eq!(info.ffi_api_version, 17);
         assert!(
             info.capabilities
                 .iter()
