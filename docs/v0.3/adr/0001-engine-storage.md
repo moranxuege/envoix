@@ -61,6 +61,13 @@ rare corrupted result even if DPAPI itself returns success. Linux/WSL uses the
 documented owner-only file fallback there. Mobile and signed Apple hosts use
 their native vault ports.
 
+The Engine host injects a `SecureVaultPort`; product code does not construct a
+platform credential backend. The port accepts validated `VaultReference`
+values and non-serializable, zeroizing `SecretBytes`. Its failures are typed,
+including `InteractionRequired`, so polling and background work cannot turn a
+platform prompt into an implicit retry loop. The desktop Agent supplies the
+owner-scoped file/DPAPI adapter, while hosted tests use an in-memory adapter.
+
 ## Alternatives considered
 
 ### SQLite

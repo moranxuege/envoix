@@ -9,7 +9,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(windows)]
 use zeroize::{Zeroize, Zeroizing};
 
-const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
+use crate::ports::{MAX_VAULT_SECRET_BYTES, PlatformPortError, SecretBytes, SecureVaultPort};
+use crate::storage::VaultReference;
+
 const MAX_CREDENTIAL_FILE_BYTES: u64 = 1024 * 1024;
 #[cfg(windows)]
 const WINDOWS_CREDENTIAL_MAGIC: &[u8] = b"ENVW\x01";
@@ -37,7 +39,7 @@ impl DesktopCredentialStore {
 
     pub fn put(&self, credential_ref: &str, opaque_credential: &[u8]) -> io::Result<()> {
         let target = self.path(credential_ref)?;
-        if opaque_credential.len() > MAX_CREDENTIAL_BYTES {
+        if opaque_credential.len() > MAX_VAULT_SECRET_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "credential data exceeds the supported size",
@@ -246,7 +248,7 @@ fn unprotect_windows_credential(credential_ref: &str, protected: &[u8]) -> io::R
             )
         })?;
     let (credential, actual_digest) = plaintext.split_at(credential_len);
-    if credential.len() > MAX_CREDENTIAL_BYTES {
+    if credential.len() > MAX_VAULT_SECRET_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Windows credential data exceeds the supported size",
@@ -260,6 +262,43 @@ fn unprotect_windows_credential(credential_ref: &str, protected: &[u8]) -> io::R
         ));
     }
     Ok(credential.to_vec())
+}
+
+impl SecureVaultPort for DesktopCredentialStore {
+    fn contains(&self, reference: &VaultReference) -> Result<bool, PlatformPortError> {
+        self.contains(reference.as_str()).map_err(port_error)
+    }
+
+    fn store(
+        &self,
+        reference: &VaultReference,
+        secret: &SecretBytes,
+    ) -> Result<(), PlatformPortError> {
+        self.put(reference.as_str(), secret.expose())
+            .map_err(port_error)
+    }
+
+    fn load(&self, reference: &VaultReference) -> Result<Option<SecretBytes>, PlatformPortError> {
+        self.get(reference.as_str())
+            .map_err(port_error)?
+            .map(|bytes| SecretBytes::new(bytes).map_err(|_| PlatformPortError::CorruptData))
+            .transpose()
+    }
+
+    fn delete(&self, reference: &VaultReference) -> Result<(), PlatformPortError> {
+        self.delete(reference.as_str()).map_err(port_error)
+    }
+}
+
+fn port_error(error: io::Error) -> PlatformPortError {
+    match error.kind() {
+        io::ErrorKind::InvalidInput => PlatformPortError::InvalidRequest,
+        io::ErrorKind::InvalidData => PlatformPortError::CorruptData,
+        io::ErrorKind::PermissionDenied => PlatformPortError::PermissionDenied,
+        io::ErrorKind::Interrupted => PlatformPortError::Canceled,
+        io::ErrorKind::WouldBlock => PlatformPortError::Limited,
+        _ => PlatformPortError::Unavailable,
+    }
 }
 
 #[cfg(windows)]
@@ -403,10 +442,29 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let store = DesktopCredentialStore::new(directory.path());
         let error = store
-            .put("reference_1", &vec![0; MAX_CREDENTIAL_BYTES + 1])
+            .put("reference_1", &vec![0; MAX_VAULT_SECRET_BYTES + 1])
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(!directory.path().join("reference_1").exists());
+    }
+
+    #[test]
+    fn vault_port_classifies_invalid_stored_secret_without_exposing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("reference_1"), []).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            directory.path().join("reference_1"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let store = DesktopCredentialStore::new(directory.path());
+        let reference = VaultReference::parse("reference_1").unwrap();
+
+        assert_eq!(
+            SecureVaultPort::load(&store, &reference).unwrap_err(),
+            PlatformPortError::CorruptData
+        );
     }
 
     #[cfg(windows)]

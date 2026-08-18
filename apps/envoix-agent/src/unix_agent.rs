@@ -1210,11 +1210,11 @@ async fn remembered_receiver_loop(
                 return;
             }
         };
-        match connect_remembered_room(&runtime, &record, &opaque, receiver_cancel).await {
+        match connect_remembered_room(&runtime, &record, opaque.expose(), receiver_cancel).await {
             Ok((session, next_generation)) => {
                 if let Err(error) = lock(&runtime.store).and_then(|mut store| {
                     store
-                        .rotate_device(record.id(), &opaque, next_generation)
+                        .rotate_device(record.id(), opaque.expose(), next_generation)
                         .map_err(Into::into)
                 }) {
                     session.shutdown().await;

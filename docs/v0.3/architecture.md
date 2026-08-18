@@ -355,7 +355,9 @@ Presentation code and standalone CLI commands never read secrets. Vault access
 occurs on Engine startup or first credential use, pairing, rotation, and
 revocation. It is not triggered by rendering, progress updates, or reconnect
 polling. Tests use an in-memory vault unless they explicitly test a platform
-adapter.
+adapter. The Engine host injects the `SecureVaultPort`; the contract exchanges
+only validated vault references and zeroizing, non-serializable secret values,
+and represents required user interaction as a typed result.
 
 ## 10. Presentation architecture
 

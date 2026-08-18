@@ -12,6 +12,7 @@ use std::io;
 #[cfg(test)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -28,6 +29,7 @@ use crate::model::{
     CommandId, ContentId, Device, DeviceId, Relationship, RelationshipId, RelationshipState,
     Transfer, TransferDirection, TransferFailure, TransferId, TransferRejection, TransferState,
 };
+use crate::ports::{SecretBytes, SecureVaultPort};
 use crate::snapshot::EngineSnapshot;
 use crate::storage::{
     DurableRelationship, EngineState, EngineStore, EngineStoreError, EngineStoreOrigin,
@@ -881,15 +883,23 @@ impl LegacyProductStore {
 /// Agent-facing projection of the unified Engine store and desktop vault.
 pub struct ProductStore {
     engine: EngineStore,
-    vault: DesktopCredentialStore,
+    vault: Arc<dyn SecureVaultPort>,
 }
 
 impl ProductStore {
     pub fn open(directory: impl Into<PathBuf>) -> Result<Self, EngineStoreError> {
         let directory = directory.into();
-        let vault = DesktopCredentialStore::new(directory.join("vault"));
+        let vault = Arc::new(DesktopCredentialStore::new(directory.join("vault")));
+        Self::open_with_vault(directory, vault)
+    }
+
+    pub fn open_with_vault(
+        directory: impl Into<PathBuf>,
+        vault: Arc<dyn SecureVaultPort>,
+    ) -> Result<Self, EngineStoreError> {
+        let directory = directory.into();
         let mut engine = EngineStore::open(&directory)?;
-        import_v0_2_product_state(&mut engine, &directory.join("product"), &vault)?;
+        import_v0_2_product_state(&mut engine, &directory.join("product"), vault.as_ref())?;
         Ok(Self { engine, vault })
     }
 
@@ -948,7 +958,8 @@ impl ProductStore {
                 "remembered device already exists".into(),
             ));
         }
-        if self.vault.contains(&prepared.credential_reference)? {
+        let vault_reference = VaultReference::parse(prepared.credential_reference.clone())?;
+        if self.vault.contains(&vault_reference)? {
             return Err(EngineStoreError::InvalidState(
                 "prepared vault reference already exists".into(),
             ));
@@ -958,7 +969,6 @@ impl ProductStore {
             .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
         let relationship_id = RelationshipId::parse(prepared.id.clone())
             .expect("Device and Relationship identifiers share validation");
-        let vault_reference = VaultReference::parse(prepared.credential_reference.clone())?;
         let mut state = self.engine.state().clone();
         apply_product_event(
             &mut state,
@@ -978,22 +988,20 @@ impl ProductStore {
         state.durable_relationships.insert(
             relationship_id,
             DurableRelationship {
-                vault_reference: Some(vault_reference),
+                vault_reference: Some(vault_reference.clone()),
                 broker: prepared.broker,
                 relay: prepared.relay,
             },
         );
 
-        self.vault
-            .put(&prepared.credential_reference, opaque_credential)?;
+        let secret = SecretBytes::new(opaque_credential.to_vec())?;
+        self.vault.store(&vault_reference, &secret)?;
         if let Err(error) = self.engine.replace(state) {
-            self.vault
-                .delete(&prepared.credential_reference)
-                .map_err(|rollback| {
-                    EngineStoreError::InvalidState(format!(
-                        "{error}; vault rollback also failed: {rollback}"
-                    ))
-                })?;
+            self.vault.delete(&vault_reference).map_err(|rollback| {
+                EngineStoreError::InvalidState(format!(
+                    "{error}; vault rollback also failed: {rollback}"
+                ))
+            })?;
             return Err(error);
         }
         self.device_record(&prepared.id)
@@ -1021,11 +1029,14 @@ impl ProductStore {
         if generation == current.generation {
             return Ok(());
         }
-        let old_credential = Zeroizing::new(self.device_credential(id)?);
-        let changed = old_credential.as_slice() != opaque_credential;
+        let vault_reference = VaultReference::parse(current.credential_reference.clone())?;
+        let old_credential = self.vault.load(&vault_reference)?.ok_or_else(|| {
+            EngineStoreError::InvalidState("remembered device credential is missing".into())
+        })?;
+        let changed = old_credential.expose() != opaque_credential;
         if changed {
-            self.vault
-                .put(&current.credential_reference, opaque_credential)?;
+            let secret = SecretBytes::new(opaque_credential.to_vec())?;
+            self.vault.store(&vault_reference, &secret)?;
         }
 
         let relationship_id =
@@ -1041,7 +1052,7 @@ impl ProductStore {
         if let Err(error) = self.engine.replace(state) {
             if changed {
                 self.vault
-                    .put(&current.credential_reference, &old_credential)
+                    .store(&vault_reference, &old_credential)
                     .map_err(|rollback| {
                         EngineStoreError::InvalidState(format!(
                             "{error}; vault rollback also failed: {rollback}"
@@ -1107,24 +1118,21 @@ impl ProductStore {
             .find(|device| device.id == id)
     }
 
-    pub fn device_credential(&self, id: &str) -> Result<Vec<u8>, EngineStoreError> {
+    pub fn device_credential(&self, id: &str) -> Result<SecretBytes, EngineStoreError> {
         let device = self
             .device_record(id)
             .ok_or_else(|| EngineStoreError::InvalidState("remembered device is missing".into()))?;
-        self.vault
-            .get(&device.credential_reference)?
-            .ok_or_else(|| {
-                EngineStoreError::InvalidState("remembered device credential is missing".into())
-            })
+        let reference = VaultReference::parse(device.credential_reference)?;
+        self.vault.load(&reference)?.ok_or_else(|| {
+            EngineStoreError::InvalidState("remembered device credential is missing".into())
+        })
     }
 
     pub fn forget_device(&mut self, selector: &str) -> Result<DeviceSummary, EngineStoreError> {
         let record = self.resolve_device(selector)?;
-        let credential = self
-            .vault
-            .get(&record.credential_reference)?
-            .map(Zeroizing::new);
-        self.vault.delete(&record.credential_reference)?;
+        let vault_reference = VaultReference::parse(record.credential_reference.clone())?;
+        let credential = self.vault.load(&vault_reference)?;
+        self.vault.delete(&vault_reference)?;
 
         let relationship_id =
             RelationshipId::parse(record.id.clone()).expect("stored device ID was validated");
@@ -1143,7 +1151,7 @@ impl ProductStore {
         if let Err(error) = self.engine.replace(state) {
             if let Some(credential) = credential {
                 self.vault
-                    .put(&record.credential_reference, &credential)
+                    .store(&vault_reference, &credential)
                     .map_err(|rollback| {
                         EngineStoreError::InvalidState(format!(
                             "{error}; vault rollback also failed: {rollback}"
@@ -1579,7 +1587,7 @@ pub enum V02ProductImportOutcome {
 pub fn import_v0_2_product_state(
     engine: &mut EngineStore,
     legacy_directory: &Path,
-    target_vault: &DesktopCredentialStore,
+    target_vault: &dyn SecureVaultPort,
 ) -> Result<V02ProductImportOutcome, EngineStoreError> {
     if let Some(record) = &engine.state().migration.v0_2_import {
         return Ok(V02ProductImportOutcome::AlreadyImported(record.clone()));
@@ -1733,21 +1741,16 @@ pub fn import_v0_2_product_state(
 
     engine.install_migration_backup(V02_PRODUCT_STATE_BACKUP, &source_bytes)?;
     for (reference, credential) in credential_copies {
-        if let Some(existing) = target_vault
-            .get(reference.as_str())
-            .map_err(EngineStoreError::Io)?
-        {
-            let existing = Zeroizing::new(existing);
-            if existing.as_slice() != credential.as_slice() {
+        if let Some(existing) = target_vault.load(&reference)? {
+            if existing.expose() != credential.as_slice() {
                 return Err(EngineStoreError::InvalidState(format!(
                     "target vault reference {} already contains different data",
                     reference.as_str()
                 )));
             }
         } else {
-            target_vault
-                .put(reference.as_str(), &credential)
-                .map_err(EngineStoreError::Io)?;
+            let secret = SecretBytes::new(credential.to_vec())?;
+            target_vault.store(&reference, &secret)?;
         }
     }
     engine.replace(candidate)?;
@@ -2080,6 +2083,86 @@ fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct MemoryVault {
+        values: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl SecureVaultPort for MemoryVault {
+        fn contains(
+            &self,
+            reference: &VaultReference,
+        ) -> Result<bool, crate::ports::PlatformPortError> {
+            Ok(self.values.lock().unwrap().contains_key(reference.as_str()))
+        }
+
+        fn store(
+            &self,
+            reference: &VaultReference,
+            secret: &SecretBytes,
+        ) -> Result<(), crate::ports::PlatformPortError> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(reference.as_str().to_string(), secret.expose().to_vec());
+            Ok(())
+        }
+
+        fn load(
+            &self,
+            reference: &VaultReference,
+        ) -> Result<Option<SecretBytes>, crate::ports::PlatformPortError> {
+            self.values
+                .lock()
+                .unwrap()
+                .get(reference.as_str())
+                .cloned()
+                .map(SecretBytes::new)
+                .transpose()
+        }
+
+        fn delete(
+            &self,
+            reference: &VaultReference,
+        ) -> Result<(), crate::ports::PlatformPortError> {
+            self.values.lock().unwrap().remove(reference.as_str());
+            Ok(())
+        }
+    }
+
+    struct InteractionRequiredVault;
+
+    impl SecureVaultPort for InteractionRequiredVault {
+        fn contains(
+            &self,
+            _reference: &VaultReference,
+        ) -> Result<bool, crate::ports::PlatformPortError> {
+            Ok(false)
+        }
+
+        fn store(
+            &self,
+            _reference: &VaultReference,
+            _secret: &SecretBytes,
+        ) -> Result<(), crate::ports::PlatformPortError> {
+            Err(crate::ports::PlatformPortError::InteractionRequired)
+        }
+
+        fn load(
+            &self,
+            _reference: &VaultReference,
+        ) -> Result<Option<SecretBytes>, crate::ports::PlatformPortError> {
+            Err(crate::ports::PlatformPortError::InteractionRequired)
+        }
+
+        fn delete(
+            &self,
+            _reference: &VaultReference,
+        ) -> Result<(), crate::ports::PlatformPortError> {
+            Err(crate::ports::PlatformPortError::InteractionRequired)
+        }
+    }
+
     fn opaque_credential() -> Vec<u8> {
         RememberedCredential::from_control_pairing(
             b"fixture control key",
@@ -2128,7 +2211,55 @@ mod tests {
         assert_eq!(device.label(), "MacBook");
         assert_eq!(device.generation(), 1);
         assert_eq!(device.previous_generation(), Some(0));
-        assert_eq!(reopened.device_credential(&id).unwrap(), credential);
+        assert_eq!(
+            reopened.device_credential(&id).unwrap().expose(),
+            credential.as_slice()
+        );
+    }
+
+    #[test]
+    fn product_store_uses_an_injected_vault_without_serializing_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Arc::new(MemoryVault::default());
+        let credential = opaque_credential();
+        let mut store = ProductStore::open_with_vault(directory.path(), vault.clone()).unwrap();
+        let pending = store.prepare_device("Android", "broker", None).unwrap();
+        let id = pending.id().to_string();
+        store.commit_device(pending, &credential, 0).unwrap();
+
+        let serialized = fs::read(directory.path().join("engine-state-v1.json")).unwrap();
+        assert!(
+            !serialized
+                .windows(credential.len())
+                .any(|window| window == credential)
+        );
+        drop(store);
+
+        let reopened = ProductStore::open_with_vault(directory.path(), vault).unwrap();
+        assert_eq!(
+            reopened.device_credential(&id).unwrap().expose(),
+            credential.as_slice()
+        );
+    }
+
+    #[test]
+    fn vault_interaction_is_typed_and_never_partially_commits_a_relationship() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store =
+            ProductStore::open_with_vault(directory.path(), Arc::new(InteractionRequiredVault))
+                .unwrap();
+        let pending = store.prepare_device("iPhone", "broker", None).unwrap();
+
+        let error = store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            EngineStoreError::PlatformPort(crate::ports::PlatformPortError::InteractionRequired)
+        ));
+        assert!(store.devices().is_empty());
+        assert!(store.engine.state().snapshot.relationships.is_empty());
     }
 
     #[test]

@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::model::{RelationshipId, RelationshipState, RoomState, TransferState};
+use crate::ports::PlatformPortError;
 use crate::product::InboxItem;
 use crate::snapshot::EngineSnapshot;
 
@@ -40,6 +41,8 @@ pub enum EngineStoreError {
     InvalidState(String),
     #[error("decode Engine state: {0}")]
     Decode(#[source] serde_json::Error),
+    #[error(transparent)]
+    PlatformPort(#[from] PlatformPortError),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
