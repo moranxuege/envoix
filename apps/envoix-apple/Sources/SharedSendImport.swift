@@ -1,4 +1,3 @@
-#if os(iOS)
 import Foundation
 
 final class ShareDraftLease {
@@ -24,6 +23,7 @@ final class ShareDraftLease {
     }
 }
 
+#if os(iOS)
 struct PendingSendSelection: Identifiable {
     let id: UUID
     let fileURLs: [URL]

@@ -581,18 +581,14 @@ final class AppModel: ObservableObject {
         isCleaningTransferCache = true
         transferCacheError = nil
         let protected = Set(activities.filter { ActivityProjectionPolicy.isPending($0.state) }.map(\.activityId))
+        var drafts = Set([send.protectedShareDraftID].compactMap { $0 })
         #if os(iOS)
-        let drafts = Set(
-            [pendingSendSelection?.id, send.protectedShareDraftID].compactMap { $0 }
-        ).union(
-            Set(
-                (try? RememberedRoomOutboxStore.shared.entries())?
-                    .compactMap(\.shareDraftID) ?? []
-            )
-        )
-        #else
-        let drafts = Set<UUID>()
+        drafts.formUnion([pendingSendSelection?.id].compactMap { $0 })
         #endif
+        drafts.formUnion(
+            (try? RememberedRoomOutboxStore.shared.entries())?
+                .compactMap(\.shareDraftID) ?? []
+        )
         Task.detached {
             do {
                 let store = TransferCacheStore()
@@ -816,7 +812,6 @@ final class TransferViewModel: ObservableObject {
     private var nativeSendReleaseActions:
         [String: [@MainActor () -> Void]] = [:]
 
-    #if os(iOS)
     var preparedShareDraftID: UUID? {
         (preparedSelection?.sourceAccess as? ShareDraftLease)?.id
     }
@@ -830,7 +825,6 @@ final class TransferViewModel: ObservableObject {
         }
         return (activeSend?.sourceAccess as? ShareDraftLease)?.id
     }
-    #endif
 
     var progressFraction: Double { total > 0 ? Double(transferred) / Double(total) : 0 }
     var etaSeconds: Double? {
@@ -1116,7 +1110,6 @@ final class TransferViewModel: ObservableObject {
         return true
     }
 
-    #if os(iOS)
     @discardableResult
     func supersedePreparedShareDraft(
         with incomingID: UUID,
@@ -1128,7 +1121,6 @@ final class TransferViewModel: ObservableObject {
         try? store.discard(id: currentID)
         return true
     }
-    #endif
 
     func approvePartialManifestSource(rootItemID: UInt64) {
         resolveSource(rootItemID: rootItemID, decision: .approvePartial, path: nil)
@@ -1257,12 +1249,7 @@ final class TransferViewModel: ObservableObject {
               let preparedSelection else {
             throw RuntimeSettingsError("Finish preparing the selected files before queueing them.")
         }
-        let shareDraftID: UUID?
-        #if os(iOS)
-        shareDraftID = (preparedSelection.sourceAccess as? ShareDraftLease)?.id
-        #else
-        shareDraftID = nil
-        #endif
+        let shareDraftID = (preparedSelection.sourceAccess as? ShareDraftLease)?.id
         let sourceBookmarks: [Data]
         if shareDraftID == nil {
             sourceBookmarks = try preparedSelection.sourcePaths.map {
@@ -1387,11 +1374,9 @@ final class TransferViewModel: ObservableObject {
             try FileManager.default.removeItem(at: url)
         }
 
-        #if os(iOS)
         if let shareDraftID = entry.shareDraftID {
             try ShareDraftStore.live().discard(id: shareDraftID)
         }
-        #endif
     }
 
     func startReceivingWithToken(
@@ -1842,11 +1827,9 @@ final class TransferViewModel: ObservableObject {
         if let direction {
             clearStoredManifestSession(direction: direction)
         }
-        #if os(iOS)
         if direction == .send {
             (activeSend?.sourceAccess as? ShareDraftLease)?.acknowledge()
         }
-        #endif
         if direction == .send {
             activeSend = nil
         } else if direction == .receive {
@@ -2024,12 +2007,10 @@ final class TransferViewModel: ObservableObject {
             guard
                   isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
             do {
-                #if os(iOS)
                 if let lease = operation.sourceAccess as? ShareDraftLease,
                    let activityID = transferActivity?.activityId {
                     try lease.bind(to: activityID)
                 }
-                #endif
                 try persistActiveSend(operation)
                 let snapshot = await operation.job.snapshot()
                 guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
@@ -2578,12 +2559,7 @@ final class TransferViewModel: ObservableObject {
         guard let activity = transferActivity else {
             throw RuntimeSettingsError("Cannot persist a sender session without an activity.")
         }
-        let shareDraftID: UUID?
-        #if os(iOS)
-        shareDraftID = (operation.sourceAccess as? ShareDraftLease)?.id
-        #else
-        shareDraftID = nil
-        #endif
+        let shareDraftID = (operation.sourceAccess as? ShareDraftLease)?.id
         let bookmarks: [Data]
         if shareDraftID == nil {
             bookmarks = try operation.sourcePaths.map {
@@ -2688,7 +2664,6 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func restoreSourceAccess(_ stored: StoredAppleManifestSessionV2) throws -> AnyObject? {
-        #if os(iOS)
         if let shareDraftID = stored.shareDraftID {
             let store = try ShareDraftStore.live()
             let draft = try store.load(id: shareDraftID)
@@ -2698,11 +2673,6 @@ final class TransferViewModel: ObservableObject {
             }
             return ShareDraftLease(id: shareDraftID, store: store)
         }
-        #else
-        guard stored.shareDraftID == nil else {
-            throw RuntimeSettingsError("A Share draft cannot be restored on this platform.")
-        }
-        #endif
 
         guard !stored.sourceBookmarks.isEmpty else {
             guard stored.sourcePaths.allSatisfy({ FileManager.default.isReadableFile(atPath: $0) }) else {
@@ -2731,7 +2701,6 @@ final class TransferViewModel: ObservableObject {
     private func restoreOutboxedSourceAccess(
         _ entry: RememberedRoomOutboxEntry
     ) throws -> AnyObject? {
-        #if os(iOS)
         if let shareDraftID = entry.shareDraftID {
             let store = try ShareDraftStore.live()
             let draft = try store.load(id: shareDraftID)
@@ -2743,11 +2712,6 @@ final class TransferViewModel: ObservableObject {
             }
             return ShareDraftLease(id: shareDraftID, store: store)
         }
-        #else
-        guard entry.shareDraftID == nil else {
-            throw RuntimeSettingsError("A queued Share draft cannot be restored on this platform.")
-        }
-        #endif
 
         guard !entry.sourceBookmarks.isEmpty else {
             guard entry.sourcePaths.allSatisfy({

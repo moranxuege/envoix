@@ -17,6 +17,7 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - Sources
+      - Shared/ShareDraftStore.swift
       - Assets.xcassets
       - Resources/PrivacyInfo.xcprivacy
     dependencies:
@@ -192,6 +193,7 @@ targets:
       - Tests/EnvoixIOSUITests/AppleWifiAwareServiceCoordinatorTests.swift
       - Tests/EnvoixIOSUITests/WifiAwareRendezvousProtocolTests.swift
       - Tests/EnvoixMacOSUITests/ConnectionHubPresentationTests.swift
+      - Tests/EnvoixMacOSUITests/ClipboardIntakeTests.swift
       - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
       - Tests/EnvoixMacOSUITests/RoomCodeInputFormatterTests.swift
     dependencies:

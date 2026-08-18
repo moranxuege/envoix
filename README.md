@@ -51,6 +51,11 @@ target/debug/envoix inbox list
 target/debug/envoix inbox latest
 ```
 
+On macOS, select the remembered WSL device and use **Paste File or Image** to
+send a Finder item, an existing path, or a clipboard image. Clipboard images
+are materialized in Envoix's durable source cache before entering the same
+Manifest v2 and remembered-room queue used by ordinary files.
+
 See [the Agent MVP design](docs/design/agent-mvp.md) for trust, persistence,
 network-path behavior, and the current WSL NAT limitation.
 

@@ -570,12 +570,10 @@ func pasteboardString() -> String? {
     #endif
 }
 
-/// Resolves a file from the clipboard, handling both a file copied in Finder
-/// (a file-URL on the pasteboard) and a plain-text path (expanding a leading
-/// `~`). Returns the URL only if it points to an existing file.
-func pastedFileURL() -> URL? {
-    #if os(macOS)
-    let pb = NSPasteboard.general
+/// Resolves an item copied in Finder or a plain-text path, expanding `~`.
+#if os(macOS)
+func pastedFileURL(from pasteboard: NSPasteboard = .general) -> URL? {
+    let pb = pasteboard
     let exists = { FileManager.default.fileExists(atPath: $0) }
 
     if let urls = pb.readObjects(forClasses: [NSURL.self],
@@ -588,10 +586,12 @@ func pastedFileURL() -> URL? {
         if exists(expanded) { return URL(fileURLWithPath: expanded) }
     }
     return nil
-    #else
-    return nil
-    #endif
 }
+#else
+func pastedFileURL() -> URL? {
+    return nil
+}
+#endif
 
 /// Selects the file in Finder (opening its enclosing folder).
 #if os(macOS)

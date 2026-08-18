@@ -8,7 +8,8 @@ The first product workflow is deliberately narrow:
 
 1. Run a persistent Envoix Agent inside WSL.
 2. Pair the macOS app once and remember both devices.
-3. Send files or folders from the Mac with the existing Manifest v2 engine.
+3. Send selected files, folders, or pasted clipboard images from the Mac with
+   the existing Manifest v2 engine.
 4. Save completed roots in a WSL Inbox.
 5. Retrieve the newest path with `envoix inbox latest`, including from an SSH
    shell that cannot accept an image paste.
@@ -35,7 +36,7 @@ by the Apple and Android apps.
 
 ```text
 macOS Envoix app
-  file/folder selection (clipboard-image intake is the next Apple slice)
+  file/folder selection or Paste File or Image
            |
            | ordinary Room + explicit six-digit verification once
            | remembered Room Control after that
@@ -101,6 +102,16 @@ The Agent automatically accepts ordinary transfers. Offers above the existing
 automatic-receive threshold, or above half of currently allocatable Inbox
 space, are rejected until an explicit approval workflow is added.
 
+## macOS clipboard intake
+
+The macOS send screen checks clipboard sources in a fixed order: a Finder file
+URL, an existing plain-text path, then image data. Files and paths remain their
+original Manifest sources. Image data is normalized to PNG and first written
+to Envoix's owner-only Application Support draft directory. The resulting
+draft uses the same claim, activity binding, cache reconciliation, resume, and
+remembered-room outbox lifecycle as an iOS Share draft, so an asynchronous WSL
+send does not depend on the clipboard contents remaining unchanged.
+
 ## Network behavior on the current WSL host
 
 The current machine uses ordinary WSL NAT. Windows owns the Tailscale adapter;
@@ -144,11 +155,9 @@ peers have a confirmed direct route.
 
 ## Next slices
 
-1. Add macOS pasteboard-image materialization into the existing durable source
-   draft, then invoke the same remembered-peer send call.
-2. Add an explicit large-offer approval command and pending-offer state.
-3. Package the Agent as a WSL user service and provide health/startup commands.
-4. Add path telemetry (`lan`, `tailnet/direct`, `relay`) without using path type
+1. Add an explicit large-offer approval command and pending-offer state.
+2. Package the Agent as a WSL user service and provide health/startup commands.
+3. Add path telemetry (`lan`, `tailnet/direct`, `relay`) without using path type
    as an authentication decision.
-5. Add an optional store-and-forward relay only if offline delivery becomes a
+4. Add an optional store-and-forward relay only if offline delivery becomes a
    real requirement; it is not part of this MVP.

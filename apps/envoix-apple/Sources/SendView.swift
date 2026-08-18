@@ -640,6 +640,20 @@ struct SendView: View {
             .disabled(viewModel.isBusy)
             .accessibilityIdentifier("send_file_picker")
             .accessibilityValue(String(selectedItems.count))
+            Button(action: pasteClipboardSelection) {
+                Label(
+                    AppText.value(
+                        "Paste File or Image",
+                        "粘贴文件或图片",
+                        language: uiLanguage
+                    ),
+                    systemImage: "doc.on.clipboard"
+                )
+                .frame(maxWidth: .infinity, minHeight: 36)
+            }
+            .buttonStyle(.bordered)
+            .disabled(selectionMutationDisabled)
+            .accessibilityIdentifier("send_clipboard_paste")
             preparationState
             preparedItems
             #endif
@@ -838,8 +852,8 @@ struct SendView: View {
         )
         #else
         AppText.value(
-            "Choose one or more files or folders. Folder structure is preserved.",
-            "可选择一个或多个文件或文件夹；目录结构会完整保留。",
+            "Choose, drop, or paste files and images. Folder structure is preserved.",
+            "可选择、拖入或粘贴文件与图片；目录结构会完整保留。",
             language: uiLanguage
         )
         #endif
@@ -1365,6 +1379,8 @@ struct SendView: View {
             accepted.append(standardized)
         }
         guard !accepted.isEmpty else { return false }
+        let supersededDraftID = viewModel.preparedShareDraftID
+        let supersededDraft = selectedSourceAccess as? ShareDraftLease
         selectedSourceAccess = access
         selectedPendingSelectionID = pendingSelectionID
         selectedItems = accepted
@@ -1373,6 +1389,11 @@ struct SendView: View {
             selectedPaths: accepted.map(\.path),
             sourceAccess: access
         )
+        if let supersededDraftID,
+           supersededDraft?.id == supersededDraftID,
+           supersededDraftID != (access as? ShareDraftLease)?.id {
+            try? supersededDraft?.discard()
+        }
         return true
     }
 
@@ -1645,6 +1666,60 @@ struct SendView: View {
     }
 
     #if os(macOS)
+    private func pasteClipboardSelection() {
+        guard let content = clipboardSendContent() else {
+            ToastCenter.shared.show(AppText.value(
+                "Clipboard does not contain a file, path, or image.",
+                "剪贴板中没有文件、路径或图片。",
+                language: uiLanguage
+            ))
+            return
+        }
+
+        switch content {
+        case .file(let url):
+            do {
+                guard try adoptUserSelectedItems([url]) else { return }
+                ToastCenter.shared.show(AppText.value(
+                    "Clipboard item ready to send",
+                    "剪贴板项目已准备发送",
+                    language: uiLanguage
+                ))
+            } catch {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        case .image(let payload):
+            do {
+                let store = try ShareDraftStore.live()
+                let draft = try store.stage(
+                    data: payload.data,
+                    contentTypeIdentifier: payload.contentTypeIdentifier,
+                    mediaKind: .image,
+                    preferredFileName: payload.preferredFileName
+                )
+                do {
+                    try store.claim(id: draft.descriptor.id)
+                    store.acknowledgePending(id: draft.descriptor.id)
+                    let lease = ShareDraftLease(id: draft.descriptor.id, store: store)
+                    guard selectItems(draft.fileURLs, access: lease) else {
+                        try? store.discard(id: draft.descriptor.id)
+                        return
+                    }
+                } catch {
+                    try? store.discard(id: draft.descriptor.id)
+                    throw error
+                }
+                ToastCenter.shared.show(AppText.value(
+                    "Clipboard image ready to send",
+                    "剪贴板图片已准备发送",
+                    language: uiLanguage
+                ))
+            } catch {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        }
+    }
+
     private func chooseSendItems() -> [URL] {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
