@@ -32,6 +32,7 @@ cargo audit --deny unsound
 | `crossbeam-epoch` | 0.9.18 | 0.9.20 | RUSTSEC-2026-0204 |
 | `quick-xml` | 0.39.4 | 0.41.0 through `plist` 1.10.0 | RUSTSEC-2026-0194 and RUSTSEC-2026-0195 |
 | `lru` | 0.18.0 | 0.18.2 | RUSTSEC-2026-0253 unsoundness |
+| `h2` | 0.4.15 | 0.4.16 | RUSTSEC-2026-0258 |
 
 These are targeted lockfile updates. They do not change Envoix's direct API
 surface.
