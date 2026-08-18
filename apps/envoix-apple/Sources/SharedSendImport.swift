@@ -51,11 +51,24 @@ enum OpenedSendFileOutcome {
     case queued
 }
 
-enum OpenedSendFileError: Error, Equatable {
+enum OpenedSendFileError: LocalizedError, Equatable {
     case unsupportedURL
     case unsupportedItem
     case inaccessible
     case itemCountExceeded
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedURL:
+            return "Envoix can open local files only."
+        case .unsupportedItem:
+            return "Choose a regular file or folder."
+        case .inaccessible:
+            return "Envoix could not access every selected item."
+        case .itemCountExceeded:
+            return "Choose no more than \(ShareDraftStore.maxItemCount) items."
+        }
+    }
 }
 
 func validatedOpenedSendURLs(_ urls: [URL]) throws -> [URL] {

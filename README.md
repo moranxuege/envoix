@@ -57,10 +57,14 @@ service. The installer enables autostart for the user service but does not edit
 `/etc/wsl.conf`; if systemd is unavailable, its error includes the equivalent
 foreground command.
 
-On macOS, select the remembered WSL device and use **Paste File or Image** to
-send a Finder item, an existing path, or a clipboard image. Clipboard images
-are materialized in Envoix's durable source cache before entering the same
-Manifest v2 and remembered-room queue used by ordinary files.
+On macOS, remembered peers appear as devices. Choose **Send**, or drag files
+and folders directly onto a device; Envoix opens the normal review screen and
+still requires the explicit final **Send** action. An installed app also adds
+**Finder > Services > Send with Envoix** for selected files and folders.
+**Paste File or Image** remains available for Finder items, existing paths, and
+clipboard images. Clipboard images are materialized in Envoix's durable source
+cache before entering the same Manifest v2 and remembered-room queue used by
+ordinary files.
 
 See [the Agent MVP design](docs/design/agent-mvp.md) for trust, persistence,
 network-path behavior, and the current WSL NAT limitation.

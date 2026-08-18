@@ -56,6 +56,22 @@ final class ClipboardIntakeTests: XCTestCase {
         XCTAssertEqual(clipboardSendContent(from: pasteboard), .file(source))
     }
 
+    func testReadsEveryFinderFileInPasteboardOrder() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = root.appendingPathComponent("first.txt", isDirectory: false)
+        let second = root.appendingPathComponent("second.txt", isDirectory: false)
+        try Data("first".utf8).write(to: first, options: .atomic)
+        try Data("second".utf8).write(to: second, options: .atomic)
+
+        XCTAssertTrue(pasteboard.writeObjects([first as NSURL, second as NSURL]))
+
+        XCTAssertEqual(pastedFileURLs(from: pasteboard), [first, second])
+        XCTAssertEqual(pastedFileURL(from: pasteboard), first)
+    }
+
     func testRejectsUnsupportedClipboardContent() {
         XCTAssertTrue(pasteboard.setString("not a local path", forType: .string))
 

@@ -16,22 +16,27 @@ enum ClipboardSendContent: Equatable {
 
 /// Resolves an item copied in Finder or a plain-text path, expanding `~`.
 func pastedFileURL(from pasteboard: NSPasteboard = .general) -> URL? {
+    pastedFileURLs(from: pasteboard).first
+}
+
+/// Resolves files copied or supplied by Finder while preserving their order.
+func pastedFileURLs(from pasteboard: NSPasteboard = .general) -> [URL] {
     let exists = { FileManager.default.fileExists(atPath: $0) }
 
     if let urls = pasteboard.readObjects(
         forClasses: [NSURL.self],
         options: [.urlReadingFileURLsOnly: true]
     ) as? [URL],
-       let url = urls.first,
-       exists(url.path) {
-        return url
+       !urls.isEmpty,
+       urls.allSatisfy({ exists($0.path) }) {
+        return urls
     }
     if let raw = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
        !raw.isEmpty {
         let expanded = (raw as NSString).expandingTildeInPath
-        if exists(expanded) { return URL(fileURLWithPath: expanded) }
+        if exists(expanded) { return [URL(fileURLWithPath: expanded)] }
     }
-    return nil
+    return []
 }
 
 func clipboardSendContent(

@@ -671,6 +671,13 @@ struct MobileConnectionFlowView: View {
             )
         }
         .onOpenURL(perform: handleIncomingURL)
+        #if os(macOS)
+        .onChange(of: model.pendingSendSelection?.id) { selectionID in
+            if selectionID != nil {
+                presentPendingSendSelection()
+            }
+        }
+        #endif
         #if os(iOS)
         .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
             guard let url = activity.webpageURL else { return }
@@ -852,6 +859,7 @@ struct MobileConnectionFlowView: View {
                 roomInvitationIsRevealed: roomInvitationIsRevealed,
                 roomInvitationIsStarting: workflow.controlPhase == .joining,
                 rememberedRooms: workflow.rememberedPeers,
+                pendingSendItemCount: model.pendingSendSelection?.fileURLs.count ?? 0,
                 rememberedRoomStatus: workflow.rememberedRoomStatus,
                 incomingRememberedRelationshipID: workflow.incomingRoomOffer == nil
                     ? nil

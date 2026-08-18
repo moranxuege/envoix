@@ -657,13 +657,20 @@ final class AppModel: ObservableObject {
     }
 
     func importOpenedSendFiles(_ urls: [URL]) throws -> OpenedSendFileOutcome {
-        let urls = try validatedOpenedSendURLs(urls)
+        guard !urls.isEmpty else { throw OpenedSendFileError.unsupportedItem }
+        guard urls.count <= ShareDraftStore.maxItemCount else {
+            throw OpenedSendFileError.itemCountExceeded
+        }
+        guard urls.allSatisfy(\.isFileURL) else {
+            throw OpenedSendFileError.unsupportedURL
+        }
         let accesses = urls.map(SecurityScopedResourceAccess.init)
         for (url, access) in zip(urls, accesses) {
             guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
                 throw OpenedSendFileError.inaccessible
             }
         }
+        let urls = try validatedOpenedSendURLs(urls)
         pendingSendSelection = PendingSendSelection(
             id: UUID(),
             fileURLs: urls,

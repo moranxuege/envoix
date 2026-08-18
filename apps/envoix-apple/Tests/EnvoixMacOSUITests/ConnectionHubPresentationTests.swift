@@ -108,5 +108,11 @@ final class ConnectionHubPresentationTests: XCTestCase {
             XCTAssertEqual(error as? OpenedSendFileError, .itemCountExceeded)
         }
     }
+
+    @MainActor
+    func testFinderServiceExposesItsAdvertisedSelector() {
+        let selector = NSSelectorFromString("sendWithEnvoix:userData:error:")
+        XCTAssertTrue(MacFinderSendService.instancesRespond(to: selector))
+    }
 }
 #endif

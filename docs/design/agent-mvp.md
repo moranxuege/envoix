@@ -36,7 +36,7 @@ by the Apple and Android apps.
 
 ```text
 macOS Envoix app
-  file/folder selection or Paste File or Image
+  device card, drag/drop, Finder Service, or Paste File or Image
            |
            | ordinary Room + explicit six-digit verification once
            | remembered Room Control after that
@@ -114,6 +114,14 @@ to Envoix's owner-only Application Support draft directory. The resulting
 draft uses the same claim, activity binding, cache reconciliation, resume, and
 remembered-room outbox lifecycle as an iOS Share draft, so an asynchronous WSL
 send does not depend on the clipboard contents remaining unchanged.
+
+The remembered-device list is the primary macOS send surface. Choosing
+**Send** opens the ordinary selection screen; dropping files or folders onto a
+device opens it with those roots already selected. The main app also provides
+the macOS Service **Send with Envoix** for Finder selections. The service keeps
+security-scoped access to every selected URL, brings the existing main window
+forward (or reopens it), and exposes the pending item count beside the device
+list. All three entry points stop at the same explicit **Send** seal boundary.
 
 ## Network behavior on the current WSL host
 

@@ -68,6 +68,14 @@ macOS supports mixed multi-file/folder selection and drag/drop through the same
 job preparation API. Security-scoped source and destination access is retained
 for the lifetime of the active job.
 
+Remembered peers are presented as devices on macOS. A device's **Send** button
+opens the selection screen, while dropping files or folders onto that device
+opens the same screen with those roots preselected. The app also advertises a
+Finder service named **Send with Envoix**. It imports all selected Finder URLs,
+brings the main window forward, and waits for device selection and the explicit
+final **Send** action; invoking the service never starts network transfer by
+itself.
+
 ## Invitations
 
 Both Send and Receive create an `envoix://invite/v2/<payload>` QR and can copy

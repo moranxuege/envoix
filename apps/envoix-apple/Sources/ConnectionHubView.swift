@@ -56,6 +56,7 @@ struct ConnectionHubView: View {
     let roomInvitationIsRevealed: Bool
     let roomInvitationIsStarting: Bool
     let rememberedRooms: [RememberedPeerSummary]
+    let pendingSendItemCount: Int
     let rememberedRoomStatus: (String) -> RememberedRoomConnectionStatus
     let incomingRememberedRelationshipID: String?
     let onScanQRCode: () -> Void
@@ -241,6 +242,25 @@ struct ConnectionHubView: View {
                     ))
                     .font(.caption)
                     .foregroundStyle(Theme.muted)
+                }
+
+                if pendingSendItemCount > 0 {
+                    Label(
+                        AppText.value(
+                            pendingSendItemCount == 1
+                                ? "1 item ready. Choose a device to send it."
+                                : "\(pendingSendItemCount) items ready. Choose a device to send them.",
+                            "已有 \(pendingSendItemCount) 个项目，请选择发送设备。",
+                            language: language
+                        ),
+                        systemImage: "tray.and.arrow.up.fill"
+                    )
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(Theme.accentStrong)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityIdentifier("pending_device_send")
                 }
 
                 ForEach(rememberedRooms) { room in
