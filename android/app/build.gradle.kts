@@ -131,8 +131,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Debug-signed so the shrunk APK stays installable for testers.
-            signingConfig = signingConfigs.getByName("debug")
+            // Production signing is injected by the release pipeline in M8.
+            // Source-built release APKs stay unsigned until that gate exists.
         }
     }
 

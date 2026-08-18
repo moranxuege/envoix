@@ -1,7 +1,7 @@
 name: release
 
-# Builds the envoix CLI (Linux / macOS arm64+x86_64 / Windows) and the Android
-# APK (multi-ABI: arm64-v8a + x86_64, test-signed release build).
+# Builds the envoix CLI for Linux, macOS arm64+x86_64, and Windows. Android is
+# intentionally absent until M8 provides production signing and verification.
 #   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
 #   - run manually (Actions -> release -> Run workflow) -> builds everything as
 #     downloadable run artifacts, without publishing a release
@@ -75,63 +75,9 @@ jobs:
           path: dist/${{ matrix.name }}
           if-no-files-found: error
 
-  android:
-    name: build android apk
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Rust + Android targets
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal
-          rustup default "$RUST_VERSION"
-          rustup target add --toolchain "$RUST_VERSION" aarch64-linux-android x86_64-linux-android
-          rustc --version
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --version 4.1.2 --locked
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK r26 + SDK components
-        run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
-
-      - name: Test, lint, and build release APK
-        working-directory: android
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
-          ENVOIX_ANDROID_ABIS: arm64-v8a,x86_64
-        run: ./gradlew testReleaseUnitTest lintRelease assembleRelease --no-daemon --stacktrace
-
-      - name: Stage APK
-        run: |
-          mkdir -p dist
-          cp android/app/build/outputs/apk/release/app-release.apk dist/envoix-android.apk
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: envoix-android.apk
-          path: dist/envoix-android.apk
-          if-no-files-found: error
-
   release:
     name: publish release
-    needs: [cli, android]
+    needs: [cli]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
