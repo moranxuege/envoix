@@ -1,4 +1,5 @@
 /target/
+/inbox/
 
 # large payloads
 *.mp4
