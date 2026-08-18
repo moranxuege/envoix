@@ -1,0 +1,305 @@
+# v0.3 target architecture
+
+Status: accepted direction; implementation proceeds by milestone.
+
+## 1. Context
+
+The repository already has a capable authenticated transfer core, but its
+product semantics are spread across Rust, Swift, and Kotlin. Frontends still
+see legacy send/invite entry points and low-level session/transfer types. The
+same Room lifecycle, remembered-device fallback, retry policy, outbox rules,
+and activity projection are implemented more than once.
+
+v0.3 keeps the working protocol and replaces this accidental application
+architecture.
+
+## 2. Architectural invariants
+
+These rules are release gates, not suggestions.
+
+1. A product rule has one owner.
+2. Views and composables do not own networking, credentials, persistence, or
+   retry policy.
+3. Platform code owns operating-system effects, not product state transitions.
+4. An application host communicates with the Engine through commands, events,
+   snapshots, and explicit platform ports.
+5. Network protocol types do not become UI state by re-export.
+6. A Room ending cannot implicitly delete a Transfer or Relationship.
+7. Received user files are outside build caches and migration cleanup.
+8. Secret material is never stored in ordinary application state or emitted in
+   diagnostics.
+9. One process has one durable Engine owner. Multiple windows have independent
+   presentation state, not independent databases or credential owners.
+10. Platform limitations are modeled as capabilities and observable states;
+    they are not hidden behind timeouts or platform-specific string errors.
+
+## 3. Logical layers
+
+```text
+Native presentation
+SwiftUI / Compose / WinUI / CLI
+        |
+        | intents and immutable UI state
+        v
+Platform host and adapters
+files / clipboard / vault / discovery / background work / notifications
+        |
+        | commands, events, snapshots, and port results
+        v
+Envoix application Engine
+Device / Relationship / Room / Transfer / Content / recovery
+        |
+        v
+Authenticated transfer core
+session / auth / pairing / transfer / protocol / rendezvous / iroh
+        |
+        v
+Rendezvous and relay services
+```
+
+The first implementation step is logical modularization inside
+`envoix-client`. A new crate is justified only if the resulting dependency
+graph or build targets require one. v0.3 must not start by creating speculative
+crates.
+
+## 4. Domain model
+
+### Device
+
+A stable local description of an endpoint identity and its observed
+capabilities. A display name is metadata and is not identity.
+
+### Relationship
+
+Durable trust established by a verified pairing transcript. It owns the peer
+identity, credential generation, trust state, revocation state, and migration
+metadata. It does not own current connectivity.
+
+Expected states:
+
+```text
+unverified -> verifying -> trusted -> rotating -> trusted
+                              |                    |
+                              +-------> revoked <--+
+```
+
+### Room
+
+A temporary authenticated rendezvous and connection context. A Room may be
+created from a typed Room code, nearby discovery, or a low-level invitation
+capability. It can authenticate a new Relationship or reconnect an existing
+one.
+
+Room expiry means that the rendezvous context can no longer admit peers. It
+does not invalidate a completed Relationship and does not define Transfer
+lifetime.
+
+### Transfer
+
+A durable operation with stable identity, direction, participants, content
+inventory, policy, progress, outcome, and recovery metadata. A Transfer may
+survive process restart, connection loss, and Room replacement.
+
+The Engine owns legal transitions. Frontends render the projected state and
+submit user intent; they do not infer terminal state from strings or partial
+files.
+
+### Content
+
+A typed description of material carried by a Transfer. v0.3 requires file and
+directory content. It reserves a product boundary for later text and image
+clipboard content without implementing a generic cross-device clipboard in
+this release.
+
+### Invite and send
+
+`Invite` is a protocol-level, time-bounded capability that supplies enough
+information to enter or locate a Room. It is not a durable product aggregate.
+
+`send` is a UI/CLI verb. It resolves a target, creates a Transfer, attaches
+Content, and asks the Engine to execute it. It is not a separate transport
+model.
+
+## 5. Application contract
+
+The Engine boundary consists of three data flows.
+
+### Commands
+
+Commands express intent and return an acknowledgement or stable operation ID.
+Representative commands include:
+
+- create or join a Room;
+- begin or verify pairing;
+- create, accept, reject, pause, resume, cancel, or remove a Transfer;
+- send Content to a trusted Device;
+- rotate or revoke a Relationship;
+- answer a platform action requested by the Engine.
+
+### Events
+
+Events are versioned, typed facts emitted by the Engine. They include Room,
+Relationship, Transfer, capability, recovery, and user-action changes. A
+single ordered event stream replaces independent progress callbacks, prose
+errors, and platform-specific activity reconstruction.
+
+### Snapshots
+
+A snapshot is an immutable view of current application state used at startup,
+after reconnecting a binding, or after an event gap. A frontend must be able to
+rebuild its presentation from a snapshot plus subsequent events.
+
+Commands and events must carry stable identifiers and typed errors. Bulk file
+contents never cross this control boundary as JSON.
+
+## 6. Effects and platform ports
+
+The Engine can request, but cannot implement, these operating-system effects:
+
+- secure credential load/store/delete;
+- source selection, staging, and destination publication;
+- clipboard capture and publication;
+- local discovery and native peer-to-peer transports;
+- notifications and user-visible background execution;
+- platform logging and diagnostics export;
+- clock, randomness, and connectivity observation where tests need control.
+
+Each port has an explicit capability report. Unsupported operations fail with
+a typed unavailable/limited result rather than an arbitrary platform error.
+
+## 7. Host topology
+
+### Apple mobile
+
+iPhone and iPad embed one Engine in the application process. Swift calls the
+typed control surface through UniFFI and implements Apple ports. One app
+process owns one Engine; each SwiftUI scene owns only presentation state.
+
+The iPhone and iPad share a universal application and feature modules, but use
+different root presentation shells:
+
+- iPhone: compact navigation and user-initiated transfers;
+- iPad: adaptive split navigation, dynamic window sizing, multiple scenes,
+  drag/drop, keyboard, pointer, and context-menu behavior.
+
+### macOS
+
+The target topology is a signed application bundle containing a
+background-capable per-user helper. The helper owns durable Engine state and
+credentials; the SwiftUI app and CLI use an owner-only local control channel.
+The exact helper packaging and Mac App Store policy require a milestone ADR,
+but ad-hoc signing is not a supported v0.3 release mode.
+
+### Android
+
+Android embeds the Engine and exposes work through a Compose presentation and
+OS-managed service/work APIs. Android Keystore, ContentResolver/MediaStore,
+notifications, nearby discovery, and background scheduling remain Kotlin
+adapters. Product state transitions do not remain in `TransferService` or
+composables.
+
+The default typed control binding is UniFFI after the application surface has
+been reduced. Hand-written JNI remains only for proven platform or performance
+boundaries and must not expose a parallel product state machine.
+
+### Windows
+
+Windows first receives a supported per-user Agent and CLI. The proposed native
+GUI is a WinUI shell that talks to the Agent through an owner-only Named Pipe.
+The GUI framework is confirmed only after the local control protocol is stable;
+the temporary egui demo is not the foundation of the Windows product.
+
+### Linux and WSL
+
+Linux/WSL runs a per-user Agent, normally through a systemd user service, with
+the Rust CLI as its supported control surface. A Linux GUI is outside v0.3
+unless a later decision adds it.
+
+## 8. Local control protocol
+
+Desktop GUI and CLI clients communicate with the Agent through a versioned
+local protocol:
+
+- Unix domain socket on macOS and Linux/WSL;
+- Named Pipe on Windows;
+- owner-only access plus peer identity validation;
+- tagged commands, events, and errors with an explicit protocol version;
+- bounded control messages;
+- paths, durable handles, or stream IDs for content, never content bytes in a
+  JSON object.
+
+JSON Lines is acceptable for the initial control encoding because the traffic
+is local and small. Its schema must be represented by Rust types and contract
+fixtures. Encoding can change later without changing the Engine contract.
+
+## 9. Persistence and secret ownership
+
+The Engine owns the versioned schema for non-secret product state:
+
+- devices and relationship metadata;
+- Rooms needed for recovery;
+- Transfer records and outcomes;
+- Inbox/Outbox metadata;
+- capability and migration metadata.
+
+The storage implementation is selected after a focused ADR comparing a shared
+SQLite store with the current atomic-file stores. The architectural constraint
+is one schema and migration owner, not a particular database library.
+
+Secrets are referenced from product state and stored by a secure-vault port:
+
+- Apple Keychain under stable signed access groups;
+- Android Keystore-backed encryption;
+- Windows user-scoped protected storage;
+- an explicitly documented owner-only fallback where WSL lacks a system vault.
+
+Presentation code and standalone CLI commands never read secrets. Vault access
+occurs on Engine startup or first credential use, pairing, rotation, and
+revocation. It is not triggered by rendering, progress updates, or reconnect
+polling. Tests use an in-memory vault unless they explicitly test a platform
+adapter.
+
+## 10. Presentation architecture
+
+Every native application uses one directional flow:
+
+```text
+View -> UI intent -> presenter -> Engine command
+Engine event/snapshot -> presenter -> immutable UI state -> View
+```
+
+Shared UI assets are semantic rather than pixel-identical:
+
+- design tokens and component states;
+- product terminology and interaction rules;
+- native localization catalogs;
+- accessibility and input behavior requirements.
+
+Strings are not moved into Rust. SwiftUI, Compose, and WinUI continue to use
+their native resource and accessibility systems.
+
+## 11. Dependency rules
+
+- Platform applications may depend on the binding/control surface and
+  platform adapters.
+- The application layer may depend on session, transfer, protocol, and domain
+  crates through explicit modules.
+- Session and transfer crates may not depend on product presentation or OS
+  storage.
+- A binding may project the application contract; it may not independently
+  decide retries, trust transitions, or terminal Transfer state.
+- No application receives `pub use envoix_session::*` or equivalent wildcard
+  access in the final v0.3 surface.
+
+## 12. Open decisions
+
+The following require focused ADRs at the milestone that first needs them:
+
+1. shared SQLite versus an improved atomic-file product store;
+2. exact macOS helper packaging and whether Mac App Store distribution is a
+   future requirement;
+3. final Windows GUI framework after Agent IPC validation;
+4. whether Linux gains a graphical shell after v0.3;
+5. the later cross-device clipboard consent and history policy.
+
+None of these decisions blocks establishing the Engine boundary.

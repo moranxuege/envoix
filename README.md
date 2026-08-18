@@ -5,6 +5,11 @@ files, folders, Photos, and Share-provider content. Every transfer uses one
 canonical Manifest v2 job from local preparation through receiver save and
 delivery proof.
 
+v0.3.0 is an active architecture-reset release. Its scope, compatibility
+policy, engineering rules, and milestone gates are documented in the
+[v0.3 architecture index](docs/v0.3/README.md). The v0.2.2 download page
+remains the current public release until those gates are complete.
+
 **[Download Envoix / 下载 Envoix](https://ece4410j-nuub.github.io/envoix/)**
 
 ## Core behavior

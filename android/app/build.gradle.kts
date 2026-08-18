@@ -114,8 +114,8 @@ android {
         applicationId = "dev.envoix.app"
         minSdk = 29 // Android 10: scoped storage + MediaStore.Downloads
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.2.2"
+        versionCode = 5
+        versionName = "0.3.0"
         buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {

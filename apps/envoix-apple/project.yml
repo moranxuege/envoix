@@ -25,8 +25,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app
-        MARKETING_VERSION: "0.2.2"
-        CURRENT_PROJECT_VERSION: "4"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "5"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info-macOS.plist
@@ -71,8 +71,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios
-        MARKETING_VERSION: "0.2.2"
-        CURRENT_PROJECT_VERSION: "4"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "5"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info.plist
@@ -120,8 +120,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.share
         PRODUCT_NAME: EnvoixShare
-        MARKETING_VERSION: "0.2.2"
-        CURRENT_PROJECT_VERSION: "4"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "5"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: ShareExtension/Info.plist
