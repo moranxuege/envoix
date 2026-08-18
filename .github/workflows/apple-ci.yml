@@ -1,6 +1,12 @@
 name: apple-ci
 
 on:
+  push:
+    branches:
+      - '**'
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   pull_request:
   workflow_dispatch:
     inputs:

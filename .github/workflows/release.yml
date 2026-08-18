@@ -19,6 +19,9 @@ on:
 permissions:
   contents: write # needed to create the release
 
+env:
+  RUST_VERSION: 1.96.0
+
 jobs:
   cli:
     name: build CLI ${{ matrix.name }}
@@ -44,12 +47,12 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.ref }}
 
-      - name: Set up Rust (iroh needs >= 1.91)
+      - name: Set up pinned Rust
         shell: bash
         run: |
-          rustup update stable
-          rustup default stable
-          rustup target add ${{ matrix.target }}
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" ${{ matrix.target }}
           rustc --version
 
       - name: Build envoix CLI
@@ -88,9 +91,9 @@ jobs:
 
       - name: Set up Rust + Android targets
         run: |
-          rustup update stable
-          rustup default stable
-          rustup target add aarch64-linux-android x86_64-linux-android
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" aarch64-linux-android x86_64-linux-android
           rustc --version
 
       - name: Cache Rust build

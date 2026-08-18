@@ -47,6 +47,7 @@ as typed capabilities, not inferred by a frontend.
 - [Milestone plan](milestones.md)
 - [Compatibility and migration policy](compatibility.md)
 - [Engineering standard](engineering.md)
+- [Dependency security baseline](dependency-security.md)
 
 When an older design document conflicts with these documents, the v0.3
 documents take precedence. Older documents remain historical evidence until a

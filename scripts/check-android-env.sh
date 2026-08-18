@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 
-readonly MIN_RUST_VERSION="1.91.0"
+readonly MIN_RUST_VERSION="1.96.0"
 readonly MIN_BUILD_TOOLS_VERSION="34.0.0"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

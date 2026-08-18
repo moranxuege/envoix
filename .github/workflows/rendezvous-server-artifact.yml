@@ -18,6 +18,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUST_VERSION: 1.96.0
+
 jobs:
   build:
     name: build glibc-compatible Linux broker
@@ -42,7 +45,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf \
             https://sh.rustup.rs \
             -o /tmp/rustup-init.sh
-          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain "$RUST_VERSION"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustc" --version
 
