@@ -6,7 +6,7 @@ license.workspace = true
 
 [lib]
 name = "envoix_ffi"
-crate-type = ["lib", "staticlib"]
+crate-type = ["lib", "staticlib", "cdylib"]
 
 [[bin]]
 name = "envoix-bindgen"
@@ -32,6 +32,8 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 envoix-error.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"

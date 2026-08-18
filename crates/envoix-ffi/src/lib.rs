@@ -19,6 +19,8 @@ uniffi::setup_scaffolding!();
 
 mod datagram_transport;
 pub use datagram_transport::*;
+mod application_contract;
+pub use application_contract::*;
 mod manifest_v2_job;
 pub use manifest_v2_job::*;
 mod manifest_v2_session;
@@ -30,7 +32,7 @@ pub use nearby_invite::*;
 mod room_control;
 pub use room_control::*;
 
-const ENVOIX_FFI_API_VERSION: u32 = 15;
+const ENVOIX_FFI_API_VERSION: u32 = 16;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
@@ -493,6 +495,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "remembered_room_control_v1".into(),
             "nearby_invite_inbox_v1".into(),
             "remembered_devices_v1".into(),
+            "typed_application_contract_v6".into(),
         ],
     }
 }
