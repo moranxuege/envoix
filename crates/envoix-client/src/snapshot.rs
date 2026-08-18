@@ -304,8 +304,11 @@ impl EngineSnapshot {
                 self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferAccepted { transfer_id } => {
-                let transfer =
-                    reducers::transfer::accept(self.transfers.get(&transfer_id), &transfer_id)?;
+                let transfer = reducers::transfer::accept(
+                    &self.relationships,
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                )?;
                 self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferRejected {
@@ -320,8 +323,11 @@ impl EngineSnapshot {
                 self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferStarted { transfer_id } => {
-                let transfer =
-                    reducers::transfer::start(self.transfers.get(&transfer_id), &transfer_id)?;
+                let transfer = reducers::transfer::start(
+                    &self.relationships,
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                )?;
                 self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferProgressed {
@@ -341,13 +347,19 @@ impl EngineSnapshot {
                 self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferResumed { transfer_id } => {
-                let transfer =
-                    reducers::transfer::resume(self.transfers.get(&transfer_id), &transfer_id)?;
+                let transfer = reducers::transfer::resume(
+                    &self.relationships,
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                )?;
                 self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferRecoveryStarted { transfer_id } => {
-                let transfer =
-                    reducers::transfer::recover(self.transfers.get(&transfer_id), &transfer_id)?;
+                let transfer = reducers::transfer::recover(
+                    &self.relationships,
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                )?;
                 self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferPayloadCompleted { transfer_id } => {

@@ -75,6 +75,12 @@ Durable trust established by a verified pairing transcript. It owns the peer
 identity, credential generation, trust state, revocation state, and migration
 metadata. It does not own current connectivity.
 
+Revocation preserves Room and Transfer history but prevents any new Transfer
+authorization or attempt from starting, including accept, start, resume, and
+recovery. An already authenticated attempt may still record its verified
+delivery proof, while reject, cancel, failure, and removal remain available for
+safe settlement.
+
 Expected states:
 
 ```text

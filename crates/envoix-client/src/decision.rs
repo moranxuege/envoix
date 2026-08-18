@@ -56,12 +56,13 @@ pub fn decide(
             }
         }
         EngineCommand::AcceptTransfer { transfer_id } => {
-            require_transfer_state(
+            let transfer = require_transfer_state(
                 snapshot,
                 &transfer_id,
                 TransferState::Offered,
                 "accept_transfer",
             )?;
+            trusted_relationship(snapshot, &transfer.relationship_id, "accept_transfer")?;
             EngineEffect::AcceptTransfer { transfer_id }
         }
         EngineCommand::RejectTransfer {
@@ -95,12 +96,13 @@ pub fn decide(
             EngineEffect::PauseTransfer { transfer_id }
         }
         EngineCommand::ResumeTransfer { transfer_id } => {
-            require_transfer_state(
+            let transfer = require_transfer_state(
                 snapshot,
                 &transfer_id,
                 TransferState::Paused,
                 "resume_transfer",
             )?;
+            trusted_relationship(snapshot, &transfer.relationship_id, "resume_transfer")?;
             EngineEffect::ResumeTransfer { transfer_id }
         }
         EngineCommand::RecoverTransfer { transfer_id } => {
@@ -115,6 +117,7 @@ pub fn decide(
                     "recover_transfer",
                 ));
             };
+            trusted_relationship(snapshot, &transfer.relationship_id, "recover_transfer")?;
             EngineEffect::RecoverTransfer {
                 transfer_id,
                 action: failure.recovery_action,
@@ -208,12 +211,12 @@ fn transfer<'a>(
         .ok_or_else(|| missing(EntityKind::Transfer, transfer_id))
 }
 
-fn require_transfer_state(
-    snapshot: &EngineSnapshot,
+fn require_transfer_state<'a>(
+    snapshot: &'a EngineSnapshot,
     transfer_id: &TransferId,
     expected: TransferState,
     command: &'static str,
-) -> Result<(), ApplyError> {
+) -> Result<&'a Transfer, ApplyError> {
     let transfer = transfer(snapshot, transfer_id)?;
     if transfer.state != expected {
         return Err(invalid_transition(
@@ -223,5 +226,5 @@ fn require_transfer_state(
             command,
         ));
     }
-    Ok(())
+    Ok(transfer)
 }

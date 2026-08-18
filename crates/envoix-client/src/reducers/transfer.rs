@@ -47,17 +47,7 @@ fn validate_new(
     transfer: &Transfer,
     operation: &'static str,
 ) -> Result<(), ApplyError> {
-    let relationship = relationships
-        .get(&transfer.relationship_id)
-        .ok_or_else(|| missing(EntityKind::Relationship, &transfer.relationship_id))?;
-    if relationship.state != RelationshipState::Trusted {
-        return Err(invalid_transition(
-            EntityKind::Relationship,
-            &transfer.relationship_id,
-            relationship.state.wire_name(),
-            operation,
-        ));
-    }
+    require_trusted_relationship(relationships, transfer, operation)?;
     if let Some(room_id) = &transfer.room_id {
         let room = rooms
             .get(room_id)
@@ -94,11 +84,13 @@ fn validate_new(
 }
 
 pub(crate) fn accept(
+    relationships: &BTreeMap<RelationshipId, Relationship>,
     existing: Option<&Transfer>,
     transfer_id: &TransferId,
 ) -> Result<Transfer, ApplyError> {
     let mut transfer = current(existing, transfer_id)?;
     require_state(&transfer, TransferState::Offered, "transfer_accepted")?;
+    require_trusted_relationship(relationships, &transfer, "transfer_accepted")?;
     transfer.state = TransferState::Queued;
     Ok(transfer)
 }
@@ -116,11 +108,13 @@ pub(crate) fn reject(
 }
 
 pub(crate) fn start(
+    relationships: &BTreeMap<RelationshipId, Relationship>,
     existing: Option<&Transfer>,
     transfer_id: &TransferId,
 ) -> Result<Transfer, ApplyError> {
     let mut transfer = current(existing, transfer_id)?;
     require_state(&transfer, TransferState::Queued, "transfer_started")?;
+    require_trusted_relationship(relationships, &transfer, "transfer_started")?;
     transfer.state = TransferState::Connecting;
     Ok(transfer)
 }
@@ -176,17 +170,20 @@ pub(crate) fn pause(
 }
 
 pub(crate) fn resume(
+    relationships: &BTreeMap<RelationshipId, Relationship>,
     existing: Option<&Transfer>,
     transfer_id: &TransferId,
 ) -> Result<Transfer, ApplyError> {
     let mut transfer = current(existing, transfer_id)?;
     require_state(&transfer, TransferState::Paused, "transfer_resumed")?;
+    require_trusted_relationship(relationships, &transfer, "transfer_resumed")?;
     transfer.state = TransferState::Connecting;
     transfer.failure = None;
     Ok(transfer)
 }
 
 pub(crate) fn recover(
+    relationships: &BTreeMap<RelationshipId, Relationship>,
     existing: Option<&Transfer>,
     transfer_id: &TransferId,
 ) -> Result<Transfer, ApplyError> {
@@ -204,6 +201,7 @@ pub(crate) fn recover(
             "transfer_recovery_started",
         ));
     }
+    require_trusted_relationship(relationships, &transfer, "transfer_recovery_started")?;
     transfer.state = TransferState::Connecting;
     transfer.failure = None;
     Ok(transfer)
@@ -309,6 +307,25 @@ fn current(existing: Option<&Transfer>, transfer_id: &TransferId) -> Result<Tran
     existing
         .cloned()
         .ok_or_else(|| missing(EntityKind::Transfer, transfer_id))
+}
+
+fn require_trusted_relationship(
+    relationships: &BTreeMap<RelationshipId, Relationship>,
+    transfer: &Transfer,
+    operation: &'static str,
+) -> Result<(), ApplyError> {
+    let relationship = relationships
+        .get(&transfer.relationship_id)
+        .ok_or_else(|| missing(EntityKind::Relationship, &transfer.relationship_id))?;
+    if relationship.state != RelationshipState::Trusted {
+        return Err(invalid_transition(
+            EntityKind::Relationship,
+            &transfer.relationship_id,
+            relationship.state.wire_name(),
+            operation,
+        ));
+    }
+    Ok(())
 }
 
 fn require_state(
