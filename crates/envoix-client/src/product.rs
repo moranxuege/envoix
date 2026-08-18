@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 use crate::api::DesktopCredentialStore;
 use crate::api::RememberedCredential;
 use crate::event::{EngineEvent, EventEnvelope};
-use crate::model::{Device, DeviceId, Relationship, RelationshipId, RelationshipState};
+use crate::model::{Device, DeviceId, Relationship, RelationshipId, RelationshipState, TransferId};
 use crate::snapshot::EngineSnapshot;
 use crate::storage::{
     DurableRelationship, EngineState, EngineStore, EngineStoreError, EngineStoreOrigin,
@@ -29,10 +29,11 @@ use crate::storage::{
     VaultReference, read_bounded_file,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 4;
+pub const AGENT_PROTOCOL_VERSION: u16 = 5;
 pub const AGENT_SETTINGS_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
+pub const MAX_AGENT_EVENT_BATCH: usize = 256;
 const MAX_AGENT_REQUEST_ID_BYTES: usize = 64;
 const PRODUCT_STATE_SCHEMA_VERSION: u16 = 1;
 const PRODUCT_STATE_FILE: &str = "product-state-v1.json";
@@ -77,11 +78,23 @@ impl AgentSettings {
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentRequest {
     Status,
-    Snapshot { inbox_limit: usize },
-    Pair { label: String },
+    Snapshot {
+        inbox_limit: usize,
+    },
+    Events {
+        after: AgentEventCursor,
+        limit: usize,
+    },
+    Pair {
+        label: String,
+    },
     ListDevices,
-    RevokeDevice { device: String },
-    ListInbox { limit: usize },
+    RevokeDevice {
+        device: String,
+    },
+    ListInbox {
+        limit: usize,
+    },
     LatestInbox,
 }
 
@@ -89,14 +102,38 @@ pub enum AgentRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentResponse {
-    Status { status: AgentStatus },
-    Pairing { pairing: PairingInvitation },
-    Devices { devices: Vec<DeviceSummary> },
-    DeviceRevoked { device: DeviceSummary },
-    Inbox { items: Vec<InboxItem> },
-    Latest { item: Option<InboxItem> },
-    Snapshot { snapshot: AgentSnapshot },
-    Error { code: String, message: String },
+    Status {
+        status: AgentStatus,
+    },
+    Pairing {
+        pairing: PairingInvitation,
+    },
+    Devices {
+        devices: Vec<DeviceSummary>,
+    },
+    DeviceRevoked {
+        device: DeviceSummary,
+    },
+    Inbox {
+        items: Vec<InboxItem>,
+    },
+    Latest {
+        item: Option<InboxItem>,
+    },
+    Snapshot {
+        snapshot: AgentSnapshot,
+    },
+    Events {
+        cursor: AgentEventCursor,
+        events: Vec<AgentEventEnvelope>,
+    },
+    SnapshotRequired {
+        cursor: AgentEventCursor,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 impl AgentResponse {
@@ -136,7 +173,11 @@ impl AgentRequestEnvelope {
                 ),
             ));
         }
-        validate_request_id(self.request_id.clone()).map(|_| ())
+        validate_request_id(self.request_id.clone())?;
+        if let AgentRequest::Events { after, .. } = &self.request {
+            after.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -175,6 +216,40 @@ impl AgentResponseEnvelope {
                 "Agent response request ID does not match the command",
             ));
         }
+        match &self.response {
+            AgentResponse::Snapshot { snapshot } => snapshot.event_cursor.validate()?,
+            AgentResponse::Events { cursor, events } => {
+                cursor.validate()?;
+                if events.len() > MAX_AGENT_EVENT_BATCH {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Agent event response exceeds the batch limit",
+                    ));
+                }
+                let mut previous_sequence = None;
+                for event in events {
+                    event.validate()?;
+                    if event.instance_id != cursor.instance_id
+                        || event.sequence > cursor.sequence
+                        || previous_sequence.is_some_and(|previous| event.sequence <= previous)
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Agent events do not match their cursor",
+                        ));
+                    }
+                    previous_sequence = Some(event.sequence);
+                }
+                if previous_sequence.is_some_and(|sequence| sequence != cursor.sequence) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Agent event cursor does not identify the final event",
+                    ));
+                }
+            }
+            AgentResponse::SnapshotRequired { cursor } => cursor.validate()?,
+            _ => {}
+        }
         Ok(())
     }
 }
@@ -200,6 +275,125 @@ pub struct AgentSnapshot {
     pub status: AgentStatus,
     pub engine: EngineSnapshot,
     pub inbox: Vec<InboxItem>,
+    pub event_cursor: AgentEventCursor,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEventCursor {
+    pub instance_id: String,
+    pub sequence: u64,
+}
+
+impl AgentEventCursor {
+    pub fn validate(&self) -> io::Result<()> {
+        validate_request_id(self.instance_id.clone()).map(|_| ())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRelationshipChange {
+    Trusted,
+    Rotated,
+    Revoked,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentEvent {
+    PairingChanged {
+        label: String,
+        active: bool,
+    },
+    RelationshipChanged {
+        relationship_id: String,
+        change: AgentRelationshipChange,
+    },
+    InboxChanged {
+        item_id: String,
+    },
+}
+
+impl AgentEvent {
+    fn validate(&self) -> io::Result<()> {
+        match self {
+            Self::PairingChanged { label, .. } => {
+                if validate_label(label)? != *label {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "pairing label cannot have leading or trailing whitespace",
+                    ));
+                }
+            }
+            Self::RelationshipChanged {
+                relationship_id, ..
+            } => {
+                RelationshipId::parse(relationship_id.clone()).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
+                })?;
+            }
+            Self::InboxChanged { item_id } => {
+                TransferId::parse(item_id.clone()).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentEventEnvelope {
+    pub protocol_version: u16,
+    pub instance_id: String,
+    pub sequence: u64,
+    pub event: AgentEvent,
+}
+
+impl AgentEventEnvelope {
+    pub fn new(
+        instance_id: impl Into<String>,
+        sequence: u64,
+        event: AgentEvent,
+    ) -> io::Result<Self> {
+        let instance_id = validate_request_id(instance_id.into())?;
+        if sequence == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Agent event sequence must be non-zero",
+            ));
+        }
+        event.validate()?;
+        Ok(Self {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            instance_id,
+            sequence,
+            event,
+        })
+    }
+
+    pub fn validate(&self) -> io::Result<()> {
+        if self.protocol_version != AGENT_PROTOCOL_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "unsupported Agent protocol {}; expected {}",
+                    self.protocol_version, AGENT_PROTOCOL_VERSION
+                ),
+            ));
+        }
+        validate_request_id(self.instance_id.clone())?;
+        if self.sequence == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Agent event sequence must be non-zero",
+            ));
+        }
+        self.event.validate()?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1483,9 +1677,34 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_v4_fixture_round_trips_every_variant() {
+    fn agent_wire_v4_fixture_remains_frozen() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/v0.3/agent-control-v4.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], 4);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 5);
+        assert!(
+            fixture["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|request| {
+                    request["protocol_version"] == 4 && request["request"]["command"] != "events"
+                })
+        );
+        assert!(
+            fixture["responses"][1]["response"]["snapshot"]
+                .get("event_cursor")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn agent_wire_v5_fixture_round_trips_every_variant() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v5.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
@@ -1511,6 +1730,10 @@ mod tests {
                 },
                 AgentRequestEnvelope {
                     request: AgentRequest::Snapshot { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::Events { .. },
                     ..
                 },
                 AgentRequestEnvelope {
@@ -1559,6 +1782,14 @@ mod tests {
                     ..
                 },
                 AgentResponseEnvelope {
+                    response: AgentResponse::Events { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::SnapshotRequired { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
                     response: AgentResponse::Pairing { .. },
                     ..
                 },
@@ -1592,7 +1823,44 @@ mod tests {
             response.validate_for(&response.request_id).unwrap();
             assert_eq!(serde_json::to_value(response).unwrap(), *expected);
         }
-        let AgentResponse::Pairing { pairing } = &responses[2].response else {
+        let AgentResponse::Events { events, .. } = &responses[2].response else {
+            unreachable!("fixture order is checked above");
+        };
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AgentEventEnvelope {
+                    event: AgentEvent::PairingChanged { .. },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::RelationshipChanged {
+                        change: AgentRelationshipChange::Trusted,
+                        ..
+                    },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::RelationshipChanged {
+                        change: AgentRelationshipChange::Rotated,
+                        ..
+                    },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::RelationshipChanged {
+                        change: AgentRelationshipChange::Revoked,
+                        ..
+                    },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::InboxChanged { .. },
+                    ..
+                },
+            ]
+        ));
+        let AgentResponse::Pairing { pairing } = &responses[4].response else {
             unreachable!("fixture order is checked above");
         };
         assert_eq!(pairing.expires_at_unix_seconds, 1);

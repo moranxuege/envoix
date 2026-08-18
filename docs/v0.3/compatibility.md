@@ -80,9 +80,10 @@ There is no silent fallback that runs v0.2 and v0.3 product engines side by
 side.
 
 The v0.3 Agent control protocol starts at version 4. Its request/response
-envelopes and snapshot are frozen in a v0.3 fixture. Unwrapped v3 commands are
-recognized only far enough to return a typed version error; they are never
-executed.
+envelopes and snapshot remain frozen in a v0.3 fixture. Version 5 adds bounded
+event polling and explicit snapshot recovery in a new fixture without
+rewriting v4. v3 and v4 commands are recognized only far enough to return a
+typed version error; they are never executed by a v5 Agent.
 
 ## 5. Relationship migration
 

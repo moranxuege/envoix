@@ -27,3 +27,5 @@ Storage migrations add a new fixture rather than rewriting this file.
 
 `agent-control-v4.json` freezes the first explicitly versioned Agent request
 and response envelopes, including the immutable Engine/Inbox snapshot.
+`agent-control-v5.json` adds a snapshot event cursor, bounded event polling,
+and an explicit `snapshot_required` recovery response without rewriting v4.

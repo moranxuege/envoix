@@ -20,7 +20,7 @@ use envoix_client::api::{
     SourceSelectionState, TransferEvent, TransferJobStore, acquire_invitation,
 };
 use envoix_client::product::{
-    AgentRequest, AgentRequestEnvelope, AgentResponse, AgentResponseEnvelope,
+    AgentEventCursor, AgentRequest, AgentRequestEnvelope, AgentResponse, AgentResponseEnvelope,
     MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, default_agent_socket_path,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
@@ -82,6 +82,24 @@ async fn run(cli: Cli) -> CliResult<()> {
             }
             AgentCommand::Snapshot { inbox_limit } => show_agent_snapshot(
                 call_agent(agent_socket, AgentRequest::Snapshot { inbox_limit }).await?,
+                json,
+            ),
+            AgentCommand::Events {
+                instance_id,
+                after,
+                limit,
+            } => show_agent_events(
+                call_agent(
+                    agent_socket,
+                    AgentRequest::Events {
+                        after: AgentEventCursor {
+                            instance_id,
+                            sequence: after,
+                        },
+                        limit,
+                    },
+                )
+                .await?,
                 json,
             ),
             AgentCommand::Install {
@@ -264,7 +282,34 @@ fn show_agent_snapshot(response: AgentResponse, json: bool) -> CliResult<()> {
     println!("rooms: {}", snapshot.engine.rooms.len());
     println!("transfers: {}", snapshot.engine.transfers.len());
     println!("inbox: {}", snapshot.inbox.len());
+    println!(
+        "event cursor: {}:{}",
+        snapshot.event_cursor.instance_id, snapshot.event_cursor.sequence
+    );
     Ok(())
+}
+
+fn show_agent_events(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    match response {
+        AgentResponse::Events { cursor, events } => {
+            for event in events {
+                println!("{}\t{:?}", event.sequence, event.event);
+            }
+            println!("event cursor: {}:{}", cursor.instance_id, cursor.sequence);
+            Ok(())
+        }
+        AgentResponse::SnapshotRequired { cursor } => Err(format!(
+            "Agent event cursor is no longer usable; fetch a new snapshot (current cursor {}:{})",
+            cursor.instance_id, cursor.sequence
+        )
+        .into()),
+        _ => Err("Agent returned an unexpected response".into()),
+    }
 }
 
 fn show_pairing(response: AgentResponse, json: bool) -> CliResult<()> {

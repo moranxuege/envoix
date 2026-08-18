@@ -277,12 +277,16 @@ JSON Lines is acceptable for the initial control encoding because the traffic
 is local and small. Its schema must be represented by Rust types and contract
 fixtures. Encoding can change later without changing the Engine contract.
 
-Agent protocol v4 wraps every command and response in an explicit protocol
-version plus bounded opaque request ID. Requests are limited to 64 KiB and
-responses to 20 MiB, which accommodates the separately bounded Engine
-snapshot. The `snapshot` command returns secret-free Engine, status, and Inbox
-state. A direct v3 JSON command receives `unsupported_protocol_version`; the
-Agent does not run a second legacy decoder.
+Agent protocol v4 introduced an explicit protocol version and bounded opaque
+request ID on every command and response. Protocol v5 adds an Agent instance
+ID, a monotonically increasing event sequence, and a bounded 1,024-event
+in-memory log. A client starts from the secret-free Engine/status/Inbox
+snapshot and its event cursor, then polls at most 256 subsequent events per
+request. An Agent restart, future cursor, or retention gap returns the typed
+`snapshot_required` response; clients never guess whether incremental state is
+complete. Requests are limited to 64 KiB and responses to 20 MiB. v3 and v4
+requests receive `unsupported_protocol_version`; the Agent does not run a
+legacy decoder.
 
 ## 9. Persistence and secret ownership
 

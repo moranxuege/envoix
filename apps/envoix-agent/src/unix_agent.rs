@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::io;
@@ -21,10 +21,12 @@ use envoix_client::model::{
     RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
 };
 use envoix_client::product::{
-    AGENT_PROTOCOL_VERSION, AgentRequest, AgentRequestEnvelope, AgentResponse,
+    AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventCursor, AgentEventEnvelope,
+    AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
     AgentResponseEnvelope, AgentSettings, AgentSnapshot, AgentStatus, InboxItem, InboxRoot,
-    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation, PreparedRememberedDevice,
-    ProductStore, RememberedDeviceRecord, default_agent_state_directory, is_valid_agent_request_id,
+    MAX_AGENT_EVENT_BATCH, MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation,
+    PreparedRememberedDevice, ProductStore, RememberedDeviceRecord, default_agent_state_directory,
+    is_valid_agent_request_id,
 };
 use envoix_client::{
     DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, IdentityConfig, TransferCancelToken,
@@ -36,6 +38,7 @@ use tokio::task::JoinHandle;
 const REMEMBERED_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
 const RECEIVER_RETRY_DELAY: Duration = Duration::from_secs(3);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
+const MAX_RETAINED_AGENT_EVENTS: usize = 1_024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -89,8 +92,93 @@ struct AgentRuntime {
     store: Mutex<ProductStore>,
     active_receivers: Mutex<HashMap<String, TransferCancelToken>>,
     active_pairings: Mutex<HashSet<String>>,
+    events: Mutex<AgentEventLog>,
     shutdown: TransferCancelToken,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+struct AgentEventLog {
+    instance_id: String,
+    sequence: u64,
+    events: VecDeque<AgentEventEnvelope>,
+}
+
+enum AgentEventRead {
+    Events {
+        cursor: AgentEventCursor,
+        events: Vec<AgentEventEnvelope>,
+    },
+    SnapshotRequired(AgentEventCursor),
+}
+
+impl AgentEventLog {
+    fn new() -> Result<Self> {
+        let mut random = [0_u8; 12];
+        getrandom::fill(&mut random)
+            .map_err(|error| anyhow!("Agent instance entropy unavailable: {error}"))?;
+        Ok(Self {
+            instance_id: format!("agent_{}", URL_SAFE_NO_PAD.encode(random)),
+            sequence: 0,
+            events: VecDeque::new(),
+        })
+    }
+
+    fn cursor(&self) -> AgentEventCursor {
+        AgentEventCursor {
+            instance_id: self.instance_id.clone(),
+            sequence: self.sequence,
+        }
+    }
+
+    fn record(&mut self, event: AgentEvent) -> Result<AgentEventEnvelope> {
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("Agent event sequence is exhausted"))?;
+        let envelope = AgentEventEnvelope::new(self.instance_id.clone(), self.sequence, event)?;
+        self.events.push_back(envelope.clone());
+        while self.events.len() > MAX_RETAINED_AGENT_EVENTS {
+            self.events.pop_front();
+        }
+        Ok(envelope)
+    }
+
+    fn read_after(&self, after: &AgentEventCursor, limit: usize) -> AgentEventRead {
+        let current = self.cursor();
+        if after.instance_id != self.instance_id || after.sequence > self.sequence {
+            return AgentEventRead::SnapshotRequired(current);
+        }
+        let oldest = self
+            .events
+            .front()
+            .map(|event| event.sequence)
+            .unwrap_or_else(|| self.sequence.saturating_add(1));
+        if after.sequence.saturating_add(1) < oldest {
+            return AgentEventRead::SnapshotRequired(current);
+        }
+        let limit = limit.min(MAX_AGENT_EVENT_BATCH);
+        if limit == 0 {
+            return AgentEventRead::Events {
+                cursor: after.clone(),
+                events: Vec::new(),
+            };
+        }
+        let events = self
+            .events
+            .iter()
+            .filter(|event| event.sequence > after.sequence)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let cursor = AgentEventCursor {
+            instance_id: self.instance_id.clone(),
+            sequence: events
+                .last()
+                .map(|event| event.sequence)
+                .unwrap_or(self.sequence),
+        };
+        AgentEventRead::Events { cursor, events }
+    }
 }
 
 impl AgentRuntime {
@@ -121,12 +209,19 @@ impl AgentRuntime {
     fn snapshot(&self, inbox_limit: usize) -> Result<AgentSnapshot> {
         let status = self.status()?;
         let store = lock(&self.store)?;
+        let event_cursor = lock(&self.events)?.cursor();
         Ok(AgentSnapshot {
             status,
             engine: store.engine_snapshot(),
             inbox: store.inbox(inbox_limit),
+            event_cursor,
         })
     }
+}
+
+fn record_agent_event(runtime: &AgentRuntime, event: AgentEvent) -> Result<()> {
+    lock(&runtime.events)?.record(event)?;
+    Ok(())
 }
 
 pub async fn run() -> Result<()> {
@@ -182,6 +277,7 @@ pub async fn run() -> Result<()> {
         store: Mutex::new(ProductStore::open(&state_directory)?),
         active_receivers: Mutex::new(HashMap::new()),
         active_pairings: Mutex::new(HashSet::new()),
+        events: Mutex::new(AgentEventLog::new()?),
         shutdown: TransferCancelToken::new(),
         background_tasks: Mutex::new(Vec::new()),
     });
@@ -410,6 +506,16 @@ async fn handle_request_result(
         AgentRequest::Snapshot { inbox_limit } => Ok(AgentResponse::Snapshot {
             snapshot: runtime.snapshot(inbox_limit)?,
         }),
+        AgentRequest::Events { after, limit } => {
+            match lock(&runtime.events)?.read_after(&after, limit) {
+                AgentEventRead::Events { cursor, events } => {
+                    Ok(AgentResponse::Events { cursor, events })
+                }
+                AgentEventRead::SnapshotRequired(cursor) => {
+                    Ok(AgentResponse::SnapshotRequired { cursor })
+                }
+            }
+        }
         AgentRequest::ListDevices => Ok(AgentResponse::Devices {
             devices: lock(&runtime.store)?.devices(),
         }),
@@ -418,6 +524,13 @@ async fn handle_request_result(
             if let Some(cancel) = lock(&runtime.active_receivers)?.get(&forgotten.id) {
                 cancel.cancel();
             }
+            record_agent_event(
+                &runtime,
+                AgentEvent::RelationshipChanged {
+                    relationship_id: forgotten.id.clone(),
+                    change: AgentRelationshipChange::Revoked,
+                },
+            )?;
             Ok(AgentResponse::DeviceRevoked { device: forgotten })
         }
         AgentRequest::ListInbox { limit } => Ok(AgentResponse::Inbox {
@@ -473,6 +586,16 @@ async fn begin_pairing(runtime: Arc<AgentRuntime>, label: String) -> Result<Agen
             expires_at_unix_seconds: invitation.expires_at_unix_secs(),
         },
     };
+    if let Err(error) = record_agent_event(
+        &runtime,
+        AgentEvent::PairingChanged {
+            label: prepared.label().to_string(),
+            active: true,
+        },
+    ) {
+        lock(&runtime.active_pairings)?.remove(&prepared.label().to_ascii_lowercase());
+        return Err(error);
+    }
     let task_runtime = runtime.clone();
     spawn_background_task(
         &runtime,
@@ -492,8 +615,26 @@ async fn run_initial_pairing(
     let paired = establish_initial_room(&runtime, prepared, invitation, &verification_code).await;
     lock_or_log(&runtime.active_pairings, "active pairings")
         .map(|mut pairings| pairings.remove(&label.to_ascii_lowercase()));
+    if let Err(error) = record_agent_event(
+        &runtime,
+        AgentEvent::PairingChanged {
+            label: label.clone(),
+            active: false,
+        },
+    ) {
+        tracing::error!(%error, "pairing completion event could not be recorded");
+    }
     let (session, session_cancel) = match paired {
         Ok(paired) => {
+            if let Err(error) = record_agent_event(
+                &runtime,
+                AgentEvent::RelationshipChanged {
+                    relationship_id: device_id.clone(),
+                    change: AgentRelationshipChange::Trusted,
+                },
+            ) {
+                tracing::error!(%error, "trusted Relationship event could not be recorded");
+            }
             tracing::info!(device = %label, "device verification completed");
             paired
         }
@@ -677,6 +818,15 @@ async fn remembered_receiver_loop(
                     session.shutdown().await;
                     tracing::error!(device = %record.label(), %error, "remembered generation could not be persisted");
                     return;
+                }
+                if let Err(error) = record_agent_event(
+                    &runtime,
+                    AgentEvent::RelationshipChanged {
+                        relationship_id: record.id().to_string(),
+                        change: AgentRelationshipChange::Rotated,
+                    },
+                ) {
+                    tracing::error!(device = %record.label(), %error, "Relationship rotation event could not be recorded");
                 }
                 tracing::info!(
                     device = %record.label(),
@@ -1007,6 +1157,12 @@ async fn receive_to_inbox(
         total_bytes: total,
     };
     lock(&runtime.store)?.append_inbox(item.clone())?;
+    record_agent_event(
+        runtime,
+        AgentEvent::InboxChanged {
+            item_id: item.id.clone(),
+        },
+    )?;
     Ok(item)
 }
 
@@ -1160,10 +1316,81 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v4_envelope() {
+    fn request_decoder_accepts_a_valid_v5_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
+    }
+
+    #[test]
+    fn event_log_returns_ordered_bounded_batches() {
+        let mut log = AgentEventLog::new().unwrap();
+        let initial = log.cursor();
+        log.record(AgentEvent::PairingChanged {
+            label: "MacBook".into(),
+            active: true,
+        })
+        .unwrap();
+        log.record(AgentEvent::InboxChanged {
+            item_id: "job_1".into(),
+        })
+        .unwrap();
+        log.record(AgentEvent::InboxChanged {
+            item_id: "job_2".into(),
+        })
+        .unwrap();
+
+        let AgentEventRead::Events { cursor, events } = log.read_after(&initial, 2) else {
+            panic!("current Agent cursor unexpectedly required a snapshot");
+        };
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[1].sequence, 2);
+        assert_eq!(cursor.sequence, 2);
+
+        let AgentEventRead::Events {
+            cursor: final_cursor,
+            events,
+        } = log.read_after(&cursor, 2)
+        else {
+            panic!("batched Agent cursor unexpectedly required a snapshot");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, 3);
+        assert_eq!(final_cursor, log.cursor());
+    }
+
+    #[test]
+    fn event_log_requires_a_snapshot_after_restart_or_retention_gap() {
+        let mut log = AgentEventLog::new().unwrap();
+        let initial = log.cursor();
+        let restarted = AgentEventCursor {
+            instance_id: "agent_restarted".into(),
+            sequence: 0,
+        };
+        assert!(matches!(
+            log.read_after(&restarted, 1),
+            AgentEventRead::SnapshotRequired(_)
+        ));
+
+        for index in 0..=MAX_RETAINED_AGENT_EVENTS {
+            log.record(AgentEvent::InboxChanged {
+                item_id: format!("job_{index}"),
+            })
+            .unwrap();
+        }
+        assert!(matches!(
+            log.read_after(&initial, 1),
+            AgentEventRead::SnapshotRequired(_)
+        ));
+        let future = AgentEventCursor {
+            instance_id: log.instance_id.clone(),
+            sequence: log.sequence + 1,
+        };
+        assert!(matches!(
+            log.read_after(&future, 1),
+            AgentEventRead::SnapshotRequired(_)
+        ));
     }
 
     #[tokio::test]
@@ -1183,6 +1410,7 @@ mod tests {
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             active_receivers: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
         });
@@ -1201,6 +1429,8 @@ mod tests {
         };
         assert_eq!(snapshot.engine.contract_version, 6);
         assert!(snapshot.inbox.is_empty());
+        assert_eq!(snapshot.event_cursor.sequence, 0);
+        snapshot.event_cursor.validate().unwrap();
         assert_eq!(
             handle_request(runtime, AgentRequest::LatestInbox).await,
             AgentResponse::Latest { item: None }
@@ -1208,7 +1438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_socket_round_trips_a_v4_envelope() {
+    async fn local_socket_round_trips_a_v5_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -1224,6 +1454,7 @@ mod tests {
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             active_receivers: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
         });
@@ -1271,6 +1502,7 @@ mod tests {
                 receiver_cancel.clone(),
             )])),
             active_pairings: Mutex::new(HashSet::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
         });
@@ -1289,6 +1521,17 @@ mod tests {
         assert_eq!(device.id, device_id);
         assert!(receiver_cancel.is_cancelled());
         assert!(lock(&runtime.store).unwrap().devices().is_empty());
+        let events = lock(&runtime.events).unwrap();
+        assert!(matches!(
+            events.events.back(),
+            Some(AgentEventEnvelope {
+                event: AgentEvent::RelationshipChanged {
+                    relationship_id,
+                    change: AgentRelationshipChange::Revoked,
+                },
+                ..
+            }) if relationship_id == &device_id
+        ));
     }
 
     #[tokio::test]

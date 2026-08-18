@@ -72,6 +72,18 @@ pub(crate) enum AgentCommand {
         #[arg(long, default_value_t = 20)]
         inbox_limit: usize,
     },
+    /// Read Agent events after a snapshot or prior event cursor.
+    Events {
+        /// Agent instance ID returned by `agent snapshot` or a prior poll.
+        #[arg(long)]
+        instance_id: String,
+        /// Last consumed event sequence.
+        #[arg(long)]
+        after: u64,
+        /// Maximum number of events to return.
+        #[arg(long, default_value_t = 64)]
+        limit: usize,
+    },
     /// Install and start the Agent as a systemd user service.
     Install {
         /// Inbox directory; defaults to the Agent state directory's Inbox.
@@ -540,6 +552,20 @@ mod tests {
         assert!(Cli::try_parse_from(["envoix", "agent", "status"]).is_ok());
         assert!(
             Cli::try_parse_from(["envoix", "agent", "snapshot", "--inbox-limit", "10"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "agent",
+                "events",
+                "--instance-id",
+                "agent_fixture",
+                "--after",
+                "0",
+                "--limit",
+                "32",
+            ])
+            .is_ok()
         );
         assert!(
             Cli::try_parse_from([
