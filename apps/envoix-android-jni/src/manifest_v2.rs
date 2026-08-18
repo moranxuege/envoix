@@ -20,6 +20,7 @@ use envoix_client::api::{
     send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
     send_manifest_v2_via_room_with_authentication,
 };
+use envoix_client::model::{RememberedGenerationRole, remembered_generation_attempts};
 #[cfg(test)]
 use envoix_error::RendezvousCause;
 use envoix_error::{CoreError, TransferCause};
@@ -1575,12 +1576,12 @@ async fn send_remembered(
     callback: Arc<GlobalRef>,
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, CoreError> {
-    // Keep joining the receiver's fallback window before trying our own
-    // previous generation.
-    let mut generations = vec![params.remembered_generation, params.remembered_generation];
-    if let Some(previous) = params.remembered_previous_generation {
-        generations.push(previous);
-    }
+    let generations = remembered_generation_attempts(
+        params.remembered_generation,
+        params.remembered_previous_generation,
+        RememberedGenerationRole::Connector,
+    )
+    .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
     let mut last_error = None;
     for generation in generations {
         let next_generation = generation.checked_add(1).ok_or_else(|| {
@@ -1629,13 +1630,12 @@ async fn receive_remembered(
     callback: Arc<GlobalRef>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, CoreError> {
-    // Offset the sender's current/current/previous schedule so either side of
-    // a one-generation crash can rendezvous.
-    let mut generations = vec![params.remembered_generation];
-    if let Some(previous) = params.remembered_previous_generation {
-        generations.push(previous);
-        generations.push(params.remembered_generation);
-    }
+    let generations = remembered_generation_attempts(
+        params.remembered_generation,
+        params.remembered_previous_generation,
+        RememberedGenerationRole::Responder,
+    )
+    .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
     let last_index = generations.len() - 1;
     let mut last_error = None;
     for (index, generation) in generations.into_iter().enumerate() {

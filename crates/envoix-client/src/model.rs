@@ -101,6 +101,46 @@ pub enum RelationshipState {
     Revoked,
 }
 
+/// Rendezvous side used to align remembered-generation recovery attempts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RememberedGenerationRole {
+    Connector,
+    Responder,
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("remembered previous generation {previous} must be less than current generation {current}")]
+pub struct RememberedGenerationError {
+    current: u64,
+    previous: u64,
+}
+
+/// Returns the bounded attempt order that lets peers recover from one
+/// generation of persistence skew.
+pub fn remembered_generation_attempts(
+    current: u64,
+    previous: Option<u64>,
+    role: RememberedGenerationRole,
+) -> Result<Vec<u64>, RememberedGenerationError> {
+    if let Some(previous) = previous
+        && previous >= current
+    {
+        return Err(RememberedGenerationError { current, previous });
+    }
+
+    let mut attempts = match role {
+        RememberedGenerationRole::Connector => vec![current, current],
+        RememberedGenerationRole::Responder => vec![current],
+    };
+    if let Some(previous) = previous {
+        match role {
+            RememberedGenerationRole::Connector => attempts.push(previous),
+            RememberedGenerationRole::Responder => attempts.extend([previous, current]),
+        }
+    }
+    Ok(attempts)
+}
+
 impl RelationshipState {
     pub const fn wire_name(self) -> &'static str {
         match self {

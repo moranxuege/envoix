@@ -17,6 +17,7 @@ use envoix_client::api::{
     RoomControlSession, RoomOfferRejection, RoomTransferOffer, TransferEvent, TransferOptions,
     TransferRole,
 };
+use envoix_client::model::{RememberedGenerationRole, remembered_generation_attempts};
 use envoix_client::product::{
     AGENT_PROTOCOL_VERSION, AgentRequest, AgentResponse, AgentSettings, AgentStatus, InboxItem,
     InboxRoot, PairingInvitation, PreparedRememberedDevice, ProductStore, RememberedDeviceRecord,
@@ -634,11 +635,11 @@ async fn connect_remembered_room(
 ) -> Result<(RoomControlSession, u64)> {
     let credential = RememberedCredential::from_opaque(opaque)?;
     let relay = record.relay();
-    let mut generations = vec![record.generation()];
-    if let Some(previous) = record.previous_generation() {
-        generations.push(previous);
-        generations.push(record.generation());
-    }
+    let generations = remembered_generation_attempts(
+        record.generation(),
+        record.previous_generation(),
+        RememberedGenerationRole::Responder,
+    )?;
     let last_index = generations.len() - 1;
     let mut last_error = None;
     for (index, generation) in generations.into_iter().enumerate() {

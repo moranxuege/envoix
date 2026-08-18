@@ -25,6 +25,7 @@ use envoix_client::api::{
     send_manifest_v2_via_room_hybrid_with_authentication,
     send_manifest_v2_via_room_with_authentication,
 };
+use envoix_client::model::{RememberedGenerationRole, remembered_generation_attempts};
 use envoix_types::{DataPath, PairingStep};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -1260,12 +1261,12 @@ async fn send_attempt(
         } => {
             let credential = acquire_remembered_credential(credential_ref).map_err(op_err_core)?;
             let broker_addr = parse_broker_addr(broker, relay)?;
-            // Keep joining the receiver's fallback window before trying our
-            // own previous generation.
-            let mut generations = vec![*generation, *generation];
-            if let Some(previous) = previous_generation {
-                generations.push(*previous);
-            }
+            let generations = remembered_generation_attempts(
+                *generation,
+                *previous_generation,
+                RememberedGenerationRole::Connector,
+            )
+            .map_err(|error| SessionError::InvalidInput(error.to_string()))?;
             let mut last_error = None;
             for generation in generations {
                 let next_generation = generation.checked_add(1).ok_or_else(|| {
@@ -1399,13 +1400,12 @@ async fn receive_offer_attempt(
         } => {
             let credential = acquire_remembered_credential(credential_ref).map_err(op_err_core)?;
             let broker_addr = parse_broker_addr(broker, relay)?;
-            // Offset the sender's current/current/previous schedule so either
-            // side of a one-generation crash can rendezvous.
-            let mut generations = vec![*generation];
-            if let Some(previous) = previous_generation {
-                generations.push(*previous);
-                generations.push(*generation);
-            }
+            let generations = remembered_generation_attempts(
+                *generation,
+                *previous_generation,
+                RememberedGenerationRole::Responder,
+            )
+            .map_err(|error| SessionError::InvalidInput(error.to_string()))?;
             let last_index = generations.len() - 1;
             let mut last_error = None;
             for (index, generation) in generations.into_iter().enumerate() {
