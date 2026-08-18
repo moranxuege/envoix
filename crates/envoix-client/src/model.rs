@@ -1,0 +1,261 @@
+//! Product identifiers and immutable snapshot records.
+
+use std::fmt;
+
+use serde::{Deserialize, Deserializer, Serialize};
+use thiserror::Error;
+
+const MAX_IDENTIFIER_BYTES: usize = 128;
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("{kind} must contain 1 to {MAX_IDENTIFIER_BYTES} ASCII letters, digits, '-' or '_'")]
+pub struct IdentifierError {
+    kind: &'static str,
+}
+
+fn validate_identifier(value: String, kind: &'static str) -> Result<String, IdentifierError> {
+    if value.is_empty()
+        || value.len() > MAX_IDENTIFIER_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(IdentifierError { kind });
+    }
+    Ok(value)
+}
+
+macro_rules! identifier {
+    ($name:ident, $kind:literal) => {
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn parse(value: impl Into<String>) -> Result<Self, IdentifierError> {
+                validate_identifier(value.into(), $kind).map(Self)
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = IdentifierError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::parse(value)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::parse(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+identifier!(CommandId, "command ID");
+identifier!(ContentId, "content ID");
+identifier!(DeviceId, "device ID");
+identifier!(RelationshipId, "relationship ID");
+identifier!(RoomId, "room ID");
+identifier!(TransferId, "transfer ID");
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityKind {
+    Device,
+    Relationship,
+    Room,
+    Transfer,
+}
+
+impl EntityKind {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::Relationship => "relationship",
+            Self::Room => "room",
+            Self::Transfer => "transfer",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipState {
+    Trusted,
+    Revoked,
+}
+
+impl RelationshipState {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomState {
+    Connecting,
+    Connected,
+    Closed,
+}
+
+impl RoomState {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomCloseReason {
+    UserEnded,
+    Expired,
+    PeerEnded,
+    Backgrounded,
+    NetworkLost,
+    ProtocolFailure,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferDirection {
+    Send,
+    Receive,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferState {
+    Queued,
+    Connecting,
+    Transferring,
+    Paused,
+    Delivered,
+    Failed,
+    Canceled,
+}
+
+impl TransferState {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Connecting => "connecting",
+            Self::Transferring => "transferring",
+            Self::Paused => "paused",
+            Self::Delivered => "delivered",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Delivered | Self::Failed | Self::Canceled)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCode {
+    NetworkLost,
+    AuthenticationFailed,
+    SourceUnavailable,
+    DestinationUnavailable,
+    IntegrityFailure,
+    UnsupportedVersion,
+    Internal,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailurePhase {
+    Setup,
+    Pairing,
+    Connecting,
+    Authenticating,
+    Negotiating,
+    Transferring,
+    Verifying,
+    Committing,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction {
+    Retry,
+    Resume,
+    ChooseFolder,
+    OpenSettings,
+    RePair,
+    None,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferFailure {
+    pub code: FailureCode,
+    pub phase: FailurePhase,
+    pub retryable: bool,
+    pub recovery_action: RecoveryAction,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Device {
+    pub id: DeviceId,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Relationship {
+    pub id: RelationshipId,
+    pub device_id: DeviceId,
+    pub generation: u64,
+    pub state: RelationshipState,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Room {
+    pub id: RoomId,
+    pub relationship_id: Option<RelationshipId>,
+    pub state: RoomState,
+    pub close_reason: Option<RoomCloseReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Transfer {
+    pub id: TransferId,
+    pub relationship_id: RelationshipId,
+    pub room_id: Option<RoomId>,
+    pub content_id: ContentId,
+    pub direction: TransferDirection,
+    pub state: TransferState,
+    pub transferred_bytes: u64,
+    pub total_bytes: u64,
+    pub failure: Option<TransferFailure>,
+}

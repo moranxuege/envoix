@@ -1,7 +1,13 @@
 //! Public application-facing facade for canonical Manifest v2 transfers.
 
 pub mod api;
+pub mod command;
+pub mod event;
+pub mod model;
+pub mod ports;
 pub mod product;
+pub mod runtime;
+pub mod snapshot;
 
 use std::fs;
 use std::path::Path;
@@ -14,6 +20,9 @@ use envoix_session::{MAX_DATA_STREAM_WINDOW, MIN_DATA_STREAM_WINDOW};
 pub use envoix_session::{TransferCancelToken, TransferDirection};
 pub use envoix_types::PROTOCOL_VERSION;
 use serde::Deserialize;
+
+/// Version of the typed v0.3 application command/event/snapshot contract.
+pub const APPLICATION_CONTRACT_VERSION: u16 = 1;
 
 /// Deployed defaults shared by the native apps, CLI agent, and FFI facade.
 /// A configured relay still allows iroh to select a direct LAN path.

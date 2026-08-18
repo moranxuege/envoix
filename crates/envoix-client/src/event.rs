@@ -1,0 +1,79 @@
+//! Ordered, secret-free application events.
+
+use serde::{Deserialize, Serialize};
+
+use crate::model::{
+    ContentId, DeviceId, RelationshipId, RoomCloseReason, RoomId, TransferDirection,
+    TransferFailure, TransferId,
+};
+use crate::ports::PlatformCapabilities;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventEnvelope {
+    pub contract_version: u16,
+    pub sequence: u64,
+    pub event: EngineEvent,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EngineEvent {
+    CapabilitiesChanged {
+        capabilities: PlatformCapabilities,
+    },
+    DeviceObserved {
+        device_id: DeviceId,
+        display_name: String,
+    },
+    RelationshipTrusted {
+        relationship_id: RelationshipId,
+        device_id: DeviceId,
+        generation: u64,
+    },
+    RelationshipRevoked {
+        relationship_id: RelationshipId,
+    },
+    RoomOpened {
+        room_id: RoomId,
+        relationship_id: Option<RelationshipId>,
+    },
+    RoomConnected {
+        room_id: RoomId,
+    },
+    RoomClosed {
+        room_id: RoomId,
+        reason: RoomCloseReason,
+    },
+    TransferCreated {
+        transfer_id: TransferId,
+        relationship_id: RelationshipId,
+        room_id: Option<RoomId>,
+        content_id: ContentId,
+        direction: TransferDirection,
+        total_bytes: u64,
+    },
+    TransferStarted {
+        transfer_id: TransferId,
+    },
+    TransferProgressed {
+        transfer_id: TransferId,
+        transferred_bytes: u64,
+    },
+    TransferPaused {
+        transfer_id: TransferId,
+    },
+    TransferResumed {
+        transfer_id: TransferId,
+    },
+    TransferDelivered {
+        transfer_id: TransferId,
+    },
+    TransferFailed {
+        transfer_id: TransferId,
+        failure: TransferFailure,
+    },
+    TransferCanceled {
+        transfer_id: TransferId,
+    },
+}
