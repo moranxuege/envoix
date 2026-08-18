@@ -13,7 +13,37 @@ pub use envoix_protocol::manifest_v2::{
     CompressionPolicyV2, EntryContentDigestV2, JobIdV2, ManifestEntryKindV2,
 };
 pub use envoix_protocol::manifest_v2_frames::RootPlanV2;
-pub use envoix_session::*;
+// Temporary compatibility surface for consumers that have not moved to the
+// v0.3 command/event boundary. Keep this list explicit so new session details
+// cannot become application API by accident.
+use envoix_session::DEFAULT_DATA_STREAM_WINDOW;
+pub use envoix_session::{
+    AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES, AuthenticationHandler, AuthenticationOutcome, BindAddrs,
+    CandidateFilter, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2,
+    EndpointAddr, EventSink, IdentityConfig, InventoryCursor, InventoryItem, JobLifecycle,
+    LocalSourceOrigin, ManifestV2DataError, ManifestV2ProgressPhase, ManifestV2ResultGate,
+    NativeTransportRead, NearbyInvite, NearbyInviteEndpoint, NearbyInviteInbox, PairingConfig,
+    PendingManifestV2Receive, PendingNativeManifestV2Receive, PlatformDatagramTransport,
+    PlatformDuplexTransport, ProviderSourceIssue, REMEMBERED_PRESENCE_TAG_LEN, ROOM_CONTROL_ALPN,
+    ReceiverManifestV2SessionSummary, RememberedCredential, RememberedRoomControlConnectError,
+    RememberedRoomControlRole, RendezvousCause, RendezvousRetryPolicy, RoomCloseReason,
+    RoomControlEvent, RoomControlInvite, RoomControlSession, RoomLifetimePolicy, RoomLifetimeState,
+    RoomOfferRejection, RoomTransferOffer, SavedEntryV2, SenderManifestV2SessionSummary,
+    SessionConfig, SessionError, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
+    SourceSelectionInfo, SourceSelectionState, TransferCancelToken, TransferDirection,
+    TransferEvent, TransferJobStore, TransferStage, connect_remembered_room_control,
+    connect_room_control, local_allocatable_bytes, parse_broker_addr,
+    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_over_datagram_transport,
+    receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
+    receive_manifest_v2_offer_via_room,
+    receive_manifest_v2_offer_via_room_hybrid_with_authentication,
+    receive_manifest_v2_offer_via_room_with_authentication,
+    receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
+    send_manifest_v2_manual, send_manifest_v2_over_datagram_transport,
+    send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
+    send_manifest_v2_via_room_hybrid_with_authentication,
+    send_manifest_v2_via_room_with_authentication, start_nearby_invite_inbox,
+};
 
 pub use credential_store::DesktopCredentialStore;
 pub use error::TransferError;

@@ -60,6 +60,10 @@ jobs:
           python3 scripts/matrix_contract.py validate-registry tests/e2e/matrix/cases.v1.json
           python3 -m unittest discover -s scripts/tests -p 'test_matrix_contract.py'
           bash -n scripts/cross-device-transfer-matrix.sh
+          if grep -R -n -E --include='*.rs' 'pub use envoix_(session|transfer)::\*' crates/envoix-client/src; then
+            echo 'envoix-client must not wildcard-export lower architectural layers' >&2
+            exit 1
+          fi
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Lint Rust
