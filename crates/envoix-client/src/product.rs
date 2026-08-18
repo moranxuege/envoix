@@ -709,40 +709,112 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_contract_is_stable_and_tagged() {
-        assert_eq!(AGENT_PROTOCOL_VERSION, 3);
-        let request = serde_json::to_string(&AgentRequest::Pair {
-            label: "MacBook".into(),
-        })
+    fn product_state_fixtures_load_or_fail_closed() {
+        let valid = include_bytes!("../../../tests/fixtures/v0.2/product-state-v1.json");
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join(PRODUCT_STATE_FILE), valid).unwrap();
+
+        let store = ProductStore::open(directory.path()).unwrap();
+        let device = &store.device_records()[0];
+        assert_eq!(device.id(), "dev_fixture_not_a_real_identity");
+        assert_eq!(device.generation(), 4);
+        assert_eq!(device.previous_generation(), Some(3));
+        assert_eq!(store.latest_inbox().unwrap().id, "job_fixture_delivered");
+        assert_eq!(
+            store.device_credential(device.id()).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+
+        for (name, invalid) in [
+            (
+                "corrupt",
+                include_bytes!("../../../tests/fixtures/v0.2/product-state-v1-corrupt.json")
+                    as &[u8],
+            ),
+            (
+                "truncated",
+                include_bytes!("../../../tests/fixtures/v0.2/product-state-v1-truncated.json"),
+            ),
+            (
+                "unknown-version",
+                include_bytes!("../../../tests/fixtures/v0.2/product-state-unknown-version.json"),
+            ),
+            (
+                "partial-migration",
+                include_bytes!("../../../tests/fixtures/v0.2/product-state-partial-migration.json"),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::write(directory.path().join(PRODUCT_STATE_FILE), invalid).unwrap();
+            let error = ProductStore::open(directory.path())
+                .err()
+                .unwrap_or_else(|| panic!("{name} fixture unexpectedly loaded"));
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+        }
+    }
+
+    #[test]
+    fn agent_wire_fixture_round_trips_every_variant() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.2/agent-control-v3.json"
+        ))
         .unwrap();
-        assert_eq!(request, r#"{"command":"pair","label":"MacBook"}"#);
-        assert_eq!(
-            serde_json::from_str::<AgentRequest>(&request).unwrap(),
-            AgentRequest::Pair {
-                label: "MacBook".into()
-            }
-        );
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
 
-        let response = AgentResponse::Pairing {
-            pairing: PairingInvitation {
-                label: "MacBook".into(),
-                room_code: "123456-a1b2-c3d4".into(),
-                verification_code: "012345".into(),
-                expires_at_unix_seconds: 42,
-            },
-        };
-        assert_eq!(
-            serde_json::to_string(&response).unwrap(),
-            r#"{"kind":"pairing","pairing":{"label":"MacBook","room_code":"123456-a1b2-c3d4","verification_code":"012345","expires_at_unix_seconds":42}}"#
-        );
+        let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
+        settings.validate().unwrap();
+        assert_eq!(serde_json::to_value(settings).unwrap(), fixture["settings"]);
 
-        let forget = AgentRequest::ForgetDevice {
-            device: "MacBook".into(),
+        let request_values = fixture["requests"].as_array().unwrap();
+        let requests = request_values
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<AgentRequest>)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(matches!(
+            requests.as_slice(),
+            [
+                AgentRequest::Status,
+                AgentRequest::Pair { .. },
+                AgentRequest::ListDevices,
+                AgentRequest::ForgetDevice { .. },
+                AgentRequest::ListInbox { .. },
+                AgentRequest::LatestInbox,
+            ]
+        ));
+        for (request, expected) in requests.iter().zip(request_values) {
+            assert_eq!(serde_json::to_value(request).unwrap(), *expected);
+        }
+
+        let response_values = fixture["responses"].as_array().unwrap();
+        let responses = response_values
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<AgentResponse>)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(matches!(
+            responses.as_slice(),
+            [
+                AgentResponse::Status { .. },
+                AgentResponse::Pairing { .. },
+                AgentResponse::Devices { .. },
+                AgentResponse::DeviceForgotten { .. },
+                AgentResponse::Inbox { .. },
+                AgentResponse::Latest { item: Some(_) },
+                AgentResponse::Latest { item: None },
+                AgentResponse::Error { .. },
+            ]
+        ));
+        for (response, expected) in responses.iter().zip(response_values) {
+            assert_eq!(serde_json::to_value(response).unwrap(), *expected);
+        }
+        let AgentResponse::Pairing { pairing } = &responses[1] else {
+            unreachable!("fixture order is checked above");
         };
-        assert_eq!(
-            serde_json::to_string(&forget).unwrap(),
-            r#"{"command":"forget_device","device":"MacBook"}"#
-        );
+        assert_eq!(pairing.expires_at_unix_seconds, 1);
     }
 
     #[test]

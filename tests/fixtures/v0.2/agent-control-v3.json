@@ -1,0 +1,129 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 3,
+  "settings": {
+    "version": 1,
+    "device_name": "Fixture WSL",
+    "inbox_directory": "/var/lib/envoix-fixture/inbox"
+  },
+  "requests": [
+    {
+      "command": "status"
+    },
+    {
+      "command": "pair",
+      "label": "Fixture Mac"
+    },
+    {
+      "command": "list_devices"
+    },
+    {
+      "command": "forget_device",
+      "device": "dev_fixture_not_a_real_identity"
+    },
+    {
+      "command": "list_inbox",
+      "limit": 20
+    },
+    {
+      "command": "latest_inbox"
+    }
+  ],
+  "responses": [
+    {
+      "kind": "status",
+      "status": {
+        "protocol_version": 3,
+        "pid": 4242,
+        "device_name": "Fixture WSL",
+        "state_directory": "/var/lib/envoix-fixture",
+        "inbox_directory": "/var/lib/envoix-fixture/inbox",
+        "broker": "fixture.invalid:8445",
+        "relay": "https://relay.fixture.invalid",
+        "paired_devices": 1,
+        "active_receivers": 0,
+        "active_pairings": 1
+      }
+    },
+    {
+      "kind": "pairing",
+      "pairing": {
+        "label": "Fixture Mac",
+        "room_code": "123456-a1b2-c3d4",
+        "verification_code": "012345",
+        "expires_at_unix_seconds": 1
+      }
+    },
+    {
+      "kind": "devices",
+      "devices": [
+        {
+          "id": "dev_fixture_not_a_real_identity",
+          "label": "Fixture Mac",
+          "generation": 4,
+          "previous_generation": 3,
+          "broker": "fixture.invalid:8445",
+          "relay": "https://relay.fixture.invalid"
+        }
+      ]
+    },
+    {
+      "kind": "device_forgotten",
+      "device": {
+        "id": "dev_fixture_not_a_real_identity",
+        "label": "Fixture Mac",
+        "generation": 4,
+        "previous_generation": 3,
+        "broker": "fixture.invalid:8445",
+        "relay": "https://relay.fixture.invalid"
+      }
+    },
+    {
+      "kind": "inbox",
+      "items": [
+        {
+          "id": "job_fixture_not_a_real_transfer",
+          "received_at_unix_ms": 1,
+          "from_device_id": "dev_fixture_not_a_real_identity",
+          "from_device_label": "Fixture Mac",
+          "roots": [
+            {
+              "name": "fixture.txt",
+              "path": "/var/lib/envoix-fixture/inbox/fixture.txt"
+            }
+          ],
+          "file_count": 1,
+          "directory_count": 0,
+          "total_bytes": 42
+        }
+      ]
+    },
+    {
+      "kind": "latest",
+      "item": {
+        "id": "job_fixture_not_a_real_transfer",
+        "received_at_unix_ms": 1,
+        "from_device_id": "dev_fixture_not_a_real_identity",
+        "from_device_label": "Fixture Mac",
+        "roots": [
+          {
+            "name": "fixture.txt",
+            "path": "/var/lib/envoix-fixture/inbox/fixture.txt"
+          }
+        ],
+        "file_count": 1,
+        "directory_count": 0,
+        "total_bytes": 42
+      }
+    },
+    {
+      "kind": "latest",
+      "item": null
+    },
+    {
+      "kind": "error",
+      "code": "fixture_error",
+      "message": "Synthetic fixture error"
+    }
+  ]
+}

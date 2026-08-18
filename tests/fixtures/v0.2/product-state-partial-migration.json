@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "devices": [
+    {
+      "id": "dev_fixture_partial",
+      "label": "Fixture Partial Migration",
+      "credential_reference": "cred_fixture_intentionally_missing",
+      "generation": 1,
+      "previous_generation": 0,
+      "broker": "fixture.invalid:8445",
+      "relay": null
+    }
+  ]
+}

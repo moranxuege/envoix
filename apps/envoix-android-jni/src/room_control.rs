@@ -858,6 +858,80 @@ mod tests {
     }
 
     #[test]
+    fn room_control_binding_fixture_covers_every_command_and_event() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.2/android-room-control-v5.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        let protocol_version = std::str::from_utf8(envoix_client::api::ROOM_CONTROL_ALPN)
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(fixture["protocol_version"], protocol_version);
+
+        let invite = RoomControlInvite::parse(
+            fixture["invite"]["input"].as_str().unwrap(),
+            "unused.invalid",
+            None,
+        )
+        .unwrap();
+        assert_eq!(invite_json(invite), fixture["invite"]["binding"]);
+
+        let command_values = fixture["commands"].as_array().unwrap();
+        let commands = command_values
+            .iter()
+            .map(|value| serde_json::from_value::<RoomCommand>(value.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                RoomCommand::RequestVerification { .. },
+                RoomCommand::SubmitVerification { .. },
+                RoomCommand::Offer { .. },
+                RoomCommand::Respond { .. },
+                RoomCommand::Policy { .. },
+                RoomCommand::TransferActive { .. },
+                RoomCommand::Close { .. },
+                RoomCommand::Ping { .. },
+            ]
+        ));
+
+        let events = vec![
+            event_json(RoomControlEvent::VerificationRequested),
+            event_json(RoomControlEvent::VerificationSucceeded),
+            event_json(RoomControlEvent::VerificationFailed),
+            event_json(RoomControlEvent::IncomingOffer(RoomTransferOffer {
+                offer_id: "fixture-offer".into(),
+                transfer_invite: "invalid-fixture-transfer-invite".into(),
+                root_names: vec!["fixture.txt".into()],
+                item_count: 1,
+                directory_count: 0,
+                total_bytes: 42,
+            })),
+            event_json(RoomControlEvent::OfferAccepted {
+                offer_id: "fixture-offer".into(),
+            }),
+            event_json(RoomControlEvent::OfferRejected {
+                offer_id: "fixture-offer".into(),
+                reason: RoomOfferRejection::Declined,
+            }),
+            event_json(RoomControlEvent::LifetimeChanged(RoomLifetimeState {
+                revision: 7,
+                policy: RoomLifetimePolicy::Idle15Minutes,
+                idle_deadline_unix_ms: Some(1_000),
+            })),
+            event_json(RoomControlEvent::PeerClosed(RoomCloseReason::NetworkLost)),
+            event_json(RoomControlEvent::Pong { nonce: 42 }),
+        ];
+        assert_eq!(fixture["events"], Value::Array(events));
+    }
+
+    #[test]
     fn legacy_prefixed_room_control_uri_is_rejected() {
         assert!(
             RoomControlInvite::parse(

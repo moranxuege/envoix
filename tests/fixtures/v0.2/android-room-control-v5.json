@@ -1,0 +1,114 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 5,
+  "invite": {
+    "input": "envoix://room/123456-a1b2-c3d4?broker=fixture.invalid%3A8445&relay=https%3A%2F%2Frelay.fixture.invalid&expires=1",
+    "binding": {
+      "code": "123456-a1b2-c3d4",
+      "payload": "envoix://room/123456-a1b2-c3d4?broker=fixture.invalid%3A8445&relay=https%3A%2F%2Frelay.fixture.invalid&expires=1",
+      "broker": "fixture.invalid:8445",
+      "relay": "https://relay.fixture.invalid",
+      "expires_at_epoch_ms": 1000
+    }
+  },
+  "commands": [
+    {
+      "command": "request_verification",
+      "expected_code": "012345"
+    },
+    {
+      "command": "submit_verification",
+      "code": "012345"
+    },
+    {
+      "command": "offer",
+      "offer_id": "fixture-offer",
+      "transfer_invite": "invalid-fixture-transfer-invite",
+      "root_names": [
+        "fixture.txt"
+      ],
+      "item_count": 1,
+      "directory_count": 0,
+      "total_bytes": 42
+    },
+    {
+      "command": "respond",
+      "offer_id": "fixture-offer",
+      "accept": true
+    },
+    {
+      "command": "policy",
+      "policy": "idle_15_minutes"
+    },
+    {
+      "command": "transfer_active",
+      "active": true
+    },
+    {
+      "command": "close",
+      "reason": "user_ended"
+    },
+    {
+      "command": "ping",
+      "nonce": 42
+    }
+  ],
+  "events": [
+    {
+      "notice": "room_control",
+      "state": "verification_requested"
+    },
+    {
+      "notice": "room_control",
+      "state": "verification_succeeded"
+    },
+    {
+      "notice": "room_control",
+      "state": "verification_failed"
+    },
+    {
+      "notice": "room_control",
+      "state": "incoming_offer",
+      "offer": {
+        "id": "fixture-offer",
+        "transfer_invite": "invalid-fixture-transfer-invite",
+        "root_names": [
+          "fixture.txt"
+        ],
+        "item_count": 1,
+        "directory_count": 0,
+        "total_bytes": 42
+      }
+    },
+    {
+      "notice": "room_control",
+      "state": "offer_accepted",
+      "offer_id": "fixture-offer"
+    },
+    {
+      "notice": "room_control",
+      "state": "offer_rejected",
+      "offer_id": "fixture-offer",
+      "reason": "declined"
+    },
+    {
+      "notice": "room_control",
+      "state": "lifetime_changed",
+      "lifetime": {
+        "revision": 7,
+        "policy": "idle_15_minutes",
+        "idle_deadline_epoch_ms": 1000
+      }
+    },
+    {
+      "notice": "room_control",
+      "state": "closed",
+      "reason": "network_lost"
+    },
+    {
+      "notice": "room_control",
+      "state": "pong",
+      "nonce": 42
+    }
+  ]
+}
