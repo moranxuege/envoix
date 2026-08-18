@@ -1,7 +1,6 @@
 //! Immutable application snapshots and their ordered event reducer.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -13,6 +12,7 @@ use crate::model::{
     RoomState, Transfer, TransferId, TransferState,
 };
 use crate::ports::PlatformCapabilities;
+use crate::reducers;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApplyOutcome {
@@ -162,108 +162,48 @@ impl EngineSnapshot {
                 device_id,
                 generation,
             } => {
-                if !self.devices.contains_key(&device_id) {
-                    return Err(missing(EntityKind::Device, &device_id));
-                }
-                if let Some(existing) = self.relationships.get(&relationship_id) {
-                    return Err(invalid_transition(
-                        EntityKind::Relationship,
-                        &relationship_id,
-                        existing.state.wire_name(),
-                        "relationship_trusted",
-                    ));
-                }
-                self.relationships.insert(
-                    relationship_id.clone(),
+                let relationship = reducers::relationship::trust(
+                    &self.devices,
+                    self.relationships.get(&relationship_id),
                     Relationship {
-                        id: relationship_id,
+                        id: relationship_id.clone(),
                         device_id,
                         generation,
                         state: RelationshipState::Trusted,
                     },
-                );
+                )?;
+                self.relationships.insert(relationship_id, relationship);
             }
             EngineEvent::RelationshipRevoked { relationship_id } => {
-                let relationship = self
-                    .relationships
-                    .get_mut(&relationship_id)
-                    .ok_or_else(|| missing(EntityKind::Relationship, &relationship_id))?;
-                if relationship.state != RelationshipState::Trusted {
-                    return Err(invalid_transition(
-                        EntityKind::Relationship,
-                        &relationship_id,
-                        relationship.state.wire_name(),
-                        "relationship_revoked",
-                    ));
-                }
-                relationship.state = RelationshipState::Revoked;
+                let relationship = reducers::relationship::revoke(
+                    self.relationships.get(&relationship_id),
+                    &relationship_id,
+                )?;
+                self.relationships.insert(relationship_id, relationship);
             }
             EngineEvent::RoomOpened {
                 room_id,
                 relationship_id,
             } => {
-                if let Some(relationship_id) = &relationship_id {
-                    let relationship = self
-                        .relationships
-                        .get(relationship_id)
-                        .ok_or_else(|| missing(EntityKind::Relationship, relationship_id))?;
-                    if relationship.state != RelationshipState::Trusted {
-                        return Err(invalid_transition(
-                            EntityKind::Relationship,
-                            relationship_id,
-                            relationship.state.wire_name(),
-                            "room_opened",
-                        ));
-                    }
-                }
-                if let Some(existing) = self.rooms.get(&room_id) {
-                    return Err(invalid_transition(
-                        EntityKind::Room,
-                        &room_id,
-                        existing.state.wire_name(),
-                        "room_opened",
-                    ));
-                }
-                self.rooms.insert(
-                    room_id.clone(),
+                let room = reducers::room::open(
+                    &self.relationships,
+                    self.rooms.get(&room_id),
                     Room {
-                        id: room_id,
+                        id: room_id.clone(),
                         relationship_id,
                         state: RoomState::Connecting,
                         close_reason: None,
                     },
-                );
+                )?;
+                self.rooms.insert(room_id, room);
             }
             EngineEvent::RoomConnected { room_id } => {
-                let room = self
-                    .rooms
-                    .get_mut(&room_id)
-                    .ok_or_else(|| missing(EntityKind::Room, &room_id))?;
-                if room.state != RoomState::Connecting {
-                    return Err(invalid_transition(
-                        EntityKind::Room,
-                        &room_id,
-                        room.state.wire_name(),
-                        "room_connected",
-                    ));
-                }
-                room.state = RoomState::Connected;
+                let room = reducers::room::connect(self.rooms.get(&room_id), &room_id)?;
+                self.rooms.insert(room_id, room);
             }
             EngineEvent::RoomClosed { room_id, reason } => {
-                let room = self
-                    .rooms
-                    .get_mut(&room_id)
-                    .ok_or_else(|| missing(EntityKind::Room, &room_id))?;
-                if room.state == RoomState::Closed {
-                    return Err(invalid_transition(
-                        EntityKind::Room,
-                        &room_id,
-                        room.state.wire_name(),
-                        "room_closed",
-                    ));
-                }
-                room.state = RoomState::Closed;
-                room.close_reason = Some(reason);
+                let room = reducers::room::close(self.rooms.get(&room_id), &room_id, reason)?;
+                self.rooms.insert(room_id, room);
             }
             EngineEvent::TransferCreated {
                 transfer_id,
@@ -273,55 +213,12 @@ impl EngineSnapshot {
                 direction,
                 total_bytes,
             } => {
-                let relationship = self
-                    .relationships
-                    .get(&relationship_id)
-                    .ok_or_else(|| missing(EntityKind::Relationship, &relationship_id))?;
-                if relationship.state != RelationshipState::Trusted {
-                    return Err(invalid_transition(
-                        EntityKind::Relationship,
-                        &relationship_id,
-                        relationship.state.wire_name(),
-                        "transfer_created",
-                    ));
-                }
-                if let Some(room_id) = &room_id {
-                    let room = self
-                        .rooms
-                        .get(room_id)
-                        .ok_or_else(|| missing(EntityKind::Room, room_id))?;
-                    if room.state != RoomState::Connected {
-                        return Err(invalid_transition(
-                            EntityKind::Room,
-                            room_id,
-                            room.state.wire_name(),
-                            "transfer_created",
-                        ));
-                    }
-                    if room
-                        .relationship_id
-                        .as_ref()
-                        .is_some_and(|value| value != &relationship_id)
-                    {
-                        return Err(ApplyError::InvalidReference {
-                            entity: EntityKind::Room,
-                            id: room_id.to_string(),
-                            field: "relationship_id",
-                        });
-                    }
-                }
-                if let Some(existing) = self.transfers.get(&transfer_id) {
-                    return Err(invalid_transition(
-                        EntityKind::Transfer,
-                        &transfer_id,
-                        existing.state.wire_name(),
-                        "transfer_created",
-                    ));
-                }
-                self.transfers.insert(
-                    transfer_id.clone(),
+                let transfer = reducers::transfer::create(
+                    &self.relationships,
+                    &self.rooms,
+                    self.transfers.get(&transfer_id),
                     Transfer {
-                        id: transfer_id,
+                        id: transfer_id.clone(),
                         relationship_id,
                         room_id,
                         content_id,
@@ -331,102 +228,55 @@ impl EngineSnapshot {
                         total_bytes,
                         failure: None,
                     },
-                );
+                )?;
+                self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferStarted { transfer_id } => {
-                let transfer = transfer_mut(&mut self.transfers, &transfer_id)?;
-                require_transfer_state(transfer, TransferState::Queued, "transfer_started")?;
-                transfer.state = TransferState::Connecting;
+                let transfer =
+                    reducers::transfer::start(self.transfers.get(&transfer_id), &transfer_id)?;
+                self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferProgressed {
                 transfer_id,
                 transferred_bytes,
             } => {
-                let transfer = transfer_mut(&mut self.transfers, &transfer_id)?;
-                if !matches!(
-                    transfer.state,
-                    TransferState::Connecting | TransferState::Transferring
-                ) {
-                    return Err(invalid_transition(
-                        EntityKind::Transfer,
-                        &transfer_id,
-                        transfer.state.wire_name(),
-                        "transfer_progressed",
-                    ));
-                }
-                if transferred_bytes < transfer.transferred_bytes
-                    || transferred_bytes > transfer.total_bytes
-                {
-                    return Err(ApplyError::InvalidProgress {
-                        transfer_id,
-                        previous_bytes: transfer.transferred_bytes,
-                        transferred_bytes,
-                        total_bytes: transfer.total_bytes,
-                    });
-                }
-                transfer.state = TransferState::Transferring;
-                transfer.transferred_bytes = transferred_bytes;
+                let transfer = reducers::transfer::progress(
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                    transferred_bytes,
+                )?;
+                self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferPaused { transfer_id } => {
-                let transfer = transfer_mut(&mut self.transfers, &transfer_id)?;
-                if !matches!(
-                    transfer.state,
-                    TransferState::Connecting | TransferState::Transferring
-                ) {
-                    return Err(invalid_transition(
-                        EntityKind::Transfer,
-                        &transfer_id,
-                        transfer.state.wire_name(),
-                        "transfer_paused",
-                    ));
-                }
-                transfer.state = TransferState::Paused;
+                let transfer =
+                    reducers::transfer::pause(self.transfers.get(&transfer_id), &transfer_id)?;
+                self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferResumed { transfer_id } => {
-                let transfer = transfer_mut(&mut self.transfers, &transfer_id)?;
-                require_transfer_state(transfer, TransferState::Paused, "transfer_resumed")?;
-                transfer.state = TransferState::Connecting;
-                transfer.failure = None;
+                let transfer =
+                    reducers::transfer::resume(self.transfers.get(&transfer_id), &transfer_id)?;
+                self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferDelivered { transfer_id } => {
-                let transfer = transfer_mut(&mut self.transfers, &transfer_id)?;
-                require_transfer_state(
-                    transfer,
-                    TransferState::Transferring,
-                    "transfer_delivered",
-                )?;
-                transfer.state = TransferState::Delivered;
-                transfer.transferred_bytes = transfer.total_bytes;
-                transfer.failure = None;
+                let transfer =
+                    reducers::transfer::deliver(self.transfers.get(&transfer_id), &transfer_id)?;
+                self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferFailed {
                 transfer_id,
                 failure,
             } => {
-                let transfer = transfer_mut(&mut self.transfers, &transfer_id)?;
-                if transfer.state.is_terminal() {
-                    return Err(invalid_transition(
-                        EntityKind::Transfer,
-                        &transfer_id,
-                        transfer.state.wire_name(),
-                        "transfer_failed",
-                    ));
-                }
-                transfer.state = TransferState::Failed;
-                transfer.failure = Some(failure);
+                let transfer = reducers::transfer::fail(
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                    failure,
+                )?;
+                self.transfers.insert(transfer_id, transfer);
             }
             EngineEvent::TransferCanceled { transfer_id } => {
-                let transfer = transfer_mut(&mut self.transfers, &transfer_id)?;
-                if transfer.state.is_terminal() {
-                    return Err(invalid_transition(
-                        EntityKind::Transfer,
-                        &transfer_id,
-                        transfer.state.wire_name(),
-                        "transfer_canceled",
-                    ));
-                }
-                transfer.state = TransferState::Canceled;
-                transfer.failure = None;
+                let transfer =
+                    reducers::transfer::cancel(self.transfers.get(&transfer_id), &transfer_id)?;
+                self.transfers.insert(transfer_id, transfer);
             }
         }
         Ok(())
@@ -439,52 +289,6 @@ fn validate_contract_version(actual: u16) -> Result<(), ApplyError> {
             expected: APPLICATION_CONTRACT_VERSION,
             actual,
         });
-    }
-    Ok(())
-}
-
-fn missing(entity: EntityKind, id: &impl fmt::Display) -> ApplyError {
-    ApplyError::MissingEntity {
-        entity,
-        id: id.to_string(),
-    }
-}
-
-fn invalid_transition(
-    entity: EntityKind,
-    id: &impl fmt::Display,
-    state: &'static str,
-    event: &'static str,
-) -> ApplyError {
-    ApplyError::InvalidTransition {
-        entity,
-        id: id.to_string(),
-        state,
-        event,
-    }
-}
-
-fn transfer_mut<'a>(
-    transfers: &'a mut BTreeMap<TransferId, Transfer>,
-    transfer_id: &TransferId,
-) -> Result<&'a mut Transfer, ApplyError> {
-    transfers
-        .get_mut(transfer_id)
-        .ok_or_else(|| missing(EntityKind::Transfer, transfer_id))
-}
-
-fn require_transfer_state(
-    transfer: &Transfer,
-    expected: TransferState,
-    event: &'static str,
-) -> Result<(), ApplyError> {
-    if transfer.state != expected {
-        return Err(invalid_transition(
-            EntityKind::Transfer,
-            &transfer.id,
-            transfer.state.wire_name(),
-            event,
-        ));
     }
     Ok(())
 }

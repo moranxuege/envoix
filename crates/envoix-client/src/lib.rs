@@ -7,6 +7,7 @@ pub mod event;
 pub mod model;
 pub mod ports;
 pub mod product;
+mod reducers;
 pub mod runtime;
 pub mod snapshot;
 
