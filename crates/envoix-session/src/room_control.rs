@@ -687,7 +687,7 @@ impl RoomLifetimeMachine {
 }
 
 pub struct RoomControlSession {
-    _endpoint: iroh::Endpoint,
+    endpoint: iroh::Endpoint,
     connection: Connection,
     send: Mutex<SendStream>,
     recv: Mutex<RecvStream>,
@@ -1023,6 +1023,7 @@ impl RoomControlSession {
             Err(_) => Err(CoreError::Transport("room control close timed out".into())),
         };
         self.connection.close(VarInt::from_u32(0), b"room closed");
+        self.endpoint.close().await;
         result
     }
 
@@ -1199,6 +1200,7 @@ impl RoomControlSession {
                     }
                     self.connection
                         .close(VarInt::from_u32(0), b"peer closed room");
+                    self.endpoint.close().await;
                     return Ok(RoomControlEvent::PeerClosed(reason));
                 }
                 ControlMessage::Ping { nonce } => {
@@ -1209,6 +1211,13 @@ impl RoomControlSession {
                 }
             }
         }
+    }
+
+    /// Terminates local transport ownership without sending another control message.
+    pub async fn shutdown(&self) {
+        self.connection
+            .close(VarInt::from_u32(0), b"room session shutdown");
+        self.endpoint.close().await;
     }
 
     fn resolve_remote_offer(&self, offer_id: &str) -> Result<(), SessionError> {
@@ -1469,11 +1478,17 @@ async fn connect_room_control_inner(
         local_endpoint: endpoint,
         candidates: config.candidates.clone(),
     };
-    let broker = parse_broker_addr(&request.broker, request.relay.as_deref())?;
+    let broker = match parse_broker_addr(&request.broker, request.relay.as_deref()) {
+        Ok(broker) => broker,
+        Err(error) => {
+            bound.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     let my_addr = bound
         .ready_endpoint_addr(!config.direct_only && request.relay.is_some())
         .await;
-    let (role, pairing) = pair_control(
+    let (role, pairing) = match pair_control(
         &bound.local_endpoint,
         RoomControlPairingRequest {
             broker,
@@ -1487,7 +1502,14 @@ async fn connect_room_control_inner(
         },
         cancel,
     )
-    .await?;
+    .await
+    {
+        Ok(pairing) => pairing,
+        Err(error) => {
+            bound.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     *peer_authenticated = true;
     let pairing_credential = matches!(request.mode, RoomControlSessionMode::Invitation { .. })
         .then(|| {
@@ -1498,10 +1520,24 @@ async fn connect_room_control_inner(
         });
     let pairing_binding = pairing.control_transcript_hash.as_bytes().to_vec();
     let (connection, mut send, mut recv) =
-        establish_control_connection(&bound.local_endpoint, role, pairing.peer, cancel).await?;
+        match establish_control_connection(&bound.local_endpoint, role, pairing.peer, cancel).await
+        {
+            Ok(connection) => connection,
+            Err(error) => {
+                bound.local_endpoint.close().await;
+                return Err(error);
+            }
+        };
     let local_lifetime = match request.mode {
         RoomControlSessionMode::Invitation { creator: true } => {
-            Some(RoomLifetimeState::initial(now_unix_millis()?))
+            let now = match now_unix_millis() {
+                Ok(now) => now,
+                Err(error) => {
+                    bound.local_endpoint.close().await;
+                    return Err(error);
+                }
+            };
+            Some(RoomLifetimeState::initial(now))
         }
         RoomControlSessionMode::Invitation { creator: false }
         | RoomControlSessionMode::Remembered { .. } => None,
@@ -1515,7 +1551,7 @@ async fn connect_room_control_inner(
         pairing_binding: pairing_binding.clone(),
         lifetime: local_lifetime.clone(),
     };
-    let peer_hello = run_control_phase(
+    let peer_hello = match run_control_phase(
         async {
             write_control_message(&mut send, &hello).await?;
             read_control_message(&mut recv).await
@@ -1524,12 +1560,25 @@ async fn connect_room_control_inner(
         CONTROL_HANDSHAKE_TIMEOUT,
         "room control hello",
     )
-    .await?;
+    .await
+    {
+        Ok(peer_hello) => peer_hello,
+        Err(error) => {
+            bound.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     let (peer_name, lifetime, peer_capabilities) =
-        validate_control_hello(peer_hello, request.mode, &pairing_binding, local_lifetime)?;
+        match validate_control_hello(peer_hello, request.mode, &pairing_binding, local_lifetime) {
+            Ok(hello) => hello,
+            Err(error) => {
+                bound.local_endpoint.close().await;
+                return Err(error);
+            }
+        };
     let pairing_authorized = request.authorize_pairing_credential;
     Ok(RoomControlSession {
-        _endpoint: bound.local_endpoint,
+        endpoint: bound.local_endpoint,
         connection,
         send: Mutex::new(send),
         recv: Mutex::new(recv),

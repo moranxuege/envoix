@@ -41,7 +41,7 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
     about = "Persistent Envoix receiver and local Inbox service"
 )]
 struct Cli {
-    /// Product metadata, protected credentials, identity, and transfer state.
+    /// Product metadata, protected credentials, and transfer state.
     #[arg(long)]
     state_dir: Option<PathBuf>,
     /// Directory where completed incoming roots are saved.
@@ -132,8 +132,7 @@ pub async fn run() -> Result<()> {
 
     create_private_directory(&state_directory)?;
     create_directory(&inbox_directory)?;
-    let mut client = api::Client::from_runtime_sources(cli.config.as_deref())?;
-    client.identity = IdentityConfig::Persistent(state_directory.join("identity.key"));
+    let client = agent_client(cli.config.as_deref())?;
     let runtime = Arc::new(AgentRuntime {
         config: RuntimeConfig {
             state_directory: state_directory.clone(),
@@ -174,6 +173,12 @@ fn init_tracing(verbosity: u8) {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into()))
         .with_target(false)
         .init();
+}
+
+fn agent_client(config_path: Option<&Path>) -> Result<api::Client> {
+    let mut client = api::Client::from_runtime_sources(config_path)?;
+    client.identity = IdentityConfig::Ephemeral;
+    Ok(client)
 }
 
 async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
@@ -362,7 +367,9 @@ async fn run_initial_pairing(
             return;
         }
     };
-    if let Err(error) = run_room_session(&runtime, &session, &device_id, &label).await
+    let result = run_room_session(&runtime, &session, &device_id, &label).await;
+    session.shutdown().await;
+    if let Err(error) = result
         && !runtime.shutdown.is_cancelled()
     {
         tracing::warn!(device = %label, %error, "initial room ended");
@@ -387,33 +394,43 @@ async fn establish_initial_room(
         &runtime.shutdown,
     )
     .await?;
-    session.request_verification(verification_code).await?;
-    loop {
-        match session.next_event().await? {
-            RoomControlEvent::VerificationSucceeded => {
-                let credential = session
-                    .pairing_credential()
-                    .ok_or_else(|| anyhow!("verified room did not expose a pairing credential"))?;
-                lock(&runtime.store)?.commit_device(prepared, &credential.to_opaque(), 0)?;
-                return Ok(session);
+    let pairing = async {
+        session.request_verification(verification_code).await?;
+        loop {
+            match session.next_event().await? {
+                RoomControlEvent::VerificationSucceeded => {
+                    let credential = session.pairing_credential().ok_or_else(|| {
+                        anyhow!("verified room did not expose a pairing credential")
+                    })?;
+                    lock(&runtime.store)?.commit_device(prepared, &credential.to_opaque(), 0)?;
+                    return Ok(());
+                }
+                RoomControlEvent::VerificationFailed => {
+                    bail!("the one-time device verification code was rejected");
+                }
+                RoomControlEvent::IncomingOffer(offer) => {
+                    session
+                        .reject_offer(&offer.offer_id, RoomOfferRejection::Invalid)
+                        .await?;
+                }
+                RoomControlEvent::PeerClosed(reason) => {
+                    bail!("peer closed the room before verification: {reason:?}");
+                }
+                RoomControlEvent::VerificationRequested
+                | RoomControlEvent::LifetimeChanged(_)
+                | RoomControlEvent::Pong { .. } => {}
+                RoomControlEvent::OfferAccepted { .. } | RoomControlEvent::OfferRejected { .. } => {
+                    bail!("peer sent an unexpected offer decision during verification");
+                }
             }
-            RoomControlEvent::VerificationFailed => {
-                bail!("the one-time device verification code was rejected");
-            }
-            RoomControlEvent::IncomingOffer(offer) => {
-                session
-                    .reject_offer(&offer.offer_id, RoomOfferRejection::Invalid)
-                    .await?;
-            }
-            RoomControlEvent::PeerClosed(reason) => {
-                bail!("peer closed the room before verification: {reason:?}");
-            }
-            RoomControlEvent::VerificationRequested
-            | RoomControlEvent::LifetimeChanged(_)
-            | RoomControlEvent::Pong { .. } => {}
-            RoomControlEvent::OfferAccepted { .. } | RoomControlEvent::OfferRejected { .. } => {
-                bail!("peer sent an unexpected offer decision during verification");
-            }
+        }
+    }
+    .await;
+    match pairing {
+        Ok(()) => Ok(session),
+        Err(error) => {
+            session.shutdown().await;
+            Err(error)
         }
     }
 }
@@ -482,6 +499,7 @@ async fn remembered_receiver_loop(runtime: Arc<AgentRuntime>, device_id: &str) {
                         .rotate_device(record.id(), &opaque, next_generation)
                         .map_err(Into::into)
                 }) {
+                    session.shutdown().await;
                     tracing::error!(device = %record.label(), %error, "remembered generation could not be persisted");
                     return;
                 }
@@ -490,8 +508,10 @@ async fn remembered_receiver_loop(runtime: Arc<AgentRuntime>, device_id: &str) {
                     generation = next_generation,
                     "remembered room connected"
                 );
-                if let Err(error) =
-                    run_room_session(&runtime, &session, record.id(), record.label()).await
+                let result =
+                    run_room_session(&runtime, &session, record.id(), record.label()).await;
+                session.shutdown().await;
+                if let Err(error) = result
                     && !runtime.shutdown.is_cancelled()
                 {
                     tracing::warn!(device = %record.label(), %error, "remembered room ended");
@@ -530,6 +550,7 @@ async fn connect_remembered_room(
         let next_generation = generation
             .checked_add(1)
             .ok_or_else(|| anyhow!("remembered credential generation is exhausted"))?;
+        let attempt_cancel = TransferCancelToken::new();
         let connect = api::connect_remembered_room_control(
             credential.derive_session(generation),
             record.broker().to_string(),
@@ -537,20 +558,35 @@ async fn connect_remembered_room(
             runtime.config.device_name.clone(),
             RememberedRoomControlRole::Responder,
             runtime.session_config(relay),
-            cancel,
+            &attempt_cancel,
         );
+        tokio::pin!(connect);
         let result = if index < last_index {
-            match tokio::time::timeout(REMEMBERED_FALLBACK_TIMEOUT, connect).await {
-                Ok(result) => result,
-                Err(_) => {
+            tokio::select! {
+                result = &mut connect => result,
+                _ = tokio::time::sleep(REMEMBERED_FALLBACK_TIMEOUT) => {
+                    attempt_cancel.cancel();
+                    let _ = (&mut connect).await;
                     last_error = Some(anyhow!(
                         "current remembered generation did not find the peer"
                     ));
                     continue;
                 }
+                _ = cancel.cancelled() => {
+                    attempt_cancel.cancel();
+                    let _ = (&mut connect).await;
+                    return Err(anyhow!("remembered room connection cancelled"));
+                }
             }
         } else {
-            connect.await
+            tokio::select! {
+                result = &mut connect => result,
+                _ = cancel.cancelled() => {
+                    attempt_cancel.cancel();
+                    let _ = (&mut connect).await;
+                    return Err(anyhow!("remembered room connection cancelled"));
+                }
+            }
         };
         match result {
             Ok(session) => return Ok((session, next_generation)),
@@ -880,6 +916,14 @@ fn unix_millis() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_uses_a_distinct_identity_for_each_endpoint() {
+        assert_eq!(
+            agent_client(None).unwrap().identity,
+            IdentityConfig::Ephemeral
+        );
+    }
 
     #[tokio::test]
     async fn empty_runtime_reports_status_and_empty_inbox() {

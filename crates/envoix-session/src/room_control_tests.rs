@@ -835,6 +835,8 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
         joiner.next_event().await.unwrap(),
         RoomControlEvent::PeerClosed(RoomCloseReason::UserEnded)
     );
+    assert!(host.endpoint.is_closed());
+    assert!(joiner.endpoint.is_closed());
 
     broker.close().await;
     broker_task.abort();
