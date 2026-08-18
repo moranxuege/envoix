@@ -734,20 +734,23 @@ async fn receive_to_inbox(
             &runtime.shutdown,
         )
         .await?;
+    if summary.saved_root_paths.len() != manifest.roots.len() {
+        bail!("receiver completion did not report every saved root");
+    }
     let roots = summary
-        .destination_plan
-        .root_plans
+        .saved_root_paths
         .iter()
-        .filter_map(|root| {
-            summary
-                .destination_plan
-                .target_path_for_root(root.root_id)
-                .map(|path| InboxRoot {
-                    name: root.planned_name.clone(),
-                    path: path.display().to_string(),
-                })
+        .map(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("saved Inbox root has no UTF-8 file name")?;
+            Ok(InboxRoot {
+                name: name.to_string(),
+                path: path.display().to_string(),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let item = InboxItem {
         id: format!(
             "{}_{}",

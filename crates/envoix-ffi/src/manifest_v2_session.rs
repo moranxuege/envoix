@@ -254,10 +254,8 @@ impl FfiPendingManifestV2Receive {
             observer.on_phase(FfiManifestV2Phase::Delivered);
             observer.on_completed(self.summary.total_plaintext_bytes);
             let saved_paths = summary
-                .destination_plan
-                .root_plans
+                .saved_root_paths
                 .iter()
-                .filter_map(|root| summary.destination_plan.target_path_for_root(root.root_id))
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect();
             Ok(FfiManifestV2Completion {
