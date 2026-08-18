@@ -22,6 +22,7 @@ pub const MAX_DURABLE_ENTITIES: usize = 1_000;
 const ENGINE_STATE_FILE: &str = "engine-state-v1.json";
 const PREVIOUS_ENGINE_STATE_FILE: &str = "engine-state-v1.previous.json";
 const ENGINE_LOCK_FILE: &str = "engine.lock";
+const MIGRATION_DIRECTORY: &str = "migration";
 const MAX_REFERENCE_BYTES: usize = 128;
 const MAX_LABEL_CHARS: usize = 256;
 const MAX_ENDPOINT_BYTES: usize = 2_048;
@@ -96,6 +97,24 @@ pub struct DurableRelationship {
     pub vault_reference: Option<VaultReference>,
     pub broker: String,
     pub relay: Option<String>,
+}
+
+impl DurableRelationship {
+    pub fn validate(&self, state: RelationshipState) -> Result<(), EngineStoreError> {
+        validate_endpoint("relationship broker", &self.broker)?;
+        if let Some(relay) = &self.relay {
+            validate_endpoint("relationship relay", relay)?;
+        }
+        match state {
+            RelationshipState::Trusted if self.vault_reference.is_none() => {
+                Err(invalid("trusted relationship has no vault reference"))
+            }
+            RelationshipState::Revoked if self.vault_reference.is_some() => {
+                Err(invalid("revoked relationship retains a vault reference"))
+            }
+            RelationshipState::Trusted | RelationshipState::Revoked => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -201,23 +220,9 @@ impl EngineState {
                         "relationship {relationship_id} has no durable metadata"
                     ))
                 })?;
-            validate_endpoint("relationship broker", &durable.broker)?;
-            if let Some(relay) = &durable.relay {
-                validate_endpoint("relationship relay", relay)?;
-            }
-            match relationship.state {
-                RelationshipState::Trusted if durable.vault_reference.is_none() => {
-                    return Err(invalid(format!(
-                        "trusted relationship {relationship_id} has no vault reference"
-                    )));
-                }
-                RelationshipState::Revoked if durable.vault_reference.is_some() => {
-                    return Err(invalid(format!(
-                        "revoked relationship {relationship_id} retains a vault reference"
-                    )));
-                }
-                RelationshipState::Trusted | RelationshipState::Revoked => {}
-            }
+            durable
+                .validate(relationship.state)
+                .map_err(|error| invalid(format!("relationship {relationship_id}: {error}")))?;
         }
         for relationship_id in self.durable_relationships.keys() {
             if !self.snapshot.relationships.contains_key(relationship_id) {
@@ -344,7 +349,11 @@ impl EngineState {
             )?;
             let mut legacy_ids = BTreeSet::new();
             for relationship in &import.re_pair_required {
-                validate_identifier_text("legacy device ID", &relationship.legacy_device_id)?;
+                validate_text_bytes(
+                    "legacy device ID",
+                    &relationship.legacy_device_id,
+                    MAX_REFERENCE_BYTES,
+                )?;
                 validate_text("legacy device label", &relationship.label, MAX_LABEL_CHARS)?;
                 if !legacy_ids.insert(&relationship.legacy_device_id) {
                     return Err(invalid(format!(
@@ -427,6 +436,57 @@ impl EngineStore {
         self.has_current_snapshot = true;
         Ok(())
     }
+
+    pub(crate) fn install_migration_backup(
+        &self,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<(), EngineStoreError> {
+        validate_backup_file(file_name)?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENGINE_STATE_BYTES {
+            return Err(EngineStoreError::StateTooLarge {
+                actual: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                maximum: MAX_ENGINE_STATE_BYTES,
+            });
+        }
+        let directory = self.directory.join(MIGRATION_DIRECTORY);
+        create_private_directory(&directory)?;
+        let target = directory.join(file_name);
+        match read_bounded_file(&target)? {
+            Some(existing) if existing == bytes => return Ok(()),
+            Some(_) => {
+                return Err(invalid(format!(
+                    "migration backup {file_name} already exists with different contents"
+                )));
+            }
+            None => {}
+        }
+
+        let temporary = temporary_path(&directory, file_name)?;
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            replace_file(&temporary, &target)?;
+            #[cfg(unix)]
+            {
+                fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o400))?;
+                File::open(&directory)?.sync_all()?;
+            }
+            Ok::<(), io::Error>(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result.map_err(Into::into)
+    }
 }
 
 impl EngineStoreError {
@@ -444,6 +504,22 @@ struct SchemaHeader {
 }
 
 fn load_state(path: &Path) -> Result<Option<EngineState>, EngineStoreError> {
+    let Some(bytes) = read_bounded_file(path)? else {
+        return Ok(None);
+    };
+    let header: SchemaHeader = serde_json::from_slice(&bytes).map_err(EngineStoreError::Decode)?;
+    if header.schema_version != ENGINE_STATE_SCHEMA_VERSION {
+        return Err(EngineStoreError::UnsupportedSchema {
+            expected: ENGINE_STATE_SCHEMA_VERSION,
+            actual: header.schema_version,
+        });
+    }
+    let state: EngineState = serde_json::from_slice(&bytes).map_err(EngineStoreError::Decode)?;
+    state.validate()?;
+    Ok(Some(state))
+}
+
+pub(crate) fn read_bounded_file(path: &Path) -> Result<Option<Vec<u8>>, EngineStoreError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -465,16 +541,7 @@ fn load_state(path: &Path) -> Result<Option<EngineState>, EngineStoreError> {
             maximum: MAX_ENGINE_STATE_BYTES,
         });
     }
-    let header: SchemaHeader = serde_json::from_slice(&bytes).map_err(EngineStoreError::Decode)?;
-    if header.schema_version != ENGINE_STATE_SCHEMA_VERSION {
-        return Err(EngineStoreError::UnsupportedSchema {
-            expected: ENGINE_STATE_SCHEMA_VERSION,
-            actual: header.schema_version,
-        });
-    }
-    let state: EngineState = serde_json::from_slice(&bytes).map_err(EngineStoreError::Decode)?;
-    state.validate()?;
-    Ok(Some(state))
+    Ok(Some(bytes))
 }
 
 fn encode_state(state: &EngineState) -> Result<Vec<u8>, EngineStoreError> {

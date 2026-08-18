@@ -4,6 +4,7 @@
 //! This module names the user-facing concepts above that protocol: remembered
 //! devices, a durable Inbox, and commands exchanged with a local Agent.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -12,14 +13,23 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::api::DesktopCredentialStore;
+use crate::api::RememberedCredential;
+use crate::model::{Device, DeviceId, Relationship, RelationshipId, RelationshipState};
+use crate::storage::{
+    DurableRelationship, EngineState, EngineStore, EngineStoreError, EngineStoreOrigin,
+    MAX_DURABLE_ENTITIES, RePairReason, RePairRequiredRelationship, V02ImportRecord,
+    VaultReference, read_bounded_file,
+};
 
 pub const AGENT_PROTOCOL_VERSION: u16 = 3;
 pub const AGENT_SETTINGS_VERSION: u16 = 1;
 const PRODUCT_STATE_SCHEMA_VERSION: u16 = 1;
 const PRODUCT_STATE_FILE: &str = "product-state-v1.json";
 const MAX_INBOX_ITEMS: usize = 1_000;
+const V02_PRODUCT_STATE_BACKUP: &str = "v0.2-product-state-v1.backup.json";
 
 /// User-owned settings loaded by a managed Agent process.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -559,6 +569,196 @@ impl ProductStore {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum V02ProductImportOutcome {
+    NoLegacyState,
+    AlreadyImported(V02ImportRecord),
+    Imported(V02ImportRecord),
+}
+
+/// Imports the desktop v0.2 ProductStore into an empty Engine store.
+///
+/// The source JSON and credential directory are read-only inputs. Usable
+/// credentials are copied through the Agent-owned vault adapter before the new
+/// Engine state is activated; unusable records become explicit re-pair items.
+pub fn import_v0_2_product_state(
+    engine: &mut EngineStore,
+    legacy_directory: &Path,
+    target_vault: &DesktopCredentialStore,
+) -> Result<V02ProductImportOutcome, EngineStoreError> {
+    if let Some(record) = &engine.state().migration.v0_2_import {
+        return Ok(V02ProductImportOutcome::AlreadyImported(record.clone()));
+    }
+    let source_path = legacy_directory.join(PRODUCT_STATE_FILE);
+    let Some(source_bytes) = read_bounded_file(&source_path)? else {
+        return Ok(V02ProductImportOutcome::NoLegacyState);
+    };
+    if engine.origin() != EngineStoreOrigin::Empty {
+        return Err(EngineStoreError::InvalidState(
+            "cannot import v0.2 state into an initialized Engine store".into(),
+        ));
+    }
+
+    let legacy: PersistentProductState =
+        serde_json::from_slice(&source_bytes).map_err(EngineStoreError::Decode)?;
+    if legacy.schema_version != PRODUCT_STATE_SCHEMA_VERSION {
+        return Err(EngineStoreError::InvalidState(format!(
+            "unsupported v0.2 product schema {}",
+            legacy.schema_version
+        )));
+    }
+    if legacy.devices.len() > MAX_DURABLE_ENTITIES || legacy.inbox.len() > MAX_INBOX_ITEMS {
+        return Err(EngineStoreError::InvalidState(
+            "v0.2 product state exceeds collection limits".into(),
+        ));
+    }
+
+    let source_vault = DesktopCredentialStore::new(legacy_directory.join("credentials"));
+    let mut candidate = EngineState::default();
+    candidate.inbox = legacy.inbox;
+    let mut credential_copies = Vec::new();
+    let mut re_pair_required = Vec::new();
+    let mut labels = BTreeSet::new();
+
+    for record in legacy.devices {
+        let label = validate_label(&record.label).map_err(EngineStoreError::Io)?;
+        if !labels.insert(label.to_ascii_lowercase()) {
+            return Err(EngineStoreError::InvalidState(format!(
+                "duplicate v0.2 device label {label:?}"
+            )));
+        }
+        let device_id = match DeviceId::parse(record.id.clone()) {
+            Ok(device_id) => device_id,
+            Err(_) => {
+                re_pair_required.push(RePairRequiredRelationship {
+                    legacy_device_id: record.id,
+                    label,
+                    reason: RePairReason::InvalidMetadata,
+                });
+                continue;
+            }
+        };
+        let relationship_id = RelationshipId::parse(device_id.as_str().to_string())
+            .expect("Device and Relationship identifiers share validation");
+        if candidate.snapshot.devices.contains_key(&device_id) {
+            return Err(EngineStoreError::InvalidState(format!(
+                "duplicate v0.2 device ID {device_id}"
+            )));
+        }
+        if record
+            .previous_generation
+            .is_some_and(|previous| previous >= record.generation)
+        {
+            re_pair_required.push(RePairRequiredRelationship {
+                legacy_device_id: record.id,
+                label,
+                reason: RePairReason::InvalidMetadata,
+            });
+            continue;
+        }
+        let vault_reference = match VaultReference::parse(record.credential_reference.clone()) {
+            Ok(reference) => reference,
+            Err(_) => {
+                re_pair_required.push(RePairRequiredRelationship {
+                    legacy_device_id: record.id,
+                    label,
+                    reason: RePairReason::InvalidMetadata,
+                });
+                continue;
+            }
+        };
+        let durable = DurableRelationship {
+            vault_reference: Some(vault_reference.clone()),
+            broker: record.broker,
+            relay: record.relay,
+        };
+        if durable.validate(RelationshipState::Trusted).is_err() {
+            re_pair_required.push(RePairRequiredRelationship {
+                legacy_device_id: record.id,
+                label,
+                reason: RePairReason::InvalidMetadata,
+            });
+            continue;
+        }
+        let Some(opaque) = source_vault
+            .get(&record.credential_reference)
+            .map_err(EngineStoreError::Io)?
+        else {
+            re_pair_required.push(RePairRequiredRelationship {
+                legacy_device_id: record.id,
+                label,
+                reason: RePairReason::MissingCredential,
+            });
+            continue;
+        };
+        let opaque = Zeroizing::new(opaque);
+        if RememberedCredential::from_opaque(&opaque).is_err() {
+            re_pair_required.push(RePairRequiredRelationship {
+                legacy_device_id: record.id,
+                label,
+                reason: RePairReason::UnsupportedCredential,
+            });
+            continue;
+        }
+
+        candidate.snapshot.devices.insert(
+            device_id.clone(),
+            Device {
+                id: device_id.clone(),
+                display_name: label,
+            },
+        );
+        candidate.snapshot.relationships.insert(
+            relationship_id.clone(),
+            Relationship {
+                id: relationship_id.clone(),
+                device_id,
+                generation: record.generation,
+                previous_generation: record.previous_generation,
+                state: RelationshipState::Trusted,
+            },
+        );
+        candidate
+            .durable_relationships
+            .insert(relationship_id, durable);
+        credential_copies.push((vault_reference, opaque));
+    }
+
+    let imported_relationships =
+        u32::try_from(candidate.snapshot.relationships.len()).expect("collection limit fits u32");
+    let imported_inbox_items = u32::try_from(candidate.inbox.len()).expect("Inbox limit fits u32");
+    let import_record = V02ImportRecord {
+        backup_file: V02_PRODUCT_STATE_BACKUP.into(),
+        imported_relationships,
+        imported_inbox_items,
+        re_pair_required,
+    };
+    candidate.migration.v0_2_import = Some(import_record.clone());
+    candidate.validate()?;
+
+    engine.install_migration_backup(V02_PRODUCT_STATE_BACKUP, &source_bytes)?;
+    for (reference, credential) in credential_copies {
+        if let Some(existing) = target_vault
+            .get(reference.as_str())
+            .map_err(EngineStoreError::Io)?
+        {
+            let existing = Zeroizing::new(existing);
+            if existing.as_slice() != credential.as_slice() {
+                return Err(EngineStoreError::InvalidState(format!(
+                    "target vault reference {} already contains different data",
+                    reference.as_str()
+                )));
+            }
+        } else {
+            target_vault
+                .put(reference.as_str(), &credential)
+                .map_err(EngineStoreError::Io)?;
+        }
+    }
+    engine.replace(candidate)?;
+    Ok(V02ProductImportOutcome::Imported(import_record))
+}
+
 pub fn default_agent_state_directory() -> io::Result<PathBuf> {
     if let Some(value) = env::var_os("ENVOIX_STATE_DIR").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value));
@@ -750,6 +950,174 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{name} fixture unexpectedly loaded"));
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+        }
+    }
+
+    #[test]
+    fn v0_2_import_is_atomic_restartable_and_keeps_secrets_out_of_engine_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_directory = directory.path().join("product");
+        let credential = RememberedCredential::from_control_pairing(
+            b"fixture control key",
+            envoix_invite::Commitment::sha256(b"fixture transcript"),
+        )
+        .to_opaque();
+        let mut legacy = ProductStore::open(&legacy_directory).unwrap();
+        let pending = legacy
+            .prepare_device(
+                "MacBook",
+                "broker.invalid:8445",
+                Some("https://relay.invalid"),
+            )
+            .unwrap();
+        let device_id = pending.id().to_string();
+        let credential_reference = pending.credential_reference.clone();
+        legacy.commit_device(pending, &credential, 4).unwrap();
+        legacy.append_inbox(inbox_item("received", 1)).unwrap();
+        drop(legacy);
+        let source_path = legacy_directory.join(PRODUCT_STATE_FILE);
+        let source_bytes = fs::read(&source_path).unwrap();
+
+        let target_vault = DesktopCredentialStore::new(directory.path().join("vault"));
+        let mut engine = EngineStore::open(directory.path()).unwrap();
+        let outcome =
+            import_v0_2_product_state(&mut engine, &legacy_directory, &target_vault).unwrap();
+        let V02ProductImportOutcome::Imported(record) = outcome else {
+            panic!("expected a new import");
+        };
+        assert_eq!(record.imported_relationships, 1);
+        assert_eq!(record.imported_inbox_items, 1);
+        assert!(record.re_pair_required.is_empty());
+        let relationship_id = RelationshipId::parse(device_id.clone()).unwrap();
+        assert_eq!(
+            engine
+                .state()
+                .snapshot
+                .relationships
+                .get(&relationship_id)
+                .unwrap()
+                .generation,
+            4
+        );
+        assert_eq!(
+            target_vault.get(&credential_reference).unwrap().unwrap(),
+            credential
+        );
+        assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+        assert_eq!(
+            fs::read(
+                directory
+                    .path()
+                    .join("migration")
+                    .join(V02_PRODUCT_STATE_BACKUP)
+            )
+            .unwrap(),
+            source_bytes
+        );
+        let serialized = serde_json::to_vec(engine.state()).unwrap();
+        assert!(
+            !serialized
+                .windows(credential.len())
+                .any(|value| value == credential)
+        );
+
+        assert!(matches!(
+            import_v0_2_product_state(&mut engine, &legacy_directory, &target_vault).unwrap(),
+            V02ProductImportOutcome::AlreadyImported(_)
+        ));
+        drop(engine);
+        let reopened = EngineStore::open(directory.path()).unwrap();
+        assert!(
+            reopened
+                .state()
+                .snapshot
+                .relationships
+                .contains_key(&relationship_id)
+        );
+    }
+
+    #[test]
+    fn v0_2_import_records_missing_credentials_as_re_pair_required() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_directory = directory.path().join("product");
+        fs::create_dir_all(&legacy_directory).unwrap();
+        let source = include_bytes!("../../../tests/fixtures/v0.2/product-state-v1.json");
+        fs::write(legacy_directory.join(PRODUCT_STATE_FILE), source).unwrap();
+        let migration_directory = directory.path().join("migration");
+        fs::create_dir_all(&migration_directory).unwrap();
+        fs::write(migration_directory.join(V02_PRODUCT_STATE_BACKUP), source).unwrap();
+
+        let target_vault = DesktopCredentialStore::new(directory.path().join("vault"));
+        let mut engine = EngineStore::open(directory.path()).unwrap();
+        let V02ProductImportOutcome::Imported(record) =
+            import_v0_2_product_state(&mut engine, &legacy_directory, &target_vault).unwrap()
+        else {
+            panic!("expected a resumed import");
+        };
+
+        assert_eq!(record.imported_relationships, 0);
+        assert_eq!(record.imported_inbox_items, 1);
+        assert_eq!(record.re_pair_required.len(), 1);
+        assert_eq!(
+            record.re_pair_required[0].reason,
+            RePairReason::MissingCredential
+        );
+        assert!(engine.state().snapshot.relationships.is_empty());
+        assert_eq!(
+            fs::read(legacy_directory.join(PRODUCT_STATE_FILE)).unwrap(),
+            source
+        );
+        assert_eq!(
+            fs::read(migration_directory.join(V02_PRODUCT_STATE_BACKUP)).unwrap(),
+            source
+        );
+    }
+
+    #[test]
+    fn failed_v0_2_import_preserves_source_and_received_files() {
+        for (name, source) in [
+            (
+                "corrupt",
+                include_bytes!("../../../tests/fixtures/v0.2/product-state-v1-corrupt.json")
+                    as &[u8],
+            ),
+            (
+                "truncated",
+                include_bytes!("../../../tests/fixtures/v0.2/product-state-v1-truncated.json"),
+            ),
+            (
+                "unknown-version",
+                include_bytes!("../../../tests/fixtures/v0.2/product-state-unknown-version.json"),
+            ),
+            (
+                "partial-migration",
+                include_bytes!("../../../tests/fixtures/v0.2/product-state-partial-migration.json"),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let legacy_directory = directory.path().join("product");
+            fs::create_dir_all(&legacy_directory).unwrap();
+            let source_path = legacy_directory.join(PRODUCT_STATE_FILE);
+            fs::write(&source_path, source).unwrap();
+            let inbox_directory = directory.path().join("inbox");
+            fs::create_dir_all(&inbox_directory).unwrap();
+            let received_path = inbox_directory.join("keep.txt");
+            fs::write(&received_path, b"received bytes").unwrap();
+            let target_vault = DesktopCredentialStore::new(directory.path().join("vault"));
+            let mut engine = EngineStore::open(directory.path()).unwrap();
+
+            assert!(
+                import_v0_2_product_state(&mut engine, &legacy_directory, &target_vault).is_err(),
+                "{name} unexpectedly imported"
+            );
+            assert_eq!(engine.origin(), EngineStoreOrigin::Empty, "{name}");
+            assert_eq!(engine.state(), &EngineState::default(), "{name}");
+            assert_eq!(fs::read(&source_path).unwrap(), source, "{name}");
+            assert_eq!(
+                fs::read(&received_path).unwrap(),
+                b"received bytes",
+                "{name}"
+            );
         }
     }
 
