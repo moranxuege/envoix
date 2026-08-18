@@ -158,8 +158,8 @@ struct SettingsStageView: View {
                         isURL: true
                     )
                     Text(AppText.value(
-                        "Redacted reports only. HTTPS is tried before HTTP fallback.",
-                        "只上传脱敏报告；优先 HTTPS，失败后回退 HTTP。",
+                        "Redacted reports only. HTTPS and a developer upload token are required.",
+                        "只上传脱敏报告；必须使用 HTTPS 和开发者上传令牌。",
                         language: language
                     ))
                         .font(.footnote)

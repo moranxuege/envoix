@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
+use axum::body::to_bytes;
+use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::post;
 use tracing::field::{Field, Visit};
@@ -20,17 +21,14 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-/// Cap on a single uploaded log body. Generous for the debug era (full,
-/// untrimmed uploads — server space is not a concern pre-release); revisit
-/// with a retention/rotation policy before release.
-const MAX_BODY: usize = 64 * 1024 * 1024;
+/// Cap shared by the native diagnostic clients and the collection endpoint.
+const MAX_BODY: usize = 480 * 1024;
 /// Cap on the rdz's own captured lines per room.
 const MAX_RDZ_LINES: usize = 2000;
 /// Reject absurd room keys.
 const MAX_ROOM_KEY: usize = 64;
-/// Memory bounds — the log store accepts UNAUTHENTICATED POSTs, so it must cap
-/// its own footprint against room-id spraying / side flooding (the sibling
-/// broker stores already cap this way; this store was the gap).
+/// Memory bounds — authenticated clients can still be buggy or compromised, so
+/// the store caps its own footprint against room-id spraying / side flooding.
 /// Over-cap uploads are refused with 507.
 const MAX_ROOMS: usize = 1024;
 const MAX_CLIENTS_PER_ROOM: usize = 4;
@@ -238,7 +236,15 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[derive(Clone)]
 pub struct LogState {
     store: Arc<RoomLogs>,
+    upload_auth: UploadAuth,
     view_auth: ViewAuth,
+}
+
+/// Uploads are disabled unless the operator configures a bearer token.
+#[derive(Clone)]
+pub enum UploadAuth {
+    Token(Arc<str>),
+    Closed,
 }
 
 /// How report RETRIEVAL (GET) is gated. Default is fail-CLOSED — an open
@@ -255,27 +261,56 @@ pub enum ViewAuth {
 }
 
 /// The axum router: `POST /logs/{room}?side=…` ingests, `GET /logs/{room}` views.
-pub fn router(store: Arc<RoomLogs>, view_auth: ViewAuth) -> Router {
+pub fn router(store: Arc<RoomLogs>, upload_auth: UploadAuth, view_auth: ViewAuth) -> Router {
     Router::new()
         .route("/logs/{room}", post(upload).get(view))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(LogState { store, view_auth })
+        .with_state(LogState {
+            store,
+            upload_auth,
+            view_auth,
+        })
 }
 
 async fn upload(
     Path(room): Path<String>,
     RawQuery(query): RawQuery,
     State(state): State<LogState>,
-    body: String,
+    request: Request,
 ) -> StatusCode {
+    if let Err(status) = authorize_upload(request.headers(), &state.upload_auth) {
+        return status;
+    }
     if room.len() > MAX_ROOM_KEY {
         return StatusCode::BAD_REQUEST;
     }
+    let body = match to_bytes(request.into_body(), MAX_BODY).await {
+        Ok(body) => match String::from_utf8(body.to_vec()) {
+            Ok(body) => body,
+            Err(_) => return StatusCode::BAD_REQUEST,
+        },
+        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE,
+    };
     if state.store.upload(&room, &side_of(query.as_deref()), body) {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::INSUFFICIENT_STORAGE
     }
+}
+
+fn authorize_upload(headers: &HeaderMap, auth: &UploadAuth) -> Result<(), StatusCode> {
+    match auth {
+        UploadAuth::Token(expected) if bearer_matches(headers, expected) => Ok(()),
+        UploadAuth::Token(_) => Err(StatusCode::UNAUTHORIZED),
+        UploadAuth::Closed => Err(StatusCode::FORBIDDEN),
+    }
+}
+
+fn bearer_matches(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
 }
 
 async fn view(
@@ -287,12 +322,7 @@ async fn view(
     // A room id is a low-entropy correlation key, NOT authorization.
     match &state.view_auth {
         ViewAuth::Token(expected) => {
-            let ok = headers
-                .get(header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.strip_prefix("Bearer "))
-                .is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()));
-            if !ok {
+            if !bearer_matches(&headers, expected) {
                 return (
                     StatusCode::UNAUTHORIZED,
                     "operator token required\n".to_string(),

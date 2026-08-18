@@ -433,15 +433,16 @@ unit-commit standard); a1 is the spine, a2/a3 are independent after it.
    and uncapped, so under the release budget it survives whole and the raw trace
    yields space; the `transfer raw trace` appendix now keeps HEAD **and** TAIL
    (`Diagnostics.headAndTail`) — the connection setup and the failure — not
-   tail-only. Debug stays fully untrimmed. (No Kotlin unit-test harness exists,
-   so this is a minimal, compile-verified change, not a rewrite.)
-9. **Log-retrieval auth** (IMPLEMENTED — hardening pass): `GET /logs/{room}`
-   requires a bearer token when `--log-view-token-file` is configured (401
-   without; constant-time compare; POST stays open). Currently deployed
-   **fail-OPEN** (no token file ⇒ open + a startup warning) so private testing
-   isn't broken. FOLLOW-UP (external review): make the default **fail-CLOSED**
-   with an explicit `--unsafe-open-log-view` opt-in, so open is a deliberate,
-   visible choice rather than a silent default — before broad rollout.
+   tail-only. Debug stays fully untrimmed. Kotlin byte-budget tests cover both
+   clipping directions and the production caps.
+9. **Log endpoint authentication and transport** (IMPLEMENTED — v0.3 M1):
+   `GET /logs/{room}` is fail-closed unless `--log-view-token-file` or the
+   explicit development-only `--unsafe-open-log-view` is supplied. `POST`
+   requires a separate `--log-upload-token-file` and is otherwise disabled.
+   Both token checks use exact bearer values and constant-time comparison.
+   Authentication is checked before the bounded 480 KiB body is read. Native
+   uploaders accept HTTPS only and obtain developer tokens from process-local
+   injection rather than persisted app settings.
 10. **Still deferred**: drawer-as-view; SEPARATE timeline/raw files (the true fix
    for "timeline never trimmed" — one shared file with head+tail is only a
    mitigation, middle authority events can still be evicted); raw-trace batching;
@@ -461,14 +462,15 @@ RISK: purely visual — needs the user's eyes on the rendered drawer, so it's a
 review-then-build item, not a blind change. Open choice: keep a compact
 human render, or show the raw envelope with a monospace toggle.
 
-**log-retrieval auth — IMPLEMENTED (hardening pass, commit 9215473).** A bearer
-token from `--log-view-token-file` gates **GET only** (constant-time compare,
-`Authorization: Bearer`, 401 without); **POST stays open** (peers can't hold the
-operator secret). Deployed fail-OPEN (no token file ⇒ open + a startup WARNING)
-so private testing keeps working. FOLLOW-UP from external review: flip the
-default to **fail-CLOSED** with an explicit `--unsafe-open-log-view` flag — so
-security doesn't "depend on deployment memory" and open is a visible, deliberate
-choice. Then broad rollout is safe-by-default and the test box carries the flag.
+**log endpoint auth — IMPLEMENTED.** `--log-view-token-file` gates `GET` and
+`--log-upload-token-file` gates `POST`; absent configuration is closed. The
+only anonymous-read escape hatch is the visibly unsafe
+`--unsafe-open-log-view` option. Apple reads the upload token from
+`ENVOIX_DIAGNOSTIC_UPLOAD_TOKEN`; Android uses the process-local
+`envoix.diagnosticUploadToken` system property. Neither token is stored in
+UserDefaults or SharedPreferences. This developer provisioning is temporary;
+if authenticated remote diagnostics becomes a distributed product feature,
+its credential moves behind the v0.3 vault port rather than into UI settings.
 
 **raw-trace batching (observer effect).** The raw tier crosses JNI synchronously
 one line at a time and does Kotlin file I/O on the logging path, which can
