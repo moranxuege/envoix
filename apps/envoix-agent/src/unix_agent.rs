@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::io;
-use std::os::unix::fs::FileTypeExt as _;
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -31,7 +31,7 @@ use envoix_client::product::{
 use envoix_client::{
     DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, IdentityConfig, TransferCancelToken,
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
@@ -332,6 +332,7 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
         &runtime.config.socket_path,
         std::os::unix::fs::PermissionsExt::from_mode(0o600),
     )?;
+    let socket_uid = fs::metadata(&runtime.config.socket_path)?.uid();
     let _cleanup = SocketCleanup(runtime.config.socket_path.clone());
     tracing::info!(
         socket = %runtime.config.socket_path.display(),
@@ -351,6 +352,10 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                if let Err(error) = validate_unix_peer(&stream, socket_uid) {
+                    tracing::warn!(%error, "rejected local Agent peer");
+                    continue;
+                }
                 let runtime = runtime.clone();
                 tokio::spawn(async move {
                     if let Err(error) = serve_connection(runtime, stream).await {
@@ -360,6 +365,14 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
             }
         }
     }
+}
+
+fn validate_unix_peer(stream: &UnixStream, socket_uid: u32) -> Result<()> {
+    let peer_uid = stream.peer_cred()?.uid();
+    if peer_uid != socket_uid {
+        bail!("Agent peer UID {peer_uid} does not match socket owner {socket_uid}");
+    }
+    Ok(())
 }
 
 async fn termination_signal() -> io::Result<()> {
@@ -396,8 +409,11 @@ async fn prepare_socket(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn serve_connection(runtime: Arc<AgentRuntime>, stream: UnixStream) -> Result<()> {
-    let (read, mut write) = stream.into_split();
+async fn serve_connection<S>(runtime: Arc<AgentRuntime>, stream: S) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (read, mut write) = tokio::io::split(stream);
     let mut request_bytes = Vec::new();
     let mut limited = BufReader::new(read).take(MAX_AGENT_REQUEST_BYTES + 1);
     limited.read_until(b'\n', &mut request_bytes).await?;
@@ -1473,6 +1489,21 @@ mod tests {
         let response: AgentResponseEnvelope = serde_json::from_str(&line).unwrap();
         response.validate_for("request_test").unwrap();
         assert!(matches!(response.response, AgentResponse::Status { .. }));
+    }
+
+    #[tokio::test]
+    async fn unix_peer_identity_must_match_the_socket_owner() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let peer_uid = client.peer_cred().unwrap().uid();
+        validate_unix_peer(&client, peer_uid).unwrap();
+
+        let different_uid = if peer_uid == u32::MAX {
+            peer_uid - 1
+        } else {
+            peer_uid + 1
+        };
+        let error = validate_unix_peer(&client, different_uid).unwrap_err();
+        assert!(error.to_string().contains("does not match socket owner"));
     }
 
     #[tokio::test]

@@ -311,6 +311,8 @@ lock is held for the lifetime of the store, including migration.
 The Linux/WSL Agent now projects pairing, generation rotation, revocation, and
 Inbox updates into this schema. Its former ProductStore implementation is
 compiled only as a v0.2 fixture writer; it is not a production runtime path.
+The Unix control adapter sets the socket to owner-only mode and verifies each
+accepted peer UID against the socket owner before decoding a command.
 
 Secrets are referenced from product state and stored by a secure-vault port:
 
