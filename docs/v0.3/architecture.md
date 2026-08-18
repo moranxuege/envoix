@@ -292,6 +292,11 @@ The storage implementation is the bounded atomic-file Engine store selected by
 the Engine ownership rule; strict validation, size bounds, last-known-good
 recovery, and atomic activation are required parts of the store.
 
+Engine schema v1 stores the immutable application snapshot, durable
+Relationship routes and vault references, Inbox metadata, and migration
+evidence. It stores neither payload bytes nor credential values. The owner
+lock is held for the lifetime of the store, including migration.
+
 Secrets are referenced from product state and stored by a secure-vault port:
 
 - Apple Keychain under stable signed access groups;

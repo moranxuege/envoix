@@ -21,3 +21,6 @@ fine-grained failure codes canonical without rewriting v1-v5. The current
 fixture covers every current command and event variant; its valid event stream
 reconstructs the embedded snapshot, and its removed Transfer is intentionally
 absent from that snapshot.
+
+`engine-state-v1.json` freezes the empty, non-secret Engine storage envelope.
+Storage migrations add a new fixture rather than rewriting this file.

@@ -13,6 +13,7 @@ pub mod product;
 mod reducers;
 pub mod runtime;
 pub mod snapshot;
+pub mod storage;
 
 pub use configuration::{DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER};
 pub use envoix_auth::SPAKE2_EXPERIMENTAL_WARNING;
