@@ -1111,6 +1111,7 @@ name = "envoix-client"
 version = "0.3.0"
 dependencies = [
  "base64",
+ "blake3",
  "envoix-auth",
  "envoix-error",
  "envoix-invite",

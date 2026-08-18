@@ -50,13 +50,16 @@ state-directory/
   migration/
     v0.2-product-state-v1.backup.json
     import-v0.2-v1.json
-  vault/                         # desktop fallback adapter only
+  vault/                         # desktop protected-credential adapter
   inbox/                         # received user files; never migration-owned
 ```
 
-Platform vaults may not use the `vault/` directory. It exists only for the
-documented owner-only desktop fallback adapter. Mobile and signed Apple hosts
-use their native vault ports.
+The Windows adapter stores only versioned, user-scoped DPAPI ciphertext in the
+`vault/` directory and binds every blob to its opaque reference with optional
+entropy. A domain-separated digest inside the protected envelope rejects a
+rare corrupted result even if DPAPI itself returns success. Linux/WSL uses the
+documented owner-only file fallback there. Mobile and signed Apple hosts use
+their native vault ports.
 
 ## Alternatives considered
 

@@ -329,6 +329,15 @@ Secrets are referenced from product state and stored by a secure-vault port:
 - Windows user-scoped protected storage;
 - an explicitly documented owner-only fallback where WSL lacks a system vault.
 
+The Windows Agent persists only versioned DPAPI ciphertext scoped to the
+current user. It supplies the credential reference as domain-separated
+optional entropy, rejects unknown/plaintext formats, and always requests
+non-interactive protection so credential access cannot trigger a prompt loop.
+The protected envelope also carries a domain-separated integrity digest because
+Microsoft's
+[`CryptUnprotectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata)
+contract says callers should not rely on one particular DPAPI tamper result.
+
 Presentation code and standalone CLI commands never read secrets. Vault access
 occurs on Engine startup or first credential use, pairing, rotation, and
 revocation. It is not triggered by rendering, progress updates, or reconnect
