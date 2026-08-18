@@ -132,6 +132,13 @@ Build through the repository cache guard:
 scripts/with-build-cache-guard.sh cargo build -p envoix-agent -p envoix-cli
 ```
 
+Run the unhosted macOS clipboard tests without launching Envoix or accessing
+remembered-device credentials:
+
+```bash
+scripts/apple-dev.sh macos-clipboard-test
+```
+
 Run the Agent in WSL:
 
 ```bash

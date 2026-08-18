@@ -570,29 +570,6 @@ func pasteboardString() -> String? {
     #endif
 }
 
-/// Resolves an item copied in Finder or a plain-text path, expanding `~`.
-#if os(macOS)
-func pastedFileURL(from pasteboard: NSPasteboard = .general) -> URL? {
-    let pb = pasteboard
-    let exists = { FileManager.default.fileExists(atPath: $0) }
-
-    if let urls = pb.readObjects(forClasses: [NSURL.self],
-                                 options: [.urlReadingFileURLsOnly: true]) as? [URL],
-       let url = urls.first, exists(url.path) {
-        return url
-    }
-    if let raw = pb.string(forType: .string)?.trimmed, !raw.isEmpty {
-        let expanded = (raw as NSString).expandingTildeInPath
-        if exists(expanded) { return URL(fileURLWithPath: expanded) }
-    }
-    return nil
-}
-#else
-func pastedFileURL() -> URL? {
-    return nil
-}
-#endif
-
 /// Selects the file in Finder (opening its enclosing folder).
 #if os(macOS)
 func revealInFinder(_ url: URL) {

@@ -52,6 +52,7 @@ required_shared_schemes=(
   Envoix-iOS-Hosted
   Envoix-iOS-AppUI
   Envoix-macOS-Hosted
+  Envoix-macOS-Clipboard
 )
 
 usage() {
@@ -69,6 +70,7 @@ Build commands:
   macos-test-build [...]         Build the macOS App-hosted tests without running them
   macos-test [...]               Run the macOS App-hosted test target
   macos-test-rerun [...]         Rerun the built macOS App-hosted tests
+  macos-clipboard-test [...]     Run unhosted macOS clipboard intake tests
   core-force                     Force regeneration of the Rust-to-Swift package
 
 Space commands:
@@ -262,7 +264,7 @@ if [[ "$#" -gt 0 ]]; then
 fi
 
 case "$command_name" in
-  prepare|ios-build|ios-test-build|ios-test|ios-device-build|macos-build|macos-test-build|macos-test|core-force)
+  prepare|ios-build|ios-test-build|ios-test|ios-device-build|macos-build|macos-test-build|macos-test|macos-clipboard-test|core-force)
     if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" == "1" \
           && "${ENVOIX_BUILD_LEASE_MODE:-writer}" == "reader" ]]; then
       echo "error: $command_name cannot mutate products under a reader lease" >&2
@@ -386,6 +388,18 @@ case "$command_name" in
       COMPILER_INDEX_STORE_ENABLE=NO \
       ${result_args[@]+"${result_args[@]}"} \
       test-without-building \
+      "$@"
+    ;;
+  macos-clipboard-test)
+    prepare_project
+    xcodebuild \
+      -project "$project" \
+      -scheme Envoix-macOS-Clipboard \
+      -configuration "$apple_build_configuration" \
+      -destination 'platform=macOS,arch=arm64' \
+      -derivedDataPath "$macos_cache" \
+      COMPILER_INDEX_STORE_ENABLE=NO \
+      test \
       "$@"
     ;;
   core-force)

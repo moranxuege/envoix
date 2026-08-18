@@ -193,7 +193,6 @@ targets:
       - Tests/EnvoixIOSUITests/AppleWifiAwareServiceCoordinatorTests.swift
       - Tests/EnvoixIOSUITests/WifiAwareRendezvousProtocolTests.swift
       - Tests/EnvoixMacOSUITests/ConnectionHubPresentationTests.swift
-      - Tests/EnvoixMacOSUITests/ClipboardIntakeTests.swift
       - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
       - Tests/EnvoixMacOSUITests/RoomCodeInputFormatterTests.swift
     dependencies:
@@ -220,6 +219,24 @@ targets:
           - "CoreWLAN"
           - "-framework"
           - "CoreBluetooth"
+
+  Envoix-macOSClipboardTests:
+    # Clipboard intake is intentionally unhosted so tests cannot initialize
+    # the production app or query remembered-device credentials in Keychain.
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Sources/ClipboardIntake.swift
+      - Shared/ShareDraftStore.swift
+      - Tests/EnvoixMacOSUITests/ClipboardIntakeTests.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.macos.clipboard-tests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
 
 schemes:
   Envoix:
@@ -272,3 +289,13 @@ schemes:
       gatherCoverageData: false
       targets:
         - Envoix-macOSUITests
+
+  Envoix-macOS-Clipboard:
+    build:
+      targets:
+        Envoix-macOSClipboardTests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - Envoix-macOSClipboardTests

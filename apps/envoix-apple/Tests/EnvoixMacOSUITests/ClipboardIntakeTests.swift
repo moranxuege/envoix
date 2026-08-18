@@ -2,7 +2,6 @@
 import AppKit
 import UniformTypeIdentifiers
 import XCTest
-@testable import Envoix
 
 @MainActor
 final class ClipboardIntakeTests: XCTestCase {
