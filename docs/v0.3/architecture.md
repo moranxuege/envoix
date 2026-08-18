@@ -287,9 +287,10 @@ The Engine owns the versioned schema for non-secret product state:
 - Inbox/Outbox metadata;
 - capability and migration metadata.
 
-The storage implementation is selected after a focused ADR comparing a shared
-SQLite store with the current atomic-file stores. The architectural constraint
-is one schema and migration owner, not a particular database library.
+The storage implementation is the bounded atomic-file Engine store selected by
+[ADR 0001](adr/0001-engine-storage.md). Its single-writer constraint follows
+the Engine ownership rule; strict validation, size bounds, last-known-good
+recovery, and atomic activation are required parts of the store.
 
 Secrets are referenced from product state and stored by a secure-vault port:
 
@@ -340,11 +341,10 @@ their native resource and accessibility systems.
 
 The following require focused ADRs at the milestone that first needs them:
 
-1. shared SQLite versus an improved atomic-file product store;
-2. exact macOS helper packaging and whether Mac App Store distribution is a
+1. exact macOS helper packaging and whether Mac App Store distribution is a
    future requirement;
-3. final Windows GUI framework after Agent IPC validation;
-4. whether Linux gains a graphical shell after v0.3;
-5. the later cross-device clipboard consent and history policy.
+2. final Windows GUI framework after Agent IPC validation;
+3. whether Linux gains a graphical shell after v0.3;
+4. the later cross-device clipboard consent and history policy.
 
 None of these decisions blocks establishing the Engine boundary.

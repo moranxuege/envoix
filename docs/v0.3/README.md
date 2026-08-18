@@ -48,6 +48,7 @@ as typed capabilities, not inferred by a frontend.
 - [Compatibility and migration policy](compatibility.md)
 - [Engineering standard](engineering.md)
 - [Dependency security baseline](dependency-security.md)
+- [ADR 0001: Engine storage](adr/0001-engine-storage.md)
 
 When an older design document conflicts with these documents, the v0.3
 documents take precedence. Older documents remain historical evidence until a
@@ -73,6 +74,8 @@ milestone either updates or archives them.
 8. Prefer selective migration over indefinite compatibility code: preserve
    received files and protocol-compatible durable identity, but permit an
    explicit reset of transient v0.2 state.
+9. Use one bounded atomic-file Engine store with an exclusive owner lock;
+   credentials remain behind vault references.
 
 ## Non-goals
 
