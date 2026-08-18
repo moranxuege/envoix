@@ -20,8 +20,10 @@ use envoix_client::api::{
     send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
     send_manifest_v2_via_room_with_authentication,
 };
+use envoix_client::failure::project_session_failure;
 use envoix_client::model::{
-    RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
+    FailurePhase as AppFailurePhase, RememberedAttemptOutcome, RememberedGenerationRole,
+    TransferDirection as AppTransferDirection, remembered_generation_attempts,
 };
 #[cfg(test)]
 use envoix_error::RendezvousCause;
@@ -2149,65 +2151,25 @@ struct FailureFact {
 }
 
 fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
-    let (projected_error, invitation_consumed) = match error {
-        CoreError::InvitationConsumed(source) => (source.as_ref(), true),
-        error => (error, false),
-    };
-    let (cause, mut detail) = match projected_error {
-        CoreError::Cause { cause, detail } => (cause.code(), detail.clone()),
-        CoreError::Rendezvous { cause, .. } => (cause.code(), projected_error.to_string()),
-        CoreError::Cancelled => ("user_canceled", "operation cancelled".into()),
-        CoreError::InvalidInput(detail) => ("unsupported_feature", detail.clone()),
-        CoreError::Transport(detail) => ("transport", detail.clone()),
-        CoreError::Protocol(detail) => ("protocol_or_integrity_failure", detail.clone()),
-        CoreError::Crypto(detail) => ("authentication_failed", detail.clone()),
-        CoreError::Io(detail) | CoreError::Storage(detail) if direction == "send" => {
-            ("sender_source_unavailable", detail.clone())
-        }
-        CoreError::Io(detail) | CoreError::Storage(detail) => {
-            ("receiver_save_failed", detail.clone())
-        }
-        CoreError::Discovery(detail) => ("discovery", detail.clone()),
-        CoreError::Transfer(detail) => ("transfer", detail.clone()),
-        CoreError::InvitationConsumed(_) => unreachable!("consumed invitation was unwrapped"),
-    };
-    if invitation_consumed {
-        detail = error.to_string();
-    }
-    let (retryable, default_recovery_action) = failure_recovery(cause);
-    let recovery_action = if invitation_consumed && retryable {
-        "re_pair"
-    } else {
-        default_recovery_action
-    };
+    let projection = project_session_failure(
+        error,
+        app_transfer_direction(direction),
+        AppFailurePhase::Transferring,
+    );
+    let failure = projection.failure;
     FailureFact {
-        cause,
-        detail,
-        retryable,
-        recovery_action,
+        cause: failure.code.wire_name(),
+        detail: error.to_string(),
+        retryable: failure.retryable,
+        recovery_action: failure.recovery_action.wire_name(),
     }
 }
 
-fn failure_recovery(cause: &str) -> (bool, &'static str) {
-    match cause {
-        "transport" | "discovery" => (true, "resume"),
-        "room_not_found"
-        | "room_full"
-        | "room_rate_limited"
-        | "endpoint_rate_limited"
-        | "ip_rate_limited"
-        | "server_busy" => (true, "retry"),
-        "room_expired" | "room_under_attack" => (true, "re_pair"),
-        "authentication_failed" => (true, "re_pair"),
-        "sender_source_unavailable" | "sender_source_changed" | "transfer" => (true, "retry"),
-        "sender_permission_lost" => (true, "open_settings"),
-        "receiver_space_insufficient"
-        | "receiver_destination_decision_required"
-        | "receiver_destination_unavailable" => (true, "choose_folder"),
-        "receiver_save_failed"
-        | "receiver_reused_object_lost"
-        | "receiver_finalization_outcome_unknown" => (true, "resume"),
-        _ => (false, "none"),
+fn app_transfer_direction(direction: &str) -> AppTransferDirection {
+    match direction {
+        "send" => AppTransferDirection::Send,
+        "receive" => AppTransferDirection::Receive,
+        _ => unreachable!("Manifest v2 direction is validated before the session starts"),
     }
 }
 
@@ -2346,7 +2308,7 @@ mod tests {
             (
                 CoreError::Transport("offline".into()),
                 "send",
-                "transport",
+                "network_lost",
                 true,
                 "resume",
             ),
@@ -2400,19 +2362,35 @@ mod tests {
 
     #[test]
     fn stable_manifest_causes_keep_their_recovery_action() {
-        assert_eq!(
-            failure_recovery("sender_permission_lost"),
-            (true, "open_settings")
+        let permission = error_fact(
+            &CoreError::Cause {
+                cause: TransferCause::SenderPermissionLost,
+                detail: "permission revoked".into(),
+            },
+            "send",
         );
-        assert_eq!(
-            failure_recovery("receiver_space_insufficient"),
-            (true, "choose_folder")
+        assert!(permission.retryable);
+        assert_eq!(permission.recovery_action, "open_settings");
+
+        let insufficient_space = error_fact(
+            &CoreError::Cause {
+                cause: TransferCause::ReceiverSpaceInsufficient,
+                detail: "destination full".into(),
+            },
+            "receive",
         );
-        assert_eq!(failure_recovery("sender_item_removed"), (false, "none"));
-        assert_eq!(
-            failure_recovery("protocol_or_integrity_failure"),
-            (false, "none")
+        assert!(insufficient_space.retryable);
+        assert_eq!(insufficient_space.recovery_action, "choose_folder");
+
+        let removed = error_fact(
+            &CoreError::Cause {
+                cause: TransferCause::SenderItemRemoved,
+                detail: "item removed".into(),
+            },
+            "send",
         );
+        assert!(!removed.retryable);
+        assert_eq!(removed.recovery_action, "none");
     }
 
     #[test]

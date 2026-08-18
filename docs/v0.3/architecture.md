@@ -136,6 +136,13 @@ verified the receiver's delivery proof. A structured retryable failure remains
 byte progress survives that transition. Only terminal Transfers may be
 explicitly removed from the product snapshot.
 
+Session failures are projected once in `envoix-client` into a stable failure
+code, phase, origin, retryability, and recovery action. Swift, Kotlin, CLI, and
+Agent adapters may translate those typed values into their native binding
+types, but must not maintain independent error-to-recovery tables or parse
+diagnostic prose. Application contract v6 makes the fine-grained failure codes
+canonical while preserving read compatibility for v1-v5 fixtures.
+
 ### Content
 
 A typed description of material carried by a Transfer. v0.3 requires file and

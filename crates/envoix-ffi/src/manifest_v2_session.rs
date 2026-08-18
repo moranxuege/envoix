@@ -12,9 +12,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_client::api::{
     AuthenticationHandler, AuthenticationOutcome, DestinationDecisionV2, DestinationRequestV2,
     EventSink, InvitationConsumption, InvitationLease, PairingConfig, PeerSource,
-    PendingManifestV2Receive, PendingNativeManifestV2Receive, RendezvousCause, SessionError,
-    TransferCancelToken, TransferDirection as CoreTransferDirection, TransferEvent, TransferStage,
-    acquire_invitation, acquire_remembered_credential, acquire_shared_token, parse_broker_addr,
+    PendingManifestV2Receive, PendingNativeManifestV2Receive, SessionError, TransferCancelToken,
+    TransferDirection as CoreTransferDirection, TransferEvent, TransferStage, acquire_invitation,
+    acquire_remembered_credential, acquire_shared_token, parse_broker_addr,
     receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_over_datagram_transport,
     receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
     receive_manifest_v2_offer_via_room_hybrid_with_authentication,
@@ -25,8 +25,12 @@ use envoix_client::api::{
     send_manifest_v2_via_room_hybrid_with_authentication,
     send_manifest_v2_via_room_with_authentication,
 };
+use envoix_client::failure::project_session_failure;
 use envoix_client::model::{
-    RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
+    FailureCategory as AppFailureCategory, FailureCode as AppFailureCode,
+    FailureOrigin as AppFailureOrigin, FailurePhase as AppFailurePhase,
+    RecoveryAction as AppRecoveryAction, RememberedAttemptOutcome, RememberedGenerationRole,
+    TransferDirection as AppTransferDirection, remembered_generation_attempts,
 };
 use envoix_types::{DataPath, PairingStep};
 use tokio::sync::Mutex;
@@ -1567,336 +1571,131 @@ fn report_v2_failure(
     direction: FfiTransferDirection,
     fallback_phase: FfiFailurePhase,
 ) {
-    let (projected_error, invitation_consumed) = match error {
-        SessionError::InvitationConsumed(source) => (source.as_ref(), true),
-        error => (error, false),
-    };
-    let (code, category, phase, origin, retryable, mut recovery_action, message_key) =
-        match projected_error {
-            SessionError::Cause { cause, .. } => manifest_v2_cause_projection(cause.code()),
-            SessionError::Rendezvous { cause, .. } => rendezvous_cause_projection(*cause),
-            SessionError::Cancelled => (
-                FfiFailureCode::UserCanceled,
-                FfiFailureCategory::User,
-                fallback_phase,
-                FfiFailureOrigin::Local,
-                false,
-                FfiRecoveryAction::None,
-                "transfer.user_canceled",
-            ),
-            SessionError::Transport(_) | SessionError::Discovery(_) => (
-                FfiFailureCode::NetworkLost,
-                FfiFailureCategory::Network,
-                fallback_phase,
-                FfiFailureOrigin::Unknown,
-                true,
-                FfiRecoveryAction::Resume,
-                "transfer.network_lost",
-            ),
-            SessionError::Crypto(_) => (
-                FfiFailureCode::AuthenticationFailed,
-                FfiFailureCategory::Authentication,
-                FfiFailurePhase::Authenticating,
-                FfiFailureOrigin::Unknown,
-                true,
-                FfiRecoveryAction::RePair,
-                "transfer.authentication_failed",
-            ),
-            SessionError::Protocol(_) => (
-                FfiFailureCode::ProtocolOrIntegrityFailure,
-                FfiFailureCategory::Integrity,
-                FfiFailurePhase::Verifying,
-                FfiFailureOrigin::Unknown,
-                false,
-                FfiRecoveryAction::None,
-                "transfer.protocol_or_integrity_failure",
-            ),
-            SessionError::Io(_) | SessionError::Storage(_) => (
-                if direction == FfiTransferDirection::Receive {
-                    FfiFailureCode::ReceiverSaveFailed
-                } else {
-                    FfiFailureCode::SenderSourceUnavailable
-                },
-                FfiFailureCategory::Storage,
-                fallback_phase,
-                FfiFailureOrigin::Local,
-                true,
-                io_failure_recovery(direction),
-                if direction == FfiTransferDirection::Receive {
-                    "transfer.receiver_save_failed"
-                } else {
-                    "transfer.sender_source_unavailable"
-                },
-            ),
-            SessionError::InvalidInput(_) => (
-                FfiFailureCode::UnsupportedFeature,
-                FfiFailureCategory::Unsupported,
-                fallback_phase,
-                FfiFailureOrigin::Local,
-                false,
-                FfiRecoveryAction::None,
-                "transfer.unsupported_feature",
-            ),
-            SessionError::Transfer(_) => (
-                FfiFailureCode::InternalError,
-                FfiFailureCategory::Internal,
-                fallback_phase,
-                FfiFailureOrigin::Unknown,
-                true,
-                FfiRecoveryAction::Retry,
-                "transfer.internal_error",
-            ),
-            SessionError::InvitationConsumed(_) => {
-                unreachable!("consumed invitation was unwrapped")
-            }
-        };
-    if invitation_consumed && retryable {
-        recovery_action = FfiRecoveryAction::RePair;
-    }
+    let projection = project_session_failure(
+        error,
+        app_transfer_direction(direction),
+        app_failure_phase(fallback_phase),
+    );
+    let failure = projection.failure;
     observer.on_transfer_failed(FfiTransferFailure {
-        code,
-        category,
-        phase,
-        origin,
+        code: ffi_failure_code(failure.code),
+        category: ffi_failure_category(failure.code.category()),
+        phase: ffi_failure_phase(failure.phase),
+        origin: ffi_failure_origin(projection.origin),
         direction,
-        retryable,
-        recovery_action,
-        user_message_key: message_key.into(),
+        retryable: failure.retryable,
+        recovery_action: ffi_recovery_action(failure.recovery_action),
+        user_message_key: failure.code.user_message_key().into(),
         diagnostic_message: error.to_string(),
     });
 }
 
-#[allow(clippy::type_complexity)]
-fn rendezvous_cause_projection(
-    cause: RendezvousCause,
-) -> (
-    FfiFailureCode,
-    FfiFailureCategory,
-    FfiFailurePhase,
-    FfiFailureOrigin,
-    bool,
-    FfiRecoveryAction,
-    &'static str,
-) {
-    let (code, retryable, recovery, key) = match cause {
-        RendezvousCause::RoomNotFound => (
-            FfiFailureCode::RoomNotFound,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.room_not_found",
-        ),
-        RendezvousCause::RoomExpired => (
-            FfiFailureCode::RoomExpired,
-            true,
-            FfiRecoveryAction::RePair,
-            "transfer.room_expired",
-        ),
-        RendezvousCause::RoomFull => (
-            FfiFailureCode::RoomFull,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.room_full",
-        ),
-        RendezvousCause::RoomRateLimited => (
-            FfiFailureCode::RoomRateLimited,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.room_rate_limited",
-        ),
-        RendezvousCause::RoomUnderAttack => (
-            FfiFailureCode::RoomUnderAttack,
-            true,
-            FfiRecoveryAction::RePair,
-            "transfer.room_under_attack",
-        ),
-        RendezvousCause::EndpointRateLimited => (
-            FfiFailureCode::EndpointRateLimited,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.endpoint_rate_limited",
-        ),
-        RendezvousCause::IpRateLimited => (
-            FfiFailureCode::IpRateLimited,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.ip_rate_limited",
-        ),
-        RendezvousCause::ServerBusy => (
-            FfiFailureCode::ServerBusy,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.server_busy",
-        ),
-        RendezvousCause::MalformedJoin => (
-            FfiFailureCode::MalformedJoin,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.malformed_join",
-        ),
-        RendezvousCause::UnsupportedVersion => (
-            FfiFailureCode::UnsupportedRendezvousVersion,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.unsupported_rendezvous_version",
-        ),
-    };
-    (
-        code,
-        if matches!(
-            cause,
-            RendezvousCause::MalformedJoin | RendezvousCause::UnsupportedVersion
-        ) {
-            FfiFailureCategory::Unsupported
-        } else {
-            FfiFailureCategory::Network
-        },
-        FfiFailurePhase::Pairing,
-        FfiFailureOrigin::Unknown,
-        retryable,
-        recovery,
-        key,
-    )
-}
-
-fn io_failure_recovery(direction: FfiTransferDirection) -> FfiRecoveryAction {
-    if direction == FfiTransferDirection::Receive {
-        FfiRecoveryAction::Resume
-    } else {
-        FfiRecoveryAction::Retry
+fn app_transfer_direction(direction: FfiTransferDirection) -> AppTransferDirection {
+    match direction {
+        FfiTransferDirection::Send => AppTransferDirection::Send,
+        FfiTransferDirection::Receive => AppTransferDirection::Receive,
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn manifest_v2_cause_projection(
-    cause: &str,
-) -> (
-    FfiFailureCode,
-    FfiFailureCategory,
-    FfiFailurePhase,
-    FfiFailureOrigin,
-    bool,
-    FfiRecoveryAction,
-    &'static str,
-) {
-    let local = FfiFailureOrigin::Local;
-    match cause {
-        "nearby_hybrid_pre_auth_transport_failure" => (
-            FfiFailureCode::NetworkLost,
-            FfiFailureCategory::Network,
-            FfiFailurePhase::Connecting,
-            FfiFailureOrigin::Unknown,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.network_lost",
-        ),
-        "sender_source_unavailable" => (
-            FfiFailureCode::SenderSourceUnavailable,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Transferring,
-            local,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.sender_source_unavailable",
-        ),
-        "sender_permission_lost" => (
-            FfiFailureCode::SenderPermissionLost,
-            FfiFailureCategory::Permission,
-            FfiFailurePhase::Transferring,
-            local,
-            true,
-            FfiRecoveryAction::OpenSettings,
-            "transfer.sender_permission_lost",
-        ),
-        "sender_source_changed" => (
-            FfiFailureCode::SenderSourceChanged,
-            FfiFailureCategory::Integrity,
-            FfiFailurePhase::Verifying,
-            local,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.sender_source_changed",
-        ),
-        "sender_item_removed" => (
-            FfiFailureCode::SenderItemRemoved,
-            FfiFailureCategory::User,
-            FfiFailurePhase::Transferring,
-            local,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.sender_item_removed",
-        ),
-        "sender_canceled" => (
-            FfiFailureCode::SenderCanceled,
-            FfiFailureCategory::User,
-            FfiFailurePhase::Transferring,
-            local,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.sender_canceled",
-        ),
-        "receiver_space_insufficient" => (
-            FfiFailureCode::ReceiverSpaceInsufficient,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Negotiating,
-            local,
-            true,
-            FfiRecoveryAction::ChooseFolder,
-            "transfer.receiver_space_insufficient",
-        ),
-        "receiver_destination_decision_required" => (
-            FfiFailureCode::ReceiverDestinationDecisionRequired,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Negotiating,
-            local,
-            true,
-            FfiRecoveryAction::ChooseFolder,
-            "transfer.receiver_destination_decision_required",
-        ),
-        "receiver_destination_unavailable" => (
-            FfiFailureCode::ReceiverDestinationUnavailable,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Committing,
-            local,
-            true,
-            FfiRecoveryAction::ChooseFolder,
-            "transfer.receiver_destination_unavailable",
-        ),
-        "receiver_save_failed" => (
-            FfiFailureCode::ReceiverSaveFailed,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Committing,
-            local,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.receiver_save_failed",
-        ),
-        "receiver_reused_object_lost" => (
-            FfiFailureCode::ReceiverReusedObjectLost,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Committing,
-            local,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.receiver_reused_object_lost",
-        ),
-        "receiver_finalization_outcome_unknown" => (
-            FfiFailureCode::ReceiverFinalizationOutcomeUnknown,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Committing,
-            local,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.receiver_finalization_outcome_unknown",
-        ),
-        _ => (
-            FfiFailureCode::ProtocolOrIntegrityFailure,
-            FfiFailureCategory::Integrity,
-            FfiFailurePhase::Verifying,
-            FfiFailureOrigin::Unknown,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.protocol_or_integrity_failure",
-        ),
+fn app_failure_phase(phase: FfiFailurePhase) -> AppFailurePhase {
+    match phase {
+        FfiFailurePhase::Setup => AppFailurePhase::Setup,
+        FfiFailurePhase::Pairing => AppFailurePhase::Pairing,
+        FfiFailurePhase::Connecting => AppFailurePhase::Connecting,
+        FfiFailurePhase::Authenticating => AppFailurePhase::Authenticating,
+        FfiFailurePhase::Negotiating => AppFailurePhase::Negotiating,
+        FfiFailurePhase::Transferring => AppFailurePhase::Transferring,
+        FfiFailurePhase::Verifying => AppFailurePhase::Verifying,
+        FfiFailurePhase::Committing => AppFailurePhase::Committing,
+    }
+}
+
+fn ffi_failure_code(code: AppFailureCode) -> FfiFailureCode {
+    match code {
+        AppFailureCode::UserCanceled => FfiFailureCode::UserCanceled,
+        AppFailureCode::NetworkLost => FfiFailureCode::NetworkLost,
+        AppFailureCode::AuthenticationFailed => FfiFailureCode::AuthenticationFailed,
+        AppFailureCode::RoomNotFound => FfiFailureCode::RoomNotFound,
+        AppFailureCode::RoomExpired => FfiFailureCode::RoomExpired,
+        AppFailureCode::RoomFull => FfiFailureCode::RoomFull,
+        AppFailureCode::RoomRateLimited => FfiFailureCode::RoomRateLimited,
+        AppFailureCode::RoomUnderAttack => FfiFailureCode::RoomUnderAttack,
+        AppFailureCode::EndpointRateLimited => FfiFailureCode::EndpointRateLimited,
+        AppFailureCode::IpRateLimited => FfiFailureCode::IpRateLimited,
+        AppFailureCode::ServerBusy => FfiFailureCode::ServerBusy,
+        AppFailureCode::MalformedJoin => FfiFailureCode::MalformedJoin,
+        AppFailureCode::UnsupportedRendezvousVersion | AppFailureCode::UnsupportedVersion => {
+            FfiFailureCode::UnsupportedRendezvousVersion
+        }
+        AppFailureCode::UnsupportedFeature => FfiFailureCode::UnsupportedFeature,
+        AppFailureCode::InternalError | AppFailureCode::Internal => FfiFailureCode::InternalError,
+        AppFailureCode::SenderSourceUnavailable | AppFailureCode::SourceUnavailable => {
+            FfiFailureCode::SenderSourceUnavailable
+        }
+        AppFailureCode::SenderPermissionLost => FfiFailureCode::SenderPermissionLost,
+        AppFailureCode::SenderSourceChanged => FfiFailureCode::SenderSourceChanged,
+        AppFailureCode::SenderItemRemoved => FfiFailureCode::SenderItemRemoved,
+        AppFailureCode::SenderCanceled => FfiFailureCode::SenderCanceled,
+        AppFailureCode::ProtocolOrIntegrityFailure | AppFailureCode::IntegrityFailure => {
+            FfiFailureCode::ProtocolOrIntegrityFailure
+        }
+        AppFailureCode::ReceiverSpaceInsufficient => FfiFailureCode::ReceiverSpaceInsufficient,
+        AppFailureCode::ReceiverDestinationDecisionRequired => {
+            FfiFailureCode::ReceiverDestinationDecisionRequired
+        }
+        AppFailureCode::ReceiverDestinationUnavailable | AppFailureCode::DestinationUnavailable => {
+            FfiFailureCode::ReceiverDestinationUnavailable
+        }
+        AppFailureCode::ReceiverSaveFailed => FfiFailureCode::ReceiverSaveFailed,
+        AppFailureCode::ReceiverReusedObjectLost => FfiFailureCode::ReceiverReusedObjectLost,
+        AppFailureCode::ReceiverFinalizationOutcomeUnknown => {
+            FfiFailureCode::ReceiverFinalizationOutcomeUnknown
+        }
+    }
+}
+
+fn ffi_failure_category(category: AppFailureCategory) -> FfiFailureCategory {
+    match category {
+        AppFailureCategory::User => FfiFailureCategory::User,
+        AppFailureCategory::Network => FfiFailureCategory::Network,
+        AppFailureCategory::Authentication => FfiFailureCategory::Authentication,
+        AppFailureCategory::Permission => FfiFailureCategory::Permission,
+        AppFailureCategory::Storage => FfiFailureCategory::Storage,
+        AppFailureCategory::Integrity => FfiFailureCategory::Integrity,
+        AppFailureCategory::Unsupported => FfiFailureCategory::Unsupported,
+        AppFailureCategory::Internal => FfiFailureCategory::Internal,
+    }
+}
+
+fn ffi_failure_phase(phase: AppFailurePhase) -> FfiFailurePhase {
+    match phase {
+        AppFailurePhase::Setup => FfiFailurePhase::Setup,
+        AppFailurePhase::Pairing => FfiFailurePhase::Pairing,
+        AppFailurePhase::Connecting => FfiFailurePhase::Connecting,
+        AppFailurePhase::Authenticating => FfiFailurePhase::Authenticating,
+        AppFailurePhase::Negotiating => FfiFailurePhase::Negotiating,
+        AppFailurePhase::Transferring => FfiFailurePhase::Transferring,
+        AppFailurePhase::Verifying => FfiFailurePhase::Verifying,
+        AppFailurePhase::Committing => FfiFailurePhase::Committing,
+    }
+}
+
+fn ffi_failure_origin(origin: AppFailureOrigin) -> FfiFailureOrigin {
+    match origin {
+        AppFailureOrigin::Local => FfiFailureOrigin::Local,
+        AppFailureOrigin::Peer => FfiFailureOrigin::Peer,
+        AppFailureOrigin::Unknown => FfiFailureOrigin::Unknown,
+    }
+}
+
+fn ffi_recovery_action(action: AppRecoveryAction) -> FfiRecoveryAction {
+    match action {
+        AppRecoveryAction::Retry => FfiRecoveryAction::Retry,
+        AppRecoveryAction::Resume => FfiRecoveryAction::Resume,
+        AppRecoveryAction::ChooseFolder => FfiRecoveryAction::ChooseFolder,
+        AppRecoveryAction::OpenSettings => FfiRecoveryAction::OpenSettings,
+        AppRecoveryAction::RePair => FfiRecoveryAction::RePair,
+        AppRecoveryAction::None => FfiRecoveryAction::None,
     }
 }
 
@@ -1909,7 +1708,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Mutex as StdMutex;
 
-    use envoix_error::TransferCause;
+    use envoix_error::{RendezvousCause, TransferCause};
 
     use super::*;
 
@@ -1977,6 +1776,21 @@ mod tests {
         }
     }
 
+    fn reported_failure(
+        error: &SessionError,
+        direction: FfiTransferDirection,
+        phase: FfiFailurePhase,
+    ) -> FfiTransferFailure {
+        let observer = RecordingObserver::default();
+        report_v2_failure(&observer, error, direction, phase);
+        observer
+            .failure
+            .lock()
+            .expect("failure mutex")
+            .clone()
+            .expect("reported failure")
+    }
+
     #[test]
     fn room_joining_reports_native_receiver_readiness() {
         assert_eq!(
@@ -1995,14 +1809,18 @@ mod tests {
 
     #[test]
     fn generic_io_recovery_matches_platform_resume_semantics() {
-        assert_eq!(
-            io_failure_recovery(FfiTransferDirection::Receive),
-            FfiRecoveryAction::Resume
+        let receive = reported_failure(
+            &SessionError::Io("write failed".into()),
+            FfiTransferDirection::Receive,
+            FfiFailurePhase::Transferring,
         );
-        assert_eq!(
-            io_failure_recovery(FfiTransferDirection::Send),
-            FfiRecoveryAction::Retry
+        assert_eq!(receive.recovery_action, FfiRecoveryAction::Resume);
+        let send = reported_failure(
+            &SessionError::Io("source unavailable".into()),
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
         );
+        assert_eq!(send.recovery_action, FfiRecoveryAction::Retry);
     }
 
     #[test]
@@ -2023,14 +1841,20 @@ mod tests {
 
     #[test]
     fn nearby_hybrid_pre_auth_transport_cause_projects_as_connecting_network_failure() {
-        let projection =
-            manifest_v2_cause_projection(TransferCause::NearbyHybridPreAuthTransportFailure.code());
+        let failure = reported_failure(
+            &SessionError::Cause {
+                cause: TransferCause::NearbyHybridPreAuthTransportFailure,
+                detail: "custom QUIC dial failed".into(),
+            },
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
+        );
 
-        assert_eq!(projection.0, FfiFailureCode::NetworkLost);
-        assert_eq!(projection.1, FfiFailureCategory::Network);
-        assert_eq!(projection.2, FfiFailurePhase::Connecting);
-        assert!(projection.4);
-        assert_eq!(projection.5, FfiRecoveryAction::Resume);
+        assert_eq!(failure.code, FfiFailureCode::NetworkLost);
+        assert_eq!(failure.category, FfiFailureCategory::Network);
+        assert_eq!(failure.phase, FfiFailurePhase::Connecting);
+        assert!(failure.retryable);
+        assert_eq!(failure.recovery_action, FfiRecoveryAction::Resume);
     }
 
     #[test]
@@ -2051,14 +1875,28 @@ mod tests {
 
     #[test]
     fn rendezvous_causes_project_without_parsing_diagnostics() {
-        let rate_limited = rendezvous_cause_projection(RendezvousCause::RoomRateLimited);
-        assert_eq!(rate_limited.0, FfiFailureCode::RoomRateLimited);
-        assert!(rate_limited.4);
-        assert_eq!(rate_limited.5, FfiRecoveryAction::Retry);
+        let rate_limited = reported_failure(
+            &SessionError::Rendezvous {
+                cause: RendezvousCause::RoomRateLimited,
+                retry_after: Some(5),
+            },
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Setup,
+        );
+        assert_eq!(rate_limited.code, FfiFailureCode::RoomRateLimited);
+        assert!(rate_limited.retryable);
+        assert_eq!(rate_limited.recovery_action, FfiRecoveryAction::Retry);
 
-        let exhausted = rendezvous_cause_projection(RendezvousCause::RoomUnderAttack);
-        assert_eq!(exhausted.0, FfiFailureCode::RoomUnderAttack);
-        assert_eq!(exhausted.5, FfiRecoveryAction::RePair);
+        let exhausted = reported_failure(
+            &SessionError::Rendezvous {
+                cause: RendezvousCause::RoomUnderAttack,
+                retry_after: None,
+            },
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Setup,
+        );
+        assert_eq!(exhausted.code, FfiFailureCode::RoomUnderAttack);
+        assert_eq!(exhausted.recovery_action, FfiRecoveryAction::RePair);
     }
 
     #[test]

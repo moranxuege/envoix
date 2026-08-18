@@ -6,6 +6,7 @@ pub mod configuration;
 pub mod decision;
 pub mod effect;
 pub mod event;
+pub mod failure;
 pub mod model;
 pub mod ports;
 pub mod product;
@@ -21,4 +22,4 @@ pub use envoix_session::{TransferCancelToken, TransferDirection};
 pub use envoix_types::PROTOCOL_VERSION;
 
 /// Version of the typed v0.3 application command/event/snapshot contract.
-pub const APPLICATION_CONTRACT_VERSION: u16 = 5;
+pub const APPLICATION_CONTRACT_VERSION: u16 = 6;

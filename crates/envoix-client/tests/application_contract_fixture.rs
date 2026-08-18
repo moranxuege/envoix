@@ -206,8 +206,37 @@ fn application_contract_v4_fixture_remains_readable_and_unchanged() {
 }
 
 #[test]
-fn application_contract_v5_fixture_is_complete_and_replayable() {
+fn application_contract_v5_fixture_remains_readable_and_unchanged() {
     let raw = include_str!("../../../tests/fixtures/v0.3/application-contract-v5.json");
+    let json: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let fixture: ApplicationContractFixture = serde_json::from_value(json.clone()).unwrap();
+
+    assert_eq!(fixture.contract_version, 5);
+    assert!(
+        fixture
+            .commands
+            .iter()
+            .all(|command| command.contract_version == 5)
+    );
+    assert!(
+        fixture
+            .events
+            .iter()
+            .all(|event| event.contract_version == 5)
+    );
+    assert!(matches!(
+        replay(EngineSnapshot::new(), fixture.events.clone()),
+        Err(ApplyError::UnsupportedContractVersion {
+            expected: APPLICATION_CONTRACT_VERSION,
+            actual: 5,
+        })
+    ));
+    assert_eq!(serde_json::to_value(&fixture).unwrap(), json);
+}
+
+#[test]
+fn application_contract_v6_fixture_is_complete_and_replayable() {
+    let raw = include_str!("../../../tests/fixtures/v0.3/application-contract-v6.json");
     let json: serde_json::Value = serde_json::from_str(raw).unwrap();
     let fixture: ApplicationContractFixture = serde_json::from_value(json.clone()).unwrap();
 

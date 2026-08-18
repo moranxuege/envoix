@@ -15,7 +15,9 @@ admission from authentication and records atomic Room replacement without
 rewriting v1 or v2. `application-contract-v4.json` adds explicit incoming
 Transfer offer, acceptance, and typed rejection without rewriting v1-v3.
 `application-contract-v5.json` makes recovery and removal explicit and splits
-payload completion from verified delivery proof without rewriting v1-v4. The
-current fixture covers every current command and event variant; its valid event
-stream reconstructs the embedded snapshot, and its removed Transfer is
-intentionally absent from that snapshot.
+payload completion from verified delivery proof without rewriting v1-v4.
+`application-contract-v6.json` makes the shared failure projection's stable,
+fine-grained failure codes canonical without rewriting v1-v5. The current
+fixture covers every current command and event variant; its valid event stream
+reconstructs the embedded snapshot, and its removed Transfer is intentionally
+absent from that snapshot.
