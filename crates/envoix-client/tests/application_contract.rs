@@ -1,5 +1,7 @@
 use envoix_client::APPLICATION_CONTRACT_VERSION;
-use envoix_client::command::{CommandEnvelope, EngineCommand};
+use envoix_client::command::{
+    CommandEnvelope, EngineCommand, MAX_ROOM_INVITATION_BYTES, RoomInvitation, VerificationCode,
+};
 use envoix_client::event::{EngineEvent, EventEnvelope};
 use envoix_client::model::{
     CommandId, ContentId, DeviceId, EntityKind, FailureCode, FailurePhase, RecoveryAction,
@@ -259,15 +261,22 @@ fn commands_and_capabilities_form_a_versioned_typed_boundary() {
         assert!(DeviceId::parse(invalid).is_err(), "{invalid:?}");
     }
     assert!(DeviceId::parse("x".repeat(129)).is_err());
+    assert!(RoomInvitation::parse("").is_err());
+    assert!(RoomInvitation::parse(" \n\t").is_err());
+    assert!(RoomInvitation::parse("x".repeat(MAX_ROOM_INVITATION_BYTES)).is_ok());
+    assert!(RoomInvitation::parse("x".repeat(MAX_ROOM_INVITATION_BYTES + 1)).is_err());
+    for invalid in ["", "12345", "1234567", "12345a", "１２３４５６"] {
+        assert!(VerificationCode::parse(invalid).is_err(), "{invalid:?}");
+    }
 
     let commands = vec![
         EngineCommand::CreateRoom,
         EngineCommand::JoinRoom {
-            invitation: "envoix://room/000000-0000-0000?expires=1".into(),
+            invitation: RoomInvitation::parse("envoix://room/000000-0000-0000?expires=1").unwrap(),
         },
         EngineCommand::VerifyPairing {
             room_id: ids.room.clone(),
-            verification_code: "000000".into(),
+            verification_code: VerificationCode::parse("000000").unwrap(),
         },
         EngineCommand::ReconnectRelationship {
             relationship_id: ids.relationship.clone(),
@@ -302,6 +311,24 @@ fn commands_and_capabilities_form_a_versioned_typed_boundary() {
         let decoded: CommandEnvelope = serde_json::from_value(json).unwrap();
         assert!(decoded == value);
     }
+
+    let invalid_invitation = serde_json::json!({
+        "contract_version": APPLICATION_CONTRACT_VERSION,
+        "command_id": "command_invalid_invitation",
+        "command": { "command": "join_room", "invitation": "" }
+    });
+    assert!(serde_json::from_value::<CommandEnvelope>(invalid_invitation).is_err());
+
+    let invalid_verification_code = serde_json::json!({
+        "contract_version": APPLICATION_CONTRACT_VERSION,
+        "command_id": "command_invalid_verification_code",
+        "command": {
+            "command": "verify_pairing",
+            "room_id": "room_fixture_0001",
+            "verification_code": "12345a"
+        }
+    });
+    assert!(serde_json::from_value::<CommandEnvelope>(invalid_verification_code).is_err());
 
     let capabilities = PlatformCapabilities::new([(
         PlatformCapability::ClipboardRead,
