@@ -750,6 +750,10 @@ final class ConnectionWorkflowState: ObservableObject {
             return .credentialUnavailable(
                 RememberedPeerStoreError.credentialInteractionRequired.localizedDescription
             )
+        } catch RememberedPeerStoreError.credentialStorageUnavailable {
+            return .credentialUnavailable(
+                RememberedPeerStoreError.credentialStorageUnavailable.localizedDescription
+            )
         } catch RememberedPeerStoreError.keychain {
             return .preAuthenticationFailure(
                 requiredCooldown: reconnectPolicy.minimumBackoff

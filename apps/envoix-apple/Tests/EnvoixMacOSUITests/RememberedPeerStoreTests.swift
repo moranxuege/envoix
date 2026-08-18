@@ -1,6 +1,4 @@
 import Foundation
-import LocalAuthentication
-import Security
 import XCTest
 
 final class RememberedPeerStoreTests: XCTestCase {
@@ -30,21 +28,55 @@ final class RememberedPeerStoreTests: XCTestCase {
         XCTAssertEqual(credentials.getCallCount, 0)
     }
 
-    func testCredentialReadDisallowsAuthenticationInteraction() throws {
-        let query = AppleCredentialStore().readQuery("relationship")
-        let context = try XCTUnwrap(
-            query[kSecUseAuthenticationContext] as? LAContext
+    func testMacOSUsesFileCredentialStoreByDefault() {
+        XCTAssertTrue(
+            RememberedPeerStore.makeDefaultCredentialStore() is MacOSFileCredentialStore
         )
-
-        XCTAssertTrue(context.interactionNotAllowed)
     }
 
-    func testCredentialAuthorizationFailuresRequireRepair() {
-        XCTAssertTrue(
-            AppleCredentialStore.requiresRepair(errSecInteractionNotAllowed)
+    func testFileCredentialStoreRoundTripsWithRestrictedPermissions() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MacOSFileCredentialStore(directoryURL: directory)
+        let reference = UUID().uuidString
+        let credential = Data([1, 2, 3, 4])
+
+        try store.put(reference, credential)
+
+        let reopenedStore = MacOSFileCredentialStore(directoryURL: directory)
+        XCTAssertEqual(try reopenedStore.get(reference), credential)
+        let directoryPermissions = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions]
+                as? NSNumber
         )
-        XCTAssertTrue(AppleCredentialStore.requiresRepair(errSecAuthFailed))
-        XCTAssertFalse(AppleCredentialStore.requiresRepair(errSecNotAvailable))
+        let credentialPermissions = try XCTUnwrap(
+            FileManager.default.attributesOfItem(
+                atPath: directory.appendingPathComponent(reference).path
+            )[.posixPermissions] as? NSNumber
+        )
+        XCTAssertEqual(directoryPermissions.intValue & 0o777, 0o700)
+        XCTAssertEqual(credentialPermissions.intValue & 0o777, 0o600)
+
+        try reopenedStore.delete(reference)
+        XCTAssertThrowsError(try reopenedStore.get(reference)) { error in
+            guard case RememberedPeerStoreError.missingCredential = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testFileCredentialStoreRejectsPathTraversal() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MacOSFileCredentialStore(directoryURL: directory)
+
+        XCTAssertThrowsError(try store.put("../credential", Data([1]))) { error in
+            guard case RememberedPeerStoreError.corruptMetadata = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
     }
 }
 

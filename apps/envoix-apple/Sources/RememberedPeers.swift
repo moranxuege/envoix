@@ -1,8 +1,5 @@
 import Foundation
 import Security
-#if os(macOS)
-import LocalAuthentication
-#endif
 
 struct RememberedPeerSummary: Equatable, Identifiable, CustomDebugStringConvertible {
     let relationshipID: String
@@ -58,6 +55,7 @@ enum RememberedPeerStoreError: LocalizedError {
     case missingCredential
     case activeTransfer
     case inactiveSession
+    case credentialStorageUnavailable
     case credentialInteractionRequired
     case keychain(OSStatus)
     case corruptMetadata
@@ -72,6 +70,8 @@ enum RememberedPeerStoreError: LocalizedError {
             return "This remembered device is already in use."
         case .inactiveSession:
             return "This remembered-device session is no longer active."
+        case .credentialStorageUnavailable:
+            return "Local credential storage is unavailable."
         case .credentialInteractionRequired:
             return "This remembered device must be paired again before Envoix can use it."
         case .keychain:
@@ -91,11 +91,19 @@ final class RememberedPeerStore: @unchecked Sendable {
     private var activeRelationships = Set<String>()
 
     init(
-        credentialStore: RememberedCredentialStoring = AppleCredentialStore(),
+        credentialStore: RememberedCredentialStoring? = nil,
         metadataFileURL: URL? = nil
     ) {
-        self.credentialStore = credentialStore
+        self.credentialStore = credentialStore ?? Self.makeDefaultCredentialStore()
         self.metadataFileURL = metadataFileURL
+    }
+
+    static func makeDefaultCredentialStore() -> RememberedCredentialStoring {
+        #if os(macOS)
+        MacOSFileCredentialStore()
+        #else
+        AppleCredentialStore()
+        #endif
     }
 
     func prepare(label: String, broker: String, relay: String) throws -> PendingRememberedPeer {
@@ -346,6 +354,94 @@ protocol RememberedCredentialStoring {
     func delete(_ reference: String) throws
 }
 
+#if os(macOS)
+/// Stores opaque remembered-room credentials in the current user's Application
+/// Support directory so ad-hoc development builds never request Keychain access.
+final class MacOSFileCredentialStore: RememberedCredentialStoring {
+    private static let directoryPermissions = 0o700
+    private static let credentialPermissions = 0o600
+    private static let credentialDirectoryName = "credentials-v1"
+
+    private let configuredDirectoryURL: URL?
+
+    init(directoryURL: URL? = nil) {
+        configuredDirectoryURL = directoryURL
+    }
+
+    func put(_ reference: String, _ credential: Data) throws {
+        let url = try credentialURL(reference)
+        do {
+            try credential.write(to: url, options: [.atomic, .completeFileProtection])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: Self.credentialPermissions],
+                ofItemAtPath: url.path
+            )
+        } catch {
+            throw RememberedPeerStoreError.credentialStorageUnavailable
+        }
+    }
+
+    func get(_ reference: String) throws -> Data {
+        let url = try credentialURL(reference)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw RememberedPeerStoreError.missingCredential
+        }
+        do {
+            return try Data(contentsOf: url)
+        } catch {
+            throw RememberedPeerStoreError.credentialStorageUnavailable
+        }
+    }
+
+    func delete(_ reference: String) throws {
+        let url = try credentialURL(reference)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            throw RememberedPeerStoreError.credentialStorageUnavailable
+        }
+    }
+
+    private func credentialURL(_ reference: String) throws -> URL {
+        guard UUID(uuidString: reference) != nil else {
+            throw RememberedPeerStoreError.corruptMetadata
+        }
+        return try directoryURL().appendingPathComponent(reference, isDirectory: false)
+    }
+
+    private func directoryURL() throws -> URL {
+        let directory: URL
+        if let configuredDirectoryURL {
+            directory = configuredDirectoryURL
+        } else {
+            guard let support = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first else {
+                throw RememberedPeerStoreError.credentialStorageUnavailable
+            }
+            directory = support
+                .appendingPathComponent("envoix/relationships", isDirectory: true)
+                .appendingPathComponent(Self.credentialDirectoryName, isDirectory: true)
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: Self.directoryPermissions]
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: Self.directoryPermissions],
+                ofItemAtPath: directory.path
+            )
+            return directory
+        } catch {
+            throw RememberedPeerStoreError.credentialStorageUnavailable
+        }
+    }
+}
+#else
 final class AppleCredentialStore: RememberedCredentialStoring {
     private let service = "com.envoix.remembered-credential.v1"
 
@@ -369,35 +465,18 @@ final class AppleCredentialStore: RememberedCredentialStoring {
     }
 
     func get(_ reference: String) throws -> Data {
-        let query = readQuery(reference)
+        var query = baseQuery(reference)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound {
             throw RememberedPeerStoreError.missingCredential
         }
-        if Self.requiresRepair(status) {
-            throw RememberedPeerStoreError.credentialInteractionRequired
-        }
         guard status == errSecSuccess, let data = result as? Data else {
             throw RememberedPeerStoreError.keychain(status)
         }
         return data
-    }
-
-    func readQuery(_ reference: String) -> [CFString: Any] {
-        var query = baseQuery(reference)
-        query[kSecReturnData] = true
-        query[kSecMatchLimit] = kSecMatchLimitOne
-        #if os(macOS)
-        let context = LAContext()
-        context.interactionNotAllowed = true
-        query[kSecUseAuthenticationContext] = context
-        #endif
-        return query
-    }
-
-    static func requiresRepair(_ status: OSStatus) -> Bool {
-        status == errSecInteractionNotAllowed || status == errSecAuthFailed
     }
 
     func delete(_ reference: String) throws {
@@ -416,6 +495,7 @@ final class AppleCredentialStore: RememberedCredentialStoring {
         ]
     }
 }
+#endif
 
 extension NSLock {
     func withEnvoixLock<T>(_ body: () throws -> T) rethrows -> T {

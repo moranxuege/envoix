@@ -222,7 +222,7 @@ targets:
 
   Envoix-macOSClipboardTests:
     # Clipboard and credential-store tests are intentionally unhosted so they
-    # cannot initialize the production app or query real Keychain items.
+    # cannot initialize the production app or touch persistent user data.
     type: bundle.unit-test
     platform: macOS
     deploymentTarget: "13.0"

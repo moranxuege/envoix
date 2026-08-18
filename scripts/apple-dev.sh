@@ -70,7 +70,7 @@ Build commands:
   macos-test-build [...]         Build the macOS App-hosted tests without running them
   macos-test [...]               Run the macOS App-hosted test target
   macos-test-rerun [...]         Rerun the built macOS App-hosted tests
-  macos-clipboard-test [...]     Run unhosted macOS clipboard and credential tests
+  macos-clipboard-test [...]     Run unhosted macOS clipboard and local credential tests
   core-force                     Force regeneration of the Rust-to-Swift package
 
 Space commands:
