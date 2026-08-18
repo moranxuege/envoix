@@ -942,6 +942,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_startManifestV2Session(
                     "detail":fact.detail,
                     "retryable":fact.retryable,
                     "recovery_action":fact.recovery_action,
+                    "outcome":fact.outcome,
+                    "session_disposition":fact.session_disposition,
                 })
                 .to_string(),
             );
@@ -1031,6 +1033,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_startManifestV2NativeSession(
                     "detail":fact.detail,
                     "retryable":fact.retryable,
                     "recovery_action":fact.recovery_action,
+                    "outcome":fact.outcome,
+                    "session_disposition":fact.session_disposition,
                 })
                 .to_string(),
             );
@@ -2148,6 +2152,8 @@ struct FailureFact {
     detail: String,
     retryable: bool,
     recovery_action: &'static str,
+    outcome: &'static str,
+    session_disposition: &'static str,
 }
 
 fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
@@ -2162,6 +2168,8 @@ fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
         detail: error.to_string(),
         retryable: failure.retryable,
         recovery_action: failure.recovery_action.wire_name(),
+        outcome: failure.outcome().wire_name(),
+        session_disposition: failure.session_disposition().wire_name(),
     }
 }
 
@@ -2189,6 +2197,8 @@ fn emit_failed_manifest(
             "detail":format!("{context}: {error}"),
             "retryable":false,
             "recovery_action":"none",
+            "outcome":"failed",
+            "session_disposition":"release",
         })
         .to_string(),
     );
@@ -2303,7 +2313,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_failures_match_the_apple_recovery_contract() {
+    fn generic_failures_use_the_shared_recovery_contract() {
         let cases = [
             (
                 CoreError::Transport("offline".into()),
@@ -2358,6 +2368,21 @@ mod tests {
             assert_eq!(fact.retryable, retryable);
             assert_eq!(fact.recovery_action, recovery_action);
         }
+    }
+
+    #[test]
+    fn terminal_outcome_and_session_disposition_are_not_inferred_from_cause_strings() {
+        let canceled = error_fact(&CoreError::Cancelled, "send");
+        assert_eq!(canceled.outcome, "canceled");
+        assert_eq!(canceled.session_disposition, "release");
+
+        let recoverable = error_fact(&CoreError::Transport("offline".into()), "receive");
+        assert_eq!(recoverable.outcome, "failed");
+        assert_eq!(recoverable.session_disposition, "retain_for_recovery");
+
+        let re_pair = error_fact(&CoreError::Crypto("bad key".into()), "receive");
+        assert_eq!(re_pair.outcome, "failed");
+        assert_eq!(re_pair.session_disposition, "release");
     }
 
     #[test]

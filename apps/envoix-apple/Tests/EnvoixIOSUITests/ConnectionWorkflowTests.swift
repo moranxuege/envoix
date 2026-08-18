@@ -734,11 +734,16 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 14)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 15)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
         XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v5")
         XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
         XCTAssertEqual(expectedNearbyInviteCoreCapability, "nearby_invite_inbox_v1")
+        XCTAssertTrue(info.capabilities.contains(expectedFailureProjectionCoreCapability))
+        XCTAssertEqual(
+            expectedFailureProjectionCoreCapability,
+            "canonical_failure_projection_v1"
+        )
     }
 
     func testBackgroundScenePreservesRoomWhileHidingInvitationAndDiscovery() {

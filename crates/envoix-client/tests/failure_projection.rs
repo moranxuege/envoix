@@ -1,6 +1,7 @@
 use envoix_client::failure::project_session_failure;
 use envoix_client::model::{
-    FailureCategory, FailureCode, FailureOrigin, FailurePhase, RecoveryAction, TransferDirection,
+    FailureCategory, FailureCode, FailureOrigin, FailureOutcome, FailurePhase,
+    FailureSessionDisposition, RecoveryAction, TransferDirection, TransferFailure,
 };
 use envoix_error::{CoreError, RendezvousCause, TransferCause};
 
@@ -419,4 +420,47 @@ fn consumed_invitation_requires_repair_only_for_retryable_failures() {
     );
     assert!(!terminal.failure.retryable);
     assert_eq!(terminal.failure.recovery_action, RecoveryAction::None);
+}
+
+#[test]
+fn terminal_outcome_and_session_disposition_are_shared_policy() {
+    for code in [FailureCode::UserCanceled, FailureCode::SenderCanceled] {
+        let failure = TransferFailure {
+            code,
+            phase: FailurePhase::Transferring,
+            retryable: false,
+            recovery_action: RecoveryAction::None,
+        };
+        assert_eq!(failure.outcome(), FailureOutcome::Canceled);
+        assert_eq!(
+            failure.session_disposition(),
+            FailureSessionDisposition::Release
+        );
+    }
+
+    let recoverable = TransferFailure {
+        code: FailureCode::NetworkLost,
+        phase: FailurePhase::Transferring,
+        retryable: true,
+        recovery_action: RecoveryAction::Resume,
+    };
+    assert_eq!(recoverable.outcome(), FailureOutcome::Failed);
+    assert_eq!(
+        recoverable.session_disposition(),
+        FailureSessionDisposition::RetainForRecovery
+    );
+
+    for recovery_action in [RecoveryAction::RePair, RecoveryAction::None] {
+        let release = TransferFailure {
+            code: FailureCode::AuthenticationFailed,
+            phase: FailurePhase::Authenticating,
+            retryable: true,
+            recovery_action,
+        };
+        assert_eq!(release.outcome(), FailureOutcome::Failed);
+        assert_eq!(
+            release.session_disposition(),
+            FailureSessionDisposition::Release
+        );
+    }
 }

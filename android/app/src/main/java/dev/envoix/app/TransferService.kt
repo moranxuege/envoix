@@ -581,17 +581,16 @@ class TransferService : Service() {
     ) {
         val cause = event.optString("cause", "transfer")
         val detail = event.optString("detail", "Transfer failed")
-        val canceled = cause == "user_canceled" || cause == "sender_canceled"
-        val retryable = !canceled && event.optBoolean("retryable", false)
-        val recoveryAction =
-            if (canceled) {
-                RecoveryAction.None
-            } else {
-                RecoveryAction.fromWire(event.optString("recovery_action"))
-            }
+        val outcome =
+            FailureOutcome.fromWire(event.optString("outcome")) ?: FailureOutcome.Failed
+        val disposition =
+            FailureSessionDisposition.fromWire(event.optString("session_disposition"))
+                ?: FailureSessionDisposition.Release
+        val retryable = event.optBoolean("retryable", false)
+        val recoveryAction = RecoveryAction.fromWire(event.optString("recovery_action"))
         TransferRepository.update(id) {
             it.copy(
-                status = if (canceled) Status.Canceled else Status.Failed,
+                status = outcome.status,
                 failureCause = cause,
                 retryable = retryable,
                 recoveryAction = recoveryAction,
@@ -601,7 +600,7 @@ class TransferService : Service() {
         }
         callbacks.remove(id, callback)
         progressTrackers.remove(id)
-        if (canceled || !retryable || recoveryAction == RecoveryAction.RePair) {
+        if (disposition == FailureSessionDisposition.Release) {
             releaseRememberedSession(specs.remove(id))
             persistSpecs()
         }

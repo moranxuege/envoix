@@ -165,6 +165,31 @@ enum class RecoveryAction(
     }
 }
 
+enum class FailureOutcome(
+    val wire: String,
+    val status: Status,
+) {
+    Canceled("canceled", Status.Canceled),
+    Failed("failed", Status.Failed),
+    ;
+
+    companion object {
+        fun fromWire(wire: String): FailureOutcome? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+enum class FailureSessionDisposition(
+    val wire: String,
+) {
+    RetainForRecovery("retain_for_recovery"),
+    Release("release"),
+    ;
+
+    companion object {
+        fun fromWire(wire: String): FailureSessionDisposition? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
 /** One transfer's observable state, shown as a card. */
 data class Transfer(
     val id: Long,

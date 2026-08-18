@@ -366,6 +366,28 @@ final class TransferPresentationPolicyTests: XCTestCase {
         )
     }
 
+    func testTypedFailureOutcomeAndSessionDispositionAreAuthoritative() {
+        let retained = failure(retryable: true)
+        XCTAssertEqual(TransferPresentationPolicy.terminalState(for: retained), .failed)
+        XCTAssertFalse(TransferPresentationPolicy.shouldReleaseSession(after: retained))
+
+        let canceled = FfiTransferFailure(
+            code: .userCanceled,
+            category: .user,
+            phase: .transferring,
+            origin: .local,
+            direction: .send,
+            retryable: false,
+            recoveryAction: .none,
+            outcome: .canceled,
+            sessionDisposition: .release,
+            userMessageKey: "transfer.user_canceled",
+            diagnosticMessage: "test"
+        )
+        XCTAssertEqual(TransferPresentationPolicy.terminalState(for: canceled), .canceled)
+        XCTAssertTrue(TransferPresentationPolicy.shouldReleaseSession(after: canceled))
+    }
+
     func testProgressContractKeepsPostPayloadStagesComplete() {
         XCTAssertEqual(TransferPresentationPolicy.progress(for: .connecting), .hidden)
         XCTAssertEqual(TransferPresentationPolicy.progress(for: .awaitingDecision), .hidden)
@@ -630,14 +652,19 @@ final class TransferPresentationPolicyTests: XCTestCase {
         retryable: Bool,
         recoveryAction: FfiRecoveryAction? = nil
     ) -> FfiTransferFailure {
-        FfiTransferFailure(
+        let recoveryAction = recoveryAction ?? (retryable ? .resume : .none)
+        return FfiTransferFailure(
             code: .networkLost,
             category: .network,
             phase: .transferring,
             origin: .unknown,
             direction: .send,
             retryable: retryable,
-            recoveryAction: recoveryAction ?? (retryable ? .resume : .none),
+            recoveryAction: recoveryAction,
+            outcome: .failed,
+            sessionDisposition: retryable && recoveryAction != .rePair
+                ? .retainForRecovery
+                : .release,
             userMessageKey: "transfer.network_lost",
             diagnosticMessage: "test"
         )

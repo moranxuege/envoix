@@ -28,7 +28,8 @@ use envoix_client::api::{
 use envoix_client::failure::project_session_failure;
 use envoix_client::model::{
     FailureCategory as AppFailureCategory, FailureCode as AppFailureCode,
-    FailureOrigin as AppFailureOrigin, FailurePhase as AppFailurePhase,
+    FailureOrigin as AppFailureOrigin, FailureOutcome as AppFailureOutcome,
+    FailurePhase as AppFailurePhase, FailureSessionDisposition as AppFailureSessionDisposition,
     RecoveryAction as AppRecoveryAction, RememberedAttemptOutcome, RememberedGenerationRole,
     TransferDirection as AppTransferDirection, remembered_generation_attempts,
 };
@@ -38,12 +39,13 @@ use tokio::task::JoinSet;
 
 use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiConnectionPathEvent, FfiConnectionPathEventKind,
-    FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailurePhase,
-    FfiManifestV2Phase, FfiNativeDatagramTransport, FfiNativeDuplexTransport, FfiPathPolicy,
-    FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferMode,
-    FfiTransferRequest, FfiTransferStage, FfiTransferStageTiming, TransferObserver,
-    build_client_for_request, core_datagram_transport, core_native_transport, on_ffi_runtime,
-    op_err, peer_sources_for_request, spawn_on_ffi_runtime, transfer_options_for_request,
+    FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailureOutcome,
+    FfiFailurePhase, FfiFailureSessionDisposition, FfiManifestV2Phase, FfiNativeDatagramTransport,
+    FfiNativeDuplexTransport, FfiPathPolicy, FfiRecoveryAction, FfiTransferDirection,
+    FfiTransferFailure, FfiTransferJobV2, FfiTransferMode, FfiTransferRequest, FfiTransferStage,
+    FfiTransferStageTiming, TransferObserver, build_client_for_request, core_datagram_transport,
+    core_native_transport, on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
+    transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -1585,6 +1587,8 @@ fn report_v2_failure(
         direction,
         retryable: failure.retryable,
         recovery_action: ffi_recovery_action(failure.recovery_action),
+        outcome: ffi_failure_outcome(failure.outcome()),
+        session_disposition: ffi_failure_session_disposition(failure.session_disposition()),
         user_message_key: failure.code.user_message_key().into(),
         diagnostic_message: error.to_string(),
     });
@@ -1696,6 +1700,24 @@ fn ffi_recovery_action(action: AppRecoveryAction) -> FfiRecoveryAction {
         AppRecoveryAction::OpenSettings => FfiRecoveryAction::OpenSettings,
         AppRecoveryAction::RePair => FfiRecoveryAction::RePair,
         AppRecoveryAction::None => FfiRecoveryAction::None,
+    }
+}
+
+fn ffi_failure_outcome(outcome: AppFailureOutcome) -> FfiFailureOutcome {
+    match outcome {
+        AppFailureOutcome::Canceled => FfiFailureOutcome::Canceled,
+        AppFailureOutcome::Failed => FfiFailureOutcome::Failed,
+    }
+}
+
+fn ffi_failure_session_disposition(
+    disposition: AppFailureSessionDisposition,
+) -> FfiFailureSessionDisposition {
+    match disposition {
+        AppFailureSessionDisposition::RetainForRecovery => {
+            FfiFailureSessionDisposition::RetainForRecovery
+        }
+        AppFailureSessionDisposition::Release => FfiFailureSessionDisposition::Release,
     }
 }
 
@@ -1919,10 +1941,31 @@ mod tests {
 
         assert_eq!(failure.code, FfiFailureCode::NetworkLost);
         assert_eq!(failure.recovery_action, FfiRecoveryAction::RePair);
+        assert_eq!(failure.outcome, FfiFailureOutcome::Failed);
+        assert_eq!(
+            failure.session_disposition,
+            FfiFailureSessionDisposition::Release
+        );
         assert!(
             failure
                 .diagnostic_message
                 .contains("one-time invitation was consumed after authentication")
+        );
+    }
+
+    #[test]
+    fn cancellation_outcome_crosses_the_ffi_without_cause_classification() {
+        let failure = reported_failure(
+            &SessionError::Cancelled,
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
+        );
+
+        assert_eq!(failure.code, FfiFailureCode::UserCanceled);
+        assert_eq!(failure.outcome, FfiFailureOutcome::Canceled);
+        assert_eq!(
+            failure.session_disposition,
+            FfiFailureSessionDisposition::Release
         );
     }
 

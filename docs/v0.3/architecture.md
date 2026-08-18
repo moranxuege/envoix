@@ -137,11 +137,13 @@ byte progress survives that transition. Only terminal Transfers may be
 explicitly removed from the product snapshot.
 
 Session failures are projected once in `envoix-client` into a stable failure
-code, phase, origin, retryability, and recovery action. Swift, Kotlin, CLI, and
-Agent adapters may translate those typed values into their native binding
-types, but must not maintain independent error-to-recovery tables or parse
-diagnostic prose. Application contract v6 makes the fine-grained failure codes
-canonical while preserving read compatibility for v1-v5 fixtures.
+code, phase, origin, retryability, recovery action, terminal outcome, and
+session-retention disposition. Swift, Kotlin, CLI, and Agent adapters may
+translate those typed values into their native binding types, but must not
+maintain independent error-to-recovery or error-to-terminal-state tables or
+parse diagnostic prose. Application contract v6 makes the fine-grained failure
+codes canonical while preserving read compatibility for v1-v5 fixtures;
+UniFFI API 15 carries the complete projection to Apple clients.
 
 ### Content
 

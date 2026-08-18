@@ -189,6 +189,17 @@ enum TransferPresentationPolicy {
         return failure.recoveryAction == .retry || failure.recoveryAction == .resume
     }
 
+    static func terminalState(for failure: FfiTransferFailure) -> TransferActivityState {
+        switch failure.outcome {
+        case .canceled: return .canceled
+        case .failed: return .failed
+        }
+    }
+
+    static func shouldReleaseSession(after failure: FfiTransferFailure) -> Bool {
+        failure.sessionDisposition == .release
+    }
+
     static func progress(for state: TransferActivityState) -> TransferProgressPresentation {
         switch state {
         case .preparing, .waitingForPeer, .pairing, .connecting, .awaitingDecision:

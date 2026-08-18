@@ -801,9 +801,9 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v5_ffi_v14() {
+    fn core_info_advertises_room_control_v5_ffi_v15() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 14);
+        assert_eq!(info.ffi_api_version, 15);
         assert!(
             info.capabilities
                 .iter()
@@ -818,6 +818,11 @@ mod tests {
             info.capabilities
                 .iter()
                 .any(|capability| capability == "structured_stage_timing_v1")
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == "canonical_failure_projection_v1")
         );
     }
 }

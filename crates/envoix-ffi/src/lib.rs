@@ -30,7 +30,7 @@ pub use nearby_invite::*;
 mod room_control;
 pub use room_control::*;
 
-const ENVOIX_FFI_API_VERSION: u32 = 14;
+const ENVOIX_FFI_API_VERSION: u32 = 15;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
@@ -392,6 +392,18 @@ pub enum FfiRecoveryAction {
     None,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiFailureOutcome {
+    Canceled,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiFailureSessionDisposition {
+    RetainForRecovery,
+    Release,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiTransferFailure {
     pub code: FfiFailureCode,
@@ -401,6 +413,8 @@ pub struct FfiTransferFailure {
     pub direction: FfiTransferDirection,
     pub retryable: bool,
     pub recovery_action: FfiRecoveryAction,
+    pub outcome: FfiFailureOutcome,
+    pub session_disposition: FfiFailureSessionDisposition,
     pub user_message_key: String,
     pub diagnostic_message: String,
 }
@@ -474,6 +488,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "wifi_aware_nearby_hybrid_v1".into(),
             "structured_connection_path".into(),
             "structured_stage_timing_v1".into(),
+            "canonical_failure_projection_v1".into(),
             "foreground_room_control_v5".into(),
             "remembered_room_control_v1".into(),
             "nearby_invite_inbox_v1".into(),

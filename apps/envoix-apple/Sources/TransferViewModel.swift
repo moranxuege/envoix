@@ -1733,6 +1733,8 @@ final class TransferViewModel: ObservableObject {
             direction: transferActivity?.direction ?? .send,
             retryable: false,
             recoveryAction: .none,
+            outcome: .failed,
+            sessionDisposition: .release,
             userMessageKey: "transfer.internal_error",
             diagnosticMessage: reason
         )
@@ -1861,12 +1863,11 @@ final class TransferViewModel: ObservableObject {
             }
         }
         transferActivity?.failure = value
-        if value.code == .userCanceled || value.code == .senderCanceled {
-            updateActivity(state: .canceled, diagnostic: statusText)
-        } else {
-            updateActivity(state: .failed, diagnostic: statusText)
-        }
-        if !value.retryable || value.recoveryAction == .rePair {
+        updateActivity(
+            state: TransferPresentationPolicy.terminalState(for: value),
+            diagnostic: statusText
+        )
+        if TransferPresentationPolicy.shouldReleaseSession(after: value) {
             if transferActivity?.direction == .send {
                 activeSend = nil
             } else {

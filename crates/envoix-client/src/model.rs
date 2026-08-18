@@ -410,6 +410,10 @@ impl FailureCode {
             Self::Internal => "transfer.internal",
         }
     }
+
+    pub const fn is_cancellation(self) -> bool {
+        matches!(self, Self::UserCanceled | Self::SenderCanceled)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -431,6 +435,36 @@ pub enum FailureOrigin {
     Local,
     Peer,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureOutcome {
+    Canceled,
+    Failed,
+}
+
+impl FailureOutcome {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Canceled => "canceled",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureSessionDisposition {
+    RetainForRecovery,
+    Release,
+}
+
+impl FailureSessionDisposition {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::RetainForRecovery => "retain_for_recovery",
+            Self::Release => "release",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -497,6 +531,30 @@ pub struct TransferFailure {
 impl TransferFailure {
     pub const fn is_recoverable(&self) -> bool {
         self.retryable && !matches!(self.recovery_action, RecoveryAction::None)
+    }
+
+    pub const fn outcome(&self) -> FailureOutcome {
+        if self.code.is_cancellation() {
+            FailureOutcome::Canceled
+        } else {
+            FailureOutcome::Failed
+        }
+    }
+
+    pub const fn session_disposition(&self) -> FailureSessionDisposition {
+        if self.retryable
+            && matches!(
+                self.recovery_action,
+                RecoveryAction::Retry
+                    | RecoveryAction::Resume
+                    | RecoveryAction::ChooseFolder
+                    | RecoveryAction::OpenSettings
+            )
+        {
+            FailureSessionDisposition::RetainForRecovery
+        } else {
+            FailureSessionDisposition::Release
+        }
     }
 }
 
