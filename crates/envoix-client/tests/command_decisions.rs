@@ -5,7 +5,7 @@ use envoix_client::effect::{EffectEnvelope, EngineEffect};
 use envoix_client::event::{EngineEvent, EventEnvelope};
 use envoix_client::model::{
     CommandId, ContentId, DeviceId, EntityKind, RelationshipId, RoomId, TransferDirection,
-    TransferId,
+    TransferId, TransferRejection,
 };
 use envoix_client::snapshot::{ApplicationErrorCode, ApplyError, EngineSnapshot};
 
@@ -346,6 +346,87 @@ fn transfer_decisions_follow_the_shared_transfer_states() {
     ] {
         assert!(decide(&terminal, self::command(command)).is_err());
     }
+}
+
+#[test]
+fn incoming_offer_decisions_require_the_offered_state() {
+    let ids = fixture_ids();
+    let mut snapshot = EngineSnapshot::new();
+    let error = expect_error(decide(
+        &snapshot,
+        command(EngineCommand::AcceptTransfer {
+            transfer_id: ids.transfer.clone(),
+        }),
+    ));
+    assert_eq!(error.code(), ApplicationErrorCode::EntityNotFound);
+
+    trust_relationship(&mut snapshot, &ids);
+    for event in [
+        EngineEvent::RoomOpened {
+            room_id: ids.room.clone(),
+            relationship_id: Some(ids.relationship.clone()),
+            replaces_room_id: None,
+        },
+        EngineEvent::RoomPeerAdmitted {
+            room_id: ids.room.clone(),
+        },
+        EngineEvent::RoomAuthenticated {
+            room_id: ids.room.clone(),
+        },
+        EngineEvent::TransferOffered {
+            transfer_id: ids.transfer.clone(),
+            relationship_id: ids.relationship,
+            room_id: ids.room,
+            content_id: ids.content,
+            total_bytes: 9,
+        },
+    ] {
+        apply_next(&mut snapshot, event);
+    }
+
+    let accept = decide(
+        &snapshot,
+        command(EngineCommand::AcceptTransfer {
+            transfer_id: ids.transfer.clone(),
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        accept.effect,
+        EngineEffect::AcceptTransfer { transfer_id } if transfer_id == ids.transfer
+    ));
+    let reject = decide(
+        &snapshot,
+        command(EngineCommand::RejectTransfer {
+            transfer_id: ids.transfer.clone(),
+            reason: TransferRejection::Busy,
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        reject.effect,
+        EngineEffect::RejectTransfer {
+            transfer_id,
+            reason: TransferRejection::Busy,
+        } if transfer_id == ids.transfer
+    ));
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferAccepted {
+            transfer_id: ids.transfer.clone(),
+        },
+    );
+    assert!(
+        decide(
+            &snapshot,
+            command(EngineCommand::RejectTransfer {
+                transfer_id: ids.transfer,
+                reason: TransferRejection::UserDeclined,
+            }),
+        )
+        .is_err()
+    );
 }
 
 #[test]

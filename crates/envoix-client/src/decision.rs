@@ -55,6 +55,30 @@ pub fn decide(
                 direction,
             }
         }
+        EngineCommand::AcceptTransfer { transfer_id } => {
+            require_transfer_state(
+                snapshot,
+                &transfer_id,
+                TransferState::Offered,
+                "accept_transfer",
+            )?;
+            EngineEffect::AcceptTransfer { transfer_id }
+        }
+        EngineCommand::RejectTransfer {
+            transfer_id,
+            reason,
+        } => {
+            require_transfer_state(
+                snapshot,
+                &transfer_id,
+                TransferState::Offered,
+                "reject_transfer",
+            )?;
+            EngineEffect::RejectTransfer {
+                transfer_id,
+                reason,
+            }
+        }
         EngineCommand::PauseTransfer { transfer_id } => {
             let transfer = transfer(snapshot, &transfer_id)?;
             if !matches!(

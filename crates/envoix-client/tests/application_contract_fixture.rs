@@ -23,6 +23,8 @@ fn command_tag(command: &EngineCommand) -> &'static str {
         EngineCommand::VerifyPairing { .. } => "verify_pairing",
         EngineCommand::ReconnectRelationship { .. } => "reconnect_relationship",
         EngineCommand::CreateTransfer { .. } => "create_transfer",
+        EngineCommand::AcceptTransfer { .. } => "accept_transfer",
+        EngineCommand::RejectTransfer { .. } => "reject_transfer",
         EngineCommand::PauseTransfer { .. } => "pause_transfer",
         EngineCommand::ResumeTransfer { .. } => "resume_transfer",
         EngineCommand::CancelTransfer { .. } => "cancel_transfer",
@@ -43,6 +45,9 @@ fn event_tag(event: &EngineEvent) -> &'static str {
         EngineEvent::RoomConnected { .. } => "room_connected",
         EngineEvent::RoomClosed { .. } => "room_closed",
         EngineEvent::TransferCreated { .. } => "transfer_created",
+        EngineEvent::TransferOffered { .. } => "transfer_offered",
+        EngineEvent::TransferAccepted { .. } => "transfer_accepted",
+        EngineEvent::TransferRejected { .. } => "transfer_rejected",
         EngineEvent::TransferStarted { .. } => "transfer_started",
         EngineEvent::TransferProgressed { .. } => "transfer_progressed",
         EngineEvent::TransferPaused { .. } => "transfer_paused",
@@ -131,8 +136,43 @@ fn application_contract_v2_fixture_remains_readable_and_unchanged() {
 }
 
 #[test]
-fn application_contract_v3_fixture_is_complete_and_replayable() {
+fn application_contract_v3_fixture_remains_readable_and_unchanged() {
     let raw = include_str!("../../../tests/fixtures/v0.3/application-contract-v3.json");
+    let json: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let fixture: ApplicationContractFixture = serde_json::from_value(json.clone()).unwrap();
+
+    assert_eq!(fixture.contract_version, 3);
+    assert!(
+        fixture
+            .commands
+            .iter()
+            .all(|command| command.contract_version == 3)
+    );
+    assert!(
+        fixture
+            .events
+            .iter()
+            .all(|event| event.contract_version == 3)
+    );
+    assert!(
+        fixture
+            .events
+            .iter()
+            .any(|event| matches!(event.event, EngineEvent::RoomAuthenticated { .. }))
+    );
+    assert!(matches!(
+        replay(EngineSnapshot::new(), fixture.events.clone()),
+        Err(ApplyError::UnsupportedContractVersion {
+            expected: APPLICATION_CONTRACT_VERSION,
+            actual: 3,
+        })
+    ));
+    assert_eq!(serde_json::to_value(&fixture).unwrap(), json);
+}
+
+#[test]
+fn application_contract_v4_fixture_is_complete_and_replayable() {
+    let raw = include_str!("../../../tests/fixtures/v0.3/application-contract-v4.json");
     let json: serde_json::Value = serde_json::from_str(raw).unwrap();
     let fixture: ApplicationContractFixture = serde_json::from_value(json.clone()).unwrap();
 
@@ -158,12 +198,14 @@ fn application_contract_v3_fixture_is_complete_and_replayable() {
     assert_eq!(
         command_tags,
         BTreeSet::from([
+            "accept_transfer",
             "cancel_transfer",
             "create_room",
             "create_transfer",
             "join_room",
             "pause_transfer",
             "reconnect_relationship",
+            "reject_transfer",
             "resume_transfer",
             "revoke_relationship",
             "verify_pairing",
@@ -189,11 +231,14 @@ fn application_contract_v3_fixture_is_complete_and_replayable() {
             "room_opened",
             "room_peer_admitted",
             "transfer_canceled",
+            "transfer_accepted",
             "transfer_created",
             "transfer_delivered",
             "transfer_failed",
             "transfer_paused",
+            "transfer_offered",
             "transfer_progressed",
+            "transfer_rejected",
             "transfer_resumed",
             "transfer_started",
         ])

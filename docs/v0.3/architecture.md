@@ -114,6 +114,10 @@ The Engine owns legal transitions. Frontends render the projected state and
 submit user intent; they do not infer terminal state from strings or partial
 files.
 
+An authenticated incoming manifest creates an `offered` Transfer. It cannot
+queue or start until the user accepts it. Rejection records a typed terminal
+reason, so every frontend can present the same outcome without parsing prose.
+
 ### Content
 
 A typed description of material carried by a Transfer. v0.3 requires file and

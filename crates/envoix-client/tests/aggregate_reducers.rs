@@ -2,7 +2,7 @@ use envoix_client::APPLICATION_CONTRACT_VERSION;
 use envoix_client::event::{EngineEvent, EventEnvelope};
 use envoix_client::model::{
     ContentId, DeviceId, EntityKind, RelationshipId, RelationshipState, RoomCloseReason, RoomId,
-    RoomState, TransferDirection, TransferId, TransferState,
+    RoomState, TransferDirection, TransferId, TransferRejection, TransferState,
 };
 use envoix_client::snapshot::{ApplicationErrorCode, ApplyError, EngineSnapshot};
 
@@ -486,6 +486,101 @@ fn transfer_reducer_is_atomic_and_outlives_its_room() {
             &mut snapshot,
             EngineEvent::TransferCanceled {
                 transfer_id: ids.transfer,
+            },
+        ),
+        Err(ApplyError::InvalidTransition {
+            entity: EntityKind::Transfer,
+            ..
+        })
+    ));
+    assert_eq!(snapshot, before_terminal);
+}
+
+#[test]
+fn incoming_transfer_requires_an_explicit_accept_or_typed_rejection() {
+    let ids = fixture_ids("incoming_offer");
+    let rejected_id = TransferId::parse("transfer_incoming_rejected").unwrap();
+    let mut snapshot = EngineSnapshot::new();
+    trust_relationship(&mut snapshot, &ids);
+    connect_room(&mut snapshot, &ids);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferOffered {
+            transfer_id: ids.transfer.clone(),
+            relationship_id: ids.relationship.clone(),
+            room_id: ids.room.clone(),
+            content_id: ids.content.clone(),
+            total_bytes: 5,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot.transfers[&ids.transfer].state,
+        TransferState::Offered
+    );
+
+    let before_start = snapshot.clone();
+    assert!(matches!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::TransferStarted {
+                transfer_id: ids.transfer.clone(),
+            },
+        ),
+        Err(ApplyError::InvalidTransition {
+            entity: EntityKind::Transfer,
+            ..
+        })
+    ));
+    assert_eq!(snapshot, before_start);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferAccepted {
+            transfer_id: ids.transfer.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot.transfers[&ids.transfer].state,
+        TransferState::Queued
+    );
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferOffered {
+            transfer_id: rejected_id.clone(),
+            relationship_id: ids.relationship,
+            room_id: ids.room,
+            content_id: ContentId::parse("content_incoming_rejected").unwrap(),
+            total_bytes: 9,
+        },
+    )
+    .unwrap();
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferRejected {
+            transfer_id: rejected_id.clone(),
+            reason: TransferRejection::UserDeclined,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot.transfers[&rejected_id].state,
+        TransferState::Rejected
+    );
+    assert_eq!(
+        snapshot.transfers[&rejected_id].rejection,
+        Some(TransferRejection::UserDeclined)
+    );
+
+    let before_terminal = snapshot.clone();
+    assert!(matches!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::TransferAccepted {
+                transfer_id: rejected_id,
             },
         ),
         Err(ApplyError::InvalidTransition {

@@ -12,6 +12,8 @@ real file metadata belongs in these fixtures.
 `application-contract-v2.json` adds remembered Relationship generation
 rotation without rewriting v1. `application-contract-v3.json` separates peer
 admission from authentication and records atomic Room replacement without
-rewriting v1 or v2. The current fixture covers every current command and event
-variant, and its valid event stream reconstructs the embedded snapshot,
-including replaced Rooms and delivered, failed, and canceled Transfers.
+rewriting v1 or v2. `application-contract-v4.json` adds explicit incoming
+Transfer offer, acceptance, and typed rejection without rewriting v1-v3. The
+current fixture covers every current command and event variant, and its valid
+event stream reconstructs the embedded snapshot, including replaced Rooms and
+delivered, rejected, failed, and canceled Transfers.

@@ -272,7 +272,50 @@ impl EngineSnapshot {
                         transferred_bytes: 0,
                         total_bytes,
                         failure: None,
+                        rejection: None,
                     },
+                )?;
+                self.transfers.insert(transfer_id, transfer);
+            }
+            EngineEvent::TransferOffered {
+                transfer_id,
+                relationship_id,
+                room_id,
+                content_id,
+                total_bytes,
+            } => {
+                let transfer = reducers::transfer::offer(
+                    &self.relationships,
+                    &self.rooms,
+                    self.transfers.get(&transfer_id),
+                    Transfer {
+                        id: transfer_id.clone(),
+                        relationship_id,
+                        room_id: Some(room_id),
+                        content_id,
+                        direction: crate::model::TransferDirection::Receive,
+                        state: TransferState::Offered,
+                        transferred_bytes: 0,
+                        total_bytes,
+                        failure: None,
+                        rejection: None,
+                    },
+                )?;
+                self.transfers.insert(transfer_id, transfer);
+            }
+            EngineEvent::TransferAccepted { transfer_id } => {
+                let transfer =
+                    reducers::transfer::accept(self.transfers.get(&transfer_id), &transfer_id)?;
+                self.transfers.insert(transfer_id, transfer);
+            }
+            EngineEvent::TransferRejected {
+                transfer_id,
+                reason,
+            } => {
+                let transfer = reducers::transfer::reject(
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                    reason,
                 )?;
                 self.transfers.insert(transfer_id, transfer);
             }

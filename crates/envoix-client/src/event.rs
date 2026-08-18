@@ -68,6 +68,20 @@ pub enum EngineEvent {
         direction: TransferDirection,
         total_bytes: u64,
     },
+    TransferOffered {
+        transfer_id: TransferId,
+        relationship_id: RelationshipId,
+        room_id: RoomId,
+        content_id: ContentId,
+        total_bytes: u64,
+    },
+    TransferAccepted {
+        transfer_id: TransferId,
+    },
+    TransferRejected {
+        transfer_id: TransferId,
+        reason: crate::model::TransferRejection,
+    },
     TransferStarted {
         transfer_id: TransferId,
     },

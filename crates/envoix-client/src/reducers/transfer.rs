@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::model::{
     EntityKind, Relationship, RelationshipId, RelationshipState, Room, RoomId, RoomState, Transfer,
-    TransferFailure, TransferId, TransferState,
+    TransferFailure, TransferId, TransferRejection, TransferState,
 };
 use crate::snapshot::ApplyError;
 
@@ -14,6 +14,39 @@ pub(crate) fn create(
     existing: Option<&Transfer>,
     transfer: Transfer,
 ) -> Result<Transfer, ApplyError> {
+    validate_new(
+        relationships,
+        rooms,
+        existing,
+        &transfer,
+        "transfer_created",
+    )?;
+    Ok(transfer)
+}
+
+pub(crate) fn offer(
+    relationships: &BTreeMap<RelationshipId, Relationship>,
+    rooms: &BTreeMap<RoomId, Room>,
+    existing: Option<&Transfer>,
+    transfer: Transfer,
+) -> Result<Transfer, ApplyError> {
+    validate_new(
+        relationships,
+        rooms,
+        existing,
+        &transfer,
+        "transfer_offered",
+    )?;
+    Ok(transfer)
+}
+
+fn validate_new(
+    relationships: &BTreeMap<RelationshipId, Relationship>,
+    rooms: &BTreeMap<RoomId, Room>,
+    existing: Option<&Transfer>,
+    transfer: &Transfer,
+    operation: &'static str,
+) -> Result<(), ApplyError> {
     let relationship = relationships
         .get(&transfer.relationship_id)
         .ok_or_else(|| missing(EntityKind::Relationship, &transfer.relationship_id))?;
@@ -22,7 +55,7 @@ pub(crate) fn create(
             EntityKind::Relationship,
             &transfer.relationship_id,
             relationship.state.wire_name(),
-            "transfer_created",
+            operation,
         ));
     }
     if let Some(room_id) = &transfer.room_id {
@@ -34,7 +67,7 @@ pub(crate) fn create(
                 EntityKind::Room,
                 room_id,
                 room.state.wire_name(),
-                "transfer_created",
+                operation,
             ));
         }
         if room
@@ -54,9 +87,31 @@ pub(crate) fn create(
             EntityKind::Transfer,
             &transfer.id,
             existing.state.wire_name(),
-            "transfer_created",
+            operation,
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn accept(
+    existing: Option<&Transfer>,
+    transfer_id: &TransferId,
+) -> Result<Transfer, ApplyError> {
+    let mut transfer = current(existing, transfer_id)?;
+    require_state(&transfer, TransferState::Offered, "transfer_accepted")?;
+    transfer.state = TransferState::Queued;
+    Ok(transfer)
+}
+
+pub(crate) fn reject(
+    existing: Option<&Transfer>,
+    transfer_id: &TransferId,
+    reason: TransferRejection,
+) -> Result<Transfer, ApplyError> {
+    let mut transfer = current(existing, transfer_id)?;
+    require_state(&transfer, TransferState::Offered, "transfer_rejected")?;
+    transfer.state = TransferState::Rejected;
+    transfer.rejection = Some(reason);
     Ok(transfer)
 }
 

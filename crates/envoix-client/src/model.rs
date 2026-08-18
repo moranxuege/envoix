@@ -192,11 +192,13 @@ pub enum TransferDirection {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferState {
+    Offered,
     Queued,
     Connecting,
     Transferring,
     Paused,
     Delivered,
+    Rejected,
     Failed,
     Canceled,
 }
@@ -204,19 +206,34 @@ pub enum TransferState {
 impl TransferState {
     pub const fn wire_name(self) -> &'static str {
         match self {
+            Self::Offered => "offered",
             Self::Queued => "queued",
             Self::Connecting => "connecting",
             Self::Transferring => "transferring",
             Self::Paused => "paused",
             Self::Delivered => "delivered",
+            Self::Rejected => "rejected",
             Self::Failed => "failed",
             Self::Canceled => "canceled",
         }
     }
 
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Delivered | Self::Failed | Self::Canceled)
+        matches!(
+            self,
+            Self::Delivered | Self::Rejected | Self::Failed | Self::Canceled
+        )
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferRejection {
+    UserDeclined,
+    Busy,
+    InsufficientSpace,
+    UnsupportedContent,
+    InvalidOffer,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -305,4 +322,6 @@ pub struct Transfer {
     pub transferred_bytes: u64,
     pub total_bytes: u64,
     pub failure: Option<TransferFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<TransferRejection>,
 }

@@ -6,7 +6,7 @@ use envoix_client::event::{EngineEvent, EventEnvelope};
 use envoix_client::model::{
     CommandId, ContentId, DeviceId, EntityKind, FailureCode, FailurePhase, RecoveryAction,
     RelationshipId, RelationshipState, RoomCloseReason, RoomId, RoomState, TransferDirection,
-    TransferFailure, TransferId, TransferState,
+    TransferFailure, TransferId, TransferRejection, TransferState,
 };
 use envoix_client::ports::{CapabilityAvailability, PlatformCapabilities, PlatformCapability};
 use envoix_client::runtime::replay;
@@ -292,6 +292,13 @@ fn commands_and_capabilities_form_a_versioned_typed_boundary() {
             relationship_id: ids.relationship.clone(),
             content_id: ids.content,
             direction: TransferDirection::Send,
+        },
+        EngineCommand::AcceptTransfer {
+            transfer_id: ids.transfer.clone(),
+        },
+        EngineCommand::RejectTransfer {
+            transfer_id: ids.transfer.clone(),
+            reason: TransferRejection::UserDeclined,
         },
         EngineCommand::PauseTransfer {
             transfer_id: ids.transfer.clone(),

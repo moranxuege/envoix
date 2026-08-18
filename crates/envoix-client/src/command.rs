@@ -7,7 +7,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::model::{CommandId, ContentId, RelationshipId, RoomId, TransferDirection, TransferId};
+use crate::model::{
+    CommandId, ContentId, RelationshipId, RoomId, TransferDirection, TransferId, TransferRejection,
+};
 
 pub const MAX_ROOM_INVITATION_BYTES: usize = 16 * 1024;
 const VERIFICATION_CODE_DIGITS: usize = 6;
@@ -106,6 +108,13 @@ pub enum EngineCommand {
         relationship_id: RelationshipId,
         content_id: ContentId,
         direction: TransferDirection,
+    },
+    AcceptTransfer {
+        transfer_id: TransferId,
+    },
+    RejectTransfer {
+        transfer_id: TransferId,
+        reason: TransferRejection,
     },
     PauseTransfer {
         transfer_id: TransferId,

@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::command::{RoomInvitation, VerificationCode};
-use crate::model::{CommandId, ContentId, RelationshipId, RoomId, TransferDirection, TransferId};
+use crate::model::{
+    CommandId, ContentId, RelationshipId, RoomId, TransferDirection, TransferId, TransferRejection,
+};
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +39,13 @@ pub enum EngineEffect {
         relationship_id: RelationshipId,
         content_id: ContentId,
         direction: TransferDirection,
+    },
+    AcceptTransfer {
+        transfer_id: TransferId,
+    },
+    RejectTransfer {
+        transfer_id: TransferId,
+        reason: TransferRejection,
     },
     PauseTransfer {
         transfer_id: TransferId,
