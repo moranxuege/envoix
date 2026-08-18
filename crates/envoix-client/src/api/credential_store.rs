@@ -69,6 +69,25 @@ impl DesktopCredentialStore {
         Ok(Some(fs::read(path)?))
     }
 
+    pub fn contains(&self, credential_ref: &str) -> io::Result<bool> {
+        let path = self.path(credential_ref)?;
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        #[cfg(unix)]
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "credential file is not owner-only",
+            ));
+        }
+        #[cfg(not(unix))]
+        let _ = metadata;
+        Ok(true)
+    }
+
     pub fn delete(&self, credential_ref: &str) -> io::Result<()> {
         match fs::remove_file(self.path(credential_ref)?) {
             Ok(()) => Ok(()),
@@ -115,6 +134,7 @@ mod tests {
         let store = DesktopCredentialStore::new(directory.path());
 
         store.put("reference_1", b"opaque").expect("store");
+        assert!(store.contains("reference_1").expect("contains"));
         assert_eq!(
             store.get("reference_1").expect("load").as_deref(),
             Some(b"opaque".as_slice())
@@ -139,6 +159,7 @@ mod tests {
             0o600
         );
         store.delete("reference_1").expect("delete");
+        assert!(!store.contains("reference_1").expect("missing"));
         assert_eq!(store.get("reference_1").expect("missing"), None);
         assert!(store.put("../outside", b"no").is_err());
     }

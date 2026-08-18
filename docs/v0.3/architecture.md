@@ -297,6 +297,10 @@ Relationship routes and vault references, Inbox metadata, and migration
 evidence. It stores neither payload bytes nor credential values. The owner
 lock is held for the lifetime of the store, including migration.
 
+The Linux/WSL Agent now projects pairing, generation rotation, revocation, and
+Inbox updates into this schema. Its former ProductStore implementation is
+compiled only as a v0.2 fixture writer; it is not a production runtime path.
+
 Secrets are referenced from product state and stored by a secure-vault port:
 
 - Apple Keychain under stable signed access groups;

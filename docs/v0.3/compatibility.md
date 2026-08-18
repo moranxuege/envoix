@@ -1,6 +1,6 @@
 # v0.3 compatibility and migration policy
 
-Status: accepted policy; concrete storage migrations are implemented in M4.
+Status: accepted policy; desktop ProductStore import is implemented in M4.
 
 v0.3 deliberately breaks accidental internal interfaces. It does not use an
 architecture refactor as permission to lose received files, silently weaken
@@ -121,6 +121,13 @@ M1 records sanitized, secret-free fixtures for:
 M4 migration tests run against copies of those fixtures. Fixtures never contain
 real device identities, production endpoints that reveal private data, or
 usable credentials.
+
+The desktop Agent opens the Engine store at the state-directory root. On first
+open it discovers the v0.2 `product/` store, validates the complete candidate,
+installs an immutable source backup, copies only supported opaque credentials
+into the Agent vault, and atomically activates Engine schema v1. Missing or
+unsupported credentials are recorded as `re_pair_required`; the legacy store
+and received files remain untouched.
 
 ## 8. Removal rule
 

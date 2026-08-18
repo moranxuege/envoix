@@ -6,8 +6,11 @@
 
 use std::collections::BTreeSet;
 use std::env;
+#[cfg(test)]
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
+#[cfg(test)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -17,6 +20,7 @@ use zeroize::Zeroizing;
 
 use crate::api::DesktopCredentialStore;
 use crate::api::RememberedCredential;
+use crate::event::{EngineEvent, EventEnvelope};
 use crate::model::{Device, DeviceId, Relationship, RelationshipId, RelationshipState};
 use crate::storage::{
     DurableRelationship, EngineState, EngineStore, EngineStoreError, EngineStoreOrigin,
@@ -254,15 +258,15 @@ impl Default for PersistentProductState {
     }
 }
 
-/// Durable non-secret product metadata plus a separate owner-only credential
-/// directory. Raw remembered credentials never enter the JSON state file.
-pub struct ProductStore {
+#[cfg(test)]
+struct LegacyProductStore {
     directory: PathBuf,
     credentials: DesktopCredentialStore,
     state: PersistentProductState,
 }
 
-impl ProductStore {
+#[cfg(test)]
+impl LegacyProductStore {
     pub fn open(directory: impl Into<PathBuf>) -> io::Result<Self> {
         let directory = directory.into();
         create_private_directory(&directory)?;
@@ -363,88 +367,8 @@ impl ProductStore {
             .summary())
     }
 
-    pub fn rotate_device(
-        &mut self,
-        id: &str,
-        opaque_credential: &[u8],
-        generation: u64,
-    ) -> io::Result<()> {
-        let index = self
-            .state
-            .devices
-            .iter()
-            .position(|device| device.id == id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remembered device missing"))?;
-        let old = self.state.devices[index].clone();
-        if generation < old.generation {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "remembered generation moved backwards",
-            ));
-        }
-        if generation == old.generation {
-            return Ok(());
-        }
-        let old_credential = self
-            .credentials
-            .get(&old.credential_reference)?
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "remembered device credential missing",
-                )
-            })?;
-        let credential_changed = old_credential != opaque_credential;
-        if credential_changed {
-            self.credentials
-                .put(&old.credential_reference, opaque_credential)?;
-        }
-        self.state.devices[index].previous_generation = Some(old.generation);
-        self.state.devices[index].generation = generation;
-        if let Err(error) = self.save() {
-            self.state.devices[index] = old;
-            if credential_changed {
-                self.credentials
-                    .put(
-                        &self.state.devices[index].credential_reference,
-                        &old_credential,
-                    )
-                    .map_err(|rollback_error| {
-                        io::Error::other(format!(
-                            "{error}; credential rollback also failed: {rollback_error}"
-                        ))
-                    })?;
-            }
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    pub fn devices(&self) -> Vec<DeviceSummary> {
-        let mut devices = self
-            .state
-            .devices
-            .iter()
-            .map(RememberedDeviceRecord::summary)
-            .collect::<Vec<_>>();
-        devices.sort_by(|left, right| {
-            left.label
-                .to_ascii_lowercase()
-                .cmp(&right.label.to_ascii_lowercase())
-        });
-        devices
-    }
-
     pub fn device_records(&self) -> Vec<RememberedDeviceRecord> {
         self.state.devices.clone()
-    }
-
-    pub fn device_record(&self, id: &str) -> Option<RememberedDeviceRecord> {
-        self.state
-            .devices
-            .iter()
-            .find(|device| device.id == id)
-            .cloned()
     }
 
     pub fn device_credential(&self, id: &str) -> io::Result<Vec<u8>> {
@@ -462,40 +386,6 @@ impl ProductStore {
                     "remembered device credential missing",
                 )
             })
-    }
-
-    pub fn forget_device(&mut self, selector: &str) -> io::Result<DeviceSummary> {
-        let selector = selector.trim();
-        if selector.is_empty() || selector.len() > 128 || selector.chars().any(char::is_control) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "device selector must be a device ID or exact label",
-            ));
-        }
-        let index = self
-            .state
-            .devices
-            .iter()
-            .position(|device| device.id == selector || device.label.eq_ignore_ascii_case(selector))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remembered device missing"))?;
-        let record = self.state.devices[index].clone();
-        let credential = self.credentials.get(&record.credential_reference)?;
-        self.credentials.delete(&record.credential_reference)?;
-        self.state.devices.remove(index);
-        if let Err(error) = self.save() {
-            self.state.devices.insert(index, record.clone());
-            if let Some(credential) = credential
-                && let Err(rollback_error) = self
-                    .credentials
-                    .put(&record.credential_reference, &credential)
-            {
-                return Err(io::Error::other(format!(
-                    "{error}; credential rollback also failed: {rollback_error}"
-                )));
-            }
-            return Err(error);
-        }
-        Ok(record.summary())
     }
 
     pub fn append_inbox(&mut self, item: InboxItem) -> io::Result<()> {
@@ -521,16 +411,6 @@ impl ProductStore {
             return Err(error);
         }
         Ok(())
-    }
-
-    pub fn inbox(&self, limit: usize) -> Vec<InboxItem> {
-        self.state
-            .inbox
-            .iter()
-            .rev()
-            .take(limit.min(MAX_INBOX_ITEMS))
-            .cloned()
-            .collect()
     }
 
     pub fn latest_inbox(&self) -> Option<InboxItem> {
@@ -567,6 +447,349 @@ impl ProductStore {
         }
         result
     }
+}
+
+/// Agent-facing projection of the unified Engine store and desktop vault.
+pub struct ProductStore {
+    engine: EngineStore,
+    vault: DesktopCredentialStore,
+}
+
+impl ProductStore {
+    pub fn open(directory: impl Into<PathBuf>) -> Result<Self, EngineStoreError> {
+        let directory = directory.into();
+        let vault = DesktopCredentialStore::new(directory.join("vault"));
+        let mut engine = EngineStore::open(&directory)?;
+        import_v0_2_product_state(&mut engine, &directory.join("product"), &vault)?;
+        Ok(Self { engine, vault })
+    }
+
+    pub fn prepare_device(
+        &self,
+        label: &str,
+        broker: &str,
+        relay: Option<&str>,
+    ) -> Result<PreparedRememberedDevice, EngineStoreError> {
+        let label = validate_label(label)?;
+        if self
+            .device_records()
+            .iter()
+            .any(|device| device.label.eq_ignore_ascii_case(&label))
+        {
+            return Err(EngineStoreError::InvalidState(format!(
+                "device label {label:?} is already paired"
+            )));
+        }
+        let prepared = PreparedRememberedDevice {
+            id: random_identifier("dev")?,
+            label,
+            credential_reference: random_identifier("cred")?,
+            broker: broker.to_string(),
+            relay: relay.map(str::to_string),
+        };
+        let durable = DurableRelationship {
+            vault_reference: Some(VaultReference::parse(
+                prepared.credential_reference.clone(),
+            )?),
+            broker: prepared.broker.clone(),
+            relay: prepared.relay.clone(),
+        };
+        durable.validate(RelationshipState::Trusted)?;
+        Ok(prepared)
+    }
+
+    pub fn commit_device(
+        &mut self,
+        prepared: PreparedRememberedDevice,
+        opaque_credential: &[u8],
+        generation: u64,
+    ) -> Result<DeviceSummary, EngineStoreError> {
+        RememberedCredential::from_opaque(opaque_credential).map_err(|_| {
+            EngineStoreError::InvalidState("remembered credential is corrupt or unsupported".into())
+        })?;
+        if self.engine.state().snapshot.devices.contains_key(
+            &DeviceId::parse(prepared.id.clone())
+                .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?,
+        ) || self
+            .device_records()
+            .iter()
+            .any(|device| device.label.eq_ignore_ascii_case(&prepared.label))
+        {
+            return Err(EngineStoreError::InvalidState(
+                "remembered device already exists".into(),
+            ));
+        }
+        if self.vault.contains(&prepared.credential_reference)? {
+            return Err(EngineStoreError::InvalidState(
+                "prepared vault reference already exists".into(),
+            ));
+        }
+
+        let device_id = DeviceId::parse(prepared.id.clone())
+            .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        let relationship_id = RelationshipId::parse(prepared.id.clone())
+            .expect("Device and Relationship identifiers share validation");
+        let vault_reference = VaultReference::parse(prepared.credential_reference.clone())?;
+        let mut state = self.engine.state().clone();
+        apply_product_event(
+            &mut state,
+            EngineEvent::DeviceObserved {
+                device_id: device_id.clone(),
+                display_name: prepared.label.clone(),
+            },
+        )?;
+        apply_product_event(
+            &mut state,
+            EngineEvent::RelationshipTrusted {
+                relationship_id: relationship_id.clone(),
+                device_id,
+                generation,
+            },
+        )?;
+        state.durable_relationships.insert(
+            relationship_id,
+            DurableRelationship {
+                vault_reference: Some(vault_reference),
+                broker: prepared.broker,
+                relay: prepared.relay,
+            },
+        );
+
+        self.vault
+            .put(&prepared.credential_reference, opaque_credential)?;
+        if let Err(error) = self.engine.replace(state) {
+            self.vault
+                .delete(&prepared.credential_reference)
+                .map_err(|rollback| {
+                    EngineStoreError::InvalidState(format!(
+                        "{error}; vault rollback also failed: {rollback}"
+                    ))
+                })?;
+            return Err(error);
+        }
+        self.device_record(&prepared.id)
+            .ok_or_else(|| EngineStoreError::InvalidState("committed device is missing".into()))
+            .map(|record| record.summary())
+    }
+
+    pub fn rotate_device(
+        &mut self,
+        id: &str,
+        opaque_credential: &[u8],
+        generation: u64,
+    ) -> Result<(), EngineStoreError> {
+        RememberedCredential::from_opaque(opaque_credential).map_err(|_| {
+            EngineStoreError::InvalidState("remembered credential is corrupt or unsupported".into())
+        })?;
+        let current = self
+            .device_record(id)
+            .ok_or_else(|| EngineStoreError::InvalidState("remembered device is missing".into()))?;
+        if generation < current.generation {
+            return Err(EngineStoreError::InvalidState(
+                "remembered generation moved backwards".into(),
+            ));
+        }
+        if generation == current.generation {
+            return Ok(());
+        }
+        let old_credential = Zeroizing::new(self.device_credential(id)?);
+        let changed = old_credential.as_slice() != opaque_credential;
+        if changed {
+            self.vault
+                .put(&current.credential_reference, opaque_credential)?;
+        }
+
+        let relationship_id =
+            RelationshipId::parse(current.id.clone()).expect("stored device ID was validated");
+        let mut state = self.engine.state().clone();
+        apply_product_event(
+            &mut state,
+            EngineEvent::RelationshipRotated {
+                relationship_id,
+                generation,
+            },
+        )?;
+        if let Err(error) = self.engine.replace(state) {
+            if changed {
+                self.vault
+                    .put(&current.credential_reference, &old_credential)
+                    .map_err(|rollback| {
+                        EngineStoreError::InvalidState(format!(
+                            "{error}; vault rollback also failed: {rollback}"
+                        ))
+                    })?;
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn devices(&self) -> Vec<DeviceSummary> {
+        let mut devices = self
+            .device_records()
+            .into_iter()
+            .map(|record| record.summary())
+            .collect::<Vec<_>>();
+        devices.sort_by(|left, right| {
+            left.label
+                .to_ascii_lowercase()
+                .cmp(&right.label.to_ascii_lowercase())
+        });
+        devices
+    }
+
+    pub fn device_records(&self) -> Vec<RememberedDeviceRecord> {
+        self.engine
+            .state()
+            .snapshot
+            .relationships
+            .iter()
+            .filter_map(|(relationship_id, relationship)| {
+                if relationship.state != RelationshipState::Trusted {
+                    return None;
+                }
+                let device = self
+                    .engine
+                    .state()
+                    .snapshot
+                    .devices
+                    .get(&relationship.device_id)?;
+                let durable = self
+                    .engine
+                    .state()
+                    .durable_relationships
+                    .get(relationship_id)?;
+                Some(RememberedDeviceRecord {
+                    id: relationship_id.as_str().to_string(),
+                    label: device.display_name.clone(),
+                    credential_reference: durable.vault_reference.as_ref()?.as_str().to_string(),
+                    generation: relationship.generation,
+                    previous_generation: relationship.previous_generation,
+                    broker: durable.broker.clone(),
+                    relay: durable.relay.clone(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn device_record(&self, id: &str) -> Option<RememberedDeviceRecord> {
+        self.device_records()
+            .into_iter()
+            .find(|device| device.id == id)
+    }
+
+    pub fn device_credential(&self, id: &str) -> Result<Vec<u8>, EngineStoreError> {
+        let device = self
+            .device_record(id)
+            .ok_or_else(|| EngineStoreError::InvalidState("remembered device is missing".into()))?;
+        self.vault
+            .get(&device.credential_reference)?
+            .ok_or_else(|| {
+                EngineStoreError::InvalidState("remembered device credential is missing".into())
+            })
+    }
+
+    pub fn forget_device(&mut self, selector: &str) -> Result<DeviceSummary, EngineStoreError> {
+        let selector = selector.trim();
+        if selector.is_empty() || selector.len() > 128 || selector.chars().any(char::is_control) {
+            return Err(EngineStoreError::InvalidState(
+                "device selector must be a device ID or exact label".into(),
+            ));
+        }
+        let record = self
+            .device_records()
+            .into_iter()
+            .find(|device| device.id == selector || device.label.eq_ignore_ascii_case(selector))
+            .ok_or_else(|| EngineStoreError::InvalidState("remembered device is missing".into()))?;
+        let credential = self
+            .vault
+            .get(&record.credential_reference)?
+            .map(Zeroizing::new);
+        self.vault.delete(&record.credential_reference)?;
+
+        let relationship_id =
+            RelationshipId::parse(record.id.clone()).expect("stored device ID was validated");
+        let mut state = self.engine.state().clone();
+        apply_product_event(
+            &mut state,
+            EngineEvent::RelationshipRevoked {
+                relationship_id: relationship_id.clone(),
+            },
+        )?;
+        state
+            .durable_relationships
+            .get_mut(&relationship_id)
+            .expect("trusted relationship has durable metadata")
+            .vault_reference = None;
+        if let Err(error) = self.engine.replace(state) {
+            if let Some(credential) = credential {
+                self.vault
+                    .put(&record.credential_reference, &credential)
+                    .map_err(|rollback| {
+                        EngineStoreError::InvalidState(format!(
+                            "{error}; vault rollback also failed: {rollback}"
+                        ))
+                    })?;
+            }
+            return Err(error);
+        }
+        Ok(record.summary())
+    }
+
+    pub fn append_inbox(&mut self, item: InboxItem) -> Result<(), EngineStoreError> {
+        if self
+            .engine
+            .state()
+            .inbox
+            .iter()
+            .any(|existing| existing.id == item.id)
+        {
+            return Ok(());
+        }
+        let mut state = self.engine.state().clone();
+        state.inbox.push(item);
+        state.inbox.sort_by_key(|item| item.received_at_unix_ms);
+        let overflow = state.inbox.len().saturating_sub(MAX_INBOX_ITEMS);
+        if overflow > 0 {
+            state.inbox.drain(..overflow);
+        }
+        self.engine.replace(state)
+    }
+
+    pub fn inbox(&self, limit: usize) -> Vec<InboxItem> {
+        self.engine
+            .state()
+            .inbox
+            .iter()
+            .rev()
+            .take(limit.min(MAX_INBOX_ITEMS))
+            .cloned()
+            .collect()
+    }
+
+    pub fn latest_inbox(&self) -> Option<InboxItem> {
+        self.engine.state().inbox.last().cloned()
+    }
+}
+
+fn apply_product_event(
+    state: &mut EngineState,
+    event: EngineEvent,
+) -> Result<(), EngineStoreError> {
+    let sequence = state
+        .snapshot
+        .last_sequence
+        .checked_add(1)
+        .ok_or_else(|| EngineStoreError::InvalidState("event sequence is exhausted".into()))?;
+    state
+        .snapshot
+        .apply(EventEnvelope {
+            contract_version: crate::APPLICATION_CONTRACT_VERSION,
+            sequence,
+            event,
+        })
+        .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -800,6 +1023,7 @@ fn random_identifier(prefix: &str) -> io::Result<String> {
     Ok(format!("{prefix}_{}", URL_SAFE_NO_PAD.encode(random)))
 }
 
+#[cfg(test)]
 fn create_private_directory(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     #[cfg(unix)]
@@ -808,11 +1032,13 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
+#[cfg(test)]
 fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
     fs::rename(temporary, target)
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
     tempfile::TempPath::try_from_path(temporary.to_path_buf())?
         .persist(target)
@@ -822,6 +1048,14 @@ fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opaque_credential() -> Vec<u8> {
+        RememberedCredential::from_control_pairing(
+            b"fixture control key",
+            envoix_invite::Commitment::sha256(b"fixture transcript"),
+        )
+        .to_opaque()
+    }
 
     fn inbox_item(id: &str, received_at: u64) -> InboxItem {
         InboxItem {
@@ -843,36 +1077,43 @@ mod tests {
     fn device_credentials_are_separate_and_generation_survives_restart() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = ProductStore::open(directory.path()).unwrap();
+        let credential = opaque_credential();
         let pending = store
             .prepare_device(" MacBook ", "broker", Some("https://relay"))
             .unwrap();
         let id = pending.id().to_string();
-        store.commit_device(pending, b"opaque", 0).unwrap();
-        store.rotate_device(&id, b"opaque", 1).unwrap();
+        store.commit_device(pending, &credential, 0).unwrap();
+        store.rotate_device(&id, &credential, 1).unwrap();
 
-        let metadata = fs::read_to_string(directory.path().join(PRODUCT_STATE_FILE)).unwrap();
-        assert!(!metadata.contains("opaque"));
+        let metadata = fs::read(directory.path().join("engine-state-v1.json")).unwrap();
+        assert!(
+            !metadata
+                .windows(credential.len())
+                .any(|window| window == credential)
+        );
+        drop(store);
         let reopened = ProductStore::open(directory.path()).unwrap();
         let device = reopened.device_record(&id).unwrap();
         assert_eq!(device.label(), "MacBook");
         assert_eq!(device.generation(), 1);
         assert_eq!(device.previous_generation(), Some(0));
-        assert_eq!(reopened.device_credential(&id).unwrap(), b"opaque");
+        assert_eq!(reopened.device_credential(&id).unwrap(), credential);
     }
 
     #[test]
     fn forgetting_device_revokes_credential_and_preserves_inbox_history() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = ProductStore::open(directory.path()).unwrap();
+        let credential = opaque_credential();
         let pending = store
             .prepare_device("MacBook", "broker", Some("https://relay"))
             .unwrap();
         let id = pending.id().to_string();
         let credential_path = directory
             .path()
-            .join("credentials")
+            .join("vault")
             .join(&pending.credential_reference);
-        store.commit_device(pending, b"opaque", 0).unwrap();
+        store.commit_device(pending, &credential, 0).unwrap();
         store.append_inbox(inbox_item("received", 1)).unwrap();
 
         let forgotten = store.forget_device("macbook").unwrap();
@@ -884,6 +1125,7 @@ mod tests {
         assert_eq!(store.latest_inbox().unwrap().id, "received");
         assert!(store.prepare_device("MacBook", "broker", None).is_ok());
 
+        drop(store);
         let reopened = ProductStore::open(directory.path()).unwrap();
         assert!(reopened.devices().is_empty());
         assert_eq!(reopened.latest_inbox().unwrap().id, "received");
@@ -914,7 +1156,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join(PRODUCT_STATE_FILE), valid).unwrap();
 
-        let store = ProductStore::open(directory.path()).unwrap();
+        let store = LegacyProductStore::open(directory.path()).unwrap();
         let device = &store.device_records()[0];
         assert_eq!(device.id(), "dev_fixture_not_a_real_identity");
         assert_eq!(device.generation(), 4);
@@ -946,7 +1188,7 @@ mod tests {
         ] {
             let directory = tempfile::tempdir().unwrap();
             fs::write(directory.path().join(PRODUCT_STATE_FILE), invalid).unwrap();
-            let error = ProductStore::open(directory.path())
+            let error = LegacyProductStore::open(directory.path())
                 .err()
                 .unwrap_or_else(|| panic!("{name} fixture unexpectedly loaded"));
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
@@ -962,7 +1204,7 @@ mod tests {
             envoix_invite::Commitment::sha256(b"fixture transcript"),
         )
         .to_opaque();
-        let mut legacy = ProductStore::open(&legacy_directory).unwrap();
+        let mut legacy = LegacyProductStore::open(&legacy_directory).unwrap();
         let pending = legacy
             .prepare_device(
                 "MacBook",

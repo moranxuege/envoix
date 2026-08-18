@@ -169,7 +169,7 @@ pub async fn run() -> Result<()> {
             relay,
         },
         client,
-        store: Mutex::new(ProductStore::open(state_directory.join("product"))?),
+        store: Mutex::new(ProductStore::open(&state_directory)?),
         active_receivers: Mutex::new(HashMap::new()),
         active_pairings: Mutex::new(HashSet::new()),
         shutdown: TransferCancelToken::new(),
@@ -1037,6 +1037,12 @@ fn unix_millis() -> Result<u64> {
 mod tests {
     use super::*;
 
+    fn opaque_credential() -> Vec<u8> {
+        let mut credential = b"ENVR\x01".to_vec();
+        credential.extend_from_slice(&[0x42; 32]);
+        credential
+    }
+
     #[test]
     fn agent_uses_a_distinct_identity_for_each_endpoint() {
         assert_eq!(
@@ -1074,7 +1080,7 @@ mod tests {
                 relay: None,
             },
             client: api::Client::default(),
-            store: Mutex::new(ProductStore::open(state_directory.join("product")).unwrap()),
+            store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             active_receivers: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
             shutdown: TransferCancelToken::new(),
@@ -1098,10 +1104,12 @@ mod tests {
     async fn forgetting_device_cancels_its_remembered_receiver() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
-        let mut store = ProductStore::open(state_directory.join("product")).unwrap();
+        let mut store = ProductStore::open(&state_directory).unwrap();
         let pending = store.prepare_device("MacBook", "broker", None).unwrap();
         let device_id = pending.id().to_string();
-        store.commit_device(pending, b"opaque", 0).unwrap();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
         let receiver_cancel = TransferCancelToken::new();
         let runtime = Arc::new(AgentRuntime {
             config: RuntimeConfig {
