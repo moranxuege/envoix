@@ -1,5 +1,9 @@
 package dev.envoix.app
 
+import dev.envoix.app.ffi.EnvoixException
+import dev.envoix.app.ffi.FfiInviteRole
+import dev.envoix.app.ffi.FfiPairingInvite
+import dev.envoix.app.ffi.parsePairingInvite
 import org.json.JSONObject
 
 class CreatedInvite(
@@ -46,7 +50,12 @@ object InviteCodec {
     }
 
     /** Parse for deep-link routing. The credential itself is not returned. */
-    fun parseForRouting(input: String): ParsedInvite? = parsed(Native.parseInvite(input))
+    fun parseForRouting(input: String): ParsedInvite? =
+        try {
+            parsePairingInvite(input).toParsedInvite()
+        } catch (_: EnvoixException) {
+            null
+        }
 
     /** Parse against the role fixed by an existing Send or Receive flow. */
     fun parseForRole(
@@ -95,6 +104,24 @@ object InviteCodec {
             expiresAt = value.getLong("expiresAt"),
         )
     }
+
+    private fun FfiPairingInvite.toParsedInvite(): ParsedInvite? {
+        val expiresAt = expiresAt.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong() ?: return null
+        return ParsedInvite(
+            reference = null,
+            broker = broker,
+            relay = relayUrls.firstOrNull(),
+            creatorRole = creatorRole.wireName(),
+            joinerRole = joinerRole.wireName(),
+            expiresAt = expiresAt,
+        )
+    }
+
+    private fun FfiInviteRole.wireName() =
+        when (this) {
+            FfiInviteRole.SEND -> "send"
+            FfiInviteRole.RECEIVE -> "receive"
+        }
 
     private fun json(value: String) = runCatching { JSONObject(value) }.getOrNull()
 

@@ -77,9 +77,6 @@ object Native {
         relay: String,
     ): String
 
-    /** Parse a complete InviteV2 for deep-link routing. */
-    external fun parseInvite(input: String): String
-
     external fun generateRoomControlInvite(
         broker: String,
         relay: String,

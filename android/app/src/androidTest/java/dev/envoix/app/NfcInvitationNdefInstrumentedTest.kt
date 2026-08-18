@@ -3,6 +3,8 @@ package dev.envoix.app
 import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import dev.envoix.app.ffi.FfiInviteRole
+import dev.envoix.app.ffi.makePairingInvite
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -14,6 +16,20 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NfcInvitationNdefInstrumentedTest {
+    @Test
+    fun transferInviteRoutingUsesTheTypedBinding() {
+        val invite = makePairingInvite(FfiInviteRole.SEND, TEST_BROKER, "")
+
+        val parsed = requireNotNull(InviteCodec.parseForRouting(invite.payload))
+
+        assertNull(parsed.reference)
+        assertEquals(TEST_BROKER, parsed.broker)
+        assertNull(parsed.relay)
+        assertEquals("send", parsed.creatorRole)
+        assertEquals("receive", parsed.joinerRole)
+        assertEquals(invite.expiresAt.toLong(), parsed.expiresAt)
+    }
+
     @Test
     fun uriRecordUsesTheExactHttpsCarrier() {
         val message = requireNotNull(NfcInvitationNdefCodec.messageFor(INVITE))
@@ -65,11 +81,11 @@ class NfcInvitationNdefInstrumentedTest {
                     "",
                 ),
             )
-        val parsedAsTransfer = JSONObject(Native.parseInvite(room))
+        val parsedAsTransfer = InviteCodec.parseForRouting(room)
 
         assertFalse(parsedRoom.toString(), parsedRoom.has("error"))
         assertEquals(room, parsedRoom.getString("payload"))
-        assertTrue(parsedAsTransfer.toString(), parsedAsTransfer.has("error"))
+        assertNull(parsedAsTransfer)
     }
 
     @Test
@@ -177,5 +193,8 @@ class NfcInvitationNdefInstrumentedTest {
 
     private companion object {
         const val INVITE = "envoix://invite/v2/abc_DEF-123"
+        const val TEST_BROKER =
+            "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff" +
+                "@67.230.187.238:8445"
     }
 }

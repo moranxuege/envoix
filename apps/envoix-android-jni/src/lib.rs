@@ -114,20 +114,6 @@ pub extern "system" fn Java_dev_envoix_app_Native_generateInvite(
     to_jstring(&mut env, &json)
 }
 
-/// Parse a full payload for deep-link routing without returning its credential.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
-    mut env: JNIEnv,
-    _class: JClass,
-    input: JString,
-) -> jni::sys::jstring {
-    let input = jstr(&mut env, &input);
-    let json = InviteV2::parse(&input, unix_now())
-        .map(|invite| parsed_invite_json(&invite))
-        .unwrap_or_else(|error| invitation_error_json(&error));
-    to_jstring(&mut env, &json)
-}
-
 /// Validate a complete InviteV2 URI against the active flow and retain the
 /// private bootstrap only behind an opaque process-memory reference.
 #[unsafe(no_mangle)]
@@ -207,22 +193,6 @@ fn parse_full_invite_for_role(
 
 fn reference_json(reference: &InviteSecretRef) -> String {
     serde_json::to_string(reference).expect("invitation reference is JSON serializable")
-}
-
-fn parsed_invite_json(invite: &ValidatedInvitation) -> String {
-    let public = &invite.invitation().public_context;
-    format!(
-        r#"{{"broker":{},"relay":{},"creatorRole":{},"joinerRole":{},"expiresAt":{}}}"#,
-        json_str(&public.broker),
-        public
-            .relay_urls
-            .first()
-            .map(|value| json_str(value))
-            .unwrap_or_else(|| "null".to_string()),
-        json_str(role_name(public.creator_transfer_role)),
-        json_str(role_name(public.joiner_transfer_role)),
-        public.expires_at,
-    )
 }
 
 fn prepared_invite_json(

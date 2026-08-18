@@ -56,3 +56,20 @@ outputs. It also rejects an asynchronous zero-argument `close()` before UniFFI
 can emit an uncompilable Kotlin overload. Generated source is build output and
 is not checked into the repository; Apple packaging and Android staging
 generate from the same crate.
+
+## Android migration ledger
+
+Android application orchestration uses the generated UniFFI API by default.
+Invitation deep-link routing is typed and no longer crosses the legacy JSON
+JNI parser. Invitation generation and role-bound parsing remain temporarily on
+the legacy bridge because their opaque references are process-local to that
+library; moving one side alone would create references that the active transfer
+session cannot resolve.
+
+The remaining hand-written JNI surface is not an accepted final M5 exception.
+It currently contains Room/Transfer session orchestration, discovery callbacks,
+Android context initialization, log routing, and synchronous platform content
+callbacks. Stateful operations must move behind one native library before their
+JSON entries are deleted. At M5 exit, only Android-runtime integration that
+cannot be expressed as a UniFFI port may remain, and every such entry must have
+an explicit rationale here.
