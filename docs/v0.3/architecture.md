@@ -152,6 +152,10 @@ rebuild its presentation from a snapshot plus subsequent events.
 Commands and events must carry stable identifiers and typed errors. Bulk file
 contents never cross this control boundary as JSON.
 
+A live command is decided against one Engine snapshot and produces a typed
+effect for an adapter to execute. The result of that work returns as ordered
+events. Snapshot or event-log replay never executes effects.
+
 ## 6. Effects and platform ports
 
 The Engine can request, but cannot implement, these operating-system effects:
