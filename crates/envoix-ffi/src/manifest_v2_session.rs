@@ -25,7 +25,9 @@ use envoix_client::api::{
     send_manifest_v2_via_room_hybrid_with_authentication,
     send_manifest_v2_via_room_with_authentication,
 };
-use envoix_client::model::{RememberedGenerationRole, remembered_generation_attempts};
+use envoix_client::model::{
+    RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
+};
 use envoix_types::{DataPath, PairingStep};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -399,14 +401,6 @@ impl AuthenticationHandler for NativeAuthentication {
         self.persisted.store(true, Ordering::Release);
         Ok(())
     }
-}
-
-fn should_stop_remembered_fallback<T>(
-    result: &Result<T, SessionError>,
-    authentication: &NativeAuthentication,
-    cancel: &TransferCancelToken,
-) -> bool {
-    result.is_ok() || authentication.authenticated() || cancel.is_cancelled()
 }
 
 impl EventSink for NativeSessionEvents {
@@ -1291,7 +1285,13 @@ async fn send_attempt(
                     &authentication,
                 )
                 .await;
-                if should_stop_remembered_fallback(&result, &authentication, cancel) {
+                if (RememberedAttemptOutcome {
+                    succeeded: result.is_ok(),
+                    authenticated: authentication.authenticated(),
+                    canceled: cancel.is_cancelled(),
+                })
+                .should_stop_fallback()
+                {
                     return result;
                 }
                 last_error = result.err();
@@ -1439,7 +1439,13 @@ async fn receive_offer_attempt(
                 } else {
                     receive.await
                 };
-                if should_stop_remembered_fallback(&result, &authentication, cancel) {
+                if (RememberedAttemptOutcome {
+                    succeeded: result.is_ok(),
+                    authenticated: authentication.authenticated(),
+                    canceled: cancel.is_cancelled(),
+                })
+                .should_stop_fallback()
+                {
                     return result;
                 }
                 last_error = result.err();
@@ -2142,11 +2148,14 @@ mod tests {
         assert!(matches!(&result, Err(SessionError::Storage(_))));
         assert!(authentication.authenticated());
         assert!(!authentication.persisted());
-        assert!(should_stop_remembered_fallback(
-            &result,
-            &authentication,
-            &TransferCancelToken::new(),
-        ));
+        assert!(
+            (RememberedAttemptOutcome {
+                succeeded: result.is_ok(),
+                authenticated: authentication.authenticated(),
+                canceled: false,
+            })
+            .should_stop_fallback()
+        );
     }
 
     #[test]

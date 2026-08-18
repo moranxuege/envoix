@@ -20,7 +20,9 @@ use envoix_client::api::{
     send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
     send_manifest_v2_via_room_with_authentication,
 };
-use envoix_client::model::{RememberedGenerationRole, remembered_generation_attempts};
+use envoix_client::model::{
+    RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
+};
 #[cfg(test)]
 use envoix_error::RendezvousCause;
 use envoix_error::{CoreError, TransferCause};
@@ -277,14 +279,6 @@ impl AuthenticationHandler for AndroidAuthentication {
         }
         Ok(())
     }
-}
-
-fn should_stop_remembered_generation_fallback(
-    succeeded: bool,
-    authenticated: bool,
-    cancelled: bool,
-) -> bool {
-    succeeded || authenticated || cancelled
 }
 
 impl AndroidEvents {
@@ -1605,11 +1599,13 @@ async fn send_remembered(
             &authentication,
         )
         .await;
-        if should_stop_remembered_generation_fallback(
-            result.is_ok(),
-            authentication.authenticated(),
-            cancel.is_cancelled(),
-        ) {
+        if (RememberedAttemptOutcome {
+            succeeded: result.is_ok(),
+            authenticated: authentication.authenticated(),
+            canceled: cancel.is_cancelled(),
+        })
+        .should_stop_fallback()
+        {
             return result;
         }
         last_error = result.err();
@@ -1668,11 +1664,13 @@ async fn receive_remembered(
         } else {
             receive.await
         };
-        if should_stop_remembered_generation_fallback(
-            result.is_ok(),
-            authentication.authenticated(),
-            cancel.is_cancelled(),
-        ) {
+        if (RememberedAttemptOutcome {
+            succeeded: result.is_ok(),
+            authenticated: authentication.authenticated(),
+            canceled: cancel.is_cancelled(),
+        })
+        .should_stop_fallback()
+        {
             return result;
         }
         last_error = result.err();
@@ -2302,18 +2300,14 @@ mod tests {
 
     #[test]
     fn authenticated_remembered_attempt_never_falls_back_to_another_generation() {
-        assert!(should_stop_remembered_generation_fallback(
-            false, true, false,
-        ));
-        assert!(should_stop_remembered_generation_fallback(
-            true, false, false,
-        ));
-        assert!(should_stop_remembered_generation_fallback(
-            false, false, true,
-        ));
-        assert!(!should_stop_remembered_generation_fallback(
-            false, false, false,
-        ));
+        assert!(
+            (RememberedAttemptOutcome {
+                succeeded: false,
+                authenticated: true,
+                canceled: false,
+            })
+            .should_stop_fallback()
+        );
     }
 
     #[test]

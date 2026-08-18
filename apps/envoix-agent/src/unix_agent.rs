@@ -17,7 +17,9 @@ use envoix_client::api::{
     RoomControlSession, RoomOfferRejection, RoomTransferOffer, TransferEvent, TransferOptions,
     TransferRole,
 };
-use envoix_client::model::{RememberedGenerationRole, remembered_generation_attempts};
+use envoix_client::model::{
+    RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
+};
 use envoix_client::product::{
     AGENT_PROTOCOL_VERSION, AgentRequest, AgentResponse, AgentSettings, AgentStatus, InboxItem,
     InboxRoot, PairingInvitation, PreparedRememberedDevice, ProductStore, RememberedDeviceRecord,
@@ -697,9 +699,12 @@ async fn connect_remembered_room(
         match result {
             Ok(session) => return Ok((session, next_generation)),
             Err(error)
-                if error.peer_authenticated()
-                    || receiver_cancel.is_cancelled()
-                    || runtime.shutdown.is_cancelled() =>
+                if (RememberedAttemptOutcome {
+                    succeeded: false,
+                    authenticated: error.peer_authenticated(),
+                    canceled: receiver_cancel.is_cancelled() || runtime.shutdown.is_cancelled(),
+                })
+                .should_stop_fallback() =>
             {
                 return Err(error.into_error().into());
             }

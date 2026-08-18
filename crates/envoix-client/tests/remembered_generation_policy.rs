@@ -1,4 +1,6 @@
-use envoix_client::model::{RememberedGenerationRole, remembered_generation_attempts};
+use envoix_client::model::{
+    RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
+};
 
 #[test]
 fn connector_attempts_overlap_the_responders_recovery_window() {
@@ -35,6 +37,26 @@ fn invalid_previous_generations_fail_closed() {
                 remembered_generation_attempts(9, Some(previous), role).is_err(),
                 "{role:?} with previous generation {previous}"
             );
+        }
+    }
+}
+
+#[test]
+fn only_pre_authentication_failure_may_try_another_generation() {
+    for succeeded in [false, true] {
+        for authenticated in [false, true] {
+            for canceled in [false, true] {
+                let outcome = RememberedAttemptOutcome {
+                    succeeded,
+                    authenticated,
+                    canceled,
+                };
+                assert_eq!(
+                    outcome.should_stop_fallback(),
+                    succeeded || authenticated || canceled,
+                    "succeeded={succeeded}, authenticated={authenticated}, canceled={canceled}"
+                );
+            }
         }
     }
 }

@@ -108,6 +108,19 @@ pub enum RememberedGenerationRole {
     Responder,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RememberedAttemptOutcome {
+    pub succeeded: bool,
+    pub authenticated: bool,
+    pub canceled: bool,
+}
+
+impl RememberedAttemptOutcome {
+    pub const fn should_stop_fallback(self) -> bool {
+        self.succeeded || self.authenticated || self.canceled
+    }
+}
+
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("remembered previous generation {previous} must be less than current generation {current}")]
 pub struct RememberedGenerationError {

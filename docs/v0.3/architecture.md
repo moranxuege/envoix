@@ -81,6 +81,11 @@ recovery. An already authenticated attempt may still record its verified
 delivery proof, while reject, cancel, failure, and removal remain available for
 safe settlement.
 
+Remembered-generation fallback is bounded by shared Engine policy. A connector
+or responder may try the next scheduled generation only after a pre-
+authentication failure; success, authentication, or cancellation ends
+fallback immediately on every host.
+
 Expected states:
 
 ```text
