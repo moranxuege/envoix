@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::DesktopCredentialStore;
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 2;
+pub const AGENT_PROTOCOL_VERSION: u16 = 3;
 pub const AGENT_SETTINGS_VERSION: u16 = 1;
 const PRODUCT_STATE_SCHEMA_VERSION: u16 = 1;
 const PRODUCT_STATE_FILE: &str = "product-state-v1.json";
@@ -61,6 +61,7 @@ pub enum AgentRequest {
     Status,
     Pair { label: String },
     ListDevices,
+    ForgetDevice { device: String },
     ListInbox { limit: usize },
     LatestInbox,
 }
@@ -72,6 +73,7 @@ pub enum AgentResponse {
     Status { status: AgentStatus },
     Pairing { pairing: PairingInvitation },
     Devices { devices: Vec<DeviceSummary> },
+    DeviceForgotten { device: DeviceSummary },
     Inbox { items: Vec<InboxItem> },
     Latest { item: Option<InboxItem> },
     Error { code: String, message: String },
@@ -452,6 +454,40 @@ impl ProductStore {
             })
     }
 
+    pub fn forget_device(&mut self, selector: &str) -> io::Result<DeviceSummary> {
+        let selector = selector.trim();
+        if selector.is_empty() || selector.len() > 128 || selector.chars().any(char::is_control) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "device selector must be a device ID or exact label",
+            ));
+        }
+        let index = self
+            .state
+            .devices
+            .iter()
+            .position(|device| device.id == selector || device.label.eq_ignore_ascii_case(selector))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remembered device missing"))?;
+        let record = self.state.devices[index].clone();
+        let credential = self.credentials.get(&record.credential_reference)?;
+        self.credentials.delete(&record.credential_reference)?;
+        self.state.devices.remove(index);
+        if let Err(error) = self.save() {
+            self.state.devices.insert(index, record.clone());
+            if let Some(credential) = credential
+                && let Err(rollback_error) = self
+                    .credentials
+                    .put(&record.credential_reference, &credential)
+            {
+                return Err(io::Error::other(format!(
+                    "{error}; credential rollback also failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+        Ok(record.summary())
+    }
+
     pub fn append_inbox(&mut self, item: InboxItem) -> io::Result<()> {
         if self
             .state
@@ -625,6 +661,35 @@ mod tests {
     }
 
     #[test]
+    fn forgetting_device_revokes_credential_and_preserves_inbox_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let pending = store
+            .prepare_device("MacBook", "broker", Some("https://relay"))
+            .unwrap();
+        let id = pending.id().to_string();
+        let credential_path = directory
+            .path()
+            .join("credentials")
+            .join(&pending.credential_reference);
+        store.commit_device(pending, b"opaque", 0).unwrap();
+        store.append_inbox(inbox_item("received", 1)).unwrap();
+
+        let forgotten = store.forget_device("macbook").unwrap();
+
+        assert_eq!(forgotten.id, id);
+        assert_eq!(forgotten.label, "MacBook");
+        assert!(store.devices().is_empty());
+        assert!(!credential_path.exists());
+        assert_eq!(store.latest_inbox().unwrap().id, "received");
+        assert!(store.prepare_device("MacBook", "broker", None).is_ok());
+
+        let reopened = ProductStore::open(directory.path()).unwrap();
+        assert!(reopened.devices().is_empty());
+        assert_eq!(reopened.latest_inbox().unwrap().id, "received");
+    }
+
+    #[test]
     fn inbox_is_newest_first_and_duplicate_jobs_are_idempotent() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = ProductStore::open(directory.path()).unwrap();
@@ -645,7 +710,7 @@ mod tests {
 
     #[test]
     fn agent_wire_contract_is_stable_and_tagged() {
-        assert_eq!(AGENT_PROTOCOL_VERSION, 2);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 3);
         let request = serde_json::to_string(&AgentRequest::Pair {
             label: "MacBook".into(),
         })
@@ -669,6 +734,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
             r#"{"kind":"pairing","pairing":{"label":"MacBook","room_code":"123456-a1b2-c3d4","verification_code":"012345","expires_at_unix_seconds":42}}"#
+        );
+
+        let forget = AgentRequest::ForgetDevice {
+            device: "MacBook".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&forget).unwrap(),
+            r#"{"command":"forget_device","device":"MacBook"}"#
         );
     }
 

@@ -53,12 +53,13 @@ WSL envoix-agent <--- Room offer + canonical Manifest v2 ---> WSL Inbox
 
 ## Local Agent contract
 
-`envoix-client::product` is the shared product contract. Protocol version 2
+`envoix-client::product` is the shared product contract. Protocol version 3
 defines these commands:
 
 - `status`
 - `pair { label }`
 - `list_devices`
+- `forget_device { device }`
 - `list_inbox { limit }`
 - `latest_inbox`
 
@@ -169,10 +170,17 @@ Manage and use the Agent from any WSL shell:
 ~/.local/bin/envoix agent status
 ~/.local/bin/envoix agent pair --name MacBook
 ~/.local/bin/envoix devices list
+~/.local/bin/envoix devices forget MacBook --yes
 ~/.local/bin/envoix inbox list
 ~/.local/bin/envoix inbox latest
 ~/.local/bin/envoix agent stop
 ```
+
+Forgetting accepts a device ID or its exact label and requires `--yes`. It
+removes only the remembered relationship and protected credential, cancels its
+reconnect listener, and leaves completed Inbox files and history intact. A
+transfer already accepted before revocation may finish; no later Room offers
+or reconnects are accepted from that relationship.
 
 For a foreground development run, use `envoix-agent` directly. Defaults can be
 overridden with `--settings`, `--state-dir`, `--inbox`, `--socket`, `--broker`,

@@ -94,6 +94,10 @@ async fn run(cli: Cli) -> CliResult<()> {
                 call_agent(agent_socket, AgentRequest::ListDevices).await?,
                 json,
             ),
+            DevicesCommand::Forget { device, yes: _ } => show_forgotten_device(
+                call_agent(agent_socket, AgentRequest::ForgetDevice { device }).await?,
+                json,
+            ),
         },
         Command::Inbox(args) => match args.command {
             InboxCommand::List { limit } => show_inbox(
@@ -258,6 +262,19 @@ fn show_devices(response: AgentResponse, json: bool) -> CliResult<()> {
             device.id, device.label, device.generation
         );
     }
+    Ok(())
+}
+
+fn show_forgotten_device(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::DeviceForgotten { device } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Forgotten device: {} ({})", device.label, device.id);
     Ok(())
 }
 

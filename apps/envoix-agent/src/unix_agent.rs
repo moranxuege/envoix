@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::io;
@@ -84,7 +84,7 @@ struct AgentRuntime {
     config: RuntimeConfig,
     client: api::Client,
     store: Mutex<ProductStore>,
-    active_receivers: Mutex<HashSet<String>>,
+    active_receivers: Mutex<HashMap<String, TransferCancelToken>>,
     active_pairings: Mutex<HashSet<String>>,
     shutdown: TransferCancelToken,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -167,7 +167,7 @@ pub async fn run() -> Result<()> {
         },
         client,
         store: Mutex::new(ProductStore::open(state_directory.join("product"))?),
-        active_receivers: Mutex::new(HashSet::new()),
+        active_receivers: Mutex::new(HashMap::new()),
         active_pairings: Mutex::new(HashSet::new()),
         shutdown: TransferCancelToken::new(),
         background_tasks: Mutex::new(Vec::new()),
@@ -325,6 +325,13 @@ async fn handle_request_result(
         AgentRequest::ListDevices => Ok(AgentResponse::Devices {
             devices: lock(&runtime.store)?.devices(),
         }),
+        AgentRequest::ForgetDevice { device } => {
+            let forgotten = lock(&runtime.store)?.forget_device(&device)?;
+            if let Some(cancel) = lock(&runtime.active_receivers)?.get(&forgotten.id) {
+                cancel.cancel();
+            }
+            Ok(AgentResponse::DeviceForgotten { device: forgotten })
+        }
         AgentRequest::ListInbox { limit } => Ok(AgentResponse::Inbox {
             items: lock(&runtime.store)?.inbox(limit),
         }),
@@ -397,10 +404,10 @@ async fn run_initial_pairing(
     let paired = establish_initial_room(&runtime, prepared, invitation, &verification_code).await;
     lock_or_log(&runtime.active_pairings, "active pairings")
         .map(|mut pairings| pairings.remove(&label.to_ascii_lowercase()));
-    let session = match paired {
-        Ok(session) => {
+    let (session, session_cancel) = match paired {
+        Ok(paired) => {
             tracing::info!(device = %label, "device verification completed");
-            session
+            paired
         }
         Err(error) if runtime.shutdown.is_cancelled() => {
             tracing::debug!(device = %label, %error, "initial pairing stopped");
@@ -411,14 +418,17 @@ async fn run_initial_pairing(
             return;
         }
     };
-    let result = run_room_session(&runtime, &session, &device_id, &label).await;
+    let result = run_room_session(&runtime, &session, &device_id, &label, &session_cancel).await;
     session.shutdown().await;
     if let Err(error) = result
         && !runtime.shutdown.is_cancelled()
+        && !session_cancel.is_cancelled()
     {
         tracing::warn!(device = %label, %error, "initial room ended");
     }
-    if !runtime.shutdown.is_cancelled() {
+    lock_or_log(&runtime.active_receivers, "active receivers")
+        .map(|mut active| active.remove(&device_id));
+    if !runtime.shutdown.is_cancelled() && !session_cancel.is_cancelled() {
         spawn_remembered_receiver(runtime, device_id);
     }
 }
@@ -428,7 +438,8 @@ async fn establish_initial_room(
     prepared: PreparedRememberedDevice,
     invitation: RoomControlInvite,
     verification_code: &str,
-) -> Result<RoomControlSession> {
+) -> Result<(RoomControlSession, TransferCancelToken)> {
+    let device_id = prepared.id().to_string();
     let session = api::connect_room_control(
         invitation,
         runtime.config.device_name.clone(),
@@ -446,8 +457,22 @@ async fn establish_initial_room(
                     let credential = session.pairing_credential().ok_or_else(|| {
                         anyhow!("verified room did not expose a pairing credential")
                     })?;
-                    lock(&runtime.store)?.commit_device(prepared, &credential.to_opaque(), 0)?;
-                    return Ok(());
+                    let session_cancel = register_remembered_receiver(runtime, &device_id)?
+                        .ok_or_else(|| anyhow!("remembered receiver was already active"))?;
+                    let commit_result = (|| -> Result<()> {
+                        lock(&runtime.store)?.commit_device(
+                            prepared,
+                            &credential.to_opaque(),
+                            0,
+                        )?;
+                        Ok(())
+                    })();
+                    if let Err(error) = commit_result {
+                        lock_or_log(&runtime.active_receivers, "active receivers")
+                            .map(|mut active| active.remove(&device_id));
+                        return Err(error);
+                    }
+                    return Ok(session_cancel);
                 }
                 RoomControlEvent::VerificationFailed => {
                     bail!("the one-time device verification code was rejected");
@@ -471,7 +496,7 @@ async fn establish_initial_room(
     }
     .await;
     match pairing {
-        Ok(()) => Ok(session),
+        Ok(session_cancel) => Ok((session, session_cancel)),
         Err(error) => {
             session.shutdown().await;
             Err(error)
@@ -503,24 +528,42 @@ fn spawn_remembered_receiver(runtime: Arc<AgentRuntime>, device_id: String) {
     if runtime.shutdown.is_cancelled() {
         return;
     }
-    let inserted = match lock_or_log(&runtime.active_receivers, "active receivers") {
-        Some(mut active) => active.insert(device_id.clone()),
-        None => false,
+    let receiver_cancel = match register_remembered_receiver(&runtime, &device_id) {
+        Ok(Some(cancel)) => cancel,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(device_id, %error, "remembered receiver could not start");
+            return;
+        }
     };
-    if !inserted {
-        return;
-    }
     let task_runtime = runtime.clone();
     spawn_background_task(&runtime, async move {
-        remembered_receiver_loop(task_runtime.clone(), &device_id).await;
+        remembered_receiver_loop(task_runtime.clone(), &device_id, &receiver_cancel).await;
         if let Some(mut active) = lock_or_log(&task_runtime.active_receivers, "active receivers") {
             active.remove(&device_id);
         }
     });
 }
 
-async fn remembered_receiver_loop(runtime: Arc<AgentRuntime>, device_id: &str) {
-    while !runtime.shutdown.is_cancelled() {
+fn register_remembered_receiver(
+    runtime: &AgentRuntime,
+    device_id: &str,
+) -> Result<Option<TransferCancelToken>> {
+    let mut active = lock(&runtime.active_receivers)?;
+    if active.contains_key(device_id) {
+        return Ok(None);
+    }
+    let cancel = TransferCancelToken::new();
+    active.insert(device_id.to_string(), cancel.clone());
+    Ok(Some(cancel))
+}
+
+async fn remembered_receiver_loop(
+    runtime: Arc<AgentRuntime>,
+    device_id: &str,
+    receiver_cancel: &TransferCancelToken,
+) {
+    while !runtime.shutdown.is_cancelled() && !receiver_cancel.is_cancelled() {
         let loaded = (|| -> Result<_> {
             let store = lock(&runtime.store)?;
             let record = store
@@ -536,7 +579,7 @@ async fn remembered_receiver_loop(runtime: Arc<AgentRuntime>, device_id: &str) {
                 return;
             }
         };
-        match connect_remembered_room(&runtime, &record, &opaque, &runtime.shutdown).await {
+        match connect_remembered_room(&runtime, &record, &opaque, receiver_cancel).await {
             Ok((session, next_generation)) => {
                 if let Err(error) = lock(&runtime.store).and_then(|mut store| {
                     store
@@ -552,23 +595,31 @@ async fn remembered_receiver_loop(runtime: Arc<AgentRuntime>, device_id: &str) {
                     generation = next_generation,
                     "remembered room connected"
                 );
-                let result =
-                    run_room_session(&runtime, &session, record.id(), record.label()).await;
+                let result = run_room_session(
+                    &runtime,
+                    &session,
+                    record.id(),
+                    record.label(),
+                    receiver_cancel,
+                )
+                .await;
                 session.shutdown().await;
                 if let Err(error) = result
                     && !runtime.shutdown.is_cancelled()
+                    && !receiver_cancel.is_cancelled()
                 {
                     tracing::warn!(device = %record.label(), %error, "remembered room ended");
                 }
             }
             Err(error) => {
-                if runtime.shutdown.is_cancelled() {
+                if runtime.shutdown.is_cancelled() || receiver_cancel.is_cancelled() {
                     return;
                 }
                 tracing::warn!(device = %record.label(), %error, "remembered receiver retrying");
                 tokio::select! {
                     _ = tokio::time::sleep(RECEIVER_RETRY_DELAY) => {}
                     _ = runtime.shutdown.cancelled() => return,
+                    _ = receiver_cancel.cancelled() => return,
                 }
             }
         }
@@ -579,7 +630,7 @@ async fn connect_remembered_room(
     runtime: &Arc<AgentRuntime>,
     record: &RememberedDeviceRecord,
     opaque: &[u8],
-    cancel: &TransferCancelToken,
+    receiver_cancel: &TransferCancelToken,
 ) -> Result<(RoomControlSession, u64)> {
     let credential = RememberedCredential::from_opaque(opaque)?;
     let relay = record.relay();
@@ -616,7 +667,12 @@ async fn connect_remembered_room(
                     ));
                     continue;
                 }
-                _ = cancel.cancelled() => {
+                _ = receiver_cancel.cancelled() => {
+                    attempt_cancel.cancel();
+                    let _ = (&mut connect).await;
+                    return Err(anyhow!("remembered room connection cancelled"));
+                }
+                _ = runtime.shutdown.cancelled() => {
                     attempt_cancel.cancel();
                     let _ = (&mut connect).await;
                     return Err(anyhow!("remembered room connection cancelled"));
@@ -625,7 +681,12 @@ async fn connect_remembered_room(
         } else {
             tokio::select! {
                 result = &mut connect => result,
-                _ = cancel.cancelled() => {
+                _ = receiver_cancel.cancelled() => {
+                    attempt_cancel.cancel();
+                    let _ = (&mut connect).await;
+                    return Err(anyhow!("remembered room connection cancelled"));
+                }
+                _ = runtime.shutdown.cancelled() => {
                     attempt_cancel.cancel();
                     let _ = (&mut connect).await;
                     return Err(anyhow!("remembered room connection cancelled"));
@@ -634,7 +695,11 @@ async fn connect_remembered_room(
         };
         match result {
             Ok(session) => return Ok((session, next_generation)),
-            Err(error) if error.peer_authenticated() || cancel.is_cancelled() => {
+            Err(error)
+                if error.peer_authenticated()
+                    || receiver_cancel.is_cancelled()
+                    || runtime.shutdown.is_cancelled() =>
+            {
                 return Err(error.into_error().into());
             }
             Err(error) => last_error = Some(error.into_error().into()),
@@ -648,14 +713,19 @@ async fn run_room_session(
     session: &RoomControlSession,
     device_id: &str,
     device_label: &str,
+    receiver_cancel: &TransferCancelToken,
 ) -> Result<()> {
     loop {
         let event = tokio::select! {
             event = session.next_event() => event?,
             _ = runtime.shutdown.cancelled() => return Ok(()),
+            _ = receiver_cancel.cancelled() => return Ok(()),
         };
         match event {
             RoomControlEvent::IncomingOffer(offer) => {
+                if receiver_cancel.is_cancelled() {
+                    return Ok(());
+                }
                 match receive_room_offer(runtime, session, device_id, device_label, offer).await {
                     Ok(item) => tracing::info!(
                         device = device_label,
@@ -999,7 +1069,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(state_directory.join("product")).unwrap()),
-            active_receivers: Mutex::new(HashSet::new()),
+            active_receivers: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
@@ -1016,6 +1086,51 @@ mod tests {
             handle_request(runtime, AgentRequest::LatestInbox).await,
             AgentResponse::Latest { item: None }
         );
+    }
+
+    #[tokio::test]
+    async fn forgetting_device_cancels_its_remembered_receiver() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let mut store = ProductStore::open(state_directory.join("product")).unwrap();
+        let pending = store.prepare_device("MacBook", "broker", None).unwrap();
+        let device_id = pending.id().to_string();
+        store.commit_device(pending, b"opaque", 0).unwrap();
+        let receiver_cancel = TransferCancelToken::new();
+        let runtime = Arc::new(AgentRuntime {
+            config: RuntimeConfig {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                socket_path: state_directory.join("agent.sock"),
+                device_name: "test-wsl".into(),
+                broker: "broker".into(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(store),
+            active_receivers: Mutex::new(HashMap::from([(
+                device_id.clone(),
+                receiver_cancel.clone(),
+            )])),
+            active_pairings: Mutex::new(HashSet::new()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+
+        let response = handle_request(
+            runtime.clone(),
+            AgentRequest::ForgetDevice {
+                device: "macbook".into(),
+            },
+        )
+        .await;
+
+        let AgentResponse::DeviceForgotten { device } = response else {
+            panic!("unexpected response")
+        };
+        assert_eq!(device.id, device_id);
+        assert!(receiver_cancel.is_cancelled());
+        assert!(lock(&runtime.store).unwrap().devices().is_empty());
     }
 
     #[tokio::test]

@@ -48,6 +48,7 @@ target/debug/envoix agent install --inbox "$PWD/inbox" --device-name WSL
 # On the Mac, enter the printed Room code, then enter the six-digit code when
 # Envoix asks to verify WSL. No transfer is required to finish pairing.
 ~/.local/bin/envoix devices list
+~/.local/bin/envoix devices forget MacBook --yes
 ~/.local/bin/envoix inbox list
 ~/.local/bin/envoix inbox latest
 ```
@@ -56,6 +57,9 @@ Use `envoix agent stop` and `envoix agent start` to manage the installed
 service. The installer enables autostart for the user service but does not edit
 `/etc/wsl.conf`; if systemd is unavailable, its error includes the equivalent
 foreground command.
+
+`devices forget <ID-or-label> --yes` revokes that remembered credential and
+stops future reconnects without deleting completed Inbox files or history.
 
 On macOS, remembered peers appear as devices. Choose **Send**, or drag files
 and folders directly onto a device; Envoix opens the normal review screen and

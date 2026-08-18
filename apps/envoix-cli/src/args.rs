@@ -100,6 +100,14 @@ pub(crate) struct DevicesArgs {
 pub(crate) enum DevicesCommand {
     /// List devices that can reconnect without a new invitation.
     List,
+    /// Revoke and remove one remembered device.
+    Forget {
+        /// Device ID or exact label shown by `devices list`.
+        device: String,
+        /// Confirm deletion of the remembered credential.
+        #[arg(long, required = true)]
+        yes: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -540,6 +548,8 @@ mod tests {
         assert!(Cli::try_parse_from(["envoix", "agent", "stop"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "agent", "pair", "--name", "MacBook"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook", "--yes"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook"]).is_err());
         assert!(Cli::try_parse_from(["envoix", "inbox", "latest"]).is_ok());
     }
 }
