@@ -234,6 +234,8 @@ pub struct Relationship {
     pub id: RelationshipId,
     pub device_id: DeviceId,
     pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_generation: Option<u64>,
     pub state: RelationshipState,
 }
 

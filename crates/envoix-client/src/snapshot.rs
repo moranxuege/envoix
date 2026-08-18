@@ -29,6 +29,7 @@ pub enum ApplicationErrorCode {
     InvalidReference,
     InvalidTransition,
     InvalidProgress,
+    GenerationMismatch,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -63,6 +64,14 @@ pub enum ApplyError {
         transferred_bytes: u64,
         total_bytes: u64,
     },
+    #[error(
+        "relationship {relationship_id} cannot move generation backwards from {current_generation} to {attempted_generation}"
+    )]
+    GenerationMismatch {
+        relationship_id: RelationshipId,
+        current_generation: u64,
+        attempted_generation: u64,
+    },
 }
 
 impl ApplyError {
@@ -77,6 +86,7 @@ impl ApplyError {
             Self::InvalidReference { .. } => ApplicationErrorCode::InvalidReference,
             Self::InvalidTransition { .. } => ApplicationErrorCode::InvalidTransition,
             Self::InvalidProgress { .. } => ApplicationErrorCode::InvalidProgress,
+            Self::GenerationMismatch { .. } => ApplicationErrorCode::GenerationMismatch,
         }
     }
 }
@@ -169,8 +179,20 @@ impl EngineSnapshot {
                         id: relationship_id.clone(),
                         device_id,
                         generation,
+                        previous_generation: None,
                         state: RelationshipState::Trusted,
                     },
+                )?;
+                self.relationships.insert(relationship_id, relationship);
+            }
+            EngineEvent::RelationshipRotated {
+                relationship_id,
+                generation,
+            } => {
+                let relationship = reducers::relationship::rotate(
+                    self.relationships.get(&relationship_id),
+                    &relationship_id,
+                    generation,
                 )?;
                 self.relationships.insert(relationship_id, relationship);
             }

@@ -4,7 +4,7 @@ use envoix_client::model::{
     ContentId, DeviceId, EntityKind, RelationshipId, RelationshipState, RoomCloseReason, RoomId,
     RoomState, TransferDirection, TransferId, TransferState,
 };
-use envoix_client::snapshot::{ApplyError, EngineSnapshot};
+use envoix_client::snapshot::{ApplicationErrorCode, ApplyError, EngineSnapshot};
 
 struct FixtureIds {
     device: DeviceId,
@@ -87,6 +87,7 @@ fn relationship_reducer_requires_a_device_and_revocation_is_terminal() {
         },
     )
     .unwrap_err();
+    assert_eq!(error.code(), ApplicationErrorCode::EntityNotFound);
     assert!(matches!(
         error,
         ApplyError::MissingEntity {
@@ -98,6 +99,52 @@ fn relationship_reducer_requires_a_device_and_revocation_is_terminal() {
     assert!(snapshot.relationships.is_empty());
 
     trust_relationship(&mut snapshot, &ids);
+    assert_eq!(
+        snapshot.relationships[&ids.relationship].previous_generation,
+        None
+    );
+    apply_next(
+        &mut snapshot,
+        EngineEvent::RelationshipRotated {
+            relationship_id: ids.relationship.clone(),
+            generation: 5,
+        },
+    )
+    .unwrap();
+    assert_eq!(snapshot.relationships[&ids.relationship].generation, 5);
+    assert_eq!(
+        snapshot.relationships[&ids.relationship].previous_generation,
+        Some(4)
+    );
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::RelationshipRotated {
+            relationship_id: ids.relationship.clone(),
+            generation: 5,
+        },
+    )
+    .unwrap();
+    let before_stale_generation = snapshot.clone();
+    let error = apply_next(
+        &mut snapshot,
+        EngineEvent::RelationshipRotated {
+            relationship_id: ids.relationship.clone(),
+            generation: 4,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), ApplicationErrorCode::GenerationMismatch);
+    assert!(matches!(
+        error,
+        ApplyError::GenerationMismatch {
+            current_generation: 5,
+            attempted_generation: 4,
+            ..
+        }
+    ));
+    assert_eq!(snapshot, before_stale_generation);
+
     apply_next(
         &mut snapshot,
         EngineEvent::RelationshipRevoked {
@@ -109,6 +156,24 @@ fn relationship_reducer_requires_a_device_and_revocation_is_terminal() {
         snapshot.relationships[&ids.relationship].state,
         RelationshipState::Revoked
     );
+
+    let before_revoked_rotation = snapshot.clone();
+    let error = apply_next(
+        &mut snapshot,
+        EngineEvent::RelationshipRotated {
+            relationship_id: ids.relationship.clone(),
+            generation: 6,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ApplyError::InvalidTransition {
+            entity: EntityKind::Relationship,
+            ..
+        }
+    ));
+    assert_eq!(snapshot, before_revoked_rotation);
 
     let before = snapshot.clone();
     let error = apply_next(

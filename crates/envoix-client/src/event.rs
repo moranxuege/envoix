@@ -31,6 +31,12 @@ pub enum EngineEvent {
         device_id: DeviceId,
         generation: u64,
     },
+    /// Persists the target generation after remembered authentication.
+    /// Repeating the current generation is an idempotent crash recovery.
+    RelationshipRotated {
+        relationship_id: RelationshipId,
+        generation: u64,
+    },
     RelationshipRevoked {
         relationship_id: RelationshipId,
     },

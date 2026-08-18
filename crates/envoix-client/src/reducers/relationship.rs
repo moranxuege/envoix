@@ -42,3 +42,33 @@ pub(crate) fn revoke(
     relationship.state = RelationshipState::Revoked;
     Ok(relationship)
 }
+
+pub(crate) fn rotate(
+    existing: Option<&Relationship>,
+    relationship_id: &RelationshipId,
+    generation: u64,
+) -> Result<Relationship, ApplyError> {
+    let mut relationship = existing
+        .cloned()
+        .ok_or_else(|| missing(EntityKind::Relationship, relationship_id))?;
+    if relationship.state != RelationshipState::Trusted {
+        return Err(invalid_transition(
+            EntityKind::Relationship,
+            relationship_id,
+            relationship.state.wire_name(),
+            "relationship_rotated",
+        ));
+    }
+    if generation < relationship.generation {
+        return Err(ApplyError::GenerationMismatch {
+            relationship_id: relationship_id.clone(),
+            current_generation: relationship.generation,
+            attempted_generation: generation,
+        });
+    }
+    if generation > relationship.generation {
+        relationship.previous_generation = Some(relationship.generation);
+        relationship.generation = generation;
+    }
+    Ok(relationship)
+}

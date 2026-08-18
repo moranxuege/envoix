@@ -4,7 +4,7 @@ use envoix_client::APPLICATION_CONTRACT_VERSION;
 use envoix_client::command::{CommandEnvelope, EngineCommand};
 use envoix_client::event::{EngineEvent, EventEnvelope};
 use envoix_client::runtime::replay;
-use envoix_client::snapshot::EngineSnapshot;
+use envoix_client::snapshot::{ApplyError, EngineSnapshot};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize)]
@@ -35,6 +35,7 @@ fn event_tag(event: &EngineEvent) -> &'static str {
         EngineEvent::CapabilitiesChanged { .. } => "capabilities_changed",
         EngineEvent::DeviceObserved { .. } => "device_observed",
         EngineEvent::RelationshipTrusted { .. } => "relationship_trusted",
+        EngineEvent::RelationshipRotated { .. } => "relationship_rotated",
         EngineEvent::RelationshipRevoked { .. } => "relationship_revoked",
         EngineEvent::RoomOpened { .. } => "room_opened",
         EngineEvent::RoomConnected { .. } => "room_connected",
@@ -51,8 +52,50 @@ fn event_tag(event: &EngineEvent) -> &'static str {
 }
 
 #[test]
-fn application_contract_v1_fixture_is_complete_and_replayable() {
+fn application_contract_v1_fixture_remains_readable_and_unchanged() {
     let raw = include_str!("../../../tests/fixtures/v0.3/application-contract-v1.json");
+    let json: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let fixture: ApplicationContractFixture = serde_json::from_value(json.clone()).unwrap();
+
+    assert_eq!(fixture.contract_version, 1);
+    assert!(
+        fixture
+            .commands
+            .iter()
+            .all(|command| command.contract_version == 1)
+    );
+    assert!(
+        fixture
+            .events
+            .iter()
+            .all(|event| event.contract_version == 1)
+    );
+    assert!(
+        fixture
+            .events
+            .iter()
+            .all(|event| !matches!(event.event, EngineEvent::RelationshipRotated { .. }))
+    );
+    assert!(
+        fixture
+            .snapshot
+            .relationships
+            .values()
+            .all(|relationship| relationship.previous_generation.is_none())
+    );
+    assert!(matches!(
+        replay(EngineSnapshot::new(), fixture.events.clone()),
+        Err(ApplyError::UnsupportedContractVersion {
+            expected: APPLICATION_CONTRACT_VERSION,
+            actual: 1,
+        })
+    ));
+    assert_eq!(serde_json::to_value(&fixture).unwrap(), json);
+}
+
+#[test]
+fn application_contract_v2_fixture_is_complete_and_replayable() {
+    let raw = include_str!("../../../tests/fixtures/v0.3/application-contract-v2.json");
     let json: serde_json::Value = serde_json::from_str(raw).unwrap();
     let fixture: ApplicationContractFixture = serde_json::from_value(json.clone()).unwrap();
 
@@ -102,6 +145,7 @@ fn application_contract_v1_fixture_is_complete_and_replayable() {
             "capabilities_changed",
             "device_observed",
             "relationship_revoked",
+            "relationship_rotated",
             "relationship_trusted",
             "room_closed",
             "room_connected",
