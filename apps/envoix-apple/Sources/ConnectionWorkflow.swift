@@ -663,7 +663,8 @@ final class ConnectionWorkflowState: ObservableObject {
             switch outcome {
             case .sessionEnded:
                 return
-            case .authenticatedFailure(let message):
+            case .authenticatedFailure(let message),
+                 .credentialUnavailable(let message):
                 blockedRememberedRelationships.insert(relationshipID)
                 rememberedRoomErrors[relationshipID] = message
                 activeRememberedRelationshipID = nil
@@ -712,6 +713,7 @@ final class ConnectionWorkflowState: ObservableObject {
         case sessionEnded
         case preAuthenticationFailure(requiredCooldown: TimeInterval?)
         case authenticatedFailure(String)
+        case credentialUnavailable(String)
     }
 
     private func connectRememberedPeer(
@@ -744,6 +746,10 @@ final class ConnectionWorkflowState: ObservableObject {
                 )
                 rememberedCredentialReferences[peer.relationshipID] = credentialReference
             }
+        } catch RememberedPeerStoreError.credentialInteractionRequired {
+            return .credentialUnavailable(
+                RememberedPeerStoreError.credentialInteractionRequired.localizedDescription
+            )
         } catch RememberedPeerStoreError.keychain {
             return .preAuthenticationFailure(
                 requiredCooldown: reconnectPolicy.minimumBackoff

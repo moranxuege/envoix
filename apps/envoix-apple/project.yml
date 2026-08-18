@@ -221,15 +221,17 @@ targets:
           - "CoreBluetooth"
 
   Envoix-macOSClipboardTests:
-    # Clipboard intake is intentionally unhosted so tests cannot initialize
-    # the production app or query remembered-device credentials in Keychain.
+    # Clipboard and credential-store tests are intentionally unhosted so they
+    # cannot initialize the production app or query real Keychain items.
     type: bundle.unit-test
     platform: macOS
     deploymentTarget: "13.0"
     sources:
       - Sources/ClipboardIntake.swift
+      - Sources/RememberedPeers.swift
       - Shared/ShareDraftStore.swift
       - Tests/EnvoixMacOSUITests/ClipboardIntakeTests.swift
+      - Tests/EnvoixMacOSUITests/RememberedPeerStoreTests.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.macos.clipboard-tests

@@ -1,5 +1,8 @@
 import Foundation
 import Security
+#if os(macOS)
+import LocalAuthentication
+#endif
 
 struct RememberedPeerSummary: Equatable, Identifiable, CustomDebugStringConvertible {
     let relationshipID: String
@@ -55,6 +58,7 @@ enum RememberedPeerStoreError: LocalizedError {
     case missingCredential
     case activeTransfer
     case inactiveSession
+    case credentialInteractionRequired
     case keychain(OSStatus)
     case corruptMetadata
 
@@ -68,6 +72,8 @@ enum RememberedPeerStoreError: LocalizedError {
             return "This remembered device is already in use."
         case .inactiveSession:
             return "This remembered-device session is no longer active."
+        case .credentialInteractionRequired:
+            return "This remembered device must be paired again before Envoix can use it."
         case .keychain:
             return "Protected credential storage is unavailable."
         case .corruptMetadata:
@@ -108,23 +114,7 @@ final class RememberedPeerStore: @unchecked Sendable {
 
     func peers() throws -> [RememberedPeerSummary] {
         try lock.withEnvoixLock {
-            var peers = try readMetadata()
-            var removedMissingCredential = false
-            peers.removeAll { peer in
-                do {
-                    _ = try credentialStore.get(peer.credentialReference)
-                    return false
-                } catch RememberedPeerStoreError.missingCredential {
-                    removedMissingCredential = true
-                    return true
-                } catch {
-                    return false
-                }
-            }
-            if removedMissingCredential {
-                try writeMetadata(peers)
-            }
-            return peers
+            try readMetadata()
                 .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
                 .map(\.summary)
         }
@@ -379,18 +369,35 @@ final class AppleCredentialStore: RememberedCredentialStoring {
     }
 
     func get(_ reference: String) throws -> Data {
-        var query = baseQuery(reference)
-        query[kSecReturnData] = true
-        query[kSecMatchLimit] = kSecMatchLimitOne
+        let query = readQuery(reference)
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound {
             throw RememberedPeerStoreError.missingCredential
         }
+        if Self.requiresRepair(status) {
+            throw RememberedPeerStoreError.credentialInteractionRequired
+        }
         guard status == errSecSuccess, let data = result as? Data else {
             throw RememberedPeerStoreError.keychain(status)
         }
         return data
+    }
+
+    func readQuery(_ reference: String) -> [CFString: Any] {
+        var query = baseQuery(reference)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        #if os(macOS)
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext] = context
+        #endif
+        return query
+    }
+
+    static func requiresRepair(_ status: OSStatus) -> Bool {
+        status == errSecInteractionNotAllowed || status == errSecAuthFailed
     }
 
     func delete(_ reference: String) throws {
