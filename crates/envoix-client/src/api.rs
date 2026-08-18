@@ -57,9 +57,10 @@ impl Client {
         let Some(path) = config_path else {
             return Ok(client);
         };
-        let config = crate::RuntimeConfig::read(path).map_err(setup_error)?;
+        let config = crate::configuration::RuntimeConfig::read(path).map_err(setup_error)?;
         if let Some(window) = config.data_stream_window {
-            client.data_stream_window = crate::parse_window(&window).map_err(setup_error)?;
+            client.data_stream_window =
+                crate::configuration::parse_window(&window).map_err(setup_error)?;
         }
         if let Some(candidates) = config.candidates {
             client.candidates = CandidateFilter::from_lists(&candidates.allow, &candidates.deny)

@@ -15,15 +15,12 @@ use envoix_client::api::{
     Capabilities, InvitationBootstrap, InvitationError, InviteSecretRef, InviteV2, PeerSource,
     TransferRole, ValidatedInvitation, register_remembered_credential,
 };
+use envoix_client::{DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-const DEFAULT_PAIRING_BROKER: &str =
-    "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
-const DEFAULT_PAIRING_RELAY: &str = "https://envoix.chkxwlyh.us:8444";
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
@@ -272,12 +269,12 @@ fn pairing_invite_endpoints(broker: &str, relay: &str) -> (String, Option<String
     let broker = broker.trim();
     let use_default_relay = broker.is_empty();
     let broker = if broker.is_empty() {
-        DEFAULT_PAIRING_BROKER
+        DEFAULT_RENDEZVOUS_BROKER
     } else {
         broker
     };
     let relay = match relay.trim() {
-        "" if use_default_relay => Some(DEFAULT_PAIRING_RELAY.to_string()),
+        "" if use_default_relay => Some(DEFAULT_RELAY_URL.to_string()),
         "" => None,
         relay => Some(relay.to_string()),
     };
@@ -365,7 +362,7 @@ mod room_control;
 #[cfg(test)]
 mod tests {
     use super::{
-        Capabilities, DEFAULT_PAIRING_BROKER, DEFAULT_PAIRING_RELAY, InviteV2, TransferRole,
+        Capabilities, DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, InviteV2, TransferRole,
         pairing_invite_endpoints, parse_full_invite_for_role, unix_now,
     };
 
@@ -373,8 +370,8 @@ mod tests {
     fn blank_pairing_endpoints_use_public_defaults() {
         let (broker, relay) = pairing_invite_endpoints(" \n", "\t");
 
-        assert_eq!(broker, DEFAULT_PAIRING_BROKER);
-        assert_eq!(relay.as_deref(), Some(DEFAULT_PAIRING_RELAY));
+        assert_eq!(broker, DEFAULT_RENDEZVOUS_BROKER);
+        assert_eq!(relay.as_deref(), Some(DEFAULT_RELAY_URL));
     }
 
     #[test]
@@ -402,8 +399,8 @@ mod tests {
     #[test]
     fn role_parser_keeps_complete_invite_v2_uris() {
         let invite = InviteV2::create(
-            DEFAULT_PAIRING_BROKER.into(),
-            vec![DEFAULT_PAIRING_RELAY.into()],
+            DEFAULT_RENDEZVOUS_BROKER.into(),
+            vec![DEFAULT_RELAY_URL.into()],
             TransferRole::Sender,
             Capabilities::current(),
             unix_now(),

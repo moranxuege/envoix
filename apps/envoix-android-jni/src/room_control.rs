@@ -9,6 +9,7 @@ use envoix_client::api::{
     RoomOfferRejection, RoomTransferOffer, TransferCancelToken, TransferOptions,
     acquire_remembered_credential, connect_remembered_room_control, connect_room_control,
 };
+use envoix_client::{DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER};
 use envoix_error::CoreError;
 use jni::JNIEnv;
 use jni::objects::{GlobalRef, JClass, JObject, JString};
@@ -18,10 +19,6 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::{callback_or_log, emit, java_vm_or_log, jstr, runtime, to_jstring};
-
-const DEFAULT_RENDEZVOUS_BROKER: &str =
-    "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
-const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
 
 struct ActiveRoom {
     cancel: TransferCancelToken,
