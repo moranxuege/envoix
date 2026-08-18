@@ -501,6 +501,37 @@ fn transfer_reducer_is_atomic_and_outlives_its_room() {
 }
 
 #[test]
+fn an_outgoing_queued_transfer_records_the_peers_typed_rejection() {
+    let ids = fixture_ids("outgoing_rejected");
+    let mut snapshot = EngineSnapshot::new();
+    trust_relationship(&mut snapshot, &ids);
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferCreated {
+            transfer_id: ids.transfer.clone(),
+            relationship_id: ids.relationship,
+            room_id: None,
+            content_id: ids.content,
+            direction: TransferDirection::Send,
+            total_bytes: 7,
+        },
+    )
+    .unwrap();
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferRejected {
+            transfer_id: ids.transfer.clone(),
+            reason: TransferRejection::Busy,
+        },
+    )
+    .unwrap();
+
+    let transfer = &snapshot.transfers[&ids.transfer];
+    assert_eq!(transfer.state, TransferState::Rejected);
+    assert_eq!(transfer.rejection, Some(TransferRejection::Busy));
+}
+
+#[test]
 fn incoming_transfer_requires_an_explicit_accept_or_typed_rejection() {
     let ids = fixture_ids("incoming_offer");
     let rejected_id = TransferId::parse("transfer_incoming_rejected").unwrap();

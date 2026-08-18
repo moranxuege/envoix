@@ -296,9 +296,16 @@ complete. Protocol v6 adds durable Transfer creation/list/get operations,
 bounded local source paths, `TransferChanged` events, and a secret-free typed
 diagnostic report. The Agent seals source content before atomically recording a
 queued Transfer, so a successful creation response always names restartable
-state. Requests are limited to 64 KiB and responses to 20 MiB. v3 through v5
-requests receive `unsupported_protocol_version`; the Agent does not run a
-legacy decoder.
+state. One scheduler per authenticated Relationship offers that Transfer over
+the existing bidirectional Room, then runs the directional Manifest v2 data
+plane only after the peer accepts. A Relationship sends one Transfer at a time;
+progress is checkpointed every 4 MiB and at payload completion. Queued and
+nonterminal in-flight Transfers are eligible again after process restart, while
+paused and failed Transfers are never retried implicitly. Peer decline, busy,
+expiry, and invalid-offer decisions remain typed rejection outcomes.
+Requests are limited to 64 KiB and responses to 20 MiB. v3 through v5 requests
+receive `unsupported_protocol_version`; the Agent does not run a legacy
+decoder.
 
 ## 9. Persistence and secret ownership
 

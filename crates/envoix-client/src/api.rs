@@ -41,7 +41,7 @@ pub use envoix_session::{
     receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
     send_manifest_v2_manual, send_manifest_v2_over_datagram_transport,
     send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
-    send_manifest_v2_via_room_hybrid_with_authentication,
+    send_manifest_v2_via_room, send_manifest_v2_via_room_hybrid_with_authentication,
     send_manifest_v2_via_room_with_authentication, start_nearby_invite_inbox,
 };
 

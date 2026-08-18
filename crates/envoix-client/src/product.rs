@@ -26,7 +26,7 @@ use crate::effect::EngineEffect;
 use crate::event::{EngineEvent, EventEnvelope};
 use crate::model::{
     CommandId, ContentId, Device, DeviceId, Relationship, RelationshipId, RelationshipState,
-    Transfer, TransferDirection, TransferId,
+    Transfer, TransferDirection, TransferFailure, TransferId, TransferRejection, TransferState,
 };
 use crate::snapshot::EngineSnapshot;
 use crate::storage::{
@@ -1249,6 +1249,207 @@ impl ProductStore {
             .cloned())
     }
 
+    pub fn dispatchable_transfers(
+        &self,
+        relationship_id: &str,
+    ) -> Result<Vec<Transfer>, EngineStoreError> {
+        let relationship_id = RelationshipId::parse(relationship_id.to_string())
+            .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        Ok(self
+            .engine
+            .state()
+            .snapshot
+            .transfers
+            .values()
+            .filter(|transfer| {
+                transfer.relationship_id == relationship_id
+                    && transfer.direction == TransferDirection::Send
+                    && matches!(
+                        transfer.state,
+                        TransferState::Queued
+                            | TransferState::Connecting
+                            | TransferState::Transferring
+                            | TransferState::AwaitingDeliveryProof
+                    )
+            })
+            .cloned()
+            .collect())
+    }
+
+    pub fn start_outgoing_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+    ) -> Result<Transfer, EngineStoreError> {
+        let transfer = self.required_outgoing_transfer(transfer_id)?;
+        match transfer.state {
+            TransferState::Queued => self.apply_transfer_events(
+                transfer_id,
+                [EngineEvent::TransferStarted {
+                    transfer_id: transfer_id.clone(),
+                }],
+            ),
+            TransferState::Connecting
+            | TransferState::Transferring
+            | TransferState::AwaitingDeliveryProof => Ok(transfer),
+            state => Err(EngineStoreError::InvalidState(format!(
+                "cannot start outgoing Transfer {transfer_id} from {}",
+                state.wire_name()
+            ))),
+        }
+    }
+
+    pub fn progress_outgoing_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+        transferred_bytes: u64,
+    ) -> Result<Transfer, EngineStoreError> {
+        let transfer = self.required_outgoing_transfer(transfer_id)?;
+        if transferred_bytes == transfer.transferred_bytes
+            || matches!(
+                transfer.state,
+                TransferState::AwaitingDeliveryProof | TransferState::Delivered
+            ) && transferred_bytes == transfer.total_bytes
+        {
+            return Ok(transfer);
+        }
+        self.apply_transfer_events(
+            transfer_id,
+            [EngineEvent::TransferProgressed {
+                transfer_id: transfer_id.clone(),
+                transferred_bytes,
+            }],
+        )
+    }
+
+    pub fn complete_outgoing_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+    ) -> Result<Transfer, EngineStoreError> {
+        let transfer = self.required_outgoing_transfer(transfer_id)?;
+        let mut events = Vec::with_capacity(3);
+        match transfer.state {
+            TransferState::Connecting | TransferState::Transferring => {
+                if transfer.transferred_bytes != transfer.total_bytes {
+                    events.push(EngineEvent::TransferProgressed {
+                        transfer_id: transfer_id.clone(),
+                        transferred_bytes: transfer.total_bytes,
+                    });
+                }
+                events.push(EngineEvent::TransferPayloadCompleted {
+                    transfer_id: transfer_id.clone(),
+                });
+                events.push(EngineEvent::TransferDeliveryProofVerified {
+                    transfer_id: transfer_id.clone(),
+                });
+            }
+            TransferState::AwaitingDeliveryProof => {
+                events.push(EngineEvent::TransferDeliveryProofVerified {
+                    transfer_id: transfer_id.clone(),
+                });
+            }
+            TransferState::Delivered => return Ok(transfer),
+            state => {
+                return Err(EngineStoreError::InvalidState(format!(
+                    "cannot complete outgoing Transfer {transfer_id} from {}",
+                    state.wire_name()
+                )));
+            }
+        }
+        self.apply_transfer_events(transfer_id, events)
+    }
+
+    pub fn reject_outgoing_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+        reason: TransferRejection,
+    ) -> Result<Transfer, EngineStoreError> {
+        self.required_outgoing_transfer(transfer_id)?;
+        self.apply_transfer_events(
+            transfer_id,
+            [EngineEvent::TransferRejected {
+                transfer_id: transfer_id.clone(),
+                reason,
+            }],
+        )
+    }
+
+    pub fn fail_outgoing_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+        failure: TransferFailure,
+    ) -> Result<Transfer, EngineStoreError> {
+        let transfer = self.required_outgoing_transfer(transfer_id)?;
+        if transfer.state == TransferState::Failed && transfer.failure.as_ref() == Some(&failure) {
+            return Ok(transfer);
+        }
+        self.apply_transfer_events(
+            transfer_id,
+            [EngineEvent::TransferFailed {
+                transfer_id: transfer_id.clone(),
+                failure,
+            }],
+        )
+    }
+
+    pub fn cancel_outgoing_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+    ) -> Result<Transfer, EngineStoreError> {
+        let transfer = self.required_outgoing_transfer(transfer_id)?;
+        if transfer.state == TransferState::Canceled {
+            return Ok(transfer);
+        }
+        self.apply_transfer_events(
+            transfer_id,
+            [EngineEvent::TransferCanceled {
+                transfer_id: transfer_id.clone(),
+            }],
+        )
+    }
+
+    fn required_outgoing_transfer(
+        &self,
+        transfer_id: &TransferId,
+    ) -> Result<Transfer, EngineStoreError> {
+        let transfer = self
+            .engine
+            .state()
+            .snapshot
+            .transfers
+            .get(transfer_id)
+            .cloned()
+            .ok_or_else(|| {
+                EngineStoreError::InvalidState(format!("Transfer {transfer_id} does not exist"))
+            })?;
+        if transfer.direction != TransferDirection::Send {
+            return Err(EngineStoreError::InvalidState(format!(
+                "Transfer {transfer_id} is not outgoing"
+            )));
+        }
+        Ok(transfer)
+    }
+
+    fn apply_transfer_events(
+        &mut self,
+        transfer_id: &TransferId,
+        events: impl IntoIterator<Item = EngineEvent>,
+    ) -> Result<Transfer, EngineStoreError> {
+        let mut state = self.engine.state().clone();
+        for event in events {
+            apply_product_event(&mut state, event)?;
+        }
+        let transfer = state
+            .snapshot
+            .transfers
+            .get(transfer_id)
+            .cloned()
+            .ok_or_else(|| {
+                EngineStoreError::InvalidState(format!("Transfer {transfer_id} does not exist"))
+            })?;
+        self.engine.replace(state)?;
+        Ok(transfer)
+    }
+
     pub fn append_inbox(&mut self, item: InboxItem) -> Result<(), EngineStoreError> {
         if self
             .engine
@@ -1959,6 +2160,53 @@ mod tests {
         assert_eq!(
             reopened.transfer("transfer_test").unwrap().unwrap().state,
             crate::model::TransferState::Queued
+        );
+    }
+
+    #[test]
+    fn outgoing_transfer_progress_and_completion_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let pending = store.prepare_device("MacBook", "broker", None).unwrap();
+        let relationship_id = pending.id().to_string();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+        let transfer_id = TransferId::parse("transfer_restart").unwrap();
+        store
+            .create_transfer(
+                "MacBook",
+                transfer_id.clone(),
+                ContentId::parse("content_restart").unwrap(),
+                42,
+            )
+            .unwrap();
+        store.start_outgoing_transfer(&transfer_id).unwrap();
+        store.progress_outgoing_transfer(&transfer_id, 21).unwrap();
+        drop(store);
+
+        let mut reopened = ProductStore::open(directory.path()).unwrap();
+        let dispatchable = reopened.dispatchable_transfers(&relationship_id).unwrap();
+        assert_eq!(dispatchable.len(), 1);
+        assert_eq!(
+            dispatchable[0].state,
+            crate::model::TransferState::Transferring
+        );
+        assert_eq!(dispatchable[0].transferred_bytes, 21);
+
+        let delivered = reopened.complete_outgoing_transfer(&transfer_id).unwrap();
+        assert_eq!(delivered.state, crate::model::TransferState::Delivered);
+        assert_eq!(delivered.transferred_bytes, 42);
+        drop(reopened);
+
+        assert_eq!(
+            ProductStore::open(directory.path())
+                .unwrap()
+                .transfer(transfer_id.as_str())
+                .unwrap()
+                .unwrap()
+                .state,
+            crate::model::TransferState::Delivered
         );
     }
 

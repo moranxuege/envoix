@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::model::{
     EntityKind, Relationship, RelationshipId, RelationshipState, Room, RoomId, RoomState, Transfer,
-    TransferFailure, TransferId, TransferRejection, TransferState,
+    TransferDirection, TransferFailure, TransferId, TransferRejection, TransferState,
 };
 use crate::snapshot::ApplyError;
 
@@ -101,8 +101,26 @@ pub(crate) fn reject(
     reason: TransferRejection,
 ) -> Result<Transfer, ApplyError> {
     let mut transfer = current(existing, transfer_id)?;
-    require_state(&transfer, TransferState::Offered, "transfer_rejected")?;
+    // Incoming rejection is a local decision while `Offered`; outgoing
+    // rejection is a peer fact received after a durable job was queued.
+    let peer_rejected_outgoing = transfer.direction == TransferDirection::Send
+        && matches!(
+            transfer.state,
+            TransferState::Queued
+                | TransferState::Connecting
+                | TransferState::Transferring
+                | TransferState::AwaitingDeliveryProof
+        );
+    if transfer.state != TransferState::Offered && !peer_rejected_outgoing {
+        return Err(invalid_transition(
+            EntityKind::Transfer,
+            transfer_id,
+            transfer.state.wire_name(),
+            "transfer_rejected",
+        ));
+    }
     transfer.state = TransferState::Rejected;
+    transfer.failure = None;
     transfer.rejection = Some(reason);
     Ok(transfer)
 }

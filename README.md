@@ -34,10 +34,10 @@ Manifest v1 and the former single-file protocol are not supported.
 
 ## CLI
 
-### Persistent WSL Agent
+### Persistent desktop Agent
 
-The Agent turns WSL into a remembered receiver with a durable Inbox while the
-CLI remains its local controller:
+The Agent gives Linux/WSL and Windows a durable Inbox and Outbox while the CLI
+remains its local controller:
 
 ```bash
 scripts/with-build-cache-guard.sh cargo build -p envoix-agent -p envoix-cli
@@ -54,8 +54,12 @@ target/debug/envoix agent install --inbox "$PWD/inbox" --device-name WSL
 # Envoix asks to verify WSL. No transfer is required to finish pairing.
 ~/.local/bin/envoix devices list
 ~/.local/bin/envoix devices forget MacBook --yes
+~/.local/bin/envoix transfers create --device MacBook ./photo.jpg ./folder
+~/.local/bin/envoix transfers list
+~/.local/bin/envoix transfers show '<transfer-id>'
 ~/.local/bin/envoix inbox list
 ~/.local/bin/envoix inbox latest
+~/.local/bin/envoix agent diagnostics
 ```
 
 Use `envoix agent stop` and `envoix agent start` to manage the installed
@@ -65,6 +69,10 @@ foreground command.
 
 `devices forget <ID-or-label> --yes` revokes that remembered credential and
 stops future reconnects without deleting completed Inbox files or history.
+`transfers create` seals the selected roots into durable content and queues one
+Transfer. If the remembered Room is connected, the peer immediately receives
+the normal file offer; otherwise the Agent dispatches it after reconnect. A
+process restart preserves queued and in-flight state.
 
 On macOS, remembered peers appear as devices. Choose **Send**, or drag files
 and folders directly onto a device; Envoix opens the normal review screen and
@@ -138,7 +146,8 @@ deny = ["100.64.0.0/10"]
 - `crates/envoix-ffi`: UniFFI surface for Apple and shared native semantics.
 - `crates/envoix-client::product`: remembered-device, Inbox, and local Agent
   command contract.
-- `apps/envoix-agent`: persistent Windows/Linux/WSL receiver and Inbox owner.
+- `apps/envoix-agent`: persistent Windows/Linux/WSL Engine, Inbox, and Outbox
+  owner.
 - `apps/envoix-android-jni`: Android JNI projection and platform save gate.
 - `apps/envoix-apple`, `android`, `apps/envoix-cli`: native front ends.
 

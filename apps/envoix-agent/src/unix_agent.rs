@@ -19,7 +19,8 @@ use envoix_client::api::{
     TransferRole,
 };
 use envoix_client::model::{
-    ContentId, RememberedAttemptOutcome, RememberedGenerationRole, TransferId,
+    ContentId, FailureCode, FailureOutcome, FailurePhase, RecoveryAction, RememberedAttemptOutcome,
+    RememberedGenerationRole, Transfer, TransferFailure, TransferId, TransferRejection,
     remembered_generation_attempts,
 };
 use envoix_client::product::{
@@ -42,12 +43,14 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 const REMEMBERED_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
 const RECEIVER_RETRY_DELAY: Duration = Duration::from_secs(3);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const MAX_RETAINED_AGENT_EVENTS: usize = 1_024;
+const OUTGOING_PROGRESS_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -100,10 +103,26 @@ struct AgentRuntime {
     client: api::Client,
     store: Mutex<ProductStore>,
     active_receivers: Mutex<HashMap<String, TransferCancelToken>>,
+    active_rooms: Mutex<HashMap<String, Arc<Notify>>>,
+    active_outgoing: Mutex<HashMap<String, ActiveOutgoingTransfer>>,
     active_pairings: Mutex<HashSet<String>>,
     events: Mutex<AgentEventLog>,
     shutdown: TransferCancelToken,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+struct ActiveOutgoingTransfer {
+    relationship_id: String,
+    cancel: TransferCancelToken,
+}
+
+struct PreparedOutgoingTransfer {
+    transfer: Transfer,
+    job: api::CanonicalTransferJob,
+    bootstrap: api::InvitationBootstrap,
+    broker: String,
+    relay: Option<String>,
+    offer: RoomTransferOffer,
 }
 
 struct AgentEventLog {
@@ -258,6 +277,29 @@ fn record_agent_event(runtime: &AgentRuntime, event: AgentEvent) -> Result<()> {
     Ok(())
 }
 
+fn wake_active_room(runtime: &AgentRuntime, relationship_id: &str) -> Result<()> {
+    let wake = lock(&runtime.active_rooms)?.get(relationship_id).cloned();
+    if let Some(wake) = wake {
+        wake.notify_one();
+    }
+    Ok(())
+}
+
+fn relationship_has_active_outgoing(runtime: &AgentRuntime, relationship_id: &str) -> Result<bool> {
+    Ok(lock(&runtime.active_outgoing)?
+        .values()
+        .any(|active| active.relationship_id == relationship_id))
+}
+
+fn cancel_outgoing_for_relationship(runtime: &AgentRuntime, relationship_id: &str) -> Result<()> {
+    for active in lock(&runtime.active_outgoing)?.values() {
+        if active.relationship_id == relationship_id {
+            active.cancel.cancel();
+        }
+    }
+    Ok(())
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
@@ -310,6 +352,8 @@ pub async fn run() -> Result<()> {
         client,
         store: Mutex::new(ProductStore::open(&state_directory)?),
         active_receivers: Mutex::new(HashMap::new()),
+        active_rooms: Mutex::new(HashMap::new()),
+        active_outgoing: Mutex::new(HashMap::new()),
         active_pairings: Mutex::new(HashSet::new()),
         events: Mutex::new(AgentEventLog::new()?),
         shutdown: TransferCancelToken::new(),
@@ -763,6 +807,7 @@ async fn handle_request_result(
             if let Some(cancel) = lock(&runtime.active_receivers)?.get(&forgotten.id) {
                 cancel.cancel();
             }
+            cancel_outgoing_for_relationship(&runtime, &forgotten.id)?;
             record_agent_event(
                 &runtime,
                 AgentEvent::RelationshipChanged {
@@ -829,9 +874,7 @@ async fn create_agent_transfer(
     job.seal_for_send()?;
     job_store.save(&job).await?;
 
-    let job_token = URL_SAFE_NO_PAD.encode(job.job_id().0);
-    let content_id = ContentId::parse(format!("content_{job_token}"))?;
-    let transfer_id = TransferId::parse(format!("transfer_{job_token}_{}", job.generation()))?;
+    let (content_id, transfer_id) = agent_transfer_ids(&job)?;
     let total_bytes = job
         .manifest()
         .expect("sealed Agent job has a manifest")
@@ -849,7 +892,32 @@ async fn create_agent_transfer(
             transfer_id: transfer_id.to_string(),
         },
     )?;
+    wake_active_room(&runtime, transfer.relationship_id.as_str())?;
     Ok(AgentResponse::TransferCreated { transfer })
+}
+
+fn agent_transfer_ids(job: &api::CanonicalTransferJob) -> Result<(ContentId, TransferId)> {
+    let job_token = URL_SAFE_NO_PAD.encode(job.job_id().0);
+    Ok((
+        ContentId::parse(format!("content_{job_token}"))?,
+        TransferId::parse(format!("transfer_{job_token}_{}", job.generation()))?,
+    ))
+}
+
+fn agent_job_id(content_id: &ContentId) -> Result<api::JobIdV2> {
+    let token = content_id
+        .as_str()
+        .strip_prefix("content_")
+        .ok_or_else(|| anyhow!("Agent content ID has an unsupported shape"))?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(token)
+        .context("Agent content ID is not canonical base64url")?;
+    let bytes = <[u8; 16]>::try_from(decoded)
+        .map_err(|_| anyhow!("Agent content ID does not contain a 16-byte job ID"))?;
+    if URL_SAFE_NO_PAD.encode(bytes) != token {
+        bail!("Agent content ID is not canonical base64url");
+    }
+    Ok(api::JobIdV2(bytes))
 }
 
 async fn begin_pairing(runtime: Arc<AgentRuntime>, label: String) -> Result<AgentResponse> {
@@ -905,11 +973,22 @@ async fn begin_pairing(runtime: Arc<AgentRuntime>, label: String) -> Result<Agen
         lock(&runtime.active_pairings)?.remove(&prepared.label().to_ascii_lowercase());
         return Err(error);
     }
+    let pairing_label = prepared.label().to_string();
     let task_runtime = runtime.clone();
-    spawn_background_task(
+    if let Err(error) = spawn_background_task(
         &runtime,
         run_initial_pairing(task_runtime, prepared, invitation, verification_code),
-    );
+    ) {
+        lock(&runtime.active_pairings)?.remove(&pairing_label.to_ascii_lowercase());
+        record_agent_event(
+            &runtime,
+            AgentEvent::PairingChanged {
+                label: pairing_label,
+                active: false,
+            },
+        )?;
+        return Err(error);
+    }
     Ok(response)
 }
 
@@ -956,7 +1035,14 @@ async fn run_initial_pairing(
             return;
         }
     };
-    let result = run_room_session(&runtime, &session, &device_id, &label, &session_cancel).await;
+    let result = run_room_session(
+        &runtime,
+        session.clone(),
+        &device_id,
+        &label,
+        &session_cancel,
+    )
+    .await;
     session.shutdown().await;
     if let Err(error) = result
         && !runtime.shutdown.is_cancelled()
@@ -976,17 +1062,19 @@ async fn establish_initial_room(
     prepared: PreparedRememberedDevice,
     invitation: RoomControlInvite,
     verification_code: &str,
-) -> Result<(RoomControlSession, TransferCancelToken)> {
+) -> Result<(Arc<RoomControlSession>, TransferCancelToken)> {
     let device_id = prepared.id().to_string();
-    let session = api::connect_room_control(
-        invitation,
-        runtime.config.device_name.clone(),
-        true,
-        false,
-        runtime.session_config(runtime.config.relay.as_deref()),
-        &runtime.shutdown,
-    )
-    .await?;
+    let session = Arc::new(
+        api::connect_room_control(
+            invitation,
+            runtime.config.device_name.clone(),
+            true,
+            false,
+            runtime.session_config(runtime.config.relay.as_deref()),
+            &runtime.shutdown,
+        )
+        .await?,
+    );
     let pairing = async {
         session.request_verification(verification_code).await?;
         loop {
@@ -1075,12 +1163,17 @@ fn spawn_remembered_receiver(runtime: Arc<AgentRuntime>, device_id: String) {
         }
     };
     let task_runtime = runtime.clone();
-    spawn_background_task(&runtime, async move {
-        remembered_receiver_loop(task_runtime.clone(), &device_id, &receiver_cancel).await;
+    let task_device_id = device_id.clone();
+    if let Err(error) = spawn_background_task(&runtime, async move {
+        remembered_receiver_loop(task_runtime.clone(), &task_device_id, &receiver_cancel).await;
         if let Some(mut active) = lock_or_log(&task_runtime.active_receivers, "active receivers") {
-            active.remove(&device_id);
+            active.remove(&task_device_id);
         }
-    });
+    }) {
+        lock_or_log(&runtime.active_receivers, "active receivers")
+            .map(|mut active| active.remove(&device_id));
+        tracing::error!(device_id, %error, "remembered receiver task could not start");
+    }
 }
 
 fn register_remembered_receiver(
@@ -1144,7 +1237,7 @@ async fn remembered_receiver_loop(
                 );
                 let result = run_room_session(
                     &runtime,
-                    &session,
+                    session.clone(),
                     record.id(),
                     record.label(),
                     receiver_cancel,
@@ -1178,7 +1271,7 @@ async fn connect_remembered_room(
     record: &RememberedDeviceRecord,
     opaque: &[u8],
     receiver_cancel: &TransferCancelToken,
-) -> Result<(RoomControlSession, u64)> {
+) -> Result<(Arc<RoomControlSession>, u64)> {
     let credential = RememberedCredential::from_opaque(opaque)?;
     let relay = record.relay();
     let generations = remembered_generation_attempts(
@@ -1241,7 +1334,7 @@ async fn connect_remembered_room(
             }
         };
         match result {
-            Ok(session) => return Ok((session, next_generation)),
+            Ok(session) => return Ok((Arc::new(session), next_generation)),
             Err(error)
                 if (RememberedAttemptOutcome {
                     succeeded: false,
@@ -1260,46 +1353,414 @@ async fn connect_remembered_room(
 
 async fn run_room_session(
     runtime: &Arc<AgentRuntime>,
-    session: &RoomControlSession,
+    session: Arc<RoomControlSession>,
     device_id: &str,
     device_label: &str,
     receiver_cancel: &TransferCancelToken,
 ) -> Result<()> {
-    loop {
-        let event = tokio::select! {
-            event = session.next_event() => event?,
-            _ = runtime.shutdown.cancelled() => return Ok(()),
-            _ = receiver_cancel.cancelled() => return Ok(()),
-        };
-        match event {
-            RoomControlEvent::IncomingOffer(offer) => {
-                if receiver_cancel.is_cancelled() {
-                    return Ok(());
-                }
-                match receive_room_offer(runtime, session, device_id, device_label, offer).await {
-                    Ok(item) => tracing::info!(
-                        device = device_label,
-                        item = %item.id,
-                        "incoming room transfer received"
-                    ),
-                    Err(error) => tracing::warn!(
-                        device = device_label,
-                        %error,
-                        "incoming room transfer failed"
-                    ),
-                }
+    let wake = Arc::new(Notify::new());
+    {
+        let mut rooms = lock(&runtime.active_rooms)?;
+        if rooms.contains_key(device_id) {
+            bail!("remembered device already has an active room");
+        }
+        rooms.insert(device_id.to_string(), wake.clone());
+    }
+    wake.notify_one();
+
+    let result = async {
+        let mut pending_outgoing = None;
+        loop {
+            if pending_outgoing.is_none() && !relationship_has_active_outgoing(runtime, device_id)?
+            {
+                pending_outgoing =
+                    offer_next_outgoing(runtime, &session, device_id, device_label).await?;
             }
-            RoomControlEvent::PeerClosed(_) => return Ok(()),
-            RoomControlEvent::LifetimeChanged(_)
-            | RoomControlEvent::Pong { .. }
-            | RoomControlEvent::VerificationSucceeded => {}
-            RoomControlEvent::VerificationRequested | RoomControlEvent::VerificationFailed => {
-                bail!("peer attempted device verification after pairing completed");
-            }
-            RoomControlEvent::OfferAccepted { .. } | RoomControlEvent::OfferRejected { .. } => {
-                bail!("peer sent an unexpected decision for an Agent receive-only room");
+
+            let event = tokio::select! {
+                event = session.next_event() => Some(event?),
+                _ = wake.notified() => None,
+                _ = runtime.shutdown.cancelled() => return Ok(()),
+                _ = receiver_cancel.cancelled() => return Ok(()),
+            };
+            let Some(event) = event else {
+                continue;
+            };
+            match event {
+                RoomControlEvent::IncomingOffer(offer) => {
+                    if receiver_cancel.is_cancelled() {
+                        return Ok(());
+                    }
+                    match receive_room_offer(
+                        runtime,
+                        session.as_ref(),
+                        device_id,
+                        device_label,
+                        offer,
+                    )
+                    .await
+                    {
+                        Ok(item) => tracing::info!(
+                            device = device_label,
+                            item = %item.id,
+                            "incoming room transfer received"
+                        ),
+                        Err(error) => tracing::warn!(
+                            device = device_label,
+                            %error,
+                            "incoming room transfer failed"
+                        ),
+                    }
+                }
+                RoomControlEvent::OfferAccepted { offer_id } => {
+                    let outgoing = take_pending_outgoing(&mut pending_outgoing, &offer_id)?;
+                    start_outgoing_transfer(runtime, session.clone(), outgoing)?;
+                }
+                RoomControlEvent::OfferRejected { offer_id, reason } => {
+                    let outgoing = take_pending_outgoing(&mut pending_outgoing, &offer_id)?;
+                    let transfer_id = outgoing.transfer.id;
+                    lock(&runtime.store)?
+                        .reject_outgoing_transfer(&transfer_id, room_rejection(reason))?;
+                    record_agent_event(
+                        runtime,
+                        AgentEvent::TransferChanged {
+                            transfer_id: transfer_id.to_string(),
+                        },
+                    )?;
+                }
+                RoomControlEvent::PeerClosed(_) => return Ok(()),
+                RoomControlEvent::LifetimeChanged(_)
+                | RoomControlEvent::Pong { .. }
+                | RoomControlEvent::VerificationSucceeded => {}
+                RoomControlEvent::VerificationRequested | RoomControlEvent::VerificationFailed => {
+                    bail!("peer attempted device verification after pairing completed");
+                }
             }
         }
+    }
+    .await;
+
+    let cleanup = lock(&runtime.active_rooms).map(|mut rooms| {
+        if rooms
+            .get(device_id)
+            .is_some_and(|registered| Arc::ptr_eq(registered, &wake))
+        {
+            rooms.remove(device_id);
+        }
+    });
+    if let Err(error) = cleanup {
+        tracing::error!(device = device_label, %error, "active room could not be unregistered");
+    }
+    result
+}
+
+fn take_pending_outgoing(
+    pending: &mut Option<PreparedOutgoingTransfer>,
+    offer_id: &str,
+) -> Result<PreparedOutgoingTransfer> {
+    let outgoing = pending
+        .take()
+        .ok_or_else(|| anyhow!("peer decided an unknown outgoing offer"))?;
+    if outgoing.offer.offer_id != offer_id {
+        bail!("peer decided a different outgoing offer");
+    }
+    Ok(outgoing)
+}
+
+fn room_rejection(reason: RoomOfferRejection) -> TransferRejection {
+    match reason {
+        RoomOfferRejection::Declined => TransferRejection::UserDeclined,
+        RoomOfferRejection::Busy => TransferRejection::Busy,
+        RoomOfferRejection::Expired | RoomOfferRejection::Invalid => {
+            TransferRejection::InvalidOffer
+        }
+    }
+}
+
+async fn offer_next_outgoing(
+    runtime: &Arc<AgentRuntime>,
+    session: &RoomControlSession,
+    relationship_id: &str,
+    device_label: &str,
+) -> Result<Option<PreparedOutgoingTransfer>> {
+    let transfers = lock(&runtime.store)?.dispatchable_transfers(relationship_id)?;
+    for transfer in transfers {
+        if lock(&runtime.active_outgoing)?.contains_key(transfer.id.as_str()) {
+            continue;
+        }
+        let outgoing = match prepare_outgoing_transfer(runtime, transfer).await {
+            Ok(outgoing) => outgoing,
+            Err(error) => {
+                let transfer_id = error.0;
+                lock(&runtime.store)?.fail_outgoing_transfer(
+                    &transfer_id,
+                    TransferFailure {
+                        code: FailureCode::InternalError,
+                        phase: FailurePhase::Setup,
+                        retryable: true,
+                        recovery_action: RecoveryAction::Retry,
+                    },
+                )?;
+                record_agent_event(
+                    runtime,
+                    AgentEvent::TransferChanged {
+                        transfer_id: transfer_id.to_string(),
+                    },
+                )?;
+                tracing::warn!(
+                    device = device_label,
+                    transfer_id = %transfer_id,
+                    error = %error.1,
+                    "queued outgoing Transfer needs attention"
+                );
+                continue;
+            }
+        };
+        session.offer_transfer(outgoing.offer.clone()).await?;
+        tracing::info!(
+            device = device_label,
+            transfer_id = %outgoing.transfer.id,
+            "outgoing room offer sent"
+        );
+        return Ok(Some(outgoing));
+    }
+    Ok(None)
+}
+
+async fn prepare_outgoing_transfer(
+    runtime: &AgentRuntime,
+    transfer: Transfer,
+) -> std::result::Result<PreparedOutgoingTransfer, (TransferId, anyhow::Error)> {
+    let transfer_id = transfer.id.clone();
+    let result = async {
+        let record = lock(&runtime.store)?
+            .device_record(transfer.relationship_id.as_str())
+            .ok_or_else(|| anyhow!("outgoing Transfer Relationship is unavailable"))?;
+        let job_id = agent_job_id(&transfer.content_id)?;
+        let job = api::TransferJobStore::new(runtime.config.state_directory.join("outbox/jobs"))
+            .load(job_id)
+            .await?
+            .ok_or_else(|| anyhow!("outgoing Transfer content is missing"))?;
+        if job.lifecycle() != api::JobLifecycle::Sealed {
+            bail!("outgoing Transfer content is not sealed");
+        }
+        let (expected_content_id, expected_transfer_id) = agent_transfer_ids(&job)?;
+        if expected_content_id != transfer.content_id || expected_transfer_id != transfer.id {
+            bail!("outgoing Transfer does not match its durable content");
+        }
+        let manifest = job
+            .manifest()
+            .ok_or_else(|| anyhow!("sealed outgoing Transfer has no manifest"))?;
+        if manifest.totals.total_plaintext_bytes != transfer.total_bytes {
+            bail!("outgoing Transfer total differs from its sealed manifest");
+        }
+        let item_count = manifest
+            .totals
+            .file_count
+            .checked_add(manifest.totals.directory_count)
+            .ok_or_else(|| anyhow!("outgoing Transfer item count overflow"))?;
+        let invitation = api::create_invitation(
+            record.broker().to_string(),
+            record.relay().map(str::to_string).into_iter().collect(),
+            TransferRole::Sender,
+            unix_seconds()?,
+        )?;
+        let offer = RoomTransferOffer {
+            offer_id: transfer.id.to_string(),
+            transfer_invite: invitation.payload.clone(),
+            root_names: manifest
+                .roots
+                .iter()
+                .take(3)
+                .map(|root| root.requested_name.clone())
+                .collect(),
+            item_count,
+            directory_count: manifest.totals.directory_count,
+            total_bytes: manifest.totals.total_plaintext_bytes,
+        };
+        Ok(PreparedOutgoingTransfer {
+            transfer,
+            job,
+            bootstrap: invitation.into_bootstrap(),
+            broker: record.broker().to_string(),
+            relay: record.relay().map(str::to_string),
+            offer,
+        })
+    }
+    .await;
+    result.map_err(|error| (transfer_id, error))
+}
+
+fn start_outgoing_transfer(
+    runtime: &Arc<AgentRuntime>,
+    session: Arc<RoomControlSession>,
+    outgoing: PreparedOutgoingTransfer,
+) -> Result<()> {
+    let transfer_id = outgoing.transfer.id.clone();
+    lock(&runtime.store)?.start_outgoing_transfer(&transfer_id)?;
+    record_agent_event(
+        runtime,
+        AgentEvent::TransferChanged {
+            transfer_id: transfer_id.to_string(),
+        },
+    )?;
+    let cancel = TransferCancelToken::new();
+    {
+        let mut active = lock(&runtime.active_outgoing)?;
+        if active
+            .values()
+            .any(|value| value.relationship_id == outgoing.transfer.relationship_id.as_str())
+        {
+            bail!("remembered device already has an active outgoing Transfer");
+        }
+        active.insert(
+            transfer_id.to_string(),
+            ActiveOutgoingTransfer {
+                relationship_id: outgoing.transfer.relationship_id.to_string(),
+                cancel: cancel.clone(),
+            },
+        );
+    }
+    let task_runtime = runtime.clone();
+    if let Err(error) = spawn_background_task(runtime, async move {
+        run_outgoing_transfer(task_runtime, session, outgoing, cancel).await;
+    }) {
+        lock(&runtime.active_outgoing)?.remove(transfer_id.as_str());
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn run_outgoing_transfer(
+    runtime: Arc<AgentRuntime>,
+    session: Arc<RoomControlSession>,
+    outgoing: PreparedOutgoingTransfer,
+    cancel: TransferCancelToken,
+) {
+    let transfer_id = outgoing.transfer.id.clone();
+    let relationship_id = outgoing.transfer.relationship_id.to_string();
+    let events = Arc::new(AgentOutgoingEvents::new(
+        runtime.clone(),
+        transfer_id.clone(),
+        outgoing.transfer.transferred_bytes,
+        outgoing.transfer.total_bytes,
+        cancel.clone(),
+    ));
+    let event_sink: Arc<dyn EventSink> = events.clone();
+
+    let result = async {
+        session.set_local_transfer_active(true).await?;
+        let broker = api::parse_broker_addr(&outgoing.broker, outgoing.relay.as_deref())?;
+        let operation = api::send_manifest_v2_via_room(
+            broker,
+            outgoing.bootstrap,
+            &outgoing.job,
+            runtime
+                .config
+                .state_directory
+                .join("outbox/transfer-state-v2"),
+            runtime.session_config(outgoing.relay.as_deref()),
+            event_sink,
+            &cancel,
+        );
+        tokio::pin!(operation);
+        tokio::select! {
+            result = &mut operation => result,
+            _ = runtime.shutdown.cancelled() => {
+                cancel.cancel();
+                operation.await
+            }
+        }
+    }
+    .await;
+
+    if let Err(error) = session.set_local_transfer_active(false).await {
+        tracing::debug!(transfer_id = %transfer_id, %error, "room activity cleanup failed");
+    }
+
+    let settlement = if runtime.shutdown.is_cancelled() {
+        Ok(None)
+    } else if let Some(error) = events.projection_error() {
+        tracing::error!(transfer_id = %transfer_id, %error, "outgoing Transfer projection failed");
+        lock(&runtime.store).and_then(|mut store| {
+            store
+                .fail_outgoing_transfer(
+                    &transfer_id,
+                    TransferFailure {
+                        code: FailureCode::InternalError,
+                        phase: events.failure_phase(),
+                        retryable: true,
+                        recovery_action: RecoveryAction::Retry,
+                    },
+                )
+                .map(Some)
+                .map_err(Into::into)
+        })
+    } else {
+        match result {
+            Ok(_) => lock(&runtime.store).and_then(|mut store| {
+                store
+                    .complete_outgoing_transfer(&transfer_id)
+                    .map(Some)
+                    .map_err(Into::into)
+            }),
+            Err(error) => {
+                let projection = envoix_client::failure::project_session_failure(
+                    &error,
+                    envoix_client::model::TransferDirection::Send,
+                    events.failure_phase(),
+                );
+                lock(&runtime.store).and_then(|mut store| {
+                    if projection.failure.outcome() == FailureOutcome::Canceled {
+                        store
+                            .cancel_outgoing_transfer(&transfer_id)
+                            .map(Some)
+                            .map_err(Into::into)
+                    } else {
+                        store
+                            .fail_outgoing_transfer(&transfer_id, projection.failure)
+                            .map(Some)
+                            .map_err(Into::into)
+                    }
+                })
+            }
+        }
+    };
+
+    if let Ok(mut active) = runtime.active_outgoing.lock() {
+        active.remove(transfer_id.as_str());
+    } else {
+        tracing::error!(transfer_id = %transfer_id, "active outgoing state is poisoned");
+    }
+    let should_wake = settlement.is_ok();
+    match settlement {
+        Ok(Some(transfer)) => {
+            if let Err(error) = record_agent_event(
+                &runtime,
+                AgentEvent::TransferChanged {
+                    transfer_id: transfer_id.to_string(),
+                },
+            ) {
+                tracing::error!(transfer_id = %transfer_id, %error, "Transfer event could not be recorded");
+            }
+            tracing::info!(
+                transfer_id = %transfer_id,
+                state = transfer.state.wire_name(),
+                "outgoing Transfer settled"
+            );
+        }
+        Ok(None) => tracing::debug!(
+            transfer_id = %transfer_id,
+            "outgoing Transfer preserved for restart"
+        ),
+        Err(error) => tracing::error!(
+            transfer_id = %transfer_id,
+            %error,
+            "outgoing Transfer settlement failed"
+        ),
+    }
+    if should_wake && let Err(error) = wake_active_room(&runtime, &relationship_id) {
+        tracing::error!(transfer_id = %transfer_id, %error, "active room could not be notified");
     }
 }
 
@@ -1475,6 +1936,167 @@ async fn receive_to_inbox(
     Ok(item)
 }
 
+struct AgentOutgoingEvents {
+    runtime: Arc<AgentRuntime>,
+    transfer_id: TransferId,
+    total_bytes: u64,
+    cancel: TransferCancelToken,
+    projection: Mutex<OutgoingProjection>,
+}
+
+struct OutgoingProjection {
+    persisted_bytes: u64,
+    phase: FailurePhase,
+    error: Option<String>,
+}
+
+impl AgentOutgoingEvents {
+    fn new(
+        runtime: Arc<AgentRuntime>,
+        transfer_id: TransferId,
+        persisted_bytes: u64,
+        total_bytes: u64,
+        cancel: TransferCancelToken,
+    ) -> Self {
+        Self {
+            runtime,
+            transfer_id,
+            total_bytes,
+            cancel,
+            projection: Mutex::new(OutgoingProjection {
+                persisted_bytes,
+                phase: FailurePhase::Pairing,
+                error: None,
+            }),
+        }
+    }
+
+    fn failure_phase(&self) -> FailurePhase {
+        self.projection
+            .lock()
+            .map(|projection| projection.phase)
+            .unwrap_or(FailurePhase::Transferring)
+    }
+
+    fn projection_error(&self) -> Option<String> {
+        match self.projection.lock() {
+            Ok(projection) => projection.error.clone(),
+            Err(_) => Some("outgoing Transfer projection lock is poisoned".into()),
+        }
+    }
+
+    fn set_phase(&self, phase: FailurePhase) {
+        match self.projection.lock() {
+            Ok(mut projection) if projection.error.is_none() => projection.phase = phase,
+            Ok(_) => {}
+            Err(_) => self.cancel.cancel(),
+        }
+    }
+
+    fn fail_projection(&self, projection: &mut OutgoingProjection, message: String) {
+        if projection.error.is_none() {
+            projection.error = Some(message);
+            self.cancel.cancel();
+        }
+    }
+
+    fn project_progress(&self, bytes_transferred: u64, total_bytes: u64) {
+        let mut projection = match self.projection.lock() {
+            Ok(projection) => projection,
+            Err(_) => {
+                self.cancel.cancel();
+                return;
+            }
+        };
+        if projection.error.is_some() {
+            return;
+        }
+        if total_bytes != self.total_bytes || bytes_transferred > total_bytes {
+            self.fail_projection(
+                &mut projection,
+                "data-plane progress does not match the durable Transfer".into(),
+            );
+            return;
+        }
+        if bytes_transferred < projection.persisted_bytes {
+            return;
+        }
+        if bytes_transferred != total_bytes
+            && bytes_transferred.saturating_sub(projection.persisted_bytes)
+                < OUTGOING_PROGRESS_CHECKPOINT_BYTES
+        {
+            return;
+        }
+        let persisted = lock(&self.runtime.store).and_then(|mut store| {
+            store
+                .progress_outgoing_transfer(&self.transfer_id, bytes_transferred)
+                .map_err(Into::into)
+        });
+        if let Err(error) = persisted {
+            self.fail_projection(
+                &mut projection,
+                format!("persist Transfer progress: {error}"),
+            );
+            return;
+        }
+        projection.persisted_bytes = bytes_transferred;
+        drop(projection);
+        if let Err(error) = record_agent_event(
+            &self.runtime,
+            AgentEvent::TransferChanged {
+                transfer_id: self.transfer_id.to_string(),
+            },
+        ) {
+            tracing::error!(transfer_id = %self.transfer_id, %error, "progress event could not be recorded");
+        }
+    }
+}
+
+impl EventSink for AgentOutgoingEvents {
+    fn on_event(&self, event: TransferEvent) {
+        match event {
+            TransferEvent::Diagnostic { message } => {
+                tracing::debug!(transfer_id = %self.transfer_id, %message, "outgoing transfer diagnostic");
+            }
+            TransferEvent::Pairing { .. } => self.set_phase(FailurePhase::Pairing),
+            TransferEvent::Connecting
+            | TransferEvent::Connected { .. }
+            | TransferEvent::PathChanged { .. } => self.set_phase(FailurePhase::Connecting),
+            TransferEvent::Progress {
+                bytes_transferred,
+                total_bytes,
+                ..
+            } => self.project_progress(bytes_transferred, total_bytes),
+            TransferEvent::ManifestV2Phase { phase, .. } => {
+                let phase = match phase {
+                    api::ManifestV2ProgressPhase::Transferring => FailurePhase::Transferring,
+                    api::ManifestV2ProgressPhase::Verifying => FailurePhase::Verifying,
+                    api::ManifestV2ProgressPhase::Saving
+                    | api::ManifestV2ProgressPhase::WaitingForReceiverSave
+                    | api::ManifestV2ProgressPhase::FinalizingDelivery => FailurePhase::Committing,
+                };
+                self.set_phase(phase);
+            }
+            TransferEvent::StageTiming { stage, .. } => {
+                let phase = match stage {
+                    api::TransferStage::SessionStarted => FailurePhase::Pairing,
+                    api::TransferStage::ConnectionReady => FailurePhase::Connecting,
+                    api::TransferStage::AuthenticationStarted
+                    | api::TransferStage::AuthenticationComplete => FailurePhase::Authenticating,
+                    api::TransferStage::ManifestOffer | api::TransferStage::ManifestAccepted => {
+                        FailurePhase::Negotiating
+                    }
+                    api::TransferStage::FirstPayload => FailurePhase::Transferring,
+                    api::TransferStage::PayloadComplete => FailurePhase::Verifying,
+                    api::TransferStage::DeliveryComplete => FailurePhase::Committing,
+                    api::TransferStage::Canceled | api::TransferStage::Failed => return,
+                };
+                self.set_phase(phase);
+            }
+        }
+    }
+}
+
 struct AgentEvents;
 
 impl EventSink for AgentEvents {
@@ -1528,18 +2150,17 @@ fn create_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn spawn_background_task<F>(runtime: &Arc<AgentRuntime>, future: F)
+fn spawn_background_task<F>(runtime: &Arc<AgentRuntime>, future: F) -> Result<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let Some(mut tasks) = lock_or_log(&runtime.background_tasks, "background tasks") else {
-        return;
-    };
+    let mut tasks = lock(&runtime.background_tasks)?;
     if runtime.shutdown.is_cancelled() {
-        return;
+        bail!("Agent is shutting down");
     }
     tasks.retain(|task| !task.is_finished());
     tasks.push(tokio::spawn(future));
+    Ok(())
 }
 
 async fn shutdown_background_tasks(runtime: &AgentRuntime) {
@@ -1725,6 +2346,8 @@ mod tests {
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -1770,7 +2393,9 @@ mod tests {
             .await
             .unwrap();
         let mut store = ProductStore::open(&state_directory).unwrap();
-        let pending = store.prepare_device("MacBook", "broker", None).unwrap();
+        let pending = store
+            .prepare_device("MacBook", DEFAULT_RENDEZVOUS_BROKER, None)
+            .unwrap();
         let relationship_id = pending.id().to_string();
         store
             .commit_device(pending, &opaque_credential(), 0)
@@ -1781,12 +2406,14 @@ mod tests {
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
                 device_name: "test-agent".into(),
-                broker: "broker".into(),
+                broker: DEFAULT_RENDEZVOUS_BROKER.into(),
                 relay: None,
             },
             client: api::Client::default(),
             store: Mutex::new(store),
             active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -1830,6 +2457,24 @@ mod tests {
                 Some(AgentEvent::TransferChanged { transfer_id }) if transfer_id == transfer.id.as_str()
             ));
         }
+        let outgoing = prepare_outgoing_transfer(&runtime, transfer.clone())
+            .await
+            .unwrap();
+        assert_eq!(outgoing.offer.root_names, vec!["hello.txt"]);
+        assert_eq!(outgoing.offer.item_count, 1);
+        assert_eq!(outgoing.offer.total_bytes, 16);
+        assert_eq!(outgoing.bootstrap.local_role(), TransferRole::Sender);
+        api::parse_invitation_for_role(
+            &outgoing.offer.transfer_invite,
+            TransferRole::Receiver,
+            unix_seconds().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            agent_job_id(&transfer.content_id).unwrap(),
+            outgoing.job.job_id()
+        );
+        assert!(agent_job_id(&ContentId::parse("content_not_base64").unwrap()).is_err());
         drop(runtime);
 
         assert_eq!(
@@ -1851,6 +2496,350 @@ mod tests {
         );
     }
 
+    #[test]
+    fn outgoing_progress_is_coalesced_until_a_checkpoint_or_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let mut store = ProductStore::open(&state_directory).unwrap();
+        let pending = store.prepare_device("MacBook", "broker", None).unwrap();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+        let transfer_id = TransferId::parse("transfer_progress").unwrap();
+        store
+            .create_transfer(
+                "MacBook",
+                transfer_id.clone(),
+                ContentId::parse("content_progress").unwrap(),
+                16,
+            )
+            .unwrap();
+        store.start_outgoing_transfer(&transfer_id).unwrap();
+        let initial_sequence = store.engine_snapshot().last_sequence;
+        let runtime = Arc::new(AgentRuntime {
+            config: RuntimeConfig {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: state_directory.join("agent.sock"),
+                device_name: "test-agent".into(),
+                broker: "broker".into(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(store),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+        let events = AgentOutgoingEvents::new(
+            runtime.clone(),
+            transfer_id.clone(),
+            0,
+            16,
+            TransferCancelToken::new(),
+        );
+
+        events.project_progress(1, 16);
+        assert_eq!(
+            lock(&runtime.store)
+                .unwrap()
+                .engine_snapshot()
+                .last_sequence,
+            initial_sequence
+        );
+        events.project_progress(16, 16);
+        let transfer = lock(&runtime.store)
+            .unwrap()
+            .transfer(transfer_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(transfer.transferred_bytes, 16);
+        assert_eq!(
+            transfer.state,
+            envoix_client::model::TransferState::Transferring
+        );
+        assert_eq!(
+            lock(&runtime.store)
+                .unwrap()
+                .engine_snapshot()
+                .last_sequence,
+            initial_sequence + 1
+        );
+        events.project_progress(8, 16);
+        assert!(events.projection_error().is_none());
+        assert_eq!(
+            lock(&runtime.store)
+                .unwrap()
+                .transfer(transfer_id.as_str())
+                .unwrap()
+                .unwrap()
+                .transferred_bytes,
+            16
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn remembered_room_dispatches_a_queued_transfer_to_delivery() {
+        use envoix_rendezvous::RoomRegistry;
+        use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
+        use iroh::{RelayMode, SecretKey};
+
+        match std::net::UdpSocket::bind(("127.0.0.1", 0)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping Agent Transfer loopback: UDP bind denied ({error})");
+                return;
+            }
+            Err(error) => panic!("Agent Transfer loopback pre-check failed: {error}"),
+        }
+        let broker = build_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            SecretKey::generate(),
+            RelayMode::Disabled,
+        )
+        .await
+        .unwrap();
+        let broker_address = endpoint_addr(&broker);
+        let broker_socket = *broker_address.ip_addrs().next().unwrap();
+        let broker_text = format!("{}@{broker_socket}", broker_address.id);
+        let registry = Arc::new(RoomRegistry::new());
+        let broker_task = tokio::spawn(serve_endpoint(broker.clone(), registry.clone(), None));
+
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let source = directory.path().join("hello.txt");
+        tokio::fs::write(&source, b"hello from Agent")
+            .await
+            .unwrap();
+        let credential = opaque_credential();
+        let mut store = ProductStore::open(&state_directory).unwrap();
+        let pending = store.prepare_device("MacBook", &broker_text, None).unwrap();
+        let relationship_id = pending.id().to_string();
+        store.commit_device(pending, &credential, 0).unwrap();
+        let runtime = Arc::new(AgentRuntime {
+            config: RuntimeConfig {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: state_directory.join("agent.sock"),
+                device_name: "test-agent".into(),
+                broker: broker_text.clone(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(store),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+        let AgentResponse::TransferCreated { transfer } = handle_request(
+            runtime.clone(),
+            AgentRequest::CreateTransfer {
+                device: "MacBook".into(),
+                paths: vec![source],
+            },
+        )
+        .await
+        else {
+            panic!("Agent did not create the loopback Transfer")
+        };
+        {
+            let mut store = lock(&runtime.store).unwrap();
+            store.start_outgoing_transfer(&transfer.id).unwrap();
+            store.progress_outgoing_transfer(&transfer.id, 8).unwrap();
+        }
+        drop(runtime);
+        let runtime = Arc::new(AgentRuntime {
+            config: RuntimeConfig {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: state_directory.join("agent.sock"),
+                device_name: "test-agent".into(),
+                broker: broker_text.clone(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+        assert_eq!(
+            lock(&runtime.store)
+                .unwrap()
+                .transfer(transfer.id.as_str())
+                .unwrap()
+                .unwrap()
+                .state,
+            envoix_client::model::TransferState::Transferring
+        );
+
+        let responder_broker = broker_text.clone();
+        let responder_config = runtime.session_config(None);
+        let responder_credential = RememberedCredential::from_opaque(&credential)
+            .unwrap()
+            .derive_session(0);
+        let responder_connect = tokio::spawn(async move {
+            let cancel = TransferCancelToken::new();
+            api::connect_remembered_room_control(
+                responder_credential,
+                responder_broker,
+                None,
+                "Agent".into(),
+                RememberedRoomControlRole::Responder,
+                responder_config,
+                &cancel,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while registry.metrics_snapshot().waiting_creators == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let connector_credential = RememberedCredential::from_opaque(&credential)
+            .unwrap()
+            .derive_session(0);
+        let connector_cancel = TransferCancelToken::new();
+        let connector = api::connect_remembered_room_control(
+            connector_credential,
+            broker_text.clone(),
+            None,
+            "MacBook".into(),
+            RememberedRoomControlRole::Connector,
+            runtime.session_config(None),
+            &connector_cancel,
+        )
+        .await
+        .unwrap();
+        let responder = Arc::new(responder_connect.await.unwrap().unwrap());
+
+        let room_cancel = TransferCancelToken::new();
+        let room_runtime = runtime.clone();
+        let room_session = responder.clone();
+        let room_relationship_id = relationship_id.clone();
+        let room_task = tokio::spawn(async move {
+            run_room_session(
+                &room_runtime,
+                room_session,
+                &room_relationship_id,
+                "MacBook",
+                &room_cancel,
+            )
+            .await
+        });
+        let offer = tokio::time::timeout(Duration::from_secs(10), connector.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        let RoomControlEvent::IncomingOffer(offer) = offer else {
+            panic!("MacBook did not receive the Agent Transfer offer")
+        };
+        assert_eq!(offer.offer_id, transfer.id.as_str());
+        let bootstrap = api::parse_invitation_for_role(
+            &offer.transfer_invite,
+            TransferRole::Receiver,
+            unix_seconds().unwrap(),
+        )
+        .unwrap()
+        .into_bootstrap();
+        let receiver_cancel = TransferCancelToken::new();
+        let receiver_task_cancel = receiver_cancel.clone();
+        let receiver_broker = api::parse_broker_addr(&broker_text, None).unwrap();
+        let receiver_config = runtime.session_config(None);
+        let receiver_task = tokio::spawn(async move {
+            api::receive_manifest_v2_offer_via_room(
+                receiver_broker,
+                bootstrap,
+                envoix_client::BindAddrs::dual_stack(0),
+                receiver_config,
+                Arc::new(AgentEvents),
+                &receiver_task_cancel,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        connector.accept_offer(&offer.offer_id).await.unwrap();
+        let pending = tokio::time::timeout(Duration::from_secs(15), receiver_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let target_directory = directory.path().join("received");
+        tokio::fs::create_dir_all(&target_directory).await.unwrap();
+        let target_directory = tokio::fs::canonicalize(target_directory).await.unwrap();
+        let available = api::local_allocatable_bytes(&target_directory).unwrap();
+        let summary = tokio::time::timeout(
+            Duration::from_secs(15),
+            pending.receive(
+                DestinationRequestV2 {
+                    target_directory,
+                    copy_staging_directory: None,
+                    decision: DestinationDecisionV2::UseDirectSave,
+                    target_allocatable_bytes: Some(available),
+                    staging_allocatable_bytes: None,
+                    stable_object_identity: true,
+                    exceptional_transfer_approved: false,
+                    preplanned_root_names: None,
+                },
+                directory.path().join("receiver-state"),
+                &receiver_cancel,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(summary.saved_root_paths.len(), 1);
+        assert_eq!(
+            tokio::fs::read(&summary.saved_root_paths[0]).await.unwrap(),
+            b"hello from Agent"
+        );
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let state = lock(&runtime.store)
+                    .unwrap()
+                    .transfer(transfer.id.as_str())
+                    .unwrap()
+                    .unwrap()
+                    .state;
+                if state == envoix_client::model::TransferState::Delivered {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(lock(&runtime.active_outgoing).unwrap().is_empty());
+
+        runtime.shutdown.cancel();
+        connector.shutdown().await;
+        responder.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(5), room_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        shutdown_background_tasks(&runtime).await;
+        broker.close().await;
+        broker_task.abort();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn local_socket_round_trips_a_v6_envelope() {
@@ -1868,6 +2857,8 @@ mod tests {
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -1914,6 +2905,8 @@ mod tests {
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -1969,6 +2962,7 @@ mod tests {
             .commit_device(pending, &opaque_credential(), 0)
             .unwrap();
         let receiver_cancel = TransferCancelToken::new();
+        let outgoing_cancel = TransferCancelToken::new();
         let runtime = Arc::new(AgentRuntime {
             config: RuntimeConfig {
                 state_directory: state_directory.clone(),
@@ -1983,6 +2977,14 @@ mod tests {
             active_receivers: Mutex::new(HashMap::from([(
                 device_id.clone(),
                 receiver_cancel.clone(),
+            )])),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::from([(
+                "transfer_test".into(),
+                ActiveOutgoingTransfer {
+                    relationship_id: device_id.clone(),
+                    cancel: outgoing_cancel.clone(),
+                },
             )])),
             active_pairings: Mutex::new(HashSet::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
@@ -2003,6 +3005,7 @@ mod tests {
         };
         assert_eq!(device.id, device_id);
         assert!(receiver_cancel.is_cancelled());
+        assert!(outgoing_cancel.is_cancelled());
         assert!(lock(&runtime.store).unwrap().devices().is_empty());
         let events = lock(&runtime.events).unwrap();
         assert!(matches!(
