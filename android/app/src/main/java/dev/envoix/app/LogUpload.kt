@@ -10,6 +10,7 @@ import java.net.URL
 object LogUpload {
     /** Connect + read timeout for every log-courier HTTP call (ms). */
     private const val TIMEOUT_MS = 8000
+
     /** Developer-injected, process-local token. It is deliberately not persisted in app settings. */
     private const val UPLOAD_TOKEN_PROPERTY = "envoix.diagnosticUploadToken"
     internal const val BODY_MAX_BYTES = 480 * 1024
@@ -84,7 +85,10 @@ object LogUpload {
         return bytes.takeIf { it.size <= BODY_MAX_BYTES }
     }
 
-    private fun validCorrelationField(value: String, maxBytes: Int): Boolean =
+    private fun validCorrelationField(
+        value: String,
+        maxBytes: Int,
+    ): Boolean =
         value.isNotEmpty() &&
             value.length <= maxBytes &&
             value.all { it.isLetterOrDigit() && it.code < 128 }
