@@ -186,14 +186,68 @@ pub(crate) fn resume(
     Ok(transfer)
 }
 
-pub(crate) fn deliver(
+pub(crate) fn recover(
     existing: Option<&Transfer>,
     transfer_id: &TransferId,
 ) -> Result<Transfer, ApplyError> {
     let mut transfer = current(existing, transfer_id)?;
-    require_state(&transfer, TransferState::Transferring, "transfer_delivered")?;
+    if transfer.state != TransferState::Failed
+        || !transfer
+            .failure
+            .as_ref()
+            .is_some_and(TransferFailure::is_recoverable)
+    {
+        return Err(invalid_transition(
+            EntityKind::Transfer,
+            transfer_id,
+            transfer.state.wire_name(),
+            "transfer_recovery_started",
+        ));
+    }
+    transfer.state = TransferState::Connecting;
+    transfer.failure = None;
+    Ok(transfer)
+}
+
+pub(crate) fn complete_payload(
+    existing: Option<&Transfer>,
+    transfer_id: &TransferId,
+) -> Result<Transfer, ApplyError> {
+    let mut transfer = current(existing, transfer_id)?;
+    if !matches!(
+        transfer.state,
+        TransferState::Connecting | TransferState::Transferring
+    ) {
+        return Err(invalid_transition(
+            EntityKind::Transfer,
+            transfer_id,
+            transfer.state.wire_name(),
+            "transfer_payload_completed",
+        ));
+    }
+    if transfer.transferred_bytes != transfer.total_bytes {
+        return Err(ApplyError::InvalidProgress {
+            transfer_id: transfer_id.clone(),
+            previous_bytes: transfer.transferred_bytes,
+            transferred_bytes: transfer.transferred_bytes,
+            total_bytes: transfer.total_bytes,
+        });
+    }
+    transfer.state = TransferState::AwaitingDeliveryProof;
+    Ok(transfer)
+}
+
+pub(crate) fn prove_delivery(
+    existing: Option<&Transfer>,
+    transfer_id: &TransferId,
+) -> Result<Transfer, ApplyError> {
+    let mut transfer = current(existing, transfer_id)?;
+    require_state(
+        &transfer,
+        TransferState::AwaitingDeliveryProof,
+        "transfer_delivery_proof_verified",
+    )?;
     transfer.state = TransferState::Delivered;
-    transfer.transferred_bytes = transfer.total_bytes;
     transfer.failure = None;
     Ok(transfer)
 }
@@ -222,7 +276,7 @@ pub(crate) fn cancel(
     transfer_id: &TransferId,
 ) -> Result<Transfer, ApplyError> {
     let mut transfer = current(existing, transfer_id)?;
-    if transfer.state.is_terminal() {
+    if !transfer.state.can_cancel() {
         return Err(invalid_transition(
             EntityKind::Transfer,
             transfer_id,
@@ -233,6 +287,22 @@ pub(crate) fn cancel(
     transfer.state = TransferState::Canceled;
     transfer.failure = None;
     Ok(transfer)
+}
+
+pub(crate) fn remove(
+    existing: Option<&Transfer>,
+    transfer_id: &TransferId,
+) -> Result<(), ApplyError> {
+    let transfer = current(existing, transfer_id)?;
+    if !transfer.state.is_terminal() {
+        return Err(invalid_transition(
+            EntityKind::Transfer,
+            transfer_id,
+            transfer.state.wire_name(),
+            "transfer_removed",
+        ));
+    }
+    Ok(())
 }
 
 fn current(existing: Option<&Transfer>, transfer_id: &TransferId) -> Result<Transfer, ApplyError> {

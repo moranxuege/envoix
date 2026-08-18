@@ -1,8 +1,9 @@
 use envoix_client::APPLICATION_CONTRACT_VERSION;
 use envoix_client::event::{EngineEvent, EventEnvelope};
 use envoix_client::model::{
-    ContentId, DeviceId, EntityKind, RelationshipId, RelationshipState, RoomCloseReason, RoomId,
-    RoomState, TransferDirection, TransferId, TransferRejection, TransferState,
+    ContentId, DeviceId, EntityKind, FailureCode, FailurePhase, RecoveryAction, RelationshipId,
+    RelationshipState, RoomCloseReason, RoomId, RoomState, TransferDirection, TransferFailure,
+    TransferId, TransferRejection, TransferState,
 };
 use envoix_client::snapshot::{ApplicationErrorCode, ApplyError, EngineSnapshot};
 
@@ -463,7 +464,10 @@ fn transfer_reducer_is_atomic_and_outlives_its_room() {
             transfer_id: ids.transfer.clone(),
             transferred_bytes: 5,
         },
-        EngineEvent::TransferDelivered {
+        EngineEvent::TransferPayloadCompleted {
+            transfer_id: ids.transfer.clone(),
+        },
+        EngineEvent::TransferDeliveryProofVerified {
             transfer_id: ids.transfer.clone(),
         },
     ] {
@@ -589,4 +593,189 @@ fn incoming_transfer_requires_an_explicit_accept_or_typed_rejection() {
         })
     ));
     assert_eq!(snapshot, before_terminal);
+}
+
+#[test]
+fn transfer_recovery_delivery_proof_and_removal_are_explicit() {
+    let ids = fixture_ids("recovery");
+    let failed_id = TransferId::parse("transfer_nonrecoverable").unwrap();
+    let mut snapshot = EngineSnapshot::new();
+    trust_relationship(&mut snapshot, &ids);
+
+    for event in [
+        EngineEvent::TransferCreated {
+            transfer_id: ids.transfer.clone(),
+            relationship_id: ids.relationship.clone(),
+            room_id: None,
+            content_id: ids.content.clone(),
+            direction: TransferDirection::Send,
+            total_bytes: 8,
+        },
+        EngineEvent::TransferStarted {
+            transfer_id: ids.transfer.clone(),
+        },
+        EngineEvent::TransferProgressed {
+            transfer_id: ids.transfer.clone(),
+            transferred_bytes: 3,
+        },
+        EngineEvent::TransferFailed {
+            transfer_id: ids.transfer.clone(),
+            failure: TransferFailure {
+                code: FailureCode::NetworkLost,
+                phase: FailurePhase::Transferring,
+                retryable: true,
+                recovery_action: RecoveryAction::Resume,
+            },
+        },
+    ] {
+        apply_next(&mut snapshot, event).unwrap();
+    }
+    assert_eq!(
+        snapshot.transfers[&ids.transfer].state,
+        TransferState::Failed
+    );
+
+    let before_recovery = snapshot.clone();
+    assert!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::TransferProgressed {
+                transfer_id: ids.transfer.clone(),
+                transferred_bytes: 4,
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(snapshot, before_recovery);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferRecoveryStarted {
+            transfer_id: ids.transfer.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot.transfers[&ids.transfer].state,
+        TransferState::Connecting
+    );
+    assert_eq!(snapshot.transfers[&ids.transfer].transferred_bytes, 3);
+    assert_eq!(snapshot.transfers[&ids.transfer].failure, None);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferProgressed {
+            transfer_id: ids.transfer.clone(),
+            transferred_bytes: 8,
+        },
+    )
+    .unwrap();
+    let before_payload_completion = snapshot.clone();
+    assert!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::TransferDeliveryProofVerified {
+                transfer_id: ids.transfer.clone(),
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(snapshot, before_payload_completion);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferPayloadCompleted {
+            transfer_id: ids.transfer.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot.transfers[&ids.transfer].state,
+        TransferState::AwaitingDeliveryProof
+    );
+
+    let before_finalization_cancel = snapshot.clone();
+    assert!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::TransferCanceled {
+                transfer_id: ids.transfer.clone(),
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(snapshot, before_finalization_cancel);
+
+    let before_legacy_delivery = snapshot.clone();
+    let error = apply_next(
+        &mut snapshot,
+        EngineEvent::TransferDelivered {
+            transfer_id: ids.transfer.clone(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), ApplicationErrorCode::UnsupportedEvent);
+    assert_eq!(snapshot, before_legacy_delivery);
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferDeliveryProofVerified {
+            transfer_id: ids.transfer.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot.transfers[&ids.transfer].state,
+        TransferState::Delivered
+    );
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferRemoved {
+            transfer_id: ids.transfer.clone(),
+        },
+    )
+    .unwrap();
+    assert!(!snapshot.transfers.contains_key(&ids.transfer));
+    assert!(snapshot.relationships.contains_key(&ids.relationship));
+
+    for event in [
+        EngineEvent::TransferCreated {
+            transfer_id: failed_id.clone(),
+            relationship_id: ids.relationship,
+            room_id: None,
+            content_id: ContentId::parse("content_nonrecoverable").unwrap(),
+            direction: TransferDirection::Send,
+            total_bytes: 1,
+        },
+        EngineEvent::TransferFailed {
+            transfer_id: failed_id.clone(),
+            failure: TransferFailure {
+                code: FailureCode::IntegrityFailure,
+                phase: FailurePhase::Verifying,
+                retryable: false,
+                recovery_action: RecoveryAction::None,
+            },
+        },
+    ] {
+        apply_next(&mut snapshot, event).unwrap();
+    }
+    let before_invalid_recovery = snapshot.clone();
+    assert!(
+        apply_next(
+            &mut snapshot,
+            EngineEvent::TransferRecoveryStarted {
+                transfer_id: failed_id.clone(),
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(snapshot, before_invalid_recovery);
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferRemoved {
+            transfer_id: failed_id.clone(),
+        },
+    )
+    .unwrap();
+    assert!(!snapshot.transfers.contains_key(&failed_id));
 }

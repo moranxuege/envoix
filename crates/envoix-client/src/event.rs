@@ -95,6 +95,16 @@ pub enum EngineEvent {
     TransferResumed {
         transfer_id: TransferId,
     },
+    TransferRecoveryStarted {
+        transfer_id: TransferId,
+    },
+    TransferPayloadCompleted {
+        transfer_id: TransferId,
+    },
+    TransferDeliveryProofVerified {
+        transfer_id: TransferId,
+    },
+    /// Historical v1-v4 event retained only for fixture decoding.
     TransferDelivered {
         transfer_id: TransferId,
     },
@@ -103,6 +113,9 @@ pub enum EngineEvent {
         failure: TransferFailure,
     },
     TransferCanceled {
+        transfer_id: TransferId,
+    },
+    TransferRemoved {
         transfer_id: TransferId,
     },
 }

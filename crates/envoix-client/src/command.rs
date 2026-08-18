@@ -122,7 +122,13 @@ pub enum EngineCommand {
     ResumeTransfer {
         transfer_id: TransferId,
     },
+    RecoverTransfer {
+        transfer_id: TransferId,
+    },
     CancelTransfer {
+        transfer_id: TransferId,
+    },
+    RemoveTransfer {
         transfer_id: TransferId,
     },
     RevokeRelationship {

@@ -27,7 +27,9 @@ fn command_tag(command: &EngineCommand) -> &'static str {
         EngineCommand::RejectTransfer { .. } => "reject_transfer",
         EngineCommand::PauseTransfer { .. } => "pause_transfer",
         EngineCommand::ResumeTransfer { .. } => "resume_transfer",
+        EngineCommand::RecoverTransfer { .. } => "recover_transfer",
         EngineCommand::CancelTransfer { .. } => "cancel_transfer",
+        EngineCommand::RemoveTransfer { .. } => "remove_transfer",
         EngineCommand::RevokeRelationship { .. } => "revoke_relationship",
     }
 }
@@ -52,9 +54,13 @@ fn event_tag(event: &EngineEvent) -> &'static str {
         EngineEvent::TransferProgressed { .. } => "transfer_progressed",
         EngineEvent::TransferPaused { .. } => "transfer_paused",
         EngineEvent::TransferResumed { .. } => "transfer_resumed",
+        EngineEvent::TransferRecoveryStarted { .. } => "transfer_recovery_started",
+        EngineEvent::TransferPayloadCompleted { .. } => "transfer_payload_completed",
+        EngineEvent::TransferDeliveryProofVerified { .. } => "transfer_delivery_proof_verified",
         EngineEvent::TransferDelivered { .. } => "transfer_delivered",
         EngineEvent::TransferFailed { .. } => "transfer_failed",
         EngineEvent::TransferCanceled { .. } => "transfer_canceled",
+        EngineEvent::TransferRemoved { .. } => "transfer_removed",
     }
 }
 
@@ -171,8 +177,37 @@ fn application_contract_v3_fixture_remains_readable_and_unchanged() {
 }
 
 #[test]
-fn application_contract_v4_fixture_is_complete_and_replayable() {
+fn application_contract_v4_fixture_remains_readable_and_unchanged() {
     let raw = include_str!("../../../tests/fixtures/v0.3/application-contract-v4.json");
+    let json: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let fixture: ApplicationContractFixture = serde_json::from_value(json.clone()).unwrap();
+
+    assert_eq!(fixture.contract_version, 4);
+    assert!(
+        fixture
+            .commands
+            .iter()
+            .all(|command| command.contract_version == 4)
+    );
+    assert!(
+        fixture
+            .events
+            .iter()
+            .all(|event| event.contract_version == 4)
+    );
+    assert!(matches!(
+        replay(EngineSnapshot::new(), fixture.events.clone()),
+        Err(ApplyError::UnsupportedContractVersion {
+            expected: APPLICATION_CONTRACT_VERSION,
+            actual: 4,
+        })
+    ));
+    assert_eq!(serde_json::to_value(&fixture).unwrap(), json);
+}
+
+#[test]
+fn application_contract_v5_fixture_is_complete_and_replayable() {
+    let raw = include_str!("../../../tests/fixtures/v0.3/application-contract-v5.json");
     let json: serde_json::Value = serde_json::from_str(raw).unwrap();
     let fixture: ApplicationContractFixture = serde_json::from_value(json.clone()).unwrap();
 
@@ -204,8 +239,10 @@ fn application_contract_v4_fixture_is_complete_and_replayable() {
             "create_transfer",
             "join_room",
             "pause_transfer",
+            "recover_transfer",
             "reconnect_relationship",
             "reject_transfer",
+            "remove_transfer",
             "resume_transfer",
             "revoke_relationship",
             "verify_pairing",
@@ -233,22 +270,23 @@ fn application_contract_v4_fixture_is_complete_and_replayable() {
             "transfer_canceled",
             "transfer_accepted",
             "transfer_created",
-            "transfer_delivered",
+            "transfer_delivery_proof_verified",
             "transfer_failed",
             "transfer_paused",
             "transfer_offered",
+            "transfer_payload_completed",
             "transfer_progressed",
             "transfer_rejected",
+            "transfer_recovery_started",
+            "transfer_removed",
             "transfer_resumed",
             "transfer_started",
         ])
     );
-    assert!(
-        fixture
-            .events
-            .iter()
-            .all(|event| !matches!(event.event, EngineEvent::RoomConnected { .. }))
-    );
+    assert!(fixture.events.iter().all(|event| !matches!(
+        event.event,
+        EngineEvent::RoomConnected { .. } | EngineEvent::TransferDelivered { .. }
+    )));
 
     for (index, event) in fixture.events.iter().enumerate() {
         assert_eq!(event.sequence, index as u64 + 1);

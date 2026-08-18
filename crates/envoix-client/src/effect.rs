@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::{RoomInvitation, VerificationCode};
 use crate::model::{
-    CommandId, ContentId, RelationshipId, RoomId, TransferDirection, TransferId, TransferRejection,
+    CommandId, ContentId, RecoveryAction, RelationshipId, RoomId, TransferDirection, TransferId,
+    TransferRejection,
 };
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,7 +54,14 @@ pub enum EngineEffect {
     ResumeTransfer {
         transfer_id: TransferId,
     },
+    RecoverTransfer {
+        transfer_id: TransferId,
+        action: RecoveryAction,
+    },
     CancelTransfer {
+        transfer_id: TransferId,
+    },
+    RemoveTransfer {
         transfer_id: TransferId,
     },
     RevokeRelationship {

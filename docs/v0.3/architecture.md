@@ -118,6 +118,13 @@ An authenticated incoming manifest creates an `offered` Transfer. It cannot
 queue or start until the user accepts it. Rejection records a typed terminal
 reason, so every frontend can present the same outcome without parsing prose.
 
+Payload completion is not delivery. A Transfer moves through
+`awaiting_delivery_proof` and becomes `delivered` only after the Engine has
+verified the receiver's delivery proof. A structured retryable failure remains
+`failed` until an explicit recovery command starts a new attempt; confirmed
+byte progress survives that transition. Only terminal Transfers may be
+explicitly removed from the product snapshot.
+
 ### Content
 
 A typed description of material carried by a Transfer. v0.3 requires file and

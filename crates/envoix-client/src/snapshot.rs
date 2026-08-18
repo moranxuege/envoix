@@ -345,10 +345,30 @@ impl EngineSnapshot {
                     reducers::transfer::resume(self.transfers.get(&transfer_id), &transfer_id)?;
                 self.transfers.insert(transfer_id, transfer);
             }
-            EngineEvent::TransferDelivered { transfer_id } => {
+            EngineEvent::TransferRecoveryStarted { transfer_id } => {
                 let transfer =
-                    reducers::transfer::deliver(self.transfers.get(&transfer_id), &transfer_id)?;
+                    reducers::transfer::recover(self.transfers.get(&transfer_id), &transfer_id)?;
                 self.transfers.insert(transfer_id, transfer);
+            }
+            EngineEvent::TransferPayloadCompleted { transfer_id } => {
+                let transfer = reducers::transfer::complete_payload(
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                )?;
+                self.transfers.insert(transfer_id, transfer);
+            }
+            EngineEvent::TransferDeliveryProofVerified { transfer_id } => {
+                let transfer = reducers::transfer::prove_delivery(
+                    self.transfers.get(&transfer_id),
+                    &transfer_id,
+                )?;
+                self.transfers.insert(transfer_id, transfer);
+            }
+            EngineEvent::TransferDelivered { .. } => {
+                return Err(ApplyError::UnsupportedEvent {
+                    event: "transfer_delivered",
+                    contract_version: APPLICATION_CONTRACT_VERSION,
+                });
             }
             EngineEvent::TransferFailed {
                 transfer_id,
@@ -365,6 +385,10 @@ impl EngineSnapshot {
                 let transfer =
                     reducers::transfer::cancel(self.transfers.get(&transfer_id), &transfer_id)?;
                 self.transfers.insert(transfer_id, transfer);
+            }
+            EngineEvent::TransferRemoved { transfer_id } => {
+                reducers::transfer::remove(self.transfers.get(&transfer_id), &transfer_id)?;
+                self.transfers.remove(&transfer_id);
             }
         }
         Ok(())

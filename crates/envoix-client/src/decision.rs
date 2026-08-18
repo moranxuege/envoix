@@ -103,9 +103,26 @@ pub fn decide(
             )?;
             EngineEffect::ResumeTransfer { transfer_id }
         }
+        EngineCommand::RecoverTransfer { transfer_id } => {
+            let transfer = transfer(snapshot, &transfer_id)?;
+            let Some(failure) = transfer.failure.as_ref().filter(|failure| {
+                transfer.state == TransferState::Failed && failure.is_recoverable()
+            }) else {
+                return Err(invalid_transition(
+                    EntityKind::Transfer,
+                    &transfer_id,
+                    transfer.state.wire_name(),
+                    "recover_transfer",
+                ));
+            };
+            EngineEffect::RecoverTransfer {
+                transfer_id,
+                action: failure.recovery_action,
+            }
+        }
         EngineCommand::CancelTransfer { transfer_id } => {
             let transfer = transfer(snapshot, &transfer_id)?;
-            if transfer.state.is_terminal() {
+            if !transfer.state.can_cancel() {
                 return Err(invalid_transition(
                     EntityKind::Transfer,
                     &transfer_id,
@@ -114,6 +131,18 @@ pub fn decide(
                 ));
             }
             EngineEffect::CancelTransfer { transfer_id }
+        }
+        EngineCommand::RemoveTransfer { transfer_id } => {
+            let transfer = transfer(snapshot, &transfer_id)?;
+            if !transfer.state.is_terminal() {
+                return Err(invalid_transition(
+                    EntityKind::Transfer,
+                    &transfer_id,
+                    transfer.state.wire_name(),
+                    "remove_transfer",
+                ));
+            }
+            EngineEffect::RemoveTransfer { transfer_id }
         }
         EngineCommand::RevokeRelationship { relationship_id } => {
             trusted_relationship(snapshot, &relationship_id, "revoke_relationship")?;

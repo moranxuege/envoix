@@ -135,12 +135,18 @@ fn remembered_transfer_events(ids: &FixtureIds) -> Vec<EventEnvelope> {
         ),
         envelope(
             12,
-            EngineEvent::TransferDelivered {
+            EngineEvent::TransferPayloadCompleted {
                 transfer_id: ids.transfer.clone(),
             },
         ),
         envelope(
             13,
+            EngineEvent::TransferDeliveryProofVerified {
+                transfer_id: ids.transfer.clone(),
+            },
+        ),
+        envelope(
+            14,
             EngineEvent::RelationshipRevoked {
                 relationship_id: ids.relationship.clone(),
             },
@@ -154,7 +160,7 @@ fn ordered_events_rebuild_an_identical_snapshot() {
     let events = remembered_transfer_events(&ids);
     let snapshot = replay(EngineSnapshot::new(), events.clone()).unwrap();
 
-    assert_eq!(snapshot.last_sequence, 13);
+    assert_eq!(snapshot.last_sequence, 14);
     assert_eq!(
         snapshot.relationships[&ids.relationship].state,
         RelationshipState::Revoked
@@ -230,7 +236,7 @@ fn replay_detects_duplicates_gaps_and_illegal_transitions() {
     assert!(matches!(
         snapshot.apply(envelope(
             11,
-            EngineEvent::TransferDelivered {
+            EngineEvent::TransferPayloadCompleted {
                 transfer_id: ids.transfer,
             },
         )),
@@ -306,7 +312,13 @@ fn commands_and_capabilities_form_a_versioned_typed_boundary() {
         EngineCommand::ResumeTransfer {
             transfer_id: ids.transfer.clone(),
         },
+        EngineCommand::RecoverTransfer {
+            transfer_id: ids.transfer.clone(),
+        },
         EngineCommand::CancelTransfer {
+            transfer_id: ids.transfer.clone(),
+        },
+        EngineCommand::RemoveTransfer {
             transfer_id: ids.transfer,
         },
         EngineCommand::RevokeRelationship {
@@ -366,7 +378,7 @@ fn commands_and_capabilities_form_a_versioned_typed_boundary() {
 }
 
 #[test]
-fn failure_and_cancellation_are_typed_terminal_facts() {
+fn failure_and_cancellation_are_typed_outcomes() {
     let ids = fixture_ids();
     let base_events = remembered_transfer_events(&ids);
     let mut snapshot = replay(EngineSnapshot::new(), base_events[..6].iter().cloned()).unwrap();
@@ -413,6 +425,7 @@ fn failure_and_cancellation_are_typed_terminal_facts() {
         snapshot.transfers[&ids.transfer].failure.as_ref(),
         Some(&failure)
     );
+    assert!(failure.is_recoverable());
 
     let canceled_transfer = TransferId::parse("transfer_fixture_0002").unwrap();
     for event in [

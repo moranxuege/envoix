@@ -4,8 +4,8 @@ use envoix_client::decision::decide;
 use envoix_client::effect::{EffectEnvelope, EngineEffect};
 use envoix_client::event::{EngineEvent, EventEnvelope};
 use envoix_client::model::{
-    CommandId, ContentId, DeviceId, EntityKind, RelationshipId, RoomId, TransferDirection,
-    TransferId, TransferRejection,
+    CommandId, ContentId, DeviceId, EntityKind, FailureCode, FailurePhase, RecoveryAction,
+    RelationshipId, RoomId, TransferDirection, TransferFailure, TransferId, TransferRejection,
 };
 use envoix_client::snapshot::{ApplicationErrorCode, ApplyError, EngineSnapshot};
 
@@ -423,6 +423,88 @@ fn incoming_offer_decisions_require_the_offered_state() {
             command(EngineCommand::RejectTransfer {
                 transfer_id: ids.transfer,
                 reason: TransferRejection::UserDeclined,
+            }),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn recovery_and_removal_decisions_use_typed_terminal_state() {
+    let ids = fixture_ids();
+    let mut snapshot = EngineSnapshot::new();
+    trust_relationship(&mut snapshot, &ids);
+    for event in [
+        EngineEvent::TransferCreated {
+            transfer_id: ids.transfer.clone(),
+            relationship_id: ids.relationship,
+            room_id: None,
+            content_id: ids.content,
+            direction: TransferDirection::Send,
+            total_bytes: 5,
+        },
+        EngineEvent::TransferStarted {
+            transfer_id: ids.transfer.clone(),
+        },
+        EngineEvent::TransferFailed {
+            transfer_id: ids.transfer.clone(),
+            failure: TransferFailure {
+                code: FailureCode::NetworkLost,
+                phase: FailurePhase::Transferring,
+                retryable: true,
+                recovery_action: RecoveryAction::Resume,
+            },
+        },
+    ] {
+        apply_next(&mut snapshot, event);
+    }
+
+    let recovery = decide(
+        &snapshot,
+        command(EngineCommand::RecoverTransfer {
+            transfer_id: ids.transfer.clone(),
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        recovery.effect,
+        EngineEffect::RecoverTransfer {
+            transfer_id,
+            action: RecoveryAction::Resume,
+        } if transfer_id == ids.transfer
+    ));
+    assert!(matches!(
+        decide(
+            &snapshot,
+            command(EngineCommand::RemoveTransfer {
+                transfer_id: ids.transfer.clone(),
+            }),
+        )
+        .unwrap()
+        .effect,
+        EngineEffect::RemoveTransfer { transfer_id } if transfer_id == ids.transfer
+    ));
+
+    apply_next(
+        &mut snapshot,
+        EngineEvent::TransferRecoveryStarted {
+            transfer_id: ids.transfer.clone(),
+        },
+    );
+    assert!(
+        decide(
+            &snapshot,
+            command(EngineCommand::RecoverTransfer {
+                transfer_id: ids.transfer.clone(),
+            }),
+        )
+        .is_err()
+    );
+    assert!(
+        decide(
+            &snapshot,
+            command(EngineCommand::RemoveTransfer {
+                transfer_id: ids.transfer,
             }),
         )
         .is_err()

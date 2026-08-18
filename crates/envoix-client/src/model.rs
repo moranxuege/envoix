@@ -197,6 +197,7 @@ pub enum TransferState {
     Connecting,
     Transferring,
     Paused,
+    AwaitingDeliveryProof,
     Delivered,
     Rejected,
     Failed,
@@ -211,6 +212,7 @@ impl TransferState {
             Self::Connecting => "connecting",
             Self::Transferring => "transferring",
             Self::Paused => "paused",
+            Self::AwaitingDeliveryProof => "awaiting_delivery_proof",
             Self::Delivered => "delivered",
             Self::Rejected => "rejected",
             Self::Failed => "failed",
@@ -222,6 +224,13 @@ impl TransferState {
         matches!(
             self,
             Self::Delivered | Self::Rejected | Self::Failed | Self::Canceled
+        )
+    }
+
+    pub const fn can_cancel(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Connecting | Self::Transferring | Self::Paused
         )
     }
 }
@@ -279,6 +288,12 @@ pub struct TransferFailure {
     pub phase: FailurePhase,
     pub retryable: bool,
     pub recovery_action: RecoveryAction,
+}
+
+impl TransferFailure {
+    pub const fn is_recoverable(&self) -> bool {
+        self.retryable && !matches!(self.recovery_action, RecoveryAction::None)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
