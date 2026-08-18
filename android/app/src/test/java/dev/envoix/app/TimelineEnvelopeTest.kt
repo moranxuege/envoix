@@ -6,7 +6,7 @@ import org.junit.Test
 /**
  * Pins the Kotlin timeline builder against the Rust one. The golden line below
  * MUST be byte-identical to the Rust `golden_line_matches_the_kotlin_builder`
- * test (apps/envoix-android-jni) — same inputs, same column order, same
+ * test (crates/envoix-ffi/src/android_jni) — same inputs, same column order, same
  * escaping — so a Rust line and a Kotlin line are indistinguishable to a reader.
  */
 class TimelineEnvelopeTest {

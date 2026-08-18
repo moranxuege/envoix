@@ -31,6 +31,8 @@ mod nearby_invite;
 pub use nearby_invite::*;
 mod room_control;
 pub use room_control::*;
+#[cfg(feature = "android-jni")]
+mod android_jni;
 
 const ENVOIX_FFI_API_VERSION: u32 = 17;
 
@@ -843,147 +845,6 @@ fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
-}
-
-#[cfg(target_os = "android")]
-mod android_bootstrap {
-    use std::io::Write;
-    use std::sync::OnceLock;
-
-    use jni::JNIEnv;
-    use jni::JavaVM;
-    use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
-
-    static LOG_VM: OnceLock<JavaVM> = OnceLock::new();
-    static LOG_SINK: OnceLock<GlobalRef> = OnceLock::new();
-    type LogReload = tracing_subscriber::reload::Handle<
-        tracing_subscriber::EnvFilter,
-        tracing_subscriber::Registry,
-    >;
-    static LOG_RELOAD: OnceLock<LogReload> = OnceLock::new();
-    const DEFAULT_LOG: &str = "envoix=debug,iroh=info,warn";
-
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_envoix_app_NativeBootstrap_initContext(
-        env: JNIEnv,
-        _class: JClass,
-        context: JObject,
-    ) {
-        let Ok(vm) = env.get_java_vm() else { return };
-        let Ok(ctx) = env.new_global_ref(&context) else {
-            return;
-        };
-        // SAFETY: ndk-context requires the JavaVM and application-context raw
-        // pointers supplied by Android. `ctx` is intentionally retained for
-        // the process lifetime immediately below, so both pointers stay valid.
-        unsafe {
-            ndk_context::initialize_android_context(
-                vm.get_java_vm_pointer() as *mut _,
-                ctx.as_obj().as_raw() as *mut _,
-            );
-        }
-        // ndk-context stores this pointer globally and exposes no ownership API.
-        std::mem::forget(ctx);
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_envoix_app_NativeBootstrap_initLogging(
-        env: JNIEnv,
-        _class: JClass,
-        sink: JObject,
-    ) {
-        let Ok(vm) = env.get_java_vm() else { return };
-        let Ok(sink) = env.new_global_ref(&sink) else {
-            return;
-        };
-        let _ = LOG_VM.set(vm);
-        let _ = LOG_SINK.set(sink);
-        let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| DEFAULT_LOG.to_string());
-        let filter = tracing_subscriber::EnvFilter::try_new(&spec)
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG));
-        let (filter, handle) = tracing_subscriber::reload::Layer::new(filter);
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        let installed = tracing_subscriber::registry()
-            .with(filter)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(JniLogWriter)
-                    .with_ansi(false)
-                    .with_target(false),
-            )
-            .try_init()
-            .is_ok();
-        if installed {
-            let _ = LOG_RELOAD.set(handle);
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_envoix_app_NativeBootstrap_setLogLevel(
-        mut env: JNIEnv,
-        _class: JClass,
-        spec: JString,
-    ) {
-        let Ok(spec) = env.get_string(&spec) else {
-            return;
-        };
-        let spec: String = spec.into();
-        if let (Some(handle), Ok(filter)) = (
-            LOG_RELOAD.get(),
-            tracing_subscriber::EnvFilter::try_new(&spec),
-        ) {
-            let _ = handle.reload(filter);
-        }
-    }
-
-    fn log_line(line: &str) {
-        let (Some(vm), Some(sink)) = (LOG_VM.get(), LOG_SINK.get()) else {
-            return;
-        };
-        let Ok(mut env) = vm.attach_current_thread() else {
-            return;
-        };
-        if let Ok(js) = env.new_string(line) {
-            let _ = env.call_method(sink, "log", "(Ljava/lang/String;)V", &[JValue::Object(&js)]);
-        }
-    }
-
-    #[derive(Clone)]
-    struct JniLogWriter;
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for JniLogWriter {
-        type Writer = LineBuf;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            LineBuf(Vec::new())
-        }
-    }
-
-    struct LineBuf(Vec<u8>);
-
-    impl Write for LineBuf {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            if !self.0.is_empty() {
-                if let Ok(line) = std::str::from_utf8(&self.0) {
-                    log_line(line.trim_end());
-                }
-                self.0.clear();
-            }
-            Ok(())
-        }
-    }
-
-    impl Drop for LineBuf {
-        fn drop(&mut self) {
-            let _ = self.flush();
-        }
-    }
 }
 
 #[cfg(test)]

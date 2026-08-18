@@ -148,7 +148,7 @@ deny = ["100.64.0.0/10"]
   command contract.
 - `apps/envoix-agent`: persistent Windows/Linux/WSL Engine, Inbox, and Outbox
   owner.
-- `apps/envoix-android-jni`: Android JNI projection and platform save gate.
+- `crates/envoix-ffi/src/android_jni`: exceptional Android runtime and platform save JNI gate inside the typed native core.
 - `apps/envoix-apple`, `android`, `apps/envoix-cli`: native front ends.
 
 See [the Manifest v2 contract](docs/design/manifest-v2-goal0-contract.md) for

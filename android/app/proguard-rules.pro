@@ -1,4 +1,4 @@
-# The Rust core (libenvoix_jni.so) binds to these Java symbols by name via JNI,
+# The Rust core (libenvoix_ffi.so) binds to these Java symbols by name via JNI,
 # so R8 must not rename or strip them:
 #  - `Native` + its native methods → the `Java_dev_envoix_app_Native_*` C symbols
 #  - `EventCallback.onEvent` / `LogCallback.log` → looked up with GetMethodID from Rust

@@ -103,15 +103,12 @@ val generateEnvoixUniFfiKotlin by tasks.registering {
     }
 }
 
-val buildEnvoixJniAndroid by tasks.registering {
+val buildEnvoixNativeAndroid by tasks.registering {
     group = "build"
-    description = "Builds and stages the UniFFI core and exceptional JNI boundaries."
+    description = "Builds and stages the single UniFFI core with exceptional JNI boundaries."
     dependsOn(generateEnvoixUniFfiKotlin)
 
     inputs.files(
-        rootProject.layout.projectDirectory
-            .dir("../apps/envoix-android-jni")
-            .asFileTree,
         rootProject.layout.projectDirectory
             .dir("../crates")
             .asFileTree,
@@ -136,9 +133,9 @@ val buildEnvoixJniAndroid by tasks.registering {
                 "build",
                 "--release",
                 "-p",
-                "envoix-android-jni",
-                "-p",
                 "envoix-ffi",
+                "--features",
+                "android-jni",
             )
 
         exec {
@@ -152,18 +149,16 @@ val buildEnvoixJniAndroid by tasks.registering {
         delete(generatedJniLibsDir)
         envoixAndroidAbis.forEach { abi ->
             val rustTarget = envoixRustTargets.getValue(abi)
-            listOf("envoix_jni", "envoix_ffi").forEach { library ->
-                val sharedLibrary =
-                    rootProject.layout.projectDirectory
-                        .file("../target/$rustTarget/release/lib$library.so")
-                        .asFile
-                require(sharedLibrary.isFile) {
-                    "cargo-ndk did not produce ${sharedLibrary.absolutePath}"
-                }
-                copy {
-                    from(sharedLibrary)
-                    into(generatedJniLibsDir.map { it.dir(abi) })
-                }
+            val sharedLibrary =
+                rootProject.layout.projectDirectory
+                    .file("../target/$rustTarget/release/libenvoix_ffi.so")
+                    .asFile
+            require(sharedLibrary.isFile) {
+                "cargo-ndk did not produce ${sharedLibrary.absolutePath}"
+            }
+            copy {
+                from(sharedLibrary)
+                into(generatedJniLibsDir.map { it.dir(abi) })
             }
         }
     }
@@ -233,7 +228,7 @@ tasks.configureEach {
         dependsOn(generateEnvoixUniFfiKotlin)
     }
     if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
-        dependsOn(buildEnvoixJniAndroid)
+        dependsOn(buildEnvoixNativeAndroid)
     }
 }
 

@@ -54,10 +54,10 @@ interface LogCallback {
     )
 }
 
-/** JNI bridge to the in-process Envoix core (libenvoix_jni.so). */
+/** Exceptional JNI bridge compiled into the typed core (libenvoix_ffi.so). */
 object Native {
     init {
-        System.loadLibrary("envoix_jni")
+        System.loadLibrary("envoix_ffi")
     }
 
     /** Route the core's logs to [sink]. Call once, before [initContext]. */

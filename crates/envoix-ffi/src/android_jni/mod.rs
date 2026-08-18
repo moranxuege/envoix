@@ -1,4 +1,5 @@
-//! JNI bridge that runs an Envoix transfer **in the Android app's process** and
+//! Exceptional JNI bridge compiled into the same library as the typed UniFFI
+//! API. It runs an Envoix transfer **in the Android app's process** and
 //! streams its event JSON to a Kotlin callback.
 //!
 //! Running in-process (rather than exec'ing the CLI as a subprocess) is required
@@ -47,6 +48,9 @@ pub extern "system" fn Java_dev_envoix_app_Native_initContext(
         tracing::warn!("initContext: failed to create global context ref");
         return;
     };
+    // SAFETY: ndk-context only accepts the raw VM and application-object
+    // pointers supplied by JNI. The global reference is deliberately retained
+    // for the process lifetime immediately below, so both pointers stay valid.
     unsafe {
         ndk_context::initialize_android_context(
             vm.get_java_vm_pointer() as *mut _,

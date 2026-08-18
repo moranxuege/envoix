@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::{callback_or_log, emit, java_vm_or_log, jstr, runtime, to_jstring};
+use super::{callback_or_log, emit, java_vm_or_log, jstr, runtime, to_jstring};
 
 struct ActiveRoom {
     cancel: TransferCancelToken,
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn room_control_binding_fixture_covers_every_command_and_event() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/v0.2/android-room-control-v5.json"
+            "../../../../tests/fixtures/v0.2/android-room-control-v5.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);

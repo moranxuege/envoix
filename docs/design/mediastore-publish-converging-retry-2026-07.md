@@ -48,7 +48,7 @@ adopt(id, expectedSourceName = src.name, publishedName = finalName, uri = outcom
 
 ## 4. Durable publication duty — real forward progress (fixes point 2)
 Leaving the file in staging and returning is **not** forward progress: nothing re-drives it, and `onSnapshot`'s `completed` block only re-fires on restart. Add a narrow duty, **in `platform_extras`, not the Rust reducer, no outbox**:
-- Extend the typed **`AndroidPlatformExtras`** DTO (`apps/envoix-android-jni/src/lib.rs:993`, `deny_unknown_fields`) with `published_name: Option<String>` and `publish: Option<String>` (`"failed"` after give-up; absent = not-yet/пending). Without this, `setSessionExtras` rejects the new keys.
+- Extend the typed **`AndroidPlatformExtras`** DTO (`crates/envoix-ffi/src/android_jni/manifest_v2.rs`, `deny_unknown_fields`) with `published_name: Option<String>` and `publish: Option<String>` (`"failed"` after give-up; absent = not-yet/пending). Without this, `setSessionExtras` rejects the new keys.
 - **Pending signal** = the staging file still exists (publishOne deletes it only on success) and `publish != "failed"`.
 - **Driver:** the `completed && Receive` branch of `onSnapshot` already calls `sweepStaging`; keep it, plus a **small bounded in-session re-attempt** (a delayed coroutine, e.g. a few tries with backoff) so a transient failure doesn't wait for a restart. On restart the same branch re-fires and retries — eventual convergence.
 - **Terminal state:** after the bounded attempts fail on a *non-collision* error, set durable `publish = "failed"` and surface it in the UI (card reads "Received — couldn't save to Downloads · Retry"), so it's never silently invisible. A user "Retry" clears the flag and re-drives.
@@ -77,7 +77,7 @@ Leaving the file in staging and returning is **not** forward progress: nothing r
 | `MediaStoreSaver.kt` | `Reserved.displayName` (SAF = `doc.name`); drop `uniqueDownloadName`; `commit` → converging retry, rows-affected checks, cause-chain UNIQUE match, random-suffix tail, returns `PublishOutcome(uri, finalName)` |
 | `Transfer.kt` | + `publishedName: String?` |
 | `TransferService.kt` | `adopt` split (source name vs published name); journal records `published_name` + no swallow / no-delete-on-failed-write; `publishOne` uses `finalName`; `onSnapshot` drives the publish duty + bounded in-session retry; surface `publish=failed` |
-| `apps/envoix-android-jni/src/lib.rs` | `AndroidPlatformExtras` += `published_name`, `publish` (keeps `deny_unknown_fields`) |
+| `crates/envoix-ffi/src/android_jni/manifest_v2.rs` | `AndroidPlatformExtras` += `published_name`, `publish` (keeps `deny_unknown_fields`) |
 | tests | `nameSequence` + UNIQUE-matcher unit tests; on-emulator thrice-receive |
 
 ## Non-goals

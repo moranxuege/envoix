@@ -1056,25 +1056,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "envoix-android-jni"
-version = "0.3.0"
-dependencies = [
- "async-trait",
- "envoix-client",
- "envoix-error",
- "envoix-protocol",
- "envoix-types",
- "jni 0.21.1",
- "ndk-context",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "envoix-auth"
 version = "0.3.0"
 dependencies = [
@@ -1155,8 +1136,10 @@ dependencies = [
  "ndk-context",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "uniffi",
 ]

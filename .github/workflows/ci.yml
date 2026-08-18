@@ -12,7 +12,6 @@ on:
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
       - 'apps/envoix-agent/**'
-      - 'apps/envoix-android-jni/**'
       - 'apps/envoix-cli/**'
       - 'apps/envoix-rendezvous-server/**'
       - 'crates/**'
@@ -69,11 +68,11 @@ jobs:
       - name: Lint Rust
         run: >-
           scripts/with-build-cache-guard.sh
-          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test Rust
         run: >-
           scripts/with-build-cache-guard.sh
-          cargo test --locked --workspace --all-targets
+          cargo test --locked --workspace --all-targets --all-features
       - name: Install pinned cargo-audit
         run: >-
           scripts/with-build-cache-guard.sh
@@ -127,4 +126,8 @@ jobs:
       - name: Verify packaged JNI library
         run: |
           test -s android/app/build/outputs/apk/debug/app-debug.apk
-          unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fx 'lib/arm64-v8a/libenvoix_jni.so'
+          unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fx 'lib/arm64-v8a/libenvoix_ffi.so'
+          if unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fq 'libenvoix_jni.so'; then
+            echo 'legacy libenvoix_jni.so must not be packaged' >&2
+            exit 1
+          fi

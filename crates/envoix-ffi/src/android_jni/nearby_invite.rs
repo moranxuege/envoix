@@ -9,7 +9,7 @@ use jni::sys::{jlong, jstring};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{callback_or_log, emit, java_vm_or_log, jstr, runtime, to_jstring};
+use super::{callback_or_log, emit, java_vm_or_log, jstr, runtime, to_jstring};
 
 struct ActiveNearbyInbox {
     inbox: Option<Arc<NearbyInviteInbox>>,
