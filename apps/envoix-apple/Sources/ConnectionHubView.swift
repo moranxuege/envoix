@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import SwiftUI
+import UniformTypeIdentifiers
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -29,6 +30,22 @@ enum RoomInvitationLayout {
     }
 }
 
+enum RememberedDeviceSendPolicy {
+    static func canSend(status: RememberedRoomConnectionStatus) -> Bool {
+        if case .needsRepair = status { return false }
+        return true
+    }
+
+    static func acceptsDrop(
+        providerCount: Int,
+        status: RememberedRoomConnectionStatus
+    ) -> Bool {
+        canSend(status: status)
+            && providerCount > 0
+            && providerCount <= ShareDraftStore.maxItemCount
+    }
+}
+
 struct ConnectionHubView: View {
     @Environment(\.appLanguage) private var language
     @ObservedObject var coordinator: NearbyDiscoveryCoordinator
@@ -53,6 +70,8 @@ struct ConnectionHubView: View {
     let onSetVisibility: (NearbyVisibilityMode) -> Void
     let onRename: (String) -> Bool
     let onSelectRememberedRoom: (String) -> Void
+    let onSendToRememberedRoom: (String) -> Void
+    let onSendDroppedItems: (String, [URL]) -> Void
     let onPrepareNearbyPairing: () async -> Bool
     let onFinishNearbyPairing: () -> Void
     let onModalPresentationChanged: (Bool) -> Void
@@ -62,6 +81,7 @@ struct ConnectionHubView: View {
     @State private var isNearbyPairingPresented = false
     @State private var isPreparingNearbyPairing = false
     @State private var editedDisplayName = ""
+    @State private var rememberedDropTargetID: String?
 
     var body: some View {
         ScrollView {
@@ -211,12 +231,12 @@ struct ConnectionHubView: View {
         if !rememberedRooms.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text(AppText.value("Rooms", "房间", language: language))
+                    Text(AppText.value("Devices", "设备", language: language))
                         .font(.headline.weight(.semibold))
                     Spacer()
                     Text(AppText.value(
-                        "\(rememberedRooms.count) saved",
-                        "已保存 \(rememberedRooms.count) 个",
+                        "\(rememberedRooms.count) remembered",
+                        "已记住 \(rememberedRooms.count) 台",
                         language: language
                     ))
                     .font(.caption)
@@ -224,79 +244,168 @@ struct ConnectionHubView: View {
                 }
 
                 ForEach(rememberedRooms) { room in
+                    let status = rememberedRoomStatus(room.relationshipID)
                     let hasIncomingOffer =
                         incomingRememberedRelationshipID == room.relationshipID
-                    Button {
-                        onSelectRememberedRoom(room.relationshipID)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: rememberedRoomIcon(
-                                rememberedRoomStatus(room.relationshipID)
-                            ))
-                            .font(.title3)
-                            .foregroundStyle(rememberedRoomTint(
-                                rememberedRoomStatus(room.relationshipID)
-                            ))
+                    let canSend = RememberedDeviceSendPolicy.canSend(status: status)
+                    HStack(spacing: 10) {
+                        Button {
+                            onSelectRememberedRoom(room.relationshipID)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: rememberedRoomIcon(status))
+                                    .font(.title3)
+                                    .foregroundStyle(rememberedRoomTint(status))
 
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(room.label)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(Theme.text)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(room.label)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Theme.text)
+                                        .lineLimit(1)
+                                    Text(hasIncomingOffer
+                                         ? AppText.value(
+                                             "Incoming files",
+                                             "收到文件邀请",
+                                             language: language
+                                         )
+                                         : rememberedRoomStatusText(status))
+                                    .font(.caption)
+                                    .foregroundStyle(
+                                        hasIncomingOffer ? Theme.accentStrong : Theme.muted
+                                    )
                                     .lineLimit(1)
-                                Text(hasIncomingOffer
-                                     ? AppText.value(
-                                         "Incoming files",
-                                         "收到文件邀请",
-                                         language: language
-                                     )
-                                     : rememberedRoomStatusText(
-                                         rememberedRoomStatus(room.relationshipID)
-                                     ))
-                                .font(.caption)
-                                .foregroundStyle(
-                                    hasIncomingOffer ? Theme.accentStrong : Theme.muted
-                                )
-                                .lineLimit(1)
+                                }
+                                Spacer()
+                                if hasIncomingOffer {
+                                    Text(AppText.value(
+                                        "Open",
+                                        "查看",
+                                        language: language
+                                    ))
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(Theme.accentStrong)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Theme.accentSoft, in: Capsule())
+                                    .accessibilityHidden(true)
+                                }
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Theme.muted)
                             }
-                            Spacer()
-                            if hasIncomingOffer {
-                                Text(AppText.value(
-                                    "Open",
-                                    "查看",
-                                    language: language
-                                ))
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(Theme.accentStrong)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    Theme.accentSoft,
-                                    in: Capsule()
-                                )
-                                .accessibilityHidden(true)
-                            }
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(Theme.muted)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .contentShape(Rectangle())
                         }
-                        .frame(maxWidth: .infinity, minHeight: 48)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .accessibilityValue(hasIncomingOffer
+                            ? AppText.value(
+                                "Incoming files waiting for your decision",
+                                "有文件邀请等待处理",
+                                language: language
+                            )
+                            : rememberedRoomStatusText(status))
+
+                        Button {
+                            onSendToRememberedRoom(room.relationshipID)
+                        } label: {
+                            Label(
+                                AppText.value("Send", "发送", language: language),
+                                systemImage: "paperplane.fill"
+                            )
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accentStrong)
+                        .disabled(!canSend)
+                        .accessibilityIdentifier("remembered_device_send_\(room.relationshipID)")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityValue(hasIncomingOffer
-                        ? AppText.value(
-                            "Incoming files waiting for your decision",
-                            "有文件邀请等待处理",
-                            language: language
+                    .padding(10)
+                    .background(
+                        rememberedDropTargetID == room.relationshipID
+                            ? Theme.accentSoft
+                            : Theme.surfaceRaised,
+                        in: RoundedRectangle(cornerRadius: 12)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(
+                                rememberedDropTargetID == room.relationshipID
+                                    ? Theme.accentStrong
+                                    : Theme.line.opacity(0.55),
+                                lineWidth: rememberedDropTargetID == room.relationshipID ? 2 : 0.5
+                            )
+                    }
+                    .onDrop(
+                        of: [.fileURL],
+                        isTargeted: rememberedDropBinding(for: room.relationshipID)
+                    ) { providers in
+                        guard RememberedDeviceSendPolicy.acceptsDrop(
+                            providerCount: providers.count,
+                            status: status
+                        ) else { return false }
+                        loadRememberedDeviceDrop(
+                            providers,
+                            relationshipID: room.relationshipID
                         )
-                        : rememberedRoomStatusText(
-                            rememberedRoomStatus(room.relationshipID)
-                        ))
+                        return true
+                    }
                     .accessibilityIdentifier("remembered_room_\(room.relationshipID)")
                 }
+
+                #if os(macOS)
+                Text(AppText.value(
+                    "Choose Send, or drop files and folders directly onto a device.",
+                    "点击“发送”，或把文件和文件夹直接拖到设备上。",
+                    language: language
+                ))
+                .font(.caption)
+                .foregroundStyle(Theme.muted)
+                #endif
             }
             .card(padding: 14)
             .accessibilityIdentifier("remembered_rooms")
+        }
+    }
+
+    private func rememberedDropBinding(for relationshipID: String) -> Binding<Bool> {
+        Binding(
+            get: { rememberedDropTargetID == relationshipID },
+            set: { isTargeted in
+                if isTargeted {
+                    rememberedDropTargetID = relationshipID
+                } else if rememberedDropTargetID == relationshipID {
+                    rememberedDropTargetID = nil
+                }
+            }
+        )
+    }
+
+    private func loadRememberedDeviceDrop(
+        _ providers: [NSItemProvider],
+        relationshipID: String
+    ) {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var loaded = Array<URL?>(repeating: nil, count: providers.count)
+        for (index, provider) in providers.enumerated() {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                lock.lock()
+                loaded[index] = url
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            let urls = loaded.compactMap { $0 }
+            guard urls.count == providers.count else {
+                ToastCenter.shared.show(AppText.value(
+                    "Envoix could not read every dropped item.",
+                    "Envoix 无法读取全部拖入项目。",
+                    language: language
+                ))
+                return
+            }
+            onSendDroppedItems(relationshipID, urls)
         }
     }
 

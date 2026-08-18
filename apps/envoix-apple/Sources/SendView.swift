@@ -5,14 +5,6 @@ import AppKit
 import UniformTypeIdentifiers
 import EnvoixCore
 
-private final class SelectedResourceAccessGroup {
-    private let resources: [AnyObject]
-
-    init(_ resources: [AnyObject]) {
-        self.resources = resources
-    }
-}
-
 func sendSelectionContainsDirectory(_ urls: [URL]) -> Bool {
     guard urls.count == 1, let url = urls.first else { return false }
     let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
@@ -215,8 +207,12 @@ struct SendView: View {
             primaryButton
                 .padding(.top, 12)
         }
+        .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onAppear(perform: applyInitialPairingInputIfNeeded)
         .onAppear(perform: prepareCurrentSelectionIfNeeded)
+        .onChange(of: model.pendingSendSelection?.id) { _ in
+            adoptSharedSelectionIfAvailable()
+        }
         .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
             adoptPreparedManifestPaths(paths)
         }
@@ -1529,6 +1525,8 @@ struct SendView: View {
         }
     }
 
+    #endif
+
     private func adoptSharedSelectionIfAvailable() {
         guard !selectionMutationDisabled,
               let selection = model.pendingSendSelection else { return }
@@ -1544,15 +1542,14 @@ struct SendView: View {
         model.consumePendingSendSelection(id: selection.id)
         ToastCenter.shared.show(AppText.value(
             selection.fileURLs.count == 1
-                ? "Shared item ready to send"
-                : "\(selection.fileURLs.count) shared items ready to send",
+                ? "Item ready to send"
+                : "\(selection.fileURLs.count) items ready to send",
             selection.fileURLs.count == 1
-                ? "分享项目已准备发送"
-                : "\(selection.fileURLs.count) 个分享项目已准备发送",
+                ? "项目已准备发送"
+                : "\(selection.fileURLs.count) 个项目已准备发送",
             language: uiLanguage
         ))
     }
-    #endif
 
     private func selectedSourceAccessForTransfer() -> AnyObject? {
         return selectedSourceAccess

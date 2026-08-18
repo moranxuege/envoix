@@ -877,6 +877,8 @@ struct MobileConnectionFlowView: View {
                 onSetVisibility: { presence.setVisibility($0) },
                 onRename: updateDisplayName,
                 onSelectRememberedRoom: openRememberedRoom,
+                onSendToRememberedRoom: offerFilesToRememberedRoom,
+                onSendDroppedItems: offerDroppedItemsToRememberedRoom,
                 onPrepareNearbyPairing: {
                     systemNearbyPairingIsActive = true
                     await nearbyCoordinator.suspendForSystemPairing()
@@ -1117,33 +1119,21 @@ struct MobileConnectionFlowView: View {
         guard preservedSendSelection.items.isEmpty else {
             return preservedSendSelection.items
         }
-        #if os(iOS)
         return model.pendingSendSelection?.fileURLs ?? []
-        #else
-        return []
-        #endif
     }
 
     private var initialSendFileAccess: AnyObject? {
         guard preservedSendSelection.items.isEmpty else {
             return preservedSendSelection.sourceAccess
         }
-        #if os(iOS)
         return model.pendingSendSelection?.sourceAccess
-        #else
-        return nil
-        #endif
     }
 
     private var initialPendingSendSelectionID: UUID? {
         guard preservedSendSelection.items.isEmpty else {
             return preservedSendSelection.pendingSelectionID
         }
-        #if os(iOS)
         return model.pendingSendSelection?.id
-        #else
-        return nil
-        #endif
     }
 
     private var pageTitle: String {
@@ -1361,18 +1351,73 @@ struct MobileConnectionFlowView: View {
         transferRoute = .send
     }
 
-    private func openRememberedRoom(_ relationshipID: String) {
-        if workflow.activeRememberedRelationshipID == relationshipID
-            || workflow.rememberedRoom?.relationshipID == relationshipID {
-            openRememberedRoomNow(relationshipID)
-            return
-        }
-        guardRoomReplacement {
-            openRememberedRoomNow(relationshipID)
+    private func offerFilesToRememberedRoom(_ relationshipID: String) {
+        guard canPresentRememberedRoomSend() else { return }
+        openRememberedRoom(relationshipID) {
+            presentedSharedSelectionID = model.pendingSendSelection?.id
+            offerRememberedRoomFiles()
         }
     }
 
-    private func openRememberedRoomNow(_ relationshipID: String) {
+    private func offerDroppedItemsToRememberedRoom(
+        _ relationshipID: String,
+        _ urls: [URL]
+    ) {
+        guard canPresentRememberedRoomSend() else { return }
+        do {
+            switch try model.importOpenedSendFiles(urls) {
+            case .imported:
+                offerFilesToRememberedRoom(relationshipID)
+            case .queued:
+                ToastCenter.shared.show(AppText.value(
+                    "Finish the current send, then drop the items again.",
+                    "请先完成当前发送，再重新拖入这些项目。",
+                    language: language
+                ))
+            }
+        } catch let error as OpenedSendFileError {
+            ToastCenter.shared.show(openedSendFileErrorMessage(error))
+        } catch {
+            ToastCenter.shared.show(error.localizedDescription)
+        }
+    }
+
+    private func canPresentRememberedRoomSend() -> Bool {
+        guard transferRoute == nil, !model.send.isBusy else {
+            ToastCenter.shared.show(AppText.value(
+                "Finish the current send before starting another one.",
+                "请先完成当前发送，再开始新的发送。",
+                language: language
+            ))
+            return false
+        }
+        return true
+    }
+
+    private func openRememberedRoom(_ relationshipID: String) {
+        openRememberedRoom(relationshipID) {
+            presentPendingSendSelection()
+        }
+    }
+
+    private func openRememberedRoom(
+        _ relationshipID: String,
+        onOpened: @escaping () -> Void
+    ) {
+        if workflow.activeRememberedRelationshipID == relationshipID
+            || workflow.rememberedRoom?.relationshipID == relationshipID {
+            openRememberedRoomNow(relationshipID, onOpened: onOpened)
+            return
+        }
+        guardRoomReplacement {
+            openRememberedRoomNow(relationshipID, onOpened: onOpened)
+        }
+    }
+
+    private func openRememberedRoomNow(
+        _ relationshipID: String,
+        onOpened: @escaping () -> Void
+    ) {
         if let error = workflow.openRememberedRoom(
             relationshipID: relationshipID,
             existingActivityIDs: Set(model.activities.map(\.activityId))
@@ -1383,7 +1428,7 @@ struct MobileConnectionFlowView: View {
         resetRoomTransferHandoff()
         page = .room
         DispatchQueue.main.async {
-            presentPendingSendSelection()
+            onOpened()
         }
     }
 
@@ -1859,7 +1904,6 @@ struct MobileConnectionFlowView: View {
             #endif
             return
         }
-        #if os(iOS)
         guard url.isFileURL else { return }
 
         do {
@@ -1878,7 +1922,6 @@ struct MobileConnectionFlowView: View {
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }
-        #endif
     }
 
     private func openConfirmedExternalInvitation(_ input: String) {
@@ -2054,6 +2097,8 @@ struct MobileConnectionFlowView: View {
         #if os(iOS)
         guard pendingExternalInvitation == nil else { return }
         presentSharedDraft(preferredID: nil)
+        #else
+        routePendingSendSelection(notifyWaiting: false)
         #endif
     }
 
@@ -2078,6 +2123,7 @@ struct MobileConnectionFlowView: View {
             ToastCenter.shared.show(error.localizedDescription)
         }
     }
+    #endif
 
     private func routePendingSendSelection(notifyWaiting: Bool) {
         let selectionID = model.pendingSendSelection?.id
@@ -2115,7 +2161,6 @@ struct MobileConnectionFlowView: View {
             offerRememberedRoomFiles()
         }
     }
-    #endif
 
     private var isRoomOccupied: Bool {
         workflow.room != nil || workflow.hasPinnedRememberedRoom || isControlRoomOpen
@@ -2423,7 +2468,6 @@ struct MobileConnectionFlowView: View {
         #endif
     }
 
-    #if os(iOS)
     private func openedSendFileErrorMessage(_ error: OpenedSendFileError) -> String {
         switch error {
         case .unsupportedURL:
@@ -2444,9 +2488,14 @@ struct MobileConnectionFlowView: View {
                 "Envoix 无法访问此文件。请先下载完成，然后重试。",
                 language: language
             )
+        case .itemCountExceeded:
+            return AppText.value(
+                "Choose no more than \(ShareDraftStore.maxItemCount) items.",
+                "一次最多选择 \(ShareDraftStore.maxItemCount) 个项目。",
+                language: language
+            )
         }
     }
-    #endif
 
     #if DEBUG && os(iOS)
     private var debugOpenInFixtureURL: URL? { openInUITestFixtureURL }

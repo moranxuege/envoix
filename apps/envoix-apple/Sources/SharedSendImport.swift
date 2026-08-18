@@ -23,19 +23,28 @@ final class ShareDraftLease {
     }
 }
 
-#if os(iOS)
+final class SelectedResourceAccessGroup {
+    private let resources: [AnyObject]
+
+    init(_ resources: [AnyObject]) {
+        self.resources = resources
+    }
+}
+
 struct PendingSendSelection: Identifiable {
     let id: UUID
     let fileURLs: [URL]
     let sourceAccess: AnyObject
 }
 
+#if os(iOS)
 enum SharedSendImportOutcome {
     case imported
     case alreadyImported
     case noPendingDraft
     case sendBusy
 }
+#endif
 
 enum OpenedSendFileOutcome {
     case imported
@@ -46,5 +55,31 @@ enum OpenedSendFileError: Error, Equatable {
     case unsupportedURL
     case unsupportedItem
     case inaccessible
+    case itemCountExceeded
 }
-#endif
+
+func validatedOpenedSendURLs(_ urls: [URL]) throws -> [URL] {
+    guard !urls.isEmpty else { throw OpenedSendFileError.unsupportedItem }
+    guard urls.count <= ShareDraftStore.maxItemCount else {
+        throw OpenedSendFileError.itemCountExceeded
+    }
+    var seenPaths = Set<String>()
+    var accepted: [URL] = []
+    for url in urls {
+        guard url.isFileURL else { throw OpenedSendFileError.unsupportedURL }
+        let standardized = url.standardizedFileURL
+        guard seenPaths.insert(standardized.path).inserted else { continue }
+        let values = try standardized.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isDirectoryKey,
+            .isSymbolicLinkKey,
+        ])
+        guard values.isSymbolicLink != true,
+              values.isRegularFile == true || values.isDirectory == true else {
+            throw OpenedSendFileError.unsupportedItem
+        }
+        accepted.append(standardized)
+    }
+    guard !accepted.isEmpty else { throw OpenedSendFileError.unsupportedItem }
+    return accepted
+}

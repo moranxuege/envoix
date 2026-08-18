@@ -379,9 +379,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var transferCacheSummary = TransferCacheSummary()
     @Published private(set) var isCleaningTransferCache = false
     @Published private(set) var transferCacheError: String?
-    #if os(iOS)
     @Published private(set) var pendingSendSelection: PendingSendSelection?
-    #endif
 
     private var cancellables = Set<AnyCancellable>()
     #if os(macOS)
@@ -582,9 +580,9 @@ final class AppModel: ObservableObject {
         transferCacheError = nil
         let protected = Set(activities.filter { ActivityProjectionPolicy.isPending($0.state) }.map(\.activityId))
         var drafts = Set([send.protectedShareDraftID].compactMap { $0 })
-        #if os(iOS)
-        drafts.formUnion([pendingSendSelection?.id].compactMap { $0 })
-        #endif
+        drafts.formUnion([
+            (pendingSendSelection?.sourceAccess as? ShareDraftLease)?.id,
+        ].compactMap { $0 })
         drafts.formUnion(
             (try? RememberedRoomOutboxStore.shared.entries())?
                 .compactMap(\.shareDraftID) ?? []
@@ -652,26 +650,24 @@ final class AppModel: ObservableObject {
         }
         return .imported
     }
+    #endif
 
     func importOpenedSendFile(_ url: URL) throws -> OpenedSendFileOutcome {
-        guard url.isFileURL else { throw OpenedSendFileError.unsupportedURL }
-        let access = SecurityScopedResourceAccess(url: url)
-        guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
-            throw OpenedSendFileError.inaccessible
-        }
-        let values = try url.resourceValues(forKeys: [
-            .isRegularFileKey,
-            .isDirectoryKey,
-            .isSymbolicLinkKey,
-        ])
-        guard values.isSymbolicLink != true,
-              values.isRegularFile == true || values.isDirectory == true else {
-            throw OpenedSendFileError.unsupportedItem
+        try importOpenedSendFiles([url])
+    }
+
+    func importOpenedSendFiles(_ urls: [URL]) throws -> OpenedSendFileOutcome {
+        let urls = try validatedOpenedSendURLs(urls)
+        let accesses = urls.map(SecurityScopedResourceAccess.init)
+        for (url, access) in zip(urls, accesses) {
+            guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
+                throw OpenedSendFileError.inaccessible
+            }
         }
         pendingSendSelection = PendingSendSelection(
             id: UUID(),
-            fileURLs: [url],
-            sourceAccess: access
+            fileURLs: urls,
+            sourceAccess: SelectedResourceAccessGroup(accesses)
         )
         return send.isBusy ? .queued : .imported
     }
@@ -679,7 +675,6 @@ final class AppModel: ObservableObject {
     func consumePendingSendSelection(id: UUID) {
         if pendingSendSelection?.id == id { pendingSendSelection = nil }
     }
-    #endif
 
     fileprivate func upsert(_ record: TransferActivityRecord) {
         if let index = activities.firstIndex(where: { $0.activityId == record.activityId }) {
