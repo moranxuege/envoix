@@ -16,9 +16,43 @@ use serde::{Deserialize, Serialize};
 use crate::api::DesktopCredentialStore;
 
 pub const AGENT_PROTOCOL_VERSION: u16 = 2;
+pub const AGENT_SETTINGS_VERSION: u16 = 1;
 const PRODUCT_STATE_SCHEMA_VERSION: u16 = 1;
 const PRODUCT_STATE_FILE: &str = "product-state-v1.json";
 const MAX_INBOX_ITEMS: usize = 1_000;
+
+/// User-owned settings loaded by a managed Agent process.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSettings {
+    pub version: u16,
+    pub device_name: String,
+    pub inbox_directory: PathBuf,
+}
+
+impl AgentSettings {
+    pub fn validate(&self) -> io::Result<()> {
+        if self.version != AGENT_SETTINGS_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported Agent settings version {}", self.version),
+            ));
+        }
+        if validate_label(&self.device_name)? != self.device_name {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Agent device name cannot have leading or trailing whitespace",
+            ));
+        }
+        if !self.inbox_directory.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Agent Inbox directory must be an absolute path",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// One request is sent as one JSON line over the local Agent socket.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -635,6 +669,34 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
             r#"{"kind":"pairing","pairing":{"label":"MacBook","room_code":"123456-a1b2-c3d4","verification_code":"012345","expires_at_unix_seconds":42}}"#
+        );
+    }
+
+    #[test]
+    fn agent_settings_validate_version_name_and_inbox() {
+        let mut settings = AgentSettings {
+            version: AGENT_SETTINGS_VERSION,
+            device_name: "WSL".into(),
+            inbox_directory: PathBuf::from("/tmp/inbox"),
+        };
+        settings.validate().unwrap();
+
+        settings.version += 1;
+        assert_eq!(
+            settings.validate().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        settings.version = AGENT_SETTINGS_VERSION;
+        settings.device_name = " WSL".into();
+        assert_eq!(
+            settings.validate().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        settings.device_name = "WSL".into();
+        settings.inbox_directory = PathBuf::from("relative/inbox");
+        assert_eq!(
+            settings.validate().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
         );
     }
 }

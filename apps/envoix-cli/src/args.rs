@@ -66,6 +66,22 @@ pub(crate) struct AgentArgs {
 pub(crate) enum AgentCommand {
     /// Show whether the Agent is running and listening for remembered peers.
     Status,
+    /// Install and start the Agent as a systemd user service.
+    Install {
+        /// Inbox directory; defaults to the Agent state directory's Inbox.
+        #[arg(long)]
+        inbox: Option<PathBuf>,
+        /// Name shown to sending devices.
+        #[arg(long, default_value = "WSL")]
+        device_name: String,
+        /// Prebuilt envoix-agent binary; defaults to the CLI's directory or PATH.
+        #[arg(long)]
+        agent_binary: Option<PathBuf>,
+    },
+    /// Start the installed Agent service.
+    Start,
+    /// Stop the installed Agent service.
+    Stop,
     /// Create a one-time receive invitation that becomes a remembered device.
     Pair {
         /// Name for the Mac or other sending device.
@@ -508,6 +524,20 @@ mod tests {
     #[test]
     fn agent_and_inbox_commands_are_available_without_transfer_flags() {
         assert!(Cli::try_parse_from(["envoix", "agent", "status"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "agent",
+                "install",
+                "--inbox",
+                "./inbox",
+                "--device-name",
+                "Dev WSL",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "agent", "start"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "agent", "stop"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "agent", "pair", "--name", "MacBook"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "list"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "inbox", "latest"]).is_ok());

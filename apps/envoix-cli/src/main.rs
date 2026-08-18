@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+mod agent_service;
 mod args;
 
 use args::{
@@ -76,6 +77,13 @@ async fn run(cli: Cli) -> CliResult<()> {
             AgentCommand::Status => {
                 show_agent_status(call_agent(agent_socket, AgentRequest::Status).await?, json)
             }
+            AgentCommand::Install {
+                inbox,
+                device_name,
+                agent_binary,
+            } => install_agent(inbox, device_name, agent_binary, json),
+            AgentCommand::Start => manage_agent_service("started", agent_service::start, json),
+            AgentCommand::Stop => manage_agent_service("stopped", agent_service::stop, json),
             AgentCommand::Pair { name } => show_pairing(
                 call_agent(agent_socket, AgentRequest::Pair { label: name }).await?,
                 json,
@@ -110,7 +118,7 @@ async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult
         io::Error::new(
             error.kind(),
             format!(
-                "cannot connect to Envoix Agent at {}: {error}; start envoix-agent first",
+                "cannot connect to Envoix Agent at {}: {error}; run `envoix agent start` or start envoix-agent in a foreground shell",
                 socket.display()
             ),
         )
@@ -126,6 +134,58 @@ async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult
         return Err("Envoix Agent closed the socket without a response".into());
     }
     Ok(serde_json::from_str(&line)?)
+}
+
+fn install_agent(
+    inbox: Option<PathBuf>,
+    device_name: String,
+    agent_binary: Option<PathBuf>,
+    json: bool,
+) -> CliResult<()> {
+    let installed = agent_service::install(agent_service::InstallOptions {
+        inbox,
+        device_name,
+        agent_binary,
+    })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_installed",
+                "agent_binary": installed.agent_binary,
+                "cli_binary": installed.cli_binary,
+                "settings_file": installed.settings_file,
+                "unit_file": installed.unit_file,
+            })
+        );
+    } else {
+        println!("Agent installed and started.");
+        println!("agent: {}", installed.agent_binary.display());
+        println!("cli: {}", installed.cli_binary.display());
+        println!("settings: {}", installed.settings_file.display());
+        println!("service: {}", installed.unit_file.display());
+    }
+    Ok(())
+}
+
+fn manage_agent_service(
+    completed: &str,
+    operation: impl FnOnce() -> io::Result<()>,
+    json: bool,
+) -> CliResult<()> {
+    operation()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_changed",
+                "state": completed,
+            })
+        );
+    } else {
+        println!("Agent service {completed}.");
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]

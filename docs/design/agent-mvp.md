@@ -68,7 +68,10 @@ limited to 64 KiB.
 
 The persisted `product-state-v1.json` records device metadata and completed
 Inbox items. Opaque credentials live under the separate `credentials/`
-directory and are never serialized into Agent responses.
+directory and are never serialized into Agent responses. A managed process
+loads its device name and Inbox location from the versioned, owner-only
+`~/.config/envoix/agent.json`; command-line arguments still take precedence for
+development runs.
 
 ## Pairing and receive lifecycle
 
@@ -139,32 +142,40 @@ Envoix or accessing real remembered-device credentials:
 scripts/apple-dev.sh macos-clipboard-test
 ```
 
-Run the Agent in WSL:
+Install the Agent in WSL after building both binaries:
 
 ```bash
-target/debug/envoix-agent
+target/debug/envoix agent install --inbox "$PWD/inbox" --device-name WSL
 ```
 
-In another WSL shell:
+The command copies `envoix` and `envoix-agent` to `~/.local/bin`, writes a
+systemd user unit, enables it for future WSL sessions, and starts it now. It
+does not edit `/etc/wsl.conf` or enable systemd on the user's behalf. When the
+user service manager is unavailable, the installed files remain usable and
+the error prints the equivalent foreground command.
+
+Manage and use the Agent from any WSL shell:
 
 ```bash
-target/debug/envoix agent status
-target/debug/envoix agent pair --name MacBook
-target/debug/envoix devices list
-target/debug/envoix inbox list
-target/debug/envoix inbox latest
+~/.local/bin/envoix agent start
+~/.local/bin/envoix agent status
+~/.local/bin/envoix agent pair --name MacBook
+~/.local/bin/envoix devices list
+~/.local/bin/envoix inbox list
+~/.local/bin/envoix inbox latest
+~/.local/bin/envoix agent stop
 ```
 
-Defaults can be overridden with `--state-dir`, `--inbox`, `--socket`,
-`--broker`, `--relay`, and `--config`. `ENVOIX_STATE_DIR` and
-`ENVOIX_AGENT_SOCKET` are also honored. Pass `--relay none` only when both
-peers have a confirmed direct route.
+For a foreground development run, use `envoix-agent` directly. Defaults can be
+overridden with `--settings`, `--state-dir`, `--inbox`, `--socket`, `--broker`,
+`--relay`, and `--config`. `ENVOIX_STATE_DIR` and `ENVOIX_AGENT_SOCKET` are also
+honored. Pass `--relay none` only when both peers have a confirmed direct
+route.
 
 ## Next slices
 
 1. Add an explicit large-offer approval command and pending-offer state.
-2. Package the Agent as a WSL user service and provide health/startup commands.
-3. Add path telemetry (`lan`, `tailnet/direct`, `relay`) without using path type
+2. Add path telemetry (`lan`, `tailnet/direct`, `relay`) without using path type
    as an authentication decision.
-4. Add an optional store-and-forward relay only if offline delivery becomes a
+3. Add an optional store-and-forward relay only if offline delivery becomes a
    real requirement; it is not part of this MVP.

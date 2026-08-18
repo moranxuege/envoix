@@ -18,8 +18,8 @@ use envoix_client::api::{
     TransferRole,
 };
 use envoix_client::product::{
-    AGENT_PROTOCOL_VERSION, AgentRequest, AgentResponse, AgentStatus, InboxItem, InboxRoot,
-    PairingInvitation, PreparedRememberedDevice, ProductStore, RememberedDeviceRecord,
+    AGENT_PROTOCOL_VERSION, AgentRequest, AgentResponse, AgentSettings, AgentStatus, InboxItem,
+    InboxRoot, PairingInvitation, PreparedRememberedDevice, ProductStore, RememberedDeviceRecord,
     default_agent_state_directory,
 };
 use envoix_client::{
@@ -41,6 +41,9 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
     about = "Persistent Envoix receiver and local Inbox service"
 )]
 struct Cli {
+    /// Managed Agent settings written by `envoix agent install`.
+    #[arg(long)]
+    settings: Option<PathBuf>,
     /// Product metadata, protected credentials, and transfer state.
     #[arg(long)]
     state_dir: Option<PathBuf>,
@@ -51,8 +54,8 @@ struct Cli {
     #[arg(long)]
     socket: Option<PathBuf>,
     /// Human-readable name for this Agent host.
-    #[arg(long, default_value = "WSL")]
-    device_name: String,
+    #[arg(long)]
+    device_name: Option<String>,
     /// Rendezvous broker shared with the Mac app.
     #[arg(long, default_value = DEFAULT_RENDEZVOUS_BROKER)]
     broker: String,
@@ -116,11 +119,31 @@ impl AgentRuntime {
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    let settings = cli
+        .settings
+        .as_deref()
+        .map(read_agent_settings)
+        .transpose()?;
     let state_directory = match cli.state_dir {
         Some(path) => path,
         None => default_agent_state_directory()?,
     };
-    let inbox_directory = cli.inbox.unwrap_or_else(|| state_directory.join("inbox"));
+    let inbox_directory = cli
+        .inbox
+        .or_else(|| {
+            settings
+                .as_ref()
+                .map(|settings| settings.inbox_directory.clone())
+        })
+        .unwrap_or_else(|| state_directory.join("inbox"));
+    let device_name = cli
+        .device_name
+        .or_else(|| {
+            settings
+                .as_ref()
+                .map(|settings| settings.device_name.clone())
+        })
+        .unwrap_or_else(|| "WSL".into());
     let socket_path = cli
         .socket
         .or_else(|| std::env::var_os("ENVOIX_AGENT_SOCKET").map(PathBuf::from))
@@ -138,7 +161,7 @@ pub async fn run() -> Result<()> {
             state_directory: state_directory.clone(),
             inbox_directory,
             socket_path,
-            device_name: cli.device_name,
+            device_name,
             broker: cli.broker,
             relay,
         },
@@ -181,6 +204,17 @@ fn agent_client(config_path: Option<&Path>) -> Result<api::Client> {
     Ok(client)
 }
 
+fn read_agent_settings(path: &Path) -> Result<AgentSettings> {
+    let bytes =
+        fs::read(path).with_context(|| format!("read Agent settings {}", path.display()))?;
+    let settings: AgentSettings = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse Agent settings {}", path.display()))?;
+    settings
+        .validate()
+        .with_context(|| format!("validate Agent settings {}", path.display()))?;
+    Ok(settings)
+}
+
 async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
     prepare_socket(&runtime.config.socket_path).await?;
     let listener = UnixListener::bind(&runtime.config.socket_path)
@@ -196,9 +230,11 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
         "Envoix Agent ready"
     );
 
+    let termination = termination_signal();
+    tokio::pin!(termination);
     loop {
         tokio::select! {
-            signal = tokio::signal::ctrl_c() => {
+            signal = &mut termination => {
                 signal?;
                 tracing::info!("shutting down");
                 shutdown_background_tasks(&runtime).await;
@@ -214,6 +250,14 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
                 });
             }
         }
+    }
+}
+
+async fn termination_signal() -> io::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => signal,
+        _ = terminate.recv() => Ok(()),
     }
 }
 
@@ -923,6 +967,21 @@ mod tests {
             agent_client(None).unwrap().identity,
             IdentityConfig::Ephemeral
         );
+    }
+
+    #[test]
+    fn managed_settings_are_validated_when_loaded() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.json");
+        fs::write(
+            &path,
+            br#"{"version":1,"device_name":" WSL","inbox_directory":"/tmp/inbox"}"#,
+        )
+        .unwrap();
+
+        let error = read_agent_settings(&path).unwrap_err();
+
+        assert!(error.to_string().contains("validate Agent settings"));
     }
 
     #[tokio::test]

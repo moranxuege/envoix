@@ -37,19 +37,25 @@ CLI remains its local controller:
 ```bash
 scripts/with-build-cache-guard.sh cargo build -p envoix-agent -p envoix-cli
 
-# Keep this running in WSL (the deployed relay remains a fallback; direct paths
-# are still preferred when reachable).
-target/debug/envoix-agent
+# Install both binaries and start a systemd user service. This keeps the Inbox
+# in the repository for the current development workflow.
+target/debug/envoix agent install --inbox "$PWD/inbox" --device-name WSL
 
 # In another shell, create an ordinary Room plus a one-time verification code.
-target/debug/envoix agent pair --name MacBook
+~/.local/bin/envoix agent status
+~/.local/bin/envoix agent pair --name MacBook
 
 # On the Mac, enter the printed Room code, then enter the six-digit code when
 # Envoix asks to verify WSL. No transfer is required to finish pairing.
-target/debug/envoix devices list
-target/debug/envoix inbox list
-target/debug/envoix inbox latest
+~/.local/bin/envoix devices list
+~/.local/bin/envoix inbox list
+~/.local/bin/envoix inbox latest
 ```
+
+Use `envoix agent stop` and `envoix agent start` to manage the installed
+service. The installer enables autostart for the user service but does not edit
+`/etc/wsl.conf`; if systemd is unavailable, its error includes the equivalent
+foreground command.
 
 On macOS, select the remembered WSL device and use **Paste File or Image** to
 send a Finder item, an existing path, or a clipboard image. Clipboard images
