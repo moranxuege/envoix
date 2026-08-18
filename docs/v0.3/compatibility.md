@@ -82,8 +82,10 @@ side.
 The v0.3 Agent control protocol starts at version 4. Its request/response
 envelopes and snapshot remain frozen in a v0.3 fixture. Version 5 adds bounded
 event polling and explicit snapshot recovery in a new fixture without
-rewriting v4. v3 and v4 commands are recognized only far enough to return a
-typed version error; they are never executed by a v5 Agent.
+rewriting v4. Version 6 adds durable Transfer creation/status and secret-free
+diagnostics in another immutable fixture. v3 through v5 commands are recognized
+only far enough to return a typed version error; they are never executed by a
+v6 Agent.
 
 ## 5. Relationship migration
 

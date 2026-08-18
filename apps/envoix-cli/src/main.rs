@@ -11,7 +11,7 @@ mod args;
 
 use args::{
     AgentCommand, Cli, Command, DevicesCommand, InboxCommand, SaveModeArg, SourceIssueActionArg,
-    TransferPlan,
+    TransferPlan, TransfersCommand,
 };
 use clap::Parser;
 use envoix_client::api::{
@@ -103,6 +103,10 @@ async fn run(cli: Cli) -> CliResult<()> {
                 .await?,
                 json,
             ),
+            AgentCommand::Diagnostics => show_agent_diagnostics(
+                call_agent(agent_endpoint, AgentRequest::Diagnostics).await?,
+                json,
+            ),
             AgentCommand::Install {
                 inbox,
                 device_name,
@@ -125,6 +129,27 @@ async fn run(cli: Cli) -> CliResult<()> {
                 json,
             ),
         },
+        Command::Transfers(args) => match args.command {
+            TransfersCommand::Create { device, paths } => {
+                let paths = canonicalize_agent_sources(paths).await?;
+                show_created_transfer(
+                    call_agent(
+                        agent_endpoint,
+                        AgentRequest::CreateTransfer { device, paths },
+                    )
+                    .await?,
+                    json,
+                )
+            }
+            TransfersCommand::List => show_transfers(
+                call_agent(agent_endpoint, AgentRequest::ListTransfers).await?,
+                json,
+            ),
+            TransfersCommand::Show { transfer_id } => show_transfer(
+                call_agent(agent_endpoint, AgentRequest::GetTransfer { transfer_id }).await?,
+                json,
+            ),
+        },
         Command::Inbox(args) => match args.command {
             InboxCommand::List { limit } => show_inbox(
                 call_agent(agent_endpoint, AgentRequest::ListInbox { limit }).await?,
@@ -136,6 +161,19 @@ async fn run(cli: Cli) -> CliResult<()> {
             ),
         },
     }
+}
+
+async fn canonicalize_agent_sources(paths: Vec<PathBuf>) -> CliResult<Vec<PathBuf>> {
+    let mut canonical = Vec::with_capacity(paths.len());
+    for path in paths {
+        canonical.push(tokio::fs::canonicalize(&path).await.map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot resolve Transfer source {}: {error}", path.display()),
+            )
+        })?);
+    }
+    Ok(canonical)
 }
 
 #[cfg(unix)]
@@ -362,6 +400,32 @@ fn show_agent_events(response: AgentResponse, json: bool) -> CliResult<()> {
     }
 }
 
+fn show_agent_diagnostics(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Diagnostics { diagnostics } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("platform: {}", diagnostics.platform);
+    println!(
+        "contracts: Agent v{}, application v{}, Engine schema v{}",
+        diagnostics.agent_protocol_version,
+        diagnostics.application_contract_version,
+        diagnostics.engine_schema_version
+    );
+    println!("control: {:?}", diagnostics.control_transport);
+    println!("credentials: {:?}", diagnostics.credential_protection);
+    println!("engine sequence: {}", diagnostics.engine_sequence);
+    println!(
+        "state: {} relationships, {} Transfers, {} Inbox items",
+        diagnostics.relationships, diagnostics.transfers, diagnostics.inbox_items
+    );
+    Ok(())
+}
+
 fn show_pairing(response: AgentResponse, json: bool) -> CliResult<()> {
     let response = agent_error(response)?;
     if json {
@@ -412,6 +476,66 @@ fn show_revoked_device(response: AgentResponse, json: bool) -> CliResult<()> {
         return Err("Agent returned an unexpected response".into());
     };
     println!("Revoked device: {} ({})", device.label, device.id);
+    Ok(())
+}
+
+fn show_created_transfer(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::TransferCreated { transfer } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Created Transfer: {}", transfer.id);
+    println!("state: {}", transfer.state.wire_name());
+    println!("bytes: {}", transfer.total_bytes);
+    Ok(())
+}
+
+fn show_transfers(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Transfers { transfers } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if transfers.is_empty() {
+        println!("No Transfers.");
+        return Ok(());
+    }
+    for transfer in transfers {
+        println!(
+            "{}\t{}\t{} / {} bytes",
+            transfer.id,
+            transfer.state.wire_name(),
+            transfer.transferred_bytes,
+            transfer.total_bytes
+        );
+    }
+    Ok(())
+}
+
+fn show_transfer(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Transfer { transfer } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Transfer: {}", transfer.id);
+    println!("relationship: {}", transfer.relationship_id);
+    println!("direction: {:?}", transfer.direction);
+    println!("state: {}", transfer.state.wire_name());
+    println!(
+        "progress: {} / {} bytes",
+        transfer.transferred_bytes, transfer.total_bytes
+    );
     Ok(())
 }
 

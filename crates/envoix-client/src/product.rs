@@ -20,8 +20,14 @@ use zeroize::Zeroizing;
 
 use crate::api::DesktopCredentialStore;
 use crate::api::RememberedCredential;
+use crate::command::{CommandEnvelope, EngineCommand};
+use crate::decision::decide;
+use crate::effect::EngineEffect;
 use crate::event::{EngineEvent, EventEnvelope};
-use crate::model::{Device, DeviceId, Relationship, RelationshipId, RelationshipState, TransferId};
+use crate::model::{
+    CommandId, ContentId, Device, DeviceId, Relationship, RelationshipId, RelationshipState,
+    Transfer, TransferDirection, TransferId,
+};
 use crate::snapshot::EngineSnapshot;
 use crate::storage::{
     DurableRelationship, EngineState, EngineStore, EngineStoreError, EngineStoreOrigin,
@@ -29,12 +35,14 @@ use crate::storage::{
     VaultReference, read_bounded_file,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 5;
+pub const AGENT_PROTOCOL_VERSION: u16 = 6;
 pub const AGENT_SETTINGS_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_AGENT_EVENT_BATCH: usize = 256;
+pub const MAX_AGENT_TRANSFER_PATHS: usize = 64;
 const MAX_AGENT_REQUEST_ID_BYTES: usize = 64;
+const MAX_AGENT_PATH_BYTES: usize = 4_096;
 const PRODUCT_STATE_SCHEMA_VERSION: u16 = 1;
 const PRODUCT_STATE_FILE: &str = "product-state-v1.json";
 const MAX_INBOX_ITEMS: usize = 1_000;
@@ -92,10 +100,19 @@ pub enum AgentRequest {
     RevokeDevice {
         device: String,
     },
+    CreateTransfer {
+        device: String,
+        paths: Vec<PathBuf>,
+    },
+    ListTransfers,
+    GetTransfer {
+        transfer_id: String,
+    },
     ListInbox {
         limit: usize,
     },
     LatestInbox,
+    Diagnostics,
 }
 
 /// One response is returned as one JSON line over the local Agent socket.
@@ -114,6 +131,15 @@ pub enum AgentResponse {
     DeviceRevoked {
         device: DeviceSummary,
     },
+    TransferCreated {
+        transfer: Transfer,
+    },
+    Transfers {
+        transfers: Vec<Transfer>,
+    },
+    Transfer {
+        transfer: Transfer,
+    },
     Inbox {
         items: Vec<InboxItem>,
     },
@@ -129,6 +155,9 @@ pub enum AgentResponse {
     },
     SnapshotRequired {
         cursor: AgentEventCursor,
+    },
+    Diagnostics {
+        diagnostics: AgentDiagnostics,
     },
     Error {
         code: String,
@@ -174,8 +203,28 @@ impl AgentRequestEnvelope {
             ));
         }
         validate_request_id(self.request_id.clone())?;
-        if let AgentRequest::Events { after, .. } = &self.request {
-            after.validate()?;
+        match &self.request {
+            AgentRequest::Events { after, .. } => after.validate()?,
+            AgentRequest::CreateTransfer { device, paths } => {
+                validate_device_selector(device)?;
+                if paths.is_empty() || paths.len() > MAX_AGENT_TRANSFER_PATHS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Agent Transfer requires 1 to {MAX_AGENT_TRANSFER_PATHS} source paths"
+                        ),
+                    ));
+                }
+                for path in paths {
+                    validate_agent_source_path(path)?;
+                }
+            }
+            AgentRequest::GetTransfer { transfer_id } => {
+                TransferId::parse(transfer_id.clone()).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
+                })?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -217,7 +266,20 @@ impl AgentResponseEnvelope {
             ));
         }
         match &self.response {
-            AgentResponse::Snapshot { snapshot } => snapshot.event_cursor.validate()?,
+            AgentResponse::Status { status } => validate_agent_status(status)?,
+            AgentResponse::Snapshot { snapshot } => {
+                validate_agent_status(&snapshot.status)?;
+                snapshot.engine.validate_contract().map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })?;
+                if snapshot.inbox.len() > MAX_INBOX_ITEMS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Agent snapshot contains too many Inbox items",
+                    ));
+                }
+                snapshot.event_cursor.validate()?;
+            }
             AgentResponse::Events { cursor, events } => {
                 cursor.validate()?;
                 if events.len() > MAX_AGENT_EVENT_BATCH {
@@ -248,6 +310,30 @@ impl AgentResponseEnvelope {
                 }
             }
             AgentResponse::SnapshotRequired { cursor } => cursor.validate()?,
+            AgentResponse::TransferCreated { transfer } | AgentResponse::Transfer { transfer } => {
+                validate_agent_transfer(transfer)?
+            }
+            AgentResponse::Transfers { transfers } => {
+                if transfers.len() > MAX_DURABLE_ENTITIES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Agent response contains too many Transfers",
+                    ));
+                }
+                let mut ids = BTreeSet::new();
+                for transfer in transfers {
+                    validate_agent_transfer(transfer)?;
+                    if !ids.insert(&transfer.id) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Agent response contains duplicate Transfers",
+                        ));
+                    }
+                }
+            }
+            AgentResponse::Diagnostics { diagnostics } => {
+                diagnostics.validate()?;
+            }
             _ => {}
         }
         Ok(())
@@ -267,6 +353,62 @@ pub struct AgentStatus {
     pub paired_devices: usize,
     pub active_receivers: usize,
     pub active_pairings: usize,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentControlTransport {
+    UnixSocket,
+    WindowsNamedPipe,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCredentialProtection {
+    OwnerOnlyFile,
+    WindowsDpapi,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDiagnostics {
+    pub agent_protocol_version: u16,
+    pub application_contract_version: u16,
+    pub engine_schema_version: u16,
+    pub platform: String,
+    pub control_transport: AgentControlTransport,
+    pub credential_protection: AgentCredentialProtection,
+    pub engine_sequence: u64,
+    pub relationships: usize,
+    pub transfers: usize,
+    pub inbox_items: usize,
+}
+
+impl AgentDiagnostics {
+    fn validate(&self) -> io::Result<()> {
+        if self.agent_protocol_version != AGENT_PROTOCOL_VERSION
+            || self.application_contract_version != crate::APPLICATION_CONTRACT_VERSION
+            || self.engine_schema_version != crate::storage::ENGINE_STATE_SCHEMA_VERSION
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Agent diagnostics report incompatible contract versions",
+            ));
+        }
+        if self.platform.is_empty()
+            || self.platform.len() > 64
+            || self.platform.chars().any(char::is_control)
+            || self.relationships > MAX_DURABLE_ENTITIES
+            || self.transfers > MAX_DURABLE_ENTITIES
+            || self.inbox_items > MAX_INBOX_ITEMS
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Agent diagnostics report invalid bounded values",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -313,6 +455,9 @@ pub enum AgentEvent {
     InboxChanged {
         item_id: String,
     },
+    TransferChanged {
+        transfer_id: String,
+    },
 }
 
 impl AgentEvent {
@@ -335,6 +480,11 @@ impl AgentEvent {
             }
             Self::InboxChanged { item_id } => {
                 TransferId::parse(item_id.clone()).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
+                })?;
+            }
+            Self::TransferChanged { transfer_id } => {
+                TransferId::parse(transfer_id.clone()).map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                 })?;
             }
@@ -969,17 +1119,7 @@ impl ProductStore {
     }
 
     pub fn forget_device(&mut self, selector: &str) -> Result<DeviceSummary, EngineStoreError> {
-        let selector = selector.trim();
-        if selector.is_empty() || selector.len() > 128 || selector.chars().any(char::is_control) {
-            return Err(EngineStoreError::InvalidState(
-                "device selector must be a device ID or exact label".into(),
-            ));
-        }
-        let record = self
-            .device_records()
-            .into_iter()
-            .find(|device| device.id == selector || device.label.eq_ignore_ascii_case(selector))
-            .ok_or_else(|| EngineStoreError::InvalidState("remembered device is missing".into()))?;
+        let record = self.resolve_device(selector)?;
         let credential = self
             .vault
             .get(&record.credential_reference)?
@@ -1013,6 +1153,100 @@ impl ProductStore {
             return Err(error);
         }
         Ok(record.summary())
+    }
+
+    pub fn resolve_device(
+        &self,
+        selector: &str,
+    ) -> Result<RememberedDeviceRecord, EngineStoreError> {
+        let selector = selector.trim();
+        validate_device_selector(selector).map_err(EngineStoreError::Io)?;
+        self.device_records()
+            .into_iter()
+            .find(|device| device.id == selector || device.label.eq_ignore_ascii_case(selector))
+            .ok_or_else(|| EngineStoreError::InvalidState("remembered device is missing".into()))
+    }
+
+    pub fn create_transfer(
+        &mut self,
+        device: &str,
+        transfer_id: TransferId,
+        content_id: ContentId,
+        total_bytes: u64,
+    ) -> Result<Transfer, EngineStoreError> {
+        let record = self.resolve_device(device)?;
+        let relationship_id = RelationshipId::parse(record.id)
+            .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        let command_id = CommandId::parse(random_identifier("command")?)
+            .expect("generated command identifier is valid");
+        let effect = decide(
+            &self.engine.state().snapshot,
+            CommandEnvelope {
+                contract_version: crate::APPLICATION_CONTRACT_VERSION,
+                command_id,
+                command: EngineCommand::CreateTransfer {
+                    relationship_id: relationship_id.clone(),
+                    content_id: content_id.clone(),
+                    direction: TransferDirection::Send,
+                },
+            },
+        )
+        .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        match effect.effect {
+            EngineEffect::CreateTransfer {
+                relationship_id: decided_relationship,
+                content_id: decided_content,
+                direction: TransferDirection::Send,
+            } if decided_relationship == relationship_id && decided_content == content_id => {}
+            _ => {
+                return Err(EngineStoreError::InvalidState(
+                    "CreateTransfer decision returned an unexpected effect".into(),
+                ));
+            }
+        }
+
+        let mut state = self.engine.state().clone();
+        apply_product_event(
+            &mut state,
+            EngineEvent::TransferCreated {
+                transfer_id: transfer_id.clone(),
+                relationship_id,
+                room_id: None,
+                content_id,
+                direction: TransferDirection::Send,
+                total_bytes,
+            },
+        )?;
+        let transfer = state
+            .snapshot
+            .transfers
+            .get(&transfer_id)
+            .cloned()
+            .ok_or_else(|| EngineStoreError::InvalidState("created Transfer is missing".into()))?;
+        self.engine.replace(state)?;
+        Ok(transfer)
+    }
+
+    pub fn transfers(&self) -> Vec<Transfer> {
+        self.engine
+            .state()
+            .snapshot
+            .transfers
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn transfer(&self, transfer_id: &str) -> Result<Option<Transfer>, EngineStoreError> {
+        let transfer_id = TransferId::parse(transfer_id.to_string())
+            .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        Ok(self
+            .engine
+            .state()
+            .snapshot
+            .transfers
+            .get(&transfer_id)
+            .cloned())
     }
 
     pub fn append_inbox(&mut self, item: InboxItem) -> Result<(), EngineStoreError> {
@@ -1072,6 +1306,60 @@ fn apply_product_event(
             event,
         })
         .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+    Ok(())
+}
+
+fn validate_device_selector(selector: &str) -> io::Result<()> {
+    if selector.trim() != selector
+        || selector.is_empty()
+        || selector.len() > 128
+        || selector.chars().any(char::is_control)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "device selector must be a bounded device ID or exact label",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_status(status: &AgentStatus) -> io::Result<()> {
+    if status.protocol_version != AGENT_PROTOCOL_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent status protocol version does not match its envelope",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_transfer(transfer: &Transfer) -> io::Result<()> {
+    if transfer.transferred_bytes > transfer.total_bytes
+        || (transfer.state == crate::model::TransferState::Failed) != transfer.failure.is_some()
+        || (transfer.state == crate::model::TransferState::Rejected) != transfer.rejection.is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent Transfer has inconsistent state or progress",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_source_path(path: &Path) -> io::Result<()> {
+    let value = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Agent source path must be valid UTF-8",
+        )
+    })?;
+    if value.is_empty() || value.len() > MAX_AGENT_PATH_BYTES || value.chars().any(char::is_control)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Agent source path must be bounded and contain no control characters",
+        ));
+    }
     Ok(())
 }
 
@@ -1643,6 +1931,38 @@ mod tests {
     }
 
     #[test]
+    fn queued_transfer_is_decided_by_the_engine_and_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let pending = store.prepare_device("MacBook", "broker", None).unwrap();
+        let relationship_id = pending.id().to_string();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+        let transfer_id = TransferId::parse("transfer_test").unwrap();
+        let transfer = store
+            .create_transfer(
+                "MacBook",
+                transfer_id.clone(),
+                ContentId::parse("content_test").unwrap(),
+                42,
+            )
+            .unwrap();
+        assert_eq!(transfer.relationship_id.as_str(), relationship_id);
+        assert_eq!(transfer.state, crate::model::TransferState::Queued);
+        assert_eq!(transfer.total_bytes, 42);
+        assert_eq!(store.transfers(), vec![transfer.clone()]);
+        assert_eq!(store.transfer("transfer_test").unwrap(), Some(transfer));
+
+        drop(store);
+        let reopened = ProductStore::open(directory.path()).unwrap();
+        assert_eq!(
+            reopened.transfer("transfer_test").unwrap().unwrap().state,
+            crate::model::TransferState::Queued
+        );
+    }
+
+    #[test]
     fn forgetting_device_revokes_credential_and_preserves_inbox_history() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = ProductStore::open(directory.path()).unwrap();
@@ -1925,7 +2245,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 5);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 6);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -1943,9 +2263,29 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_v5_fixture_round_trips_every_variant() {
+    fn agent_wire_v5_fixture_remains_frozen() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/v0.3/agent-control-v5.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], 5);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 6);
+        assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
+        assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
+        assert_eq!(
+            fixture["responses"][2]["response"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn agent_wire_v6_fixture_round_trips_every_variant() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v6.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
@@ -1990,11 +2330,27 @@ mod tests {
                     ..
                 },
                 AgentRequestEnvelope {
+                    request: AgentRequest::CreateTransfer { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::ListTransfers,
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::GetTransfer { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
                     request: AgentRequest::ListInbox { .. },
                     ..
                 },
                 AgentRequestEnvelope {
                     request: AgentRequest::LatestInbox,
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::Diagnostics,
                     ..
                 },
             ]
@@ -2043,6 +2399,18 @@ mod tests {
                     ..
                 },
                 AgentResponseEnvelope {
+                    response: AgentResponse::TransferCreated { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Transfers { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Transfer { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
                     response: AgentResponse::Inbox { .. },
                     ..
                 },
@@ -2052,6 +2420,10 @@ mod tests {
                 },
                 AgentResponseEnvelope {
                     response: AgentResponse::Latest { item: None },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::Diagnostics { .. },
                     ..
                 },
                 AgentResponseEnvelope {
@@ -2099,6 +2471,10 @@ mod tests {
                     event: AgentEvent::InboxChanged { .. },
                     ..
                 },
+                AgentEventEnvelope {
+                    event: AgentEvent::TransferChanged { .. },
+                    ..
+                },
             ]
         ));
         let AgentResponse::Pairing { pairing } = &responses[4].response else {
@@ -2129,6 +2505,44 @@ mod tests {
         )
         .unwrap();
         assert!(response.validate_for("request_2").is_err());
+    }
+
+    #[test]
+    fn agent_transfer_requests_require_bounded_paths() {
+        for paths in [
+            Vec::new(),
+            vec![PathBuf::from("bad\npath")],
+            vec![PathBuf::from("x".repeat(MAX_AGENT_PATH_BYTES + 1))],
+        ] {
+            let request = AgentRequestEnvelope::new(
+                "request_1",
+                AgentRequest::CreateTransfer {
+                    device: "MacBook".into(),
+                    paths,
+                },
+            )
+            .unwrap();
+            assert!(request.validate().is_err());
+        }
+        let request = AgentRequestEnvelope::new(
+            "request_1",
+            AgentRequest::CreateTransfer {
+                device: "MacBook".into(),
+                paths: vec![PathBuf::from("/tmp/hello.txt")],
+            },
+        )
+        .unwrap();
+        request.validate().unwrap();
+
+        let request = AgentRequestEnvelope::new(
+            "request_2",
+            AgentRequest::CreateTransfer {
+                device: "MacBook".into(),
+                paths: vec![PathBuf::from("relative.txt")],
+            },
+        )
+        .unwrap();
+        request.validate().unwrap();
     }
 
     #[test]

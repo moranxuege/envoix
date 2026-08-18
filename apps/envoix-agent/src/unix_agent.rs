@@ -19,18 +19,21 @@ use envoix_client::api::{
     TransferRole,
 };
 use envoix_client::model::{
-    RememberedAttemptOutcome, RememberedGenerationRole, remembered_generation_attempts,
+    ContentId, RememberedAttemptOutcome, RememberedGenerationRole, TransferId,
+    remembered_generation_attempts,
 };
 use envoix_client::product::{
-    AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventCursor, AgentEventEnvelope,
-    AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
-    AgentResponseEnvelope, AgentSettings, AgentSnapshot, AgentStatus, InboxItem, InboxRoot,
-    MAX_AGENT_EVENT_BATCH, MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation,
-    PreparedRememberedDevice, ProductStore, RememberedDeviceRecord, default_agent_control_endpoint,
-    default_agent_state_directory, is_valid_agent_request_id,
+    AGENT_PROTOCOL_VERSION, AgentControlTransport, AgentCredentialProtection, AgentDiagnostics,
+    AgentEvent, AgentEventCursor, AgentEventEnvelope, AgentRelationshipChange, AgentRequest,
+    AgentRequestEnvelope, AgentResponse, AgentResponseEnvelope, AgentSettings, AgentSnapshot,
+    AgentStatus, InboxItem, InboxRoot, MAX_AGENT_EVENT_BATCH, MAX_AGENT_REQUEST_BYTES,
+    MAX_AGENT_RESPONSE_BYTES, PairingInvitation, PreparedRememberedDevice, ProductStore,
+    RememberedDeviceRecord, default_agent_control_endpoint, default_agent_state_directory,
+    is_valid_agent_request_id,
 };
 #[cfg(windows)]
 use envoix_client::product::{current_windows_user_sid, windows_process_user_sid};
+use envoix_client::storage::ENGINE_STATE_SCHEMA_VERSION;
 use envoix_client::{
     DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, IdentityConfig, TransferCancelToken,
 };
@@ -221,6 +224,31 @@ impl AgentRuntime {
             engine: store.engine_snapshot(),
             inbox: store.inbox(inbox_limit),
             event_cursor,
+        })
+    }
+
+    fn diagnostics(&self) -> Result<AgentDiagnostics> {
+        let store = lock(&self.store)?;
+        let engine = store.engine_snapshot();
+        #[cfg(unix)]
+        let control_transport = AgentControlTransport::UnixSocket;
+        #[cfg(windows)]
+        let control_transport = AgentControlTransport::WindowsNamedPipe;
+        #[cfg(unix)]
+        let credential_protection = AgentCredentialProtection::OwnerOnlyFile;
+        #[cfg(windows)]
+        let credential_protection = AgentCredentialProtection::WindowsDpapi;
+        Ok(AgentDiagnostics {
+            agent_protocol_version: AGENT_PROTOCOL_VERSION,
+            application_contract_version: envoix_client::APPLICATION_CONTRACT_VERSION,
+            engine_schema_version: ENGINE_STATE_SCHEMA_VERSION,
+            platform: std::env::consts::OS.to_string(),
+            control_transport,
+            credential_protection,
+            engine_sequence: engine.last_sequence,
+            relationships: engine.relationships.len(),
+            transfers: engine.transfers.len(),
+            inbox_items: store.inbox(usize::MAX).len(),
         })
     }
 }
@@ -744,14 +772,84 @@ async fn handle_request_result(
             )?;
             Ok(AgentResponse::DeviceRevoked { device: forgotten })
         }
+        AgentRequest::CreateTransfer { device, paths } => {
+            create_agent_transfer(runtime, device, paths).await
+        }
+        AgentRequest::ListTransfers => Ok(AgentResponse::Transfers {
+            transfers: lock(&runtime.store)?.transfers(),
+        }),
+        AgentRequest::GetTransfer { transfer_id } => {
+            let transfer = lock(&runtime.store)?
+                .transfer(&transfer_id)?
+                .ok_or_else(|| anyhow!("Transfer {transfer_id} does not exist"))?;
+            Ok(AgentResponse::Transfer { transfer })
+        }
         AgentRequest::ListInbox { limit } => Ok(AgentResponse::Inbox {
             items: lock(&runtime.store)?.inbox(limit),
         }),
         AgentRequest::LatestInbox => Ok(AgentResponse::Latest {
             item: lock(&runtime.store)?.latest_inbox(),
         }),
+        AgentRequest::Diagnostics => Ok(AgentResponse::Diagnostics {
+            diagnostics: runtime.diagnostics()?,
+        }),
         AgentRequest::Pair { label } => begin_pairing(runtime, label).await,
     }
+}
+
+async fn create_agent_transfer(
+    runtime: Arc<AgentRuntime>,
+    device: String,
+    paths: Vec<PathBuf>,
+) -> Result<AgentResponse> {
+    {
+        let store = lock(&runtime.store)?;
+        store.resolve_device(&device)?;
+    }
+    let job_store = api::TransferJobStore::new(runtime.config.state_directory.join("outbox/jobs"));
+    let mut job = api::CanonicalTransferJob::new(api::CompressionPolicyV2::Smart)?;
+    for path in paths {
+        if !path.is_absolute() {
+            bail!(
+                "Agent Transfer source path must be absolute: {}",
+                path.display()
+            );
+        }
+        let path = tokio::fs::canonicalize(&path)
+            .await
+            .with_context(|| format!("resolve Transfer source {}", path.display()))?;
+        job.add_local_path(path).await?;
+        job_store.save(&job).await?;
+    }
+    job.prepare_all().await?;
+    job_store.save(&job).await?;
+    if job.lifecycle() != api::JobLifecycle::ReadyToSend {
+        bail!("Transfer source preparation requires a user decision");
+    }
+    job.seal_for_send()?;
+    job_store.save(&job).await?;
+
+    let job_token = URL_SAFE_NO_PAD.encode(job.job_id().0);
+    let content_id = ContentId::parse(format!("content_{job_token}"))?;
+    let transfer_id = TransferId::parse(format!("transfer_{job_token}_{}", job.generation()))?;
+    let total_bytes = job
+        .manifest()
+        .expect("sealed Agent job has a manifest")
+        .totals
+        .total_plaintext_bytes;
+    let transfer = lock(&runtime.store)?.create_transfer(
+        &device,
+        transfer_id.clone(),
+        content_id,
+        total_bytes,
+    )?;
+    record_agent_event(
+        &runtime,
+        AgentEvent::TransferChanged {
+            transfer_id: transfer_id.to_string(),
+        },
+    )?;
+    Ok(AgentResponse::TransferCreated { transfer })
 }
 
 async fn begin_pairing(runtime: Arc<AgentRuntime>, label: String) -> Result<AgentResponse> {
@@ -1534,7 +1632,7 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v5_envelope() {
+    fn request_decoder_accepts_a_valid_v6_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -1649,15 +1747,113 @@ mod tests {
         assert!(snapshot.inbox.is_empty());
         assert_eq!(snapshot.event_cursor.sequence, 0);
         snapshot.event_cursor.validate().unwrap();
+        let AgentResponse::Diagnostics { diagnostics } =
+            handle_request(runtime.clone(), AgentRequest::Diagnostics).await
+        else {
+            panic!("unexpected response")
+        };
+        assert_eq!(diagnostics.agent_protocol_version, AGENT_PROTOCOL_VERSION);
+        assert_eq!(diagnostics.engine_sequence, 0);
+        assert_eq!(diagnostics.transfers, 0);
         assert_eq!(
             handle_request(runtime, AgentRequest::LatestInbox).await,
             AgentResponse::Latest { item: None }
         );
     }
 
+    #[tokio::test]
+    async fn creating_an_agent_transfer_seals_content_before_persisting_queued_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let source = directory.path().join("hello.txt");
+        tokio::fs::write(&source, b"hello from Agent")
+            .await
+            .unwrap();
+        let mut store = ProductStore::open(&state_directory).unwrap();
+        let pending = store.prepare_device("MacBook", "broker", None).unwrap();
+        let relationship_id = pending.id().to_string();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+        let runtime = Arc::new(AgentRuntime {
+            config: RuntimeConfig {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: state_directory.join("agent.sock"),
+                device_name: "test-agent".into(),
+                broker: "broker".into(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(store),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+
+        assert!(matches!(
+            handle_request(
+                runtime.clone(),
+                AgentRequest::CreateTransfer {
+                    device: "MacBook".into(),
+                    paths: vec![PathBuf::from("relative.txt")],
+                },
+            )
+            .await,
+            AgentResponse::Error { code, .. } if code == "operation_failed"
+        ));
+
+        let response = handle_request(
+            runtime.clone(),
+            AgentRequest::CreateTransfer {
+                device: "MacBook".into(),
+                paths: vec![source],
+            },
+        )
+        .await;
+        let AgentResponse::TransferCreated { transfer } = response else {
+            panic!("unexpected response: {response:?}")
+        };
+        assert_eq!(transfer.relationship_id.as_str(), relationship_id);
+        assert_eq!(transfer.state, envoix_client::model::TransferState::Queued);
+        assert_eq!(transfer.total_bytes, 16);
+        assert!(matches!(
+            handle_request(runtime.clone(), AgentRequest::ListTransfers).await,
+            AgentResponse::Transfers { transfers } if transfers == vec![transfer.clone()]
+        ));
+        {
+            let events = lock(&runtime.events).unwrap();
+            assert!(matches!(
+                events.events.back().map(|event| &event.event),
+                Some(AgentEvent::TransferChanged { transfer_id }) if transfer_id == transfer.id.as_str()
+            ));
+        }
+        drop(runtime);
+
+        assert_eq!(
+            api::TransferJobStore::new(state_directory.join("outbox/jobs"))
+                .load_all()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            ProductStore::open(&state_directory)
+                .unwrap()
+                .transfer(transfer.id.as_str())
+                .unwrap()
+                .unwrap()
+                .state,
+            envoix_client::model::TransferState::Queued
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v5_envelope() {
+    async fn local_socket_round_trips_a_v6_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -1696,7 +1892,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_named_pipe_round_trips_a_v5_envelope_for_its_owner() {
+    async fn windows_named_pipe_round_trips_a_v6_envelope_for_its_owner() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let directory = tempfile::tempdir().unwrap();

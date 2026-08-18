@@ -52,6 +52,8 @@ pub(crate) enum Command {
     Agent(AgentArgs),
     /// Manage remembered devices owned by the local Agent.
     Devices(DevicesArgs),
+    /// Create and inspect durable Transfers owned by the local Agent.
+    Transfers(TransfersArgs),
     /// Inspect files received by the local Agent.
     Inbox(InboxArgs),
 }
@@ -84,6 +86,8 @@ pub(crate) enum AgentCommand {
         #[arg(long, default_value_t = 64)]
         limit: usize,
     },
+    /// Print a secret-free Agent and Engine health report.
+    Diagnostics,
     /// Install and start the Agent as a systemd user service.
     Install {
         /// Inbox directory; defaults to the Agent state directory's Inbox.
@@ -126,6 +130,29 @@ pub(crate) enum DevicesCommand {
         #[arg(long, required = true)]
         yes: bool,
     },
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct TransfersArgs {
+    #[command(subcommand)]
+    pub(crate) command: TransfersCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum TransfersCommand {
+    /// Prepare content and create a durable queued Transfer.
+    Create {
+        /// Device ID or exact label shown by `devices list`.
+        #[arg(long)]
+        device: String,
+        /// One or more files or directories on this Agent host.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
+    /// List durable Transfers.
+    List,
+    /// Show one durable Transfer by ID.
+    Show { transfer_id: String },
 }
 
 #[derive(Args, Debug)]
@@ -546,6 +573,7 @@ mod tests {
             ])
             .is_ok()
         );
+        assert!(Cli::try_parse_from(["envoix", "agent", "diagnostics"]).is_ok());
     }
 
     #[test]
@@ -586,6 +614,19 @@ mod tests {
         assert!(Cli::try_parse_from(["envoix", "devices", "list"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook", "--yes"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "transfers",
+                "create",
+                "--device",
+                "MacBook",
+                "/tmp/hello.txt",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "transfers", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "show", "transfer_1"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "inbox", "latest"]).is_ok());
     }
 

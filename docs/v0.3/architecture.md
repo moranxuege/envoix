@@ -292,7 +292,11 @@ in-memory log. A client starts from the secret-free Engine/status/Inbox
 snapshot and its event cursor, then polls at most 256 subsequent events per
 request. An Agent restart, future cursor, or retention gap returns the typed
 `snapshot_required` response; clients never guess whether incremental state is
-complete. Requests are limited to 64 KiB and responses to 20 MiB. v3 and v4
+complete. Protocol v6 adds durable Transfer creation/list/get operations,
+bounded local source paths, `TransferChanged` events, and a secret-free typed
+diagnostic report. The Agent seals source content before atomically recording a
+queued Transfer, so a successful creation response always names restartable
+state. Requests are limited to 64 KiB and responses to 20 MiB. v3 through v5
 requests receive `unsupported_protocol_version`; the Agent does not run a
 legacy decoder.
 
