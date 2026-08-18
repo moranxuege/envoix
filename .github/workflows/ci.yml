@@ -1,82 +1,84 @@
 name: ci
 
-# Enforce contracts, security, Rust tests, and Android checks on every branch.
+# One routine gate for shared Rust and Android product code. Documentation and
+# Apple-only changes are handled elsewhere and do not consume Linux runners.
 on:
   push:
     branches:
       - '**'
-  pull_request:
+    paths:
+      - '.github/workflows/ci.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - 'apps/envoix-agent/**'
+      - 'apps/envoix-android-jni/**'
+      - 'apps/envoix-cli/**'
+      - 'apps/envoix-rendezvous-server/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'android/**'
+      - 'scripts/check-android-jni-transfer-surface.sh'
+      - 'scripts/cross-device-transfer-matrix.sh'
+      - 'scripts/matrix_contract.py'
+      - 'scripts/tests/**'
+      - 'scripts/with-build-cache-guard.sh'
+      - 'scripts/build-cache-guard.sh'
+      - 'tests/e2e/matrix/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   RUST_VERSION: 1.96.0
   CARGO_AUDIT_VERSION: 0.22.2
+  ENVOIX_BUILD_CACHE_MIN_FREE_GIB: '1'
+  ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
 
 jobs:
-  matrix-contract:
-    name: test matrix contract
+  core:
+    name: contracts + Rust + security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Validate matrix registry
+      - name: Set up pinned Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_VERSION"
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate repository contracts
         run: |
           python3 scripts/matrix_contract.py validate-registry tests/e2e/matrix/cases.v1.json
           python3 -m unittest discover -s scripts/tests -p 'test_matrix_contract.py'
           bash -n scripts/cross-device-transfer-matrix.sh
-      - name: Publish registry summary
-        run: |
-          python3 scripts/matrix_contract.py render-report \
-            tests/e2e/matrix/cases.v1.json \
-            --output "$RUNNER_TEMP/matrix-registry.md"
-          cat "$RUNNER_TEMP/matrix-registry.md" >> "$GITHUB_STEP_SUMMARY"
-
-  rust:
-    name: rust fmt + clippy + test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Rust
-        run: |
-          rustup toolchain install "$RUST_VERSION" \
-            --profile minimal \
-            --component rustfmt,clippy
-          rustup default "$RUST_VERSION"
-          rustc --version
-      - uses: Swatinem/rust-cache@v2
-      - name: rustfmt
+      - name: Check Rust formatting
         run: cargo fmt --all -- --check
-      - name: clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: test
-        run: cargo test --locked --workspace --all-targets
-
-  security:
-    name: RustSec audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Rust
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal
-          rustup default "$RUST_VERSION"
-          rustc --version
+      - name: Lint Rust
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test Rust
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo test --locked --workspace --all-targets
       - name: Install pinned cargo-audit
-        run: cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
-      - name: Reject vulnerabilities and unsound dependencies
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+      - name: Audit Rust dependencies
         run: cargo audit --deny unsound
 
   android:
-    name: android lint + JNI build
+    name: Android lint + unit test + debug build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,7 +89,7 @@ jobs:
           java-version: '17'
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-      - name: Set up Rust + Android target
+      - name: Set up Rust and Android target
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal
           rustup default "$RUST_VERSION"
@@ -95,26 +97,30 @@ jobs:
           rustc --version
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --version 4.1.2 --locked
-      - name: Install NDK r26 + SDK components
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Install Android build components
         run: |
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
-      - name: Kotlin style
-        working-directory: android
-        run: ./gradlew :app:ktlintCheck --no-daemon --stacktrace
-      - name: Lint
-        working-directory: android
-        run: ./gradlew :app:lintDebug --no-daemon --stacktrace
       - name: Check Android JNI compatibility
         run: scripts/check-android-jni-transfer-surface.sh
-      - name: Run Android unit tests and build app/instrumentation APKs
+      - name: Lint, test, and build Android
         working-directory: android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
           ENVOIX_ANDROID_ABIS: arm64-v8a
-        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
-      - name: Verify Android test artifacts
+        run: >-
+          ../scripts/with-build-cache-guard.sh
+          ./gradlew
+          :app:ktlintCheck
+          :app:lintDebug
+          :app:testDebugUnitTest
+          :app:assembleDebug
+          --no-daemon
+          --stacktrace
+      - name: Verify packaged JNI library
         run: |
-          test -s android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          test -s android/app/build/outputs/apk/debug/app-debug.apk
           unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fx 'lib/arm64-v8a/libenvoix_jni.so'

@@ -2,24 +2,14 @@ name: rendezvous server artifact
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - '**'
-    paths:
-      - '.github/workflows/rendezvous-server-artifact.yml'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - 'apps/envoix-rendezvous-server/**'
-      - 'crates/envoix-invite/**'
-      - 'crates/envoix-pairing/**'
-      - 'crates/envoix-rendezvous/**'
-      - 'crates/envoix-rendezvous-iroh/**'
 
 permissions:
   contents: read
 
 env:
   RUST_VERSION: 1.96.0
+  ENVOIX_BUILD_CACHE_MIN_FREE_GIB: '1'
+  ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
 
 jobs:
   build:
@@ -58,13 +48,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test rendezvous broker
-        run: |
-          cargo test --locked -p envoix-rendezvous --test room_pairing
-          cargo test --locked -p envoix-rendezvous-iroh --test iroh_loopback
-
       - name: Build rendezvous server
-        run: cargo build --locked --release -p envoix-rendezvous-server
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo build --locked --release -p envoix-rendezvous-server
 
       - name: Stage and verify artifact
         run: |

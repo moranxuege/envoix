@@ -141,6 +141,22 @@ guard's marked cache path.
 Run the smallest relevant test first, then the milestone gate. Do not run
 multiple writers against a shared Apple/Cargo build cache.
 
+### Automation tiers
+
+Routine push automation stays intentionally small:
+
+| Workflow | Trigger | Required scope |
+| --- | --- | --- |
+| `ci.yml` | relevant shared Rust or Android paths | repository contracts, Rust format/lint/test/audit, Android lint/unit test/debug build |
+| `apple-ci.yml` | relevant Apple or shared-core paths | macOS compile and iOS hosted tests on one runner |
+| `release.yml` | version tag or explicit dispatch | package supported release artifacts; never substitute for CI |
+| `rendezvous-server-artifact.yml` | explicit dispatch | build and inspect the deployable broker artifact |
+
+UI, physical-device, cross-device, performance, and migration suites are
+milestone or release evidence. They are not silently retried or run on every
+push. The current personal-fork workflow uses push gates without a duplicate
+`pull_request` event; add a PR gate when external contribution work resumes.
+
 ## 10. Documentation and decisions
 
 The v0.3 documents are maintained with the code. A decision needs an ADR when
