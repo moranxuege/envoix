@@ -7,7 +7,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,9 +16,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,36 +25,26 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -72,8 +58,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -82,9 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
-import dev.envoix.app.InviteCodec
 import dev.envoix.app.LogUpload
-import dev.envoix.app.R
 import dev.envoix.app.Room
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
@@ -100,304 +82,6 @@ import dev.envoix.app.smoothedBps
 import dev.envoix.app.transferRateString
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
-
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
-@Composable
-fun HomeScreen(
-    transfers: List<Transfer>,
-    initialSharedUris: List<android.net.Uri> = emptyList(),
-    onSharedUrisConsumed: () -> Unit = {},
-    onReceive: (
-        code: String,
-        broker: String,
-        relay: String,
-        qrPayload: String?,
-        copyApproved: Boolean,
-        rememberLabel: String?,
-        rememberedRelationshipId: String?,
-    ) -> Unit,
-    onSend: (
-        code: String,
-        broker: String,
-        relay: String,
-        jobId: String,
-        qrPayload: String?,
-        rememberLabel: String?,
-        rememberedRelationshipId: String?,
-    ) -> Unit,
-    onPauseResume: (Long) -> Unit,
-    onApproveReceive: (Long) -> Unit,
-    onCancel: (Long) -> Unit,
-    onRemove: (Long) -> Unit,
-    onOpenDiscovery: () -> Unit,
-    onOpenLogs: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onOpen: (Transfer) -> Unit,
-    onShare: (Transfer) -> Unit,
-    initialPairingInput: String? = null,
-) {
-    val colors = Envoix.colors
-    var sheetRole by remember { mutableStateOf<String?>(null) }
-    val expanded = remember { mutableStateListOf<Long>() }
-    val listState = rememberLazyListState()
-    // A just-created transfer lands at the top (newest-first sort); bring it
-    // into view instead of leaving it above the fold.
-    val newestId = transfers.maxOfOrNull { it.id } ?: -1L
-    LaunchedEffect(newestId) {
-        if (newestId >= 0) listState.animateScrollToItem(0)
-    }
-    LaunchedEffect(initialSharedUris) {
-        if (initialSharedUris.isNotEmpty()) sheetRole = "send"
-    }
-    LaunchedEffect(initialPairingInput) {
-        initialPairingInput
-            ?.takeIf(String::isNotBlank)
-            ?.let(InviteCodec::parseForRouting)
-            ?.let { sheetRole = it.joinerRole }
-    }
-    val active =
-        transfers.count { !it.status.isTerminal }
-
-    Scaffold(
-        modifier = Modifier.semantics { testTagsAsResourceId = true },
-        containerColor = colors.bg,
-    ) { inner ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .padding(horizontal = 20.dp),
-        ) {
-            Header(active, onOpenDiscovery, onOpenLogs, onOpenSettings)
-            Spacer(Modifier.height(18.dp))
-            Text(
-                appString(R.string.transfer_files_title),
-                color = colors.text,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.ExtraBold,
-            )
-            Text(
-                appString(R.string.choose_device_action),
-                color = colors.muted,
-                fontSize = 14.sp,
-                modifier = Modifier.padding(top = 3.dp),
-            )
-            Spacer(Modifier.height(14.dp))
-            HomeActionCard(
-                title = appString(R.string.send_action_title),
-                subtitle = appString(R.string.send_action_subtitle),
-                icon = Icons.Default.Share,
-                testTag = "home_send",
-            ) {
-                sheetRole = "send"
-            }
-            Spacer(Modifier.height(10.dp))
-            HomeActionCard(
-                title = appString(R.string.receive_action_title),
-                subtitle = appString(R.string.receive_action_subtitle),
-                icon = Icons.Default.Download,
-                testTag = "home_receive",
-            ) {
-                sheetRole = "receive"
-            }
-            Spacer(Modifier.height(18.dp))
-            Text(
-                appString(R.string.activity_title),
-                color = colors.text,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(8.dp))
-            if (transfers.isEmpty()) {
-                EmptyState()
-            } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    state = listState,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
-                ) {
-                    items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
-                        TransferCard(
-                            t = t,
-                            expanded = t.id in expanded,
-                            onToggleDetail = { if (it in expanded) expanded.remove(it) else expanded.add(it) },
-                            onPauseResume = onPauseResume,
-                            onApproveReceive = onApproveReceive,
-                            onCancel = onCancel,
-                            onRemove = onRemove,
-                            onOpen = onOpen,
-                            onShare = onShare,
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    sheetRole?.let { initialRole ->
-        ModalBottomSheet(
-            onDismissRequest = {
-                sheetRole = null
-            },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = colors.surface,
-        ) {
-            NewTransferSheet(
-                initialRole = initialRole,
-                initialSources = initialSharedUris,
-                initialPairingInput = initialPairingInput,
-                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
-                    sheetRole = null
-                    onReceive(c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId)
-                },
-                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
-                    sheetRole = null
-                    onSharedUrisConsumed()
-                    onSend(c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId)
-                },
-            )
-        }
-    }
-}
-
-@Composable
-private fun Header(
-    active: Int,
-    onOpenDiscovery: () -> Unit,
-    onOpenLogs: () -> Unit,
-    onOpenSettings: () -> Unit,
-) {
-    val colors = Envoix.colors
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(top = 16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(colors.accentSoft),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Default.MailOutline,
-                    contentDescription = null,
-                    tint = colors.accentStrong,
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            Text("Envoix", color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (active > 0) {
-                Pill(
-                    text = appString(R.string.active_transfer_count, active),
-                    fg = colors.success,
-                    bg = colors.successSoft,
-                )
-                Spacer(Modifier.width(8.dp))
-            }
-            Icon(
-                Icons.Default.Devices,
-                contentDescription = appString(R.string.nearby_devices),
-                tint = colors.accent,
-                modifier =
-                    Modifier
-                        .clip(CircleShape)
-                        .clickable(onClick = onOpenDiscovery)
-                        .padding(6.dp)
-                        .size(22.dp),
-            )
-            Text(
-                appString(R.string.logs),
-                color = colors.accent,
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                modifier =
-                    Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable(onClick = onOpenLogs)
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-            )
-            Icon(
-                Icons.Default.Settings,
-                contentDescription = appString(R.string.settings),
-                tint = colors.accent,
-                modifier =
-                    Modifier
-                        .clip(CircleShape)
-                        .clickable(onClick = onOpenSettings)
-                        .padding(6.dp)
-                        .size(22.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun HomeActionCard(
-    title: String,
-    subtitle: String,
-    icon: ImageVector,
-    testTag: String,
-    onClick: () -> Unit,
-) {
-    val colors = Envoix.colors
-    Row(
-        Modifier
-            .testTag(testTag)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(colors.surfaceRaised)
-            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
-            .padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .size(48.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(colors.accentSoft),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, contentDescription = null, tint = colors.accentStrong, modifier = Modifier.size(24.dp))
-        }
-        Spacer(Modifier.width(13.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, color = colors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Text(
-                subtitle,
-                color = colors.muted,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-        }
-        Text("›", color = colors.muted, fontSize = 26.sp)
-    }
-}
-
-@Composable
-private fun EmptyState() {
-    val colors = Envoix.colors
-    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
-        Text(
-            appText(
-                "No activity yet. Transfers will appear here.",
-                "暂无活动，传输任务会显示在这里。",
-            ),
-            color = colors.muted,
-            fontSize = 13.sp,
-        )
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

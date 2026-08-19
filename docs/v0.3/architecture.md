@@ -263,8 +263,8 @@ example, the Connection Hub renders `DiscoveryUiState` and nearby presence
 values; the Android host owns permission launchers, settings persistence, and
 discovery commands. A Composable never retains a service or ViewModel merely
 to invoke platform effects. The Connection Hub is the sole nearby-discovery
-entry point; the retired standalone discovery/send-invite screen is not part
-of the v0.3 application topology.
+entry point; the retired standalone discovery and mode-first send/receive home
+screens are not part of the v0.3 application topology.
 
 The default typed control binding is UniFFI after the application surface has
 been reduced. Hand-written JNI remains only for proven platform or performance
