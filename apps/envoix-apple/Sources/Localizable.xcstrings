@@ -66,6 +66,48 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer files" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输文件" } }
       }
+    },
+    "transfer.path.changed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "changed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已切换" } }
+      }
+    },
+    "transfer.path.direct" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Data path · Direct" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数据路径 · 直连" } }
+      }
+    },
+    "transfer.path.direct_ipv4" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Data path · Direct · IPv4" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数据路径 · 直连 · IPv4" } }
+      }
+    },
+    "transfer.path.direct_ipv6" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Data path · Direct · IPv6" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数据路径 · 直连 · IPv6" } }
+      }
+    },
+    "transfer.path.other" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Data path · Other" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数据路径 · 其他" } }
+      }
+    },
+    "transfer.path.relay" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Data path · Relay" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数据路径 · 中继" } }
+      }
+    },
+    "transfer.path.wifi_aware" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Data path · Wi‑Fi Aware" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数据路径 · Wi‑Fi Aware" } }
+      }
     }
   },
   "version" : "1.0"

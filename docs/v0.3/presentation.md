@@ -149,6 +149,10 @@ on a primary flow.
 Formatting, pluralization, and accessibility phrases belong to the native
 catalog. Error codes and Engine state remain locale-independent.
 
+Apple migration is incremental. The shared connection-path projection now
+resolves semantic keys from `Localizable.xcstrings`; remaining SwiftUI feature
+surfaces still using inline bilingual values keep M6 open.
+
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,
 Settings, remembered Rooms, and the existing shared transfer-setup labels use

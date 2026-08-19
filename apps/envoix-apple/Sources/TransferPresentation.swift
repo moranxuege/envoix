@@ -36,40 +36,25 @@ enum ConnectionPathPresentationPolicy {
     static func label(for path: FfiDataPathKind, language: String) -> String {
         switch path {
         case .direct:
-            return AppText.value("Data path · Direct", "数据路径 · 直连", language: language)
+            return AppText.localized("transfer.path.direct", language: language)
         case .directIpv4:
-            return AppText.value(
-                "Data path · Direct · IPv4",
-                "数据路径 · 直连 · IPv4",
-                language: language
-            )
+            return AppText.localized("transfer.path.direct_ipv4", language: language)
         case .directIpv6:
-            return AppText.value(
-                "Data path · Direct · IPv6",
-                "数据路径 · 直连 · IPv6",
-                language: language
-            )
+            return AppText.localized("transfer.path.direct_ipv6", language: language)
         case .relay:
-            return AppText.value("Data path · Relay", "数据路径 · 中继", language: language)
+            return AppText.localized("transfer.path.relay", language: language)
         case .wifiAware:
-            return AppText.value(
-                "Data path · Wi‑Fi Aware",
-                "数据路径 · Wi‑Fi Aware",
-                language: language
-            )
+            return AppText.localized("transfer.path.wifi_aware", language: language)
         case .other:
-            return AppText.value("Data path · Other", "数据路径 · 其他", language: language)
+            return AppText.localized("transfer.path.other", language: language)
         }
     }
 
     static func label(for event: FfiConnectionPathEvent, language: String) -> String {
         let path = label(for: event.pathKind, language: language)
         guard event.eventKind == .changed else { return path }
-        return AppText.value(
-            "\(path) · changed",
-            "\(path) · 已切换",
-            language: language
-        )
+        let changed = AppText.localized("transfer.path.changed", language: language)
+        return "\(path) · \(changed)"
     }
 }
 
