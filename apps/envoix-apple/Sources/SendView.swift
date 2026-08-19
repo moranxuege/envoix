@@ -1292,23 +1292,15 @@ struct SendView: View {
     }
 
     private var primaryLabel: String {
-        if viewModel.isPreparingManifest {
-            return AppText.value("Cancel Preparation", "取消准备", language: uiLanguage)
-        }
-        if nearbyInviteDelivery.isDelivering {
-            return AppText.value("Delivering Invitation…", "正在发送邀请码…", language: uiLanguage)
-        }
-        if pendingRoomOfferID != nil {
-            return AppText.value("Waiting for acceptance…", "正在等待对方接受…", language: uiLanguage)
-        }
-        if isQueueingRememberedRoom {
-            return AppText.value("Adding to room…", "正在加入房间队列…", language: uiLanguage)
-        }
-        if viewModel.isBusy { return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage) }
-        if rememberedRoomRelationshipID != nil {
-            return AppText.value("Add to room", "加入房间队列", language: uiLanguage)
-        }
-        return AppText.value("Send", "发送", language: uiLanguage)
+        SendPresentationText.primaryAction(
+            isPreparingManifest: viewModel.isPreparingManifest,
+            isDeliveringInvitation: nearbyInviteDelivery.isDelivering,
+            isWaitingForAcceptance: pendingRoomOfferID != nil,
+            isAddingToRoom: isQueueingRememberedRoom,
+            isBusy: viewModel.isBusy,
+            canAddToRoom: rememberedRoomRelationshipID != nil,
+            language: uiLanguage
+        )
     }
 
     private var isPhotoImporting: Bool {

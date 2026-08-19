@@ -5,6 +5,14 @@ final class SendPresentationTests: XCTestCase {
     func testSelectionCatalogProvidesStaticCopy() {
         let cases: [(String, String, String)] = [
             ("common.remove", "Remove", "移除"),
+            ("send.action.add_to_room", "Add to room", "加入房间队列"),
+            ("send.action.adding_to_room", "Adding to room…", "正在加入房间队列…"),
+            ("send.action.cancel_preparation", "Cancel Preparation", "取消准备"),
+            (
+                "send.action.waiting_for_acceptance",
+                "Waiting for acceptance…",
+                "正在等待对方接受…"
+            ),
             (
                 "send.concurrent.finish_receive",
                 "Finish receiving before starting a send.",
@@ -69,6 +77,50 @@ final class SendPresentationTests: XCTestCase {
             XCTAssertEqual(AppText.localized(key, language: "en"), english, key)
             XCTAssertEqual(AppText.localized(key, language: "zh-Hans"), chinese, key)
         }
+    }
+
+    func testPrimaryActionUsesStablePriority() {
+        XCTAssertEqual(
+            primary(
+                preparing: true,
+                delivering: true,
+                waiting: true,
+                adding: true,
+                busy: true,
+                canAdd: true
+            ),
+            "Cancel Preparation"
+        )
+        XCTAssertEqual(
+            primary(
+                delivering: true,
+                waiting: true,
+                adding: true,
+                busy: true,
+                canAdd: true
+            ),
+            "Delivering Invitation…"
+        )
+        XCTAssertEqual(
+            primary(waiting: true, adding: true, busy: true, canAdd: true),
+            "Waiting for acceptance…"
+        )
+        XCTAssertEqual(primary(adding: true, busy: true, canAdd: true), "Adding to room…")
+        XCTAssertEqual(primary(busy: true, canAdd: true), "Managed in Activity")
+        XCTAssertEqual(primary(canAdd: true), "Add to room")
+        XCTAssertEqual(primary(), "Send")
+        XCTAssertEqual(
+            SendPresentationText.primaryAction(
+                isPreparingManifest: false,
+                isDeliveringInvitation: false,
+                isWaitingForAcceptance: false,
+                isAddingToRoom: false,
+                isBusy: false,
+                canAddToRoom: false,
+                language: "zh-Hans"
+            ),
+            "发送"
+        )
     }
 
     func testSelectionProjectionCoversPlatformAndContentState() {
@@ -168,6 +220,25 @@ final class SendPresentationTests: XCTestCase {
             itemCount: itemCount,
             singleItemIsDirectory: isDirectory,
             platform: platform,
+            language: "en"
+        )
+    }
+
+    private func primary(
+        preparing: Bool = false,
+        delivering: Bool = false,
+        waiting: Bool = false,
+        adding: Bool = false,
+        busy: Bool = false,
+        canAdd: Bool = false
+    ) -> String {
+        SendPresentationText.primaryAction(
+            isPreparingManifest: preparing,
+            isDeliveringInvitation: delivering,
+            isWaitingForAcceptance: waiting,
+            isAddingToRoom: adding,
+            isBusy: busy,
+            canAddToRoom: canAdd,
             language: "en"
         )
     }

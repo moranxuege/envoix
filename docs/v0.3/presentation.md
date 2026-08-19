@@ -197,6 +197,8 @@ inventory counts, source-access decisions, and accessibility labels through
 security-scoped access remain View-owned effects.
 The macOS path controls and receiver-invite input now use the same catalog,
 including the shared paste and direction-specific QR scan contracts.
+Send primary-action copy and its state priority are now a tested
+`SendPresentationText` projection that reuses shared transfer labels.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

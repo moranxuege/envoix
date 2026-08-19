@@ -5,6 +5,39 @@ enum SendPresentationPlatform: Equatable {
 }
 
 enum SendPresentationText {
+    static func primaryAction(
+        isPreparingManifest: Bool,
+        isDeliveringInvitation: Bool,
+        isWaitingForAcceptance: Bool,
+        isAddingToRoom: Bool,
+        isBusy: Bool,
+        canAddToRoom: Bool,
+        language: String
+    ) -> String {
+        if isPreparingManifest {
+            return AppText.localized("send.action.cancel_preparation", language: language)
+        }
+        if isDeliveringInvitation {
+            return AppText.localized(
+                "transfer.action.delivering_invitation",
+                language: language
+            )
+        }
+        if isWaitingForAcceptance {
+            return AppText.localized("send.action.waiting_for_acceptance", language: language)
+        }
+        if isAddingToRoom {
+            return AppText.localized("send.action.adding_to_room", language: language)
+        }
+        if isBusy {
+            return AppText.localized("transfer.action.managed_in_activity", language: language)
+        }
+        if canAddToRoom {
+            return AppText.localized("send.action.add_to_room", language: language)
+        }
+        return AppText.localized("transfer.direction.send", language: language)
+    }
+
     static func photoImportProgress(
         itemNumber: Int,
         itemCount: Int,

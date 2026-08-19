@@ -1196,6 +1196,30 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未经验证" } }
       }
     },
+    "send.action.add_to_room" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add to room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加入房间队列" } }
+      }
+    },
+    "send.action.adding_to_room" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Adding to room…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在加入房间队列…" } }
+      }
+    },
+    "send.action.cancel_preparation" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel Preparation" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消准备" } }
+      }
+    },
+    "send.action.waiting_for_acceptance" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for acceptance…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待对方接受…" } }
+      }
+    },
     "send.concurrent.finish_receive" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Finish receiving before starting a send." } },
