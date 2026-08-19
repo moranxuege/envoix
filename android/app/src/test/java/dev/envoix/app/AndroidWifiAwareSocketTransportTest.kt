@@ -1,8 +1,10 @@
 package dev.envoix.app
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -19,11 +21,17 @@ class AndroidWifiAwareSocketTransportTest {
                         write(byteArrayOf(1, 2, 3, 4, 5))
                         flush()
                     }
-                    assertArrayEquals(byteArrayOf(1, 2, 3), transport.receive(3))
-                    assertArrayEquals(byteArrayOf(4, 5), transport.receive(3))
+                    val first = runBlocking { transport.receive(3u) }
+                    assertArrayEquals(byteArrayOf(1, 2, 3), first.bytes)
+                    assertFalse(first.endOfStream)
+                    val second = runBlocking { transport.receive(3u) }
+                    assertArrayEquals(byteArrayOf(4, 5), second.bytes)
+                    assertFalse(second.endOfStream)
                     server.shutdownOutput()
-                    assertNull(transport.receive(3))
-                    transport.close()
+                    val eof = runBlocking { transport.receive(3u) }
+                    assertTrue(eof.bytes.isEmpty())
+                    assertTrue(eof.endOfStream)
+                    runBlocking { transport.shutdown() }
                 }
             }
         }
@@ -36,7 +44,7 @@ class AndroidWifiAwareSocketTransportTest {
                 listener.accept().use {
                     val transport = AndroidWifiAwareSocketTransport(client)
                     assertThrows(IllegalArgumentException::class.java) {
-                        transport.receive(0)
+                        runBlocking { transport.receive(0u) }
                     }
                     transport.close()
                 }

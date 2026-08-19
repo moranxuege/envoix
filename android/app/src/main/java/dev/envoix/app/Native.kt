@@ -1,34 +1,7 @@
 package dev.envoix.app
 
-/** Legacy callback retained by the direct-JNI physical harness and Wi-Fi Aware
- * diagnostic. Product transfers use typed UniFFI observers and destinations. */
-interface ManifestV2Callback {
-    fun onEvent(json: String)
-
-    fun onPlanRequired(requestJson: String): String
-
-    fun onSaveRequired(requestJson: String): String
-
-    /** Persist a negotiated or rotated opaque relationship credential before
-     * the core sends any Manifest frame. */
-    fun onRememberedCredential(
-        opaqueCredential: ByteArray,
-        generation: Long,
-    ): Boolean
-}
-
 interface NearbyInviteCallback {
     fun onEvent(json: String)
-}
-
-/** Platform-owned reliable byte stream. Null from [receive] is EOF. Rust owns
- * TLS, invitation authentication, Manifest-v2 framing, and file semantics. */
-interface NativeDuplexTransport {
-    fun send(bytes: ByteArray)
-
-    fun receive(maxBytes: Int): ByteArray?
-
-    fun close()
 }
 
 /** Sink for the core's `tracing` log lines. */
@@ -79,34 +52,4 @@ object Native {
     ): String
 
     external fun stopNearbyInviteInbox(id: Long)
-
-    /** Legacy direct-JNI physical-test driver pending typed harness migration. */
-    external fun startManifestV2Session(
-        id: Long,
-        paramsJson: String,
-        callback: ManifestV2Callback,
-    )
-
-    /** Start the same canonical engine on an already established platform
-     * Wi-Fi Aware byte stream. */
-    external fun startManifestV2NativeSession(
-        id: Long,
-        paramsJson: String,
-        pairingToken: String,
-        transport: NativeDuplexTransport,
-        callback: ManifestV2Callback,
-    )
-
-    external fun continueManifestV2Receive(
-        id: Long,
-        decisionJson: String,
-    ): String
-
-    external fun listManifestV2OfferEntries(
-        id: Long,
-        offset: Long,
-        limit: Long,
-    ): String
-
-    external fun cancelManifestV2Session(id: Long)
 }

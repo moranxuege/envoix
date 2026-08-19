@@ -133,11 +133,17 @@ All Android native entry points are compiled into `libenvoix_ffi.so`; the
 library that owns UniFFI handles and process-local credentials. The former
 `libenvoix_jni.so` and its second runtime/state registry no longer exist.
 
+The direct physical-test driver now exercises the same typed UniFFI send and
+receive gateways as the product instead of a parallel JSON JNI session API.
+The uncalled Wi-Fi Aware diagnostic transfer mode and its legacy
+session/list/continue/cancel symbols have been deleted. The Android Wi-Fi Aware
+socket adapter implements the typed `FfiNativeDuplexTransport` port; the
+capability probe remains Android-owned, and later product integration must use
+the typed native-transport session functions rather than restore a second
+orchestration surface.
+
 The remaining hand-written JNI surface is not an accepted final M5 exception.
-Production Room and ordinary Transfer orchestration no longer depend on it,
-but the direct physical-test driver, Wi-Fi Aware diagnostic stream, Nearby
-discovery callbacks, Android context initialization, and log routing still do.
-The direct test driver must move to the same typed gateways before its legacy
-session/list/continue/cancel symbols are deleted. At M5 exit, only Android
-runtime integration that cannot be expressed as a UniFFI port may remain, and
-every such entry must have an explicit rationale here.
+It is limited to Nearby invitation discovery callbacks, Android context
+initialization, and log routing. Nearby discovery must move to a typed UniFFI
+port before M5 exits. Android runtime integration may remain only when it
+cannot be expressed as a UniFFI port, with an explicit rationale recorded here.
