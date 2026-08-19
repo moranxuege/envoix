@@ -413,39 +413,13 @@ struct OneTimeRoomView: View {
     }
 
     private var roomStatus: String {
-        switch controlPhase {
-        case .hosting:
-            return AppText.value("Waiting for another device", "正在等待另一台设备", language: language)
-        case .joining:
-            return AppText.value("Joining room", "正在加入房间", language: language)
-        case .connectingRemembered:
-            return AppText.value("Connecting", "正在连接", language: language)
-        case .waitingRemembered:
-            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
-        case .connected:
-            return AppText.value("Connected for this room", "已连接此房间", language: language)
-        case .ended:
-            return AppText.value("Room ended", "房间已结束", language: language)
-        case .failed:
-            return AppText.value("Connection needs attention", "连接需要处理", language: language)
-        case .idle:
-            break
-        }
-        switch room.origin {
-        case .nearby:
-            if selectedPeerIsVisible {
-                return AppText.value("Nearby now", "当前在附近", language: language)
-            }
-            return discoveryIsActive
-                ? AppText.value("Looking for this device", "正在查找此设备", language: language)
-                : AppText.value("Nearby discovery paused", "附近发现已暂停", language: language)
-        case .pairingCode:
-            return AppText.value("Invite loaded", "已载入邀请", language: language)
-        case .showCode:
-            return AppText.value("Ready to show a room QR", "可显示房间二维码", language: language)
-        case .roomControl:
-            return AppText.value("Connecting", "正在连接", language: language)
-        }
+        RoomPresentationText.status(
+            phase: controlPhase,
+            origin: room.origin,
+            selectedPeerIsVisible: selectedPeerIsVisible,
+            discoveryIsActive: discoveryIsActive,
+            language: language
+        )
     }
 
     private var statusColor: Color {
@@ -465,9 +439,7 @@ struct OneTimeRoomView: View {
     }
 
     private var trustLabel: String {
-        roomWasAuthenticated
-            ? AppText.value("Authenticated for this room", "已为此房间认证", language: language)
-            : AppText.value("Unverified", "未经验证", language: language)
+        RoomPresentationText.trust(authenticated: roomWasAuthenticated, language: language)
     }
 
     private var roomWasAuthenticated: Bool {
@@ -536,29 +508,7 @@ struct OneTimeRoomView: View {
     }
 
     private var endedMessage: String? {
-        switch controlPhase {
-        case .ended(let reason):
-            switch reason {
-            case .userEnded:
-                return AppText.value("This room was ended.", "此房间已结束。", language: language)
-            case .idleExpired:
-                return AppText.value("This room ended after 15 minutes without transfer activity.", "此房间在 15 分钟无传输活动后结束。", language: language)
-            case .invitationExpired:
-                return AppText.value("The room invitation expired.", "房间邀请已过期。", language: language)
-            case .peerEnded:
-                return AppText.value("The other device ended this room.", "另一台设备结束了此房间。", language: language)
-            case .backgrounded:
-                return AppText.value("The room ended when Envoix left the foreground.", "Envoix 离开前台后房间已结束。", language: language)
-            case .networkLost:
-                return AppText.value("The room connection was lost.", "房间连接已断开。", language: language)
-            case .protocolFailure:
-                return AppText.value("The room ended because of a connection error.", "房间因连接错误而结束。", language: language)
-            }
-        case .failed(let message):
-            return message
-        default:
-            return nil
-        }
+        RoomPresentationText.endedMessage(phase: controlPhase, language: language)
     }
 
     private func offerSummary(_ offer: RoomControlTransferOffer) -> String {

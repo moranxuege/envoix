@@ -322,6 +322,48 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间活动" } }
       }
     },
+    "room.ended.background" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The room ended when Envoix left the foreground." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 离开前台后房间已结束。" } }
+      }
+    },
+    "room.ended.idle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This room ended after 15 minutes without transfer activity." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间在 15 分钟无传输活动后结束。" } }
+      }
+    },
+    "room.ended.invitation" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The room invitation expired." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间邀请已过期。" } }
+      }
+    },
+    "room.ended.network" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The room connection was lost." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间连接已断开。" } }
+      }
+    },
+    "room.ended.peer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The other device ended this room." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "另一台设备结束了此房间。" } }
+      }
+    },
+    "room.ended.protocol" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The room ended because of a connection error." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间因连接错误而结束。" } }
+      }
+    },
+    "room.ended.user" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This room was ended." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间已结束。" } }
+      }
+    },
     "room.offer.contents" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Contents" } },
@@ -350,6 +392,90 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Offer summary" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内容摘要" } }
+      }
+    },
+    "room.status.connected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected for this room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已连接此房间" } }
+      }
+    },
+    "room.status.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connecting" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在连接" } }
+      }
+    },
+    "room.status.discovery_paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby discovery paused" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近发现已暂停" } }
+      }
+    },
+    "room.status.ended" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Room ended" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间已结束" } }
+      }
+    },
+    "room.status.hosting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for another device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待另一台设备" } }
+      }
+    },
+    "room.status.invite_loaded" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invite loaded" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已载入邀请" } }
+      }
+    },
+    "room.status.joining" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Joining room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在加入房间" } }
+      }
+    },
+    "room.status.looking_for_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Looking for this device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在查找此设备" } }
+      }
+    },
+    "room.status.nearby_now" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby now" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前在附近" } }
+      }
+    },
+    "room.status.needs_attention" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connection needs attention" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接需要处理" } }
+      }
+    },
+    "room.status.ready_for_qr" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready to show a room QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可显示房间二维码" } }
+      }
+    },
+    "room.status.waiting_remembered" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for the other device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待另一台设备" } }
+      }
+    },
+    "room.trust.authenticated" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Authenticated for this room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已为此房间认证" } }
+      }
+    },
+    "room.trust.unverified" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unverified" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未经验证" } }
       }
     },
     "transfer.path.changed" : {
