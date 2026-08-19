@@ -43,4 +43,12 @@
     <string name="scanner_camera_access_off">Camera access is off</string>
     <string name="scanner_camera_access_off_choose_image">Camera access is off —\nchoose a QR image below</string>
     <string name="scanner_choose_from_photos">Choose from photos</string>
+
+    <string name="room_activity_section">ROOM ACTIVITY</string>
+    <string name="room_all_activity">All Activity</string>
+    <string name="nearby_envoix_device">Nearby Envoix device</string>
+    <string name="room_end_title">End this room?</string>
+    <string name="room_end_explanation">New file offers will stop. Transfers already in progress will continue in Activity.</string>
+    <string name="room_end_action">End room</string>
+    <string name="room_keep_action">Keep room</string>
 </resources>

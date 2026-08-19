@@ -43,4 +43,12 @@
     <string name="scanner_camera_access_off">相机权限未开启</string>
     <string name="scanner_camera_access_off_choose_image">相机权限未开启—\n请从下方选择二维码图片</string>
     <string name="scanner_choose_from_photos">从相册选择</string>
+
+    <string name="room_activity_section">房间活动</string>
+    <string name="room_all_activity">全部活动</string>
+    <string name="nearby_envoix_device">附近的 Envoix 设备</string>
+    <string name="room_end_title">结束这个房间？</string>
+    <string name="room_end_explanation">结束后将无法发送新文件。已经开始的传输会继续显示在“活动”中。</string>
+    <string name="room_end_action">结束房间</string>
+    <string name="room_keep_action">保留房间</string>
 </resources>

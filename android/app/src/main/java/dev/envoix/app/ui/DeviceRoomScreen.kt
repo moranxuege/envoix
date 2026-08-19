@@ -34,6 +34,7 @@ import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.R
 import dev.envoix.app.Transfer
 import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveryUiState
@@ -181,14 +182,14 @@ internal fun DeviceRoomScreen(
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                 ) {
                     Text(
-                        appText("ROOM ACTIVITY", "房间活动"),
+                        appString(R.string.room_activity_section),
                         color = colors.muted,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 0.8.sp,
                     )
                     TextButton(onClick = onActivity) {
-                        Text(appText("All Activity", "全部活动"))
+                        Text(appString(R.string.room_all_activity))
                     }
                 }
             }
@@ -373,7 +374,7 @@ internal fun DeviceRoomScreen(
                 verificationOffer = BleVerificationInvitation.isPublicOffer(offer.invite),
                 peerName =
                     offer.senderDisplayName
-                        ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
+                        ?: appString(R.string.nearby_envoix_device),
                 onAccept = { code ->
                     onAcceptIncomingOffer(offer, code)
                     onConsumeNearbyOffer(offer.requestId)
@@ -388,14 +389,9 @@ internal fun DeviceRoomScreen(
     if (confirmEnd) {
         AlertDialog(
             onDismissRequest = { confirmEnd = false },
-            title = { Text(appText("End this room?", "结束这个房间？")) },
+            title = { Text(appString(R.string.room_end_title)) },
             text = {
-                Text(
-                    appText(
-                        "New file offers will stop. Transfers already in progress will continue in Activity.",
-                        "结束后将无法发送新文件。已经开始的传输会继续显示在“活动”中。",
-                    ),
-                )
+                Text(appString(R.string.room_end_explanation))
             },
             confirmButton = {
                 TextButton(
@@ -404,12 +400,12 @@ internal fun DeviceRoomScreen(
                         if (legacyRoom) onBack() else onEndRoom()
                     },
                 ) {
-                    Text(appText("End room", "结束房间"), color = colors.danger)
+                    Text(appString(R.string.room_end_action), color = colors.danger)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { confirmEnd = false }) {
-                    Text(appText("Keep room", "保留房间"))
+                    Text(appString(R.string.room_keep_action))
                 }
             },
             containerColor = colors.surface,
