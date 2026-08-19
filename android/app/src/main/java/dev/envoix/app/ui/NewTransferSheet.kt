@@ -39,7 +39,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -47,7 +46,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -58,18 +56,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.InviteCodec
-import dev.envoix.app.ManifestV2JobGateway
-import dev.envoix.app.ManifestV2Source
-import dev.envoix.app.ManifestV2SourceDecision
-import dev.envoix.app.ManifestV2SourceStager
-import dev.envoix.app.ManifestV2StageResult
-import dev.envoix.app.PreparedManifestV2Source
 import dev.envoix.app.R
-import dev.envoix.app.TransferService
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyPairingSelection
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
 internal typealias PrepareReceiveBeforeDecision = (
@@ -127,6 +116,7 @@ internal fun NewTransferSheet(
         rememberedRelationshipId: String?,
     ) -> Unit,
     preferences: TransferSetupPreferences,
+    sourcePreparationIntents: TransferSourcePreparationIntents,
     onSaveTreePicked: (Uri) -> Unit,
     nearbySelection: NearbyPairingSelection? = null,
     nearbyDeliveryAvailable: Boolean = true,
@@ -147,7 +137,6 @@ internal fun NewTransferSheet(
 ) {
     val colors = Envoix.colors
     val clipboard = LocalClipboardManager.current
-    val context = LocalContext.current
     val language = LocalAppLanguage.current
 
     fun text(
@@ -156,6 +145,13 @@ internal fun NewTransferSheet(
     ) = AppText.value(english, simplifiedChinese, language)
     val switchedToSendNotice = appString(R.string.switched_to_send_notice)
     val switchedToReceiveNotice = appString(R.string.switched_to_receive_notice)
+    val sourcePreparationMessages =
+        TransferSourcePreparationMessages(
+            prepareFailed = text("Could not prepare the selected source", "无法准备所选内容"),
+            removeFailed = text("Could not remove the selected source", "无法移除所选来源"),
+            selectionChanged = text("Source selection changed while authorizing", "授权期间所选内容发生了变化"),
+            authorizationFailed = text("Could not authorize the selected folder", "无法授权所选文件夹"),
+        )
     val broker = roomEndpoint?.broker ?: preferences.broker
     val relay = roomEndpoint?.relay ?: preferences.relay
 
@@ -176,8 +172,6 @@ internal fun NewTransferSheet(
     var scannedRelay by preparation.scannedRelay
     val preparedSources = preparation.preparedSources
     var preparedJobId by preparation.preparedJobId
-    var jobStoreDirectory by preparation.jobStoreDirectory
-    var stagingRootDirectory by preparation.stagingRootDirectory
     var preparationSummary by preparation.summary
     var preparingCount by preparation.preparingCount
     var preparationError by preparation.error
@@ -192,189 +186,34 @@ internal fun NewTransferSheet(
     var rememberLabel by remember { mutableStateOf("") }
     var pairingInputError by remember(draftId) { mutableStateOf<String?>(null) }
 
-    val preparationScope = rememberCoroutineScope()
-    val preparationMutex = preparation.mutex
-    val jobGateway = ManifestV2JobGateway.shared
-
     DisposableEffect(preparation, preparationState) {
         onDispose {
             if (preparationState == null) preparation.discard()
         }
     }
 
-    fun addSources(sources: List<ManifestV2Source>) {
-        if (sources.isEmpty()) return
-        preparationScope.launch {
-            preparationMutex.withLock {
-                if (!preparation.acceptsPreparationChanges()) return@withLock
-                val fresh =
-                    sources.filter { candidate ->
-                        preparedSources.none { it.source.uri == candidate.uri }
-                    }
-                if (fresh.isEmpty()) return@withLock
-                preparingCount += fresh.size
-                preparationError = null
-                try {
-                    val store = TransferService.jobStoreDirectory(context).absolutePath
-                    jobStoreDirectory = store
-                    val jobId =
-                        preparedJobId ?: jobGateway.create(store, preferences.compressionPolicy).jobId.also {
-                            preparedJobId = it
-                            stagingRootDirectory =
-                                java.io.File(context.filesDir, "manifest-v2/source-staging/$it").absolutePath
-                        }
-                    for (source in fresh) {
-                        val staged = ManifestV2SourceStager.stage(context, jobId, source)
-                        var attached = false
-                        try {
-                            val snapshot =
-                                jobGateway.addStagedProviderRoot(
-                                    store,
-                                    jobId,
-                                    ManifestV2SourceStager.stagedProviderRoot(source, staged),
-                                )
-                            attached = true
-                            preparationSummary = snapshot
-                            preparedSources +=
-                                ManifestV2SourceStager.parsePreparedSnapshot(
-                                    source,
-                                    staged.root,
-                                    snapshot,
-                                )
-                        } catch (error: Throwable) {
-                            if (!attached) staged.root.parentFile?.deleteRecursively()
-                            throw error
-                        }
-                    }
-                } catch (error: Throwable) {
-                    preparationError =
-                        error.message ?: text(
-                            "Could not prepare the selected source",
-                            "无法准备所选内容",
-                        )
-                } finally {
-                    preparingCount -= fresh.size
-                }
-            }
-        }
-    }
-
-    fun removeSource(source: PreparedManifestV2Source) {
-        val jobId = preparedJobId ?: return
-        preparationScope.launch {
-            preparationMutex.withLock {
-                if (!preparation.acceptsPreparationChanges()) return@withLock
-                preparingCount += 1
-                try {
-                    val store = TransferService.jobStoreDirectory(context).absolutePath
-                    val snapshot =
-                        jobGateway.resolveSourceIssue(
-                            store,
-                            jobId,
-                            source.rootItemId,
-                            ManifestV2SourceDecision.RemoveSelection,
-                        )
-                    preparedSources.remove(source)
-                    source.localRoot.parentFile?.deleteRecursively()
-                    preparationSummary = snapshot
-                } catch (error: Throwable) {
-                    preparationError =
-                        error.message ?: text(
-                            "Could not remove the selected source",
-                            "无法移除所选来源",
-                        )
-                } finally {
-                    preparingCount -= 1
-                }
-            }
-        }
-    }
-
-    fun approvePartial(source: PreparedManifestV2Source) {
-        val jobId = preparedJobId ?: return
-        preparationScope.launch {
-            preparationMutex.withLock {
-                if (!preparation.acceptsPreparationChanges()) return@withLock
-                val snapshot =
-                    jobGateway.resolveSourceIssue(
-                        TransferService.jobStoreDirectory(context).absolutePath,
-                        jobId,
-                        source.rootItemId,
-                        ManifestV2SourceDecision.ApprovePartial,
-                    )
-                val index = preparedSources.indexOf(source)
-                if (index >= 0) preparedSources[index] = source.copy(partialApproved = true)
-                preparationSummary = snapshot
-                preparationError = null
-            }
-        }
-    }
-
-    fun reauthorizeSource(
-        previous: PreparedManifestV2Source,
-        uri: android.net.Uri,
-    ) {
-        val jobId = preparedJobId ?: return
-        preparationScope.launch {
-            preparationMutex.withLock {
-                if (!preparation.acceptsPreparationChanges()) return@withLock
-                preparingCount += 1
-                preparationError = null
-                val source = ManifestV2SourceStager.sourceFromUri(context, uri, true)
-                var staged: ManifestV2StageResult? = null
-                var committed = false
-                try {
-                    val stagedResult = ManifestV2SourceStager.stage(context, jobId, source)
-                    staged = stagedResult
-                    val snapshot =
-                        jobGateway.reauthorizeStagedProviderSource(
-                            TransferService.jobStoreDirectory(context).absolutePath,
-                            jobId,
-                            previous.rootItemId,
-                            ManifestV2SourceStager.stagedProviderRoot(
-                                source,
-                                stagedResult,
-                            ),
-                        )
-                    committed = true
-                    val replacement =
-                        ManifestV2SourceStager.parsePreparedSnapshot(
-                            source,
-                            stagedResult.root,
-                            snapshot,
-                            previous.rootItemId,
-                        )
-                    val index = preparedSources.indexOf(previous)
-                    check(index >= 0) {
-                        text("Source selection changed while authorizing", "授权期间所选内容发生了变化")
-                    }
-                    preparedSources[index] = replacement
-                    previous.localRoot.parentFile?.deleteRecursively()
-                    preparationSummary = snapshot
-                } catch (error: Throwable) {
-                    if (!committed) staged?.root?.parentFile?.deleteRecursively()
-                    preparationError =
-                        error.message ?: text(
-                            "Could not authorize the selected folder",
-                            "无法授权所选文件夹",
-                        )
-                } finally {
-                    preparingCount -= 1
-                }
-            }
-        }
-    }
-
     val filePicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             onExternalActivityChanged(false)
-            addSources(uris.map { ManifestV2SourceStager.sourceFromUri(context, it, false) })
+            sourcePreparationIntents.addSources(
+                preparation,
+                uris,
+                false,
+                preferences.compressionPolicy,
+                sourcePreparationMessages,
+            )
         }
     val sourceFolderPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             onExternalActivityChanged(false)
             uri?.let {
-                addSources(listOf(ManifestV2SourceStager.sourceFromUri(context, it, true)))
+                sourcePreparationIntents.addSources(
+                    preparation,
+                    listOf(it),
+                    true,
+                    preferences.compressionPolicy,
+                    sourcePreparationMessages,
+                )
             }
         }
     val sourceReauthorizationPicker =
@@ -382,7 +221,14 @@ internal fun NewTransferSheet(
             onExternalActivityChanged(false)
             val previous = sourceAwaitingReauthorization
             sourceAwaitingReauthorization = null
-            if (uri != null && previous != null) reauthorizeSource(previous, uri)
+            if (uri != null && previous != null) {
+                sourcePreparationIntents.reauthorizeSource(
+                    preparation,
+                    previous,
+                    uri,
+                    sourcePreparationMessages,
+                )
+            }
         }
     val saveFolderPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -394,7 +240,13 @@ internal fun NewTransferSheet(
     LaunchedEffect(draftId, initialSources, initialRole) {
         if (initialSources.isNotEmpty()) {
             role = "send"
-            addSources(initialSources.map { ManifestV2SourceStager.sourceFromUri(context, it, false) })
+            sourcePreparationIntents.addSources(
+                preparation,
+                initialSources,
+                false,
+                preferences.compressionPolicy,
+                sourcePreparationMessages,
+            )
         }
     }
 
@@ -652,8 +504,9 @@ internal fun NewTransferSheet(
                                     modifier =
                                         Modifier
                                             .clip(RoundedCornerShape(7.dp))
-                                            .clickable(enabled = !startSubmitted) { approvePartial(prepared) }
-                                            .padding(horizontal = 7.dp, vertical = 5.dp),
+                                            .clickable(enabled = !startSubmitted) {
+                                                sourcePreparationIntents.approvePartial(preparation, prepared)
+                                            }.padding(horizontal = 7.dp, vertical = 5.dp),
                                 )
                             }
                         }
@@ -668,8 +521,13 @@ internal fun NewTransferSheet(
                             modifier =
                                 Modifier
                                     .clip(CircleShape)
-                                    .clickable(enabled = !startSubmitted) { removeSource(prepared) }
-                                    .padding(7.dp)
+                                    .clickable(enabled = !startSubmitted) {
+                                        sourcePreparationIntents.removeSource(
+                                            preparation,
+                                            prepared,
+                                            sourcePreparationMessages,
+                                        )
+                                    }.padding(7.dp)
                                     .size(17.dp),
                         )
                     }

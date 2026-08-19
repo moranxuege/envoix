@@ -73,6 +73,7 @@ internal fun DeviceRoomScreen(
     discovery: DiscoveryUiState,
     incomingDestination: RoomDestinationPresentation?,
     transferPreferences: TransferSetupPreferences,
+    sourcePreparationIntents: TransferSourcePreparationIntents,
     onSaveTreePicked: (Uri) -> Unit,
     resolveRoomDestination: (directoryCount: Int) -> RoomDestinationPresentation,
     onOfferNearbyInvite: (NearbyPairingSelection, String, (String?) -> Unit) -> Unit,
@@ -287,6 +288,7 @@ internal fun DeviceRoomScreen(
                 showQrInitially = activeDraft.showQrInitially,
                 initialRole = role,
                 preferences = transferPreferences,
+                sourcePreparationIntents = sourcePreparationIntents,
                 onSaveTreePicked = onSaveTreePicked,
                 initialPairingInput = draft.pairingInput.takeIf { setupUsesPending },
                 initialSources =

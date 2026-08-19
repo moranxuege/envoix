@@ -51,6 +51,7 @@ import dev.envoix.app.ui.SettingsScreen
 import dev.envoix.app.ui.TransferActivityPresentationEnvironment
 import dev.envoix.app.ui.TransferActivityScreen
 import dev.envoix.app.ui.TransferSetupPreferences
+import dev.envoix.app.ui.TransferSourcePreparationCoordinator
 import dev.envoix.app.ui.WorkflowScreen
 import dev.envoix.app.ui.roomOfferDestinationPresentation
 import kotlinx.coroutines.flow.collect
@@ -64,6 +65,9 @@ class MainActivity : ComponentActivity() {
     private val workflowVm: ConnectionWorkflowViewModel by viewModels()
     private val rememberedRoomsVm: RememberedRoomsViewModel by viewModels()
     private val settingsDiagnosticsVm: SettingsDiagnosticsViewModel by viewModels()
+    private val transferSourcePreparation by lazy {
+        TransferSourcePreparationCoordinator(this, lifecycleScope)
+    }
     private val rememberedRoomConnections by lazy {
         RememberedRoomConnectionManager.get(this)
     }
@@ -349,6 +353,7 @@ class MainActivity : ComponentActivity() {
                                             )
                                         },
                                     transferPreferences = transferPreferences,
+                                    sourcePreparationIntents = transferSourcePreparation.intents,
                                     onSaveTreePicked = { uri ->
                                         SettingsStore.setSaveTree(this@MainActivity, uri)
                                     },
@@ -419,6 +424,7 @@ class MainActivity : ComponentActivity() {
                                 onExternalActivityChanged = ::setExternalActivityActive,
                                 onDismissError = rememberedRoomsVm::clearError,
                                 transferPreferences = transferPreferences,
+                                sourcePreparationIntents = transferSourcePreparation.intents,
                                 onSaveTreePicked = { uri ->
                                     SettingsStore.setSaveTree(this@MainActivity, uri)
                                 },

@@ -275,6 +275,12 @@ Transfer setup consumes one immutable `TransferSetupPreferences` projection.
 Both active and remembered Rooms use the same projection, so the shared sheet
 does not observe or persist application settings itself.
 
+Source pickers emit URI intents through `TransferSourcePreparationIntents`.
+The Activity-scoped coordinator owns provider inspection, private staging, and
+Manifest v2 job mutations; the shared sheet renders only
+`TransferDraftPreparationState` and never opens the job store or
+`ContentResolver` directly.
+
 The Settings screen renders a settings snapshot and
 `SettingsDiagnosticsUiState`. The Activity applies persistence and launches
 runtime permission requests, while `SettingsDiagnosticsViewModel` owns and
