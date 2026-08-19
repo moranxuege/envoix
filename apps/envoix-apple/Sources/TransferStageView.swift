@@ -257,7 +257,11 @@ struct TransferStageView: View {
 
             HStack(spacing: 8) {
                 Label(
-                    stateText(group.summaryRecord),
+                    TransferActivityText.state(
+                        group.summaryRecord.state,
+                        direction: group.summaryRecord.direction,
+                        language: language
+                    ),
                     systemImage: icon(for: group.summaryRecord)
                 )
                 .foregroundStyle(tint(for: group.summaryRecord.state))
@@ -330,9 +334,7 @@ struct TransferStageView: View {
                         .foregroundStyle(Theme.muted)
                 }
                 Spacer(minLength: 8)
-                Text(record.direction == .send
-                    ? AppText.value("Send", "发送", language: language)
-                    : AppText.value("Receive", "接收", language: language))
+                Text(TransferActivityText.direction(record.direction, language: language))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(tint(for: record.state))
             }
@@ -494,7 +496,11 @@ struct TransferStageView: View {
 
     private func transferSummary(_ record: TransferActivityRecord) -> String {
         var parts = [
-            stateText(record),
+            TransferActivityText.state(
+                record.state,
+                direction: record.direction,
+                language: language
+            ),
             itemCountText(UInt64(record.itemCount)),
         ]
         if record.totalBytes > 0 {
@@ -623,7 +629,7 @@ struct TransferStageView: View {
                 ) {
                     ForEach(Array(samples.enumerated()), id: \.offset) { _, sample in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(stageTitle(sample.stage))
+                            Text(TransferActivityText.stage(sample.stage, language: language))
                                 .font(.caption2)
                                 .foregroundStyle(Theme.muted)
                                 .lineLimit(1)
@@ -657,26 +663,6 @@ struct TransferStageView: View {
         case .relay: return "point.3.connected.trianglepath.dotted"
         case .wifiAware: return "wifi"
         case .other: return "link"
-        }
-    }
-
-    private func stageTitle(_ stage: FfiTransferStage) -> String {
-        switch stage {
-        case .sessionStarted: return AppText.value("Started", "开始", language: language)
-        case .connectionReady: return AppText.value("Connected", "连接完成", language: language)
-        case .authenticationStarted:
-            return AppText.value("Authenticating", "开始认证", language: language)
-        case .authenticationComplete:
-            return AppText.value("Authenticated", "认证完成", language: language)
-        case .manifestOffer: return AppText.value("Offer", "清单送达", language: language)
-        case .manifestAccepted: return AppText.value("Accepted", "清单确认", language: language)
-        case .firstPayload: return AppText.value("First byte", "首个数据", language: language)
-        case .payloadComplete:
-            return AppText.value("Payload complete", "数据完成", language: language)
-        case .deliveryComplete:
-            return AppText.value("Delivered", "交付完成", language: language)
-        case .canceled: return AppText.value("Canceled", "已取消", language: language)
-        case .failed: return AppText.value("Failed", "失败", language: language)
         }
     }
 
@@ -790,31 +776,6 @@ struct TransferStageView: View {
         }
         if count == 1 { return AppText.value("1 item", "1 个项目", language: language) }
         return AppText.value("\(count) items", "\(count) 个项目", language: language)
-    }
-
-    private func stateText(_ record: TransferActivityRecord) -> String {
-        switch record.state {
-        case .preparing: return AppText.value("Preparing locally", "正在本地准备", language: language)
-        case .waitingForPeer: return AppText.value("Waiting for peer", "正在等待对端", language: language)
-        case .pairing: return AppText.value("Pairing", "正在配对", language: language)
-        case .connecting: return AppText.value("Connecting", "正在连接", language: language)
-        case .awaitingDecision: return AppText.value("Waiting for your decision", "等待你的确认", language: language)
-        case .transferring:
-            return record.direction == .send
-                ? AppText.value("Sending", "正在发送", language: language)
-                : AppText.value("Receiving", "正在接收", language: language)
-        case .verifying: return AppText.value("Verifying", "正在校验", language: language)
-        case .saving: return AppText.value("Saving to destination", "正在保存到目标位置", language: language)
-        case .waitingForReceiverSave: return AppText.value("Waiting for receiver to save", "等待接收方完成保存", language: language)
-        case .finalizingDelivery: return AppText.value("Saved; finalizing delivery", "已保存，正在完成交付确认", language: language)
-        case .paused: return AppText.value("Paused", "已暂停", language: language)
-        case .delivered:
-            return record.direction == .send
-                ? AppText.value("Delivered", "已送达", language: language)
-                : AppText.value("Received", "已接收", language: language)
-        case .failed: return AppText.value("Failed", "失败", language: language)
-        case .canceled: return AppText.value("Canceled", "已取消", language: language)
-        }
     }
 
     private func tint(for state: TransferActivityState) -> Color {

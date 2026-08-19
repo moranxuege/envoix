@@ -4,6 +4,63 @@ import EnvoixCore
 @testable import Envoix_iOS
 
 final class TransferPresentationPolicyTests: XCTestCase {
+    func testActivityTextProjectsEveryStateAndStageFromSemanticCatalog() {
+        let stateCases: [(
+            TransferActivityState,
+            FfiTransferDirection,
+            String,
+            String
+        )] = [
+            (.preparing, .send, "Preparing locally", "正在本地准备"),
+            (.waitingForPeer, .send, "Waiting for peer", "正在等待对端"),
+            (.pairing, .send, "Pairing", "正在配对"),
+            (.connecting, .send, "Connecting", "正在连接"),
+            (.awaitingDecision, .receive, "Waiting for your decision", "等待你的确认"),
+            (.transferring, .send, "Sending", "正在发送"),
+            (.transferring, .receive, "Receiving", "正在接收"),
+            (.verifying, .receive, "Verifying", "正在校验"),
+            (.saving, .receive, "Saving to destination", "正在保存到目标位置"),
+            (.waitingForReceiverSave, .send, "Waiting for receiver to save", "等待接收方完成保存"),
+            (.finalizingDelivery, .send, "Saved; finalizing delivery", "已保存，正在完成交付确认"),
+            (.paused, .send, "Paused", "已暂停"),
+            (.delivered, .send, "Delivered", "已送达"),
+            (.delivered, .receive, "Received", "已接收"),
+            (.failed, .send, "Failed", "失败"),
+            (.canceled, .send, "Canceled", "已取消"),
+        ]
+        for (state, direction, english, chinese) in stateCases {
+            XCTAssertEqual(
+                TransferActivityText.state(state, direction: direction, language: "en"),
+                english
+            )
+            XCTAssertEqual(
+                TransferActivityText.state(state, direction: direction, language: "zh-Hans"),
+                chinese
+            )
+        }
+
+        let stageCases: [(FfiTransferStage, String, String)] = [
+            (.sessionStarted, "Started", "开始"),
+            (.connectionReady, "Connected", "连接完成"),
+            (.authenticationStarted, "Authenticating", "开始认证"),
+            (.authenticationComplete, "Authenticated", "认证完成"),
+            (.manifestOffer, "Offer", "清单送达"),
+            (.manifestAccepted, "Accepted", "清单确认"),
+            (.firstPayload, "First byte", "首个数据"),
+            (.payloadComplete, "Payload complete", "数据完成"),
+            (.deliveryComplete, "Delivered", "交付完成"),
+            (.canceled, "Canceled", "已取消"),
+            (.failed, "Failed", "失败"),
+        ]
+        for (stage, english, chinese) in stageCases {
+            XCTAssertEqual(TransferActivityText.stage(stage, language: "en"), english)
+            XCTAssertEqual(TransferActivityText.stage(stage, language: "zh-Hans"), chinese)
+        }
+
+        XCTAssertEqual(TransferActivityText.direction(.send, language: "en"), "Send")
+        XCTAssertEqual(TransferActivityText.direction(.receive, language: "zh-Hans"), "接收")
+    }
+
     @MainActor
     func testNativeObserverHopsBackgroundCallbacksToMainActor() async {
         let model = TransferViewModel()

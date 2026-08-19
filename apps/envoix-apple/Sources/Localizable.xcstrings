@@ -108,6 +108,180 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Data path · Wi‑Fi Aware" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数据路径 · Wi‑Fi Aware" } }
       }
+    },
+    "transfer.direction.receive" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收" } }
+      }
+    },
+    "transfer.direction.send" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送" } }
+      }
+    },
+    "transfer.stage.accepted" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Accepted" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "清单确认" } }
+      }
+    },
+    "transfer.stage.authenticated" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Authenticated" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "认证完成" } }
+      }
+    },
+    "transfer.stage.authenticating" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Authenticating" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开始认证" } }
+      }
+    },
+    "transfer.stage.canceled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Canceled" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已取消" } }
+      }
+    },
+    "transfer.stage.connected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接完成" } }
+      }
+    },
+    "transfer.stage.delivered" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Delivered" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "交付完成" } }
+      }
+    },
+    "transfer.stage.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "失败" } }
+      }
+    },
+    "transfer.stage.first_byte" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "First byte" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "首个数据" } }
+      }
+    },
+    "transfer.stage.offer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Offer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "清单送达" } }
+      }
+    },
+    "transfer.stage.payload_complete" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Payload complete" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "数据完成" } }
+      }
+    },
+    "transfer.stage.started" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Started" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开始" } }
+      }
+    },
+    "transfer.state.awaiting_decision" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for your decision" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待你的确认" } }
+      }
+    },
+    "transfer.state.canceled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Canceled" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已取消" } }
+      }
+    },
+    "transfer.state.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connecting" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在连接" } }
+      }
+    },
+    "transfer.state.delivered" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Delivered" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已送达" } }
+      }
+    },
+    "transfer.state.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "失败" } }
+      }
+    },
+    "transfer.state.finalizing_delivery" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saved; finalizing delivery" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已保存，正在完成交付确认" } }
+      }
+    },
+    "transfer.state.pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在配对" } }
+      }
+    },
+    "transfer.state.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paused" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已暂停" } }
+      }
+    },
+    "transfer.state.preparing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing locally" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在本地准备" } }
+      }
+    },
+    "transfer.state.received" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Received" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已接收" } }
+      }
+    },
+    "transfer.state.receiving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receiving" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在接收" } }
+      }
+    },
+    "transfer.state.saving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saving to destination" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在保存到目标位置" } }
+      }
+    },
+    "transfer.state.sending" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sending" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在发送" } }
+      }
+    },
+    "transfer.state.verifying" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verifying" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在校验" } }
+      }
+    },
+    "transfer.state.waiting_for_peer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for peer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待对端" } }
+      }
+    },
+    "transfer.state.waiting_for_receiver_save" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for receiver to save" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待接收方完成保存" } }
+      }
     }
   },
   "version" : "1.0"

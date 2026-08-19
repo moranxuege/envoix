@@ -58,6 +58,66 @@ enum ConnectionPathPresentationPolicy {
     }
 }
 
+enum TransferActivityText {
+    static func direction(_ direction: FfiTransferDirection, language: String) -> String {
+        switch direction {
+        case .send:
+            return AppText.localized("transfer.direction.send", language: language)
+        case .receive:
+            return AppText.localized("transfer.direction.receive", language: language)
+        }
+    }
+
+    static func state(
+        _ state: TransferActivityState,
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        let key: String
+        switch state {
+        case .preparing: key = "transfer.state.preparing"
+        case .waitingForPeer: key = "transfer.state.waiting_for_peer"
+        case .pairing: key = "transfer.state.pairing"
+        case .connecting: key = "transfer.state.connecting"
+        case .awaitingDecision: key = "transfer.state.awaiting_decision"
+        case .transferring:
+            key = direction == .send
+                ? "transfer.state.sending"
+                : "transfer.state.receiving"
+        case .verifying: key = "transfer.state.verifying"
+        case .saving: key = "transfer.state.saving"
+        case .waitingForReceiverSave: key = "transfer.state.waiting_for_receiver_save"
+        case .finalizingDelivery: key = "transfer.state.finalizing_delivery"
+        case .paused: key = "transfer.state.paused"
+        case .delivered:
+            key = direction == .send
+                ? "transfer.state.delivered"
+                : "transfer.state.received"
+        case .failed: key = "transfer.state.failed"
+        case .canceled: key = "transfer.state.canceled"
+        }
+        return AppText.localized(key, language: language)
+    }
+
+    static func stage(_ stage: FfiTransferStage, language: String) -> String {
+        let key: String
+        switch stage {
+        case .sessionStarted: key = "transfer.stage.started"
+        case .connectionReady: key = "transfer.stage.connected"
+        case .authenticationStarted: key = "transfer.stage.authenticating"
+        case .authenticationComplete: key = "transfer.stage.authenticated"
+        case .manifestOffer: key = "transfer.stage.offer"
+        case .manifestAccepted: key = "transfer.stage.accepted"
+        case .firstPayload: key = "transfer.stage.first_byte"
+        case .payloadComplete: key = "transfer.stage.payload_complete"
+        case .deliveryComplete: key = "transfer.stage.delivered"
+        case .canceled: key = "transfer.stage.canceled"
+        case .failed: key = "transfer.stage.failed"
+        }
+        return AppText.localized(key, language: language)
+    }
+}
+
 enum ActivityStageTimingPresentationPolicy {
     private static let microsecondsPerMillisecond: UInt64 = 1_000
     private static let microsecondsPerSecond: UInt64 = 1_000_000
