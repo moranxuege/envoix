@@ -57,14 +57,24 @@ final class AppleApplicationRuntime: ObservableObject {
     private var nextSceneOrder = 0
     private var systemPairingLease: AppleWifiAwareServiceCoordinator.Lease?
 
+    convenience init() {
+        self.init(
+            nearbyCoordinator: NearbyDiscoveryCoordinator(),
+            presence: NearbyPresencePreferences(),
+            workflow: ConnectionWorkflowState(
+                gateway: RoomControlGatewayFactory.make()
+            ),
+            rememberedOutbox: RememberedRoomOutboxController(),
+            wifiAwareServices: .shared
+        )
+    }
+
     init(
-        nearbyCoordinator: NearbyDiscoveryCoordinator = NearbyDiscoveryCoordinator(),
-        presence: NearbyPresencePreferences = NearbyPresencePreferences(),
-        workflow: ConnectionWorkflowState = ConnectionWorkflowState(
-            gateway: RoomControlGatewayFactory.make()
-        ),
-        rememberedOutbox: RememberedRoomOutboxController = RememberedRoomOutboxController(),
-        wifiAwareServices: AppleWifiAwareServiceCoordinator = .shared
+        nearbyCoordinator: NearbyDiscoveryCoordinator,
+        presence: NearbyPresencePreferences,
+        workflow: ConnectionWorkflowState,
+        rememberedOutbox: RememberedRoomOutboxController,
+        wifiAwareServices: AppleWifiAwareServiceCoordinator
     ) {
         self.nearbyCoordinator = nearbyCoordinator
         self.presence = presence
