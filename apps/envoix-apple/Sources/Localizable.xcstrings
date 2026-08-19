@@ -196,6 +196,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
       }
     },
+    "common.open" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开" } }
+      }
+    },
     "common.pause" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Pause" } },

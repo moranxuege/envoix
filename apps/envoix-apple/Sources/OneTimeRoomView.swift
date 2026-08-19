@@ -254,9 +254,7 @@ struct OneTimeRoomView: View {
                         .foregroundStyle(Theme.muted)
                 }
                 Spacer(minLength: 8)
-                Text(record.direction == .send
-                     ? AppText.value("Send", "发送", language: language)
-                     : AppText.value("Receive", "接收", language: language))
+                Text(TransferActivityText.direction(record.direction, language: language))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.muted)
             }
@@ -307,14 +305,14 @@ struct OneTimeRoomView: View {
                     Button {
                         openReceivedItems(urls)
                     } label: {
-                        Text(AppText.value("Open", "打开", language: language))
+                        Text(AppText.localized("common.open", language: language))
                             .font(.caption.weight(.semibold))
                     }
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("room_open_received_\(record.activityId)")
 
                     ShareLink(items: urls) {
-                        Text(AppText.value("Share", "分享", language: language))
+                        Text(AppText.localized("common.share", language: language))
                             .font(.caption.weight(.semibold))
                     }
                     .buttonStyle(.bordered)
@@ -417,7 +415,7 @@ struct OneTimeRoomView: View {
         if let displayName = room.nearbySelection?.displayName, !displayName.trimmed.isEmpty {
             return displayName
         }
-        return AppText.value("One-time Room", "一次性房间", language: language)
+        return AppText.localized("activity.group.one_time_room", language: language)
     }
 
     private var roomStatus: String {
@@ -602,37 +600,18 @@ struct OneTimeRoomView: View {
     private func activityTitle(_ record: TransferActivityRecord) -> String {
         if record.itemCount == 0 {
             return record.direction == .send
-                ? AppText.value("Outgoing transfer", "待发送内容", language: language)
-                : AppText.value("Incoming transfer", "待接收内容", language: language)
+                ? AppText.localized("activity.outgoing", language: language)
+                : AppText.localized("activity.incoming", language: language)
         }
-        return AppText.value(
-            record.itemCount == 1 ? "1 item" : "\(record.itemCount) items",
-            "\(record.itemCount) 个项目",
-            language: language
-        )
+        return TransferActivityText.itemCount(UInt64(record.itemCount), language: language)
     }
 
     private func activityState(_ record: TransferActivityRecord) -> String {
-        switch record.state {
-        case .preparing: return AppText.value("Preparing", "正在准备", language: language)
-        case .waitingForPeer: return AppText.value("Waiting for the other device", "等待另一台设备", language: language)
-        case .pairing, .connecting: return AppText.value("Connecting", "正在连接", language: language)
-        case .awaitingDecision: return AppText.value("Waiting for confirmation", "等待确认", language: language)
-        case .transferring:
-            return record.direction == .send
-                ? AppText.value("Sending", "正在发送", language: language)
-                : AppText.value("Receiving", "正在接收", language: language)
-        case .verifying: return AppText.value("Verifying", "正在校验", language: language)
-        case .saving, .waitingForReceiverSave, .finalizingDelivery:
-            return AppText.value("Finishing", "正在完成", language: language)
-        case .paused: return AppText.value("Paused", "已暂停", language: language)
-        case .delivered:
-            return record.direction == .send
-                ? AppText.value("Delivered", "已送达", language: language)
-                : AppText.value("Received", "已接收", language: language)
-        case .failed: return AppText.value("Needs attention", "需要处理", language: language)
-        case .canceled: return AppText.value("Canceled", "已取消", language: language)
-        }
+        TransferActivityText.state(
+            record.state,
+            direction: record.direction,
+            language: language
+        )
     }
 
     private func activityTint(_ state: TransferActivityState) -> Color {

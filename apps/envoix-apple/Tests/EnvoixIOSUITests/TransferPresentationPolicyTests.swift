@@ -23,6 +23,7 @@ final class TransferPresentationPolicyTests: XCTestCase {
             ("activity.saved.view_items", "View received items", "查看已接收项目"),
             ("activity.timeline", "Transfer timeline", "传输时间线"),
             ("common.cancel", "Cancel", "取消"),
+            ("common.open", "Open", "打开"),
             ("common.pause", "Pause", "暂停"),
             ("common.receive", "Receive", "接收"),
             ("common.resume", "Resume", "恢复"),

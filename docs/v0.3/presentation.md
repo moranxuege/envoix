@@ -157,7 +157,8 @@ accessibility phrases are catalog-backed as well. Activity count, relative-time,
 and destination formats use explicit-locale catalog interpolation and native
 plural variations, so `TransferStageView` no longer uses inline bilingual
 values. Other SwiftUI feature text still using inline bilingual values keeps M6
-open.
+open. The one-time Room timeline reuses Activity direction, item-count, and
+lifecycle-state projections instead of defining conflicting labels in its View.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,
