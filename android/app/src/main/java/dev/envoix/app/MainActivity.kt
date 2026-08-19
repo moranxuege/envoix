@@ -25,8 +25,10 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveryMode
+import dev.envoix.app.discovery.DiscoveryPermissions
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
+import dev.envoix.app.discovery.NearbyVisibility
 import dev.envoix.app.ffi.FfiRoomControlInvite
 import dev.envoix.app.ffi.parseRoomControlInvite
 import dev.envoix.app.ui.AppText
@@ -82,6 +84,10 @@ class MainActivity : ComponentActivity() {
 
     private val requestNotif =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    private val requestNearbyPermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            discoveryVm.start()
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -173,7 +179,20 @@ class MainActivity : ComponentActivity() {
                                 onConfirmReplacement = workflowVm::confirmReplacement,
                                 onExternalActivityChanged = ::setExternalActivityActive,
                                 pendingShareCount = workflow.pendingShares.size,
-                                discoveryViewModel = discoveryVm,
+                                discovery = discovery,
+                                nearbyDisplayName = settings.nearbyDisplayName,
+                                nearbyVisibility =
+                                    NearbyVisibility.fromPersisted(settings.nearbyVisibility),
+                                onToggleDiscovery = {
+                                    toggleNearbyDiscovery(discovery.active)
+                                },
+                                onRequestNearbyPermission = ::requestNearbyPermission,
+                                onOfferNearbyInvite = discoveryVm::offerInvite,
+                                onConsumeNearbyOffer = discoveryVm::consumeRendezvousOffer,
+                                onSaveNearbyDisplayName = SettingsStore::setNearbyDisplayName,
+                                onSetNearbyVisibility = {
+                                    SettingsStore.setNearbyVisibility(it.persistedValue)
+                                },
                             )
                         WorkflowScreen.Room -> {
                             val draft = workflow.room
@@ -200,7 +219,20 @@ class MainActivity : ComponentActivity() {
                                     onConfirmReplacement = workflowVm::confirmReplacement,
                                     onExternalActivityChanged = ::setExternalActivityActive,
                                     pendingShareCount = workflow.pendingShares.size,
-                                    discoveryViewModel = discoveryVm,
+                                    discovery = discovery,
+                                    nearbyDisplayName = settings.nearbyDisplayName,
+                                    nearbyVisibility =
+                                        NearbyVisibility.fromPersisted(settings.nearbyVisibility),
+                                    onToggleDiscovery = {
+                                        toggleNearbyDiscovery(discovery.active)
+                                    },
+                                    onRequestNearbyPermission = ::requestNearbyPermission,
+                                    onOfferNearbyInvite = discoveryVm::offerInvite,
+                                    onConsumeNearbyOffer = discoveryVm::consumeRendezvousOffer,
+                                    onSaveNearbyDisplayName = SettingsStore::setNearbyDisplayName,
+                                    onSetNearbyVisibility = {
+                                        SettingsStore.setNearbyVisibility(it.persistedValue)
+                                    },
                                 )
                             } else {
                                 DeviceRoomScreen(
@@ -599,6 +631,22 @@ class MainActivity : ComponentActivity() {
                 else -> emptyList()
             }
         workflowVm.captureSharedUris(uris)
+    }
+
+    private fun toggleNearbyDiscovery(active: Boolean) {
+        if (active) {
+            discoveryVm.stop()
+        } else if (DiscoveryPermissions.hasBluetoothPermissions(this)) {
+            discoveryVm.start()
+        } else {
+            requestNearbyPermission()
+        }
+    }
+
+    private fun requestNearbyPermission() {
+        requestNearbyPermissions.launch(
+            DiscoveryPermissions.bluetoothRuntimePermissions(),
+        )
     }
 
     private fun setExternalActivityActive(active: Boolean) {

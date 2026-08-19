@@ -1,7 +1,5 @@
 package dev.envoix.app.ui
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -23,22 +21,18 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.envoix.app.NfcPhoneHostingState
 import dev.envoix.app.NfcPhoneReaderState
-import dev.envoix.app.SettingsStore
 import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveredPeer
-import dev.envoix.app.discovery.DiscoveryPermissions
 import dev.envoix.app.discovery.DiscoverySource
-import dev.envoix.app.discovery.DiscoveryViewModel
+import dev.envoix.app.discovery.DiscoveryUiState
 import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
 import dev.envoix.app.discovery.NearbyVisibility
@@ -72,12 +66,17 @@ internal fun ConnectionHubScreen(
     onConfirmReplacement: () -> Unit,
     onExternalActivityChanged: (Boolean) -> Unit,
     pendingShareCount: Int = 0,
-    discoveryViewModel: DiscoveryViewModel,
+    discovery: DiscoveryUiState,
+    nearbyDisplayName: String,
+    nearbyVisibility: NearbyVisibility,
+    onToggleDiscovery: () -> Unit,
+    onRequestNearbyPermission: () -> Unit,
+    onOfferNearbyInvite: (NearbyPairingSelection, String, (String?) -> Unit) -> Unit,
+    onConsumeNearbyOffer: (String) -> Unit,
+    onSaveNearbyDisplayName: (String) -> Boolean,
+    onSetNearbyVisibility: (NearbyVisibility) -> Unit,
 ) {
     val colors = Envoix.colors
-    val discovery by discoveryViewModel.uiState.collectAsStateWithLifecycle()
-    val settings by SettingsStore.settings.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     var scannerOpen by remember { mutableStateOf(false) }
     var codeDialogOpen by remember { mutableStateOf(false) }
     var identityDialogOpen by remember { mutableStateOf(false) }
@@ -86,10 +85,16 @@ internal fun ConnectionHubScreen(
     var wifiAwareDialogOpen by remember { mutableStateOf(false) }
     var nearbyListExpanded by rememberSaveable { mutableStateOf(true) }
     var localError by remember { mutableStateOf<String?>(null) }
-    val permissionLauncher =
-        rememberLauncherForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions(),
-        ) { discoveryViewModel.start() }
+    val invalidDisplayName =
+        appText(
+            "Enter a name between 1 and 48 characters.",
+            "请输入 1 到 48 个字符的名称。",
+        )
+    val unsupportedInvitation =
+        appText(
+            "This invitation is not supported.",
+            "暂不支持这个邀请。",
+        )
 
     Column(
         Modifier
@@ -146,11 +151,8 @@ internal fun ConnectionHubScreen(
             }
             item {
                 NearbyIdentityRow(
-                    displayName = settings.nearbyDisplayName,
-                    visibility =
-                        NearbyVisibility.fromPersisted(
-                            settings.nearbyVisibility,
-                        ),
+                    displayName = nearbyDisplayName,
+                    visibility = nearbyVisibility,
                     onEditName = { identityDialogOpen = true },
                     onVisibility = { visibilityDialogOpen = true },
                 )
@@ -165,17 +167,7 @@ internal fun ConnectionHubScreen(
                     onWifiAware = { wifiAwareDialogOpen = true },
                     onNfc = { nfcDialogOpen = true },
                     onToggleList = { nearbyListExpanded = !nearbyListExpanded },
-                    onToggleDiscovery = {
-                        if (discovery.active) {
-                            discoveryViewModel.stop()
-                        } else if (DiscoveryPermissions.hasBluetoothPermissions(context)) {
-                            discoveryViewModel.start()
-                        } else {
-                            permissionLauncher.launch(
-                                DiscoveryPermissions.bluetoothRuntimePermissions(),
-                            )
-                        }
-                    },
+                    onToggleDiscovery = onToggleDiscovery,
                 )
             }
             if (nearbyListExpanded) {
@@ -185,11 +177,7 @@ internal fun ConnectionHubScreen(
                 ) {
                     item {
                         Button(
-                            onClick = {
-                                permissionLauncher.launch(
-                                    DiscoveryPermissions.bluetoothRuntimePermissions(),
-                                )
-                            },
+                            onClick = onRequestNearbyPermission,
                         ) {
                             Text(appText("Allow nearby access", "允许附近设备访问"))
                         }
@@ -241,7 +229,7 @@ internal fun ConnectionHubScreen(
                             enabled = canOfferNearbyRoom(selection),
                         ) {
                             onNearbyRoom(selection) { invite, completion ->
-                                discoveryViewModel.offerInvite(
+                                onOfferNearbyInvite(
                                     selection,
                                     invite,
                                     completion,
@@ -279,28 +267,23 @@ internal fun ConnectionHubScreen(
     }
     if (identityDialogOpen) {
         EditNearbyNameDialog(
-            currentName = settings.nearbyDisplayName,
+            currentName = nearbyDisplayName,
             onDismiss = { identityDialogOpen = false },
             onSave = { value ->
-                if (SettingsStore.setNearbyDisplayName(value)) {
+                if (onSaveNearbyDisplayName(value)) {
                     identityDialogOpen = false
                 } else {
-                    localError =
-                        AppText.value(
-                            "Enter a name between 1 and 48 characters.",
-                            "请输入 1 到 48 个字符的名称。",
-                            settings.language,
-                        )
+                    localError = invalidDisplayName
                 }
             },
         )
     }
     if (visibilityDialogOpen) {
         NearbyVisibilityDialog(
-            selected = NearbyVisibility.fromPersisted(settings.nearbyVisibility),
+            selected = nearbyVisibility,
             onDismiss = { visibilityDialogOpen = false },
             onSelect = {
-                SettingsStore.setNearbyVisibility(it.persistedValue)
+                onSetNearbyVisibility(it)
                 visibilityDialogOpen = false
             },
         )
@@ -333,17 +316,12 @@ internal fun ConnectionHubScreen(
                     ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
             onAccept = { code ->
                 if (!onAcceptIncomingOffer(offer, code)) {
-                    localError =
-                        AppText.value(
-                            "This invitation is not supported.",
-                            "暂不支持这个邀请。",
-                            settings.language,
-                        )
+                    localError = unsupportedInvitation
                 }
-                discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                onConsumeNearbyOffer(offer.requestId)
             },
             onReject = {
-                discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                onConsumeNearbyOffer(offer.requestId)
             },
         )
     }

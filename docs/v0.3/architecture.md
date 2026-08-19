@@ -258,6 +258,12 @@ notifications, nearby discovery, and background scheduling remain Kotlin
 adapters. Product state transitions do not remain in `TransferService` or
 composables.
 
+Compose feature screens receive immutable UI state and intent callbacks. For
+example, the Connection Hub renders `DiscoveryUiState` and nearby presence
+values; the Android host owns permission launchers, settings persistence, and
+discovery commands. A Composable never retains a service or ViewModel merely
+to invoke platform effects.
+
 The default typed control binding is UniFFI after the application surface has
 been reduced. Hand-written JNI remains only for proven platform or performance
 boundaries and must not expose a parallel product state machine.
