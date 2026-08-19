@@ -27,6 +27,8 @@ mod manifest_v2_session;
 pub use manifest_v2_session::*;
 mod native_transport;
 pub use native_transport::*;
+mod platform_destination;
+pub use platform_destination::*;
 mod nearby_invite;
 pub use nearby_invite::*;
 mod room_control;
@@ -34,7 +36,7 @@ pub use room_control::*;
 #[cfg(feature = "android-jni")]
 mod android_jni;
 
-const ENVOIX_FFI_API_VERSION: u32 = 19;
+const ENVOIX_FFI_API_VERSION: u32 = 20;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
@@ -494,6 +496,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "structured_connection_path".into(),
             "structured_stage_timing_v1".into(),
             "canonical_failure_projection_v1".into(),
+            "platform_manifest_v2_destination_v1".into(),
             "foreground_room_control_v5".into(),
             "remembered_room_control_v1".into(),
             "typed_room_control_errors_v1".into(),

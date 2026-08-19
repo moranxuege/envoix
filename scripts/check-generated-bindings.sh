@@ -52,6 +52,10 @@ rg -q 'data class FfiStagedProviderRootV2' "$kotlin_binding"
 rg -q 'enum class FfiProviderSourceIssueKindV2' "$kotlin_binding"
 rg -q 'suspend fun `addStagedProviderRoots`' "$kotlin_binding"
 rg -q 'suspend fun `reauthorizeStagedProviderSource`' "$kotlin_binding"
+rg -q 'interface ManifestV2PlatformDestination' "$kotlin_binding"
+rg -q 'data class FfiDestinationPlanRequestV2' "$kotlin_binding"
+rg -q 'data class FfiDestinationCommitRequestV2' "$kotlin_binding"
+rg -q 'suspend fun `receiveWithPlatformDestination`' "$kotlin_binding"
 if rg -q 'suspend fun `close`\(\)' "$kotlin_binding"; then
   echo "error: async close() conflicts with UniFFI AutoCloseable.close() in Kotlin" >&2
   exit 1
@@ -68,5 +72,9 @@ rg -q 'public struct FfiStagedProviderRootV2' "$swift_binding"
 rg -q 'public enum FfiProviderSourceIssueKindV2' "$swift_binding"
 rg -q 'func addStagedProviderRoots' "$swift_binding"
 rg -q 'func reauthorizeStagedProviderSource' "$swift_binding"
+rg -q 'protocol ManifestV2PlatformDestination' "$swift_binding"
+rg -q 'struct FfiDestinationPlanRequestV2' "$swift_binding"
+rg -q 'struct FfiDestinationCommitRequestV2' "$swift_binding"
+rg -q 'func receiveWithPlatformDestination' "$swift_binding"
 
 echo "Swift and Kotlin typed application bindings generated successfully."

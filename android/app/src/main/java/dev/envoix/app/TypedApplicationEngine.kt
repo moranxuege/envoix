@@ -20,7 +20,7 @@ import kotlinx.coroutines.withContext
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 
-internal const val EXPECTED_FFI_API_VERSION: UInt = 19u
+internal const val EXPECTED_FFI_API_VERSION: UInt = 20u
 internal const val EXPECTED_APPLICATION_BINDING_VERSION: UInt = 1u
 internal const val EXPECTED_APPLICATION_CONTRACT_VERSION: UShort = 6u
 private const val TYPED_APPLICATION_CAPABILITY = "typed_application_contract_v6"

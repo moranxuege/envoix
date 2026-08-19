@@ -41,11 +41,12 @@ use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiConnectionPathEvent, FfiConnectionPathEventKind,
     FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailureOutcome,
     FfiFailurePhase, FfiFailureSessionDisposition, FfiManifestV2Phase, FfiNativeDatagramTransport,
-    FfiNativeDuplexTransport, FfiPathPolicy, FfiRecoveryAction, FfiTransferDirection,
-    FfiTransferFailure, FfiTransferJobV2, FfiTransferMode, FfiTransferRequest, FfiTransferStage,
-    FfiTransferStageTiming, TransferObserver, build_client_for_request, core_datagram_transport,
-    core_native_transport, on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
-    transfer_options_for_request,
+    FfiNativeDuplexTransport, FfiPathPolicy, FfiPlatformReceiveDestinationV2, FfiRecoveryAction,
+    FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferMode,
+    FfiTransferRequest, FfiTransferStage, FfiTransferStageTiming, ManifestV2PlatformDestination,
+    TransferObserver, build_client_for_request, core_datagram_transport, core_native_transport,
+    on_ffi_runtime, op_err, peer_sources_for_request, prepare_platform_destination,
+    spawn_on_ffi_runtime, transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -97,6 +98,12 @@ pub struct FfiManifestV2Completion {
     pub delivery_proof_digest: Vec<u8>,
     /// Receiver-only final root paths. Sender completions keep this empty.
     pub saved_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiPlatformManifestV2Completion {
+    pub transfer: FfiManifestV2Completion,
+    pub saved_roots: Vec<super::FfiDestinationSavedRootV2>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -195,6 +202,44 @@ impl CorePendingManifestV2Receive {
             }
         }
     }
+
+    async fn receive_with_result_gate(
+        self,
+        destination: DestinationRequestV2,
+        state_directory: PathBuf,
+        result_gate: &dyn envoix_client::api::ManifestV2ResultGate,
+        cancellation: &TransferCancelToken,
+    ) -> Result<envoix_client::api::ReceiverManifestV2SessionSummary, SessionError> {
+        match self {
+            Self::Iroh(pending) => {
+                pending
+                    .receive_with_result_gate(
+                        destination,
+                        state_directory,
+                        result_gate,
+                        cancellation,
+                    )
+                    .await
+            }
+            Self::Native(pending) => {
+                pending
+                    .receive_with_result_gate(
+                        destination,
+                        state_directory,
+                        result_gate,
+                        cancellation,
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn close_with_failure(self) {
+        match self {
+            Self::Iroh(pending) => pending.close_with_failure().await,
+            Self::Native(pending) => pending.close_with_failure().await,
+        }
+    }
 }
 
 #[uniffi::export]
@@ -274,6 +319,84 @@ impl FfiPendingManifestV2Receive {
                 total_plaintext_bytes: self.summary.total_plaintext_bytes,
                 delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
                 saved_paths,
+            })
+        })
+        .await
+    }
+
+    /// Receives into Rust-owned verified staging, then awaits a typed
+    /// platform save before publishing receiver results or delivery proof.
+    pub async fn receive_with_platform_destination(
+        &self,
+        destination_request: FfiPlatformReceiveDestinationV2,
+        destination: Arc<dyn ManifestV2PlatformDestination>,
+        observer: Arc<dyn TransferObserver>,
+    ) -> Result<FfiPlatformManifestV2Completion, EnvoixError> {
+        on_ffi_runtime(async {
+            let pending =
+                self.pending
+                    .lock()
+                    .await
+                    .take()
+                    .ok_or_else(|| EnvoixError::Operation {
+                        reason: "this authenticated offer has already been continued".into(),
+                    })?;
+            let prepared = prepare_platform_destination(
+                &pending.offer().manifest,
+                destination_request,
+                destination,
+            )
+            .await;
+            let (destination_request, result_gate) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    pending.close_with_failure().await;
+                    report_v2_failure(
+                        observer.as_ref(),
+                        &error,
+                        FfiTransferDirection::Receive,
+                        FfiFailurePhase::Negotiating,
+                    );
+                    return Err(op_err(error));
+                }
+            };
+            observer.on_started(
+                u32::try_from(self.entries.len()).unwrap_or(u32::MAX),
+                self.summary.total_plaintext_bytes,
+            );
+            let summary = match pending
+                .receive_with_result_gate(
+                    destination_request,
+                    self.state_directory.clone(),
+                    &result_gate,
+                    &self.cancellation.token,
+                )
+                .await
+            {
+                Ok(summary) => summary,
+                Err(error) => {
+                    report_v2_failure(
+                        observer.as_ref(),
+                        &error,
+                        FfiTransferDirection::Receive,
+                        FfiFailurePhase::Committing,
+                    );
+                    return Err(op_err(error));
+                }
+            };
+            let saved_roots = result_gate.committed_roots().map_err(op_err)?;
+            observer.on_phase(FfiManifestV2Phase::Delivered);
+            observer.on_completed(self.summary.total_plaintext_bytes);
+            Ok(FfiPlatformManifestV2Completion {
+                transfer: FfiManifestV2Completion {
+                    job_id: self.summary.job_id.clone(),
+                    entry_count: u32::try_from(summary.data_plane.entry_results.len())
+                        .unwrap_or(u32::MAX),
+                    total_plaintext_bytes: self.summary.total_plaintext_bytes,
+                    delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
+                    saved_paths: Vec::new(),
+                },
+                saved_roots,
             })
         })
         .await

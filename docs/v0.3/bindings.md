@@ -6,7 +6,7 @@ Status: normative for M5 and later platform migrations.
 
 The native library exposes two independent versions:
 
-- UniFFI API `19` identifies the complete native symbol/type surface;
+- UniFFI API `20` identifies the complete native symbol/type surface;
 - application binding `1` projects application contract `6`.
 
 Callers must check both `envoixCoreInfo()` and
@@ -30,6 +30,13 @@ only in the immediate command/effect pair that must consume them.
 Foreign transport and inbox ports use `shutdown()` for their asynchronous
 protocol operation. Generated object-handle disposal remains `close()`; the two
 names must stay distinct because Kotlin objects implement `AutoCloseable`.
+
+`ManifestV2PlatformDestination` is the typed exception to Rust-owned local
+filesystem output. It freezes public root names before Accept and asynchronously
+commits platform-owned roots before receiver results or delivery proof. The
+port exchanges bounded records only; invitation material and file bytes never
+cross it. A successful platform completion returns final root names and URIs,
+while private verified staging paths remain internal.
 
 ## State and recovery ownership
 
