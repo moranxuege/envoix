@@ -99,7 +99,7 @@ final class TransferPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(TransferActivityText.itemCount(2, language: "zh-Hans"), "2 个项目")
         XCTAssertEqual(
             TransferActivityText.itemCount(UInt64.max, language: "en"),
-            "9223372036854775807 items"
+            "9,223,372,036,854,775,807 items"
         )
 
         XCTAssertEqual(TransferActivityText.transferCount(1, language: "en"), "1 transfer")

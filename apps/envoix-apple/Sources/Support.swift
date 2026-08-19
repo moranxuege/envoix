@@ -271,13 +271,7 @@ enum AppText {
     }
 
     static func localized(_ key: String, language: String) -> String {
-        let resourceLanguage = language == "zh-Hans" ? "zh-Hans" : "en"
-        guard
-            let path = Bundle.main.path(forResource: resourceLanguage, ofType: "lproj"),
-            let languageBundle = Bundle(path: path)
-        else {
-            return key
-        }
+        guard let languageBundle = localizedBundle(for: language) else { return key }
         return languageBundle.localizedString(forKey: key, value: nil, table: "Localizable")
     }
 
@@ -286,12 +280,25 @@ enum AppText {
         defaultValue: String.LocalizationValue,
         language: String
     ) -> String {
-        String(
+        let locale = Locale(identifier: resourceLanguage(for: language))
+        return String(
             localized: key,
             defaultValue: defaultValue,
-            bundle: .main,
-            locale: Locale(identifier: language == "zh-Hans" ? "zh-Hans" : "en")
+            bundle: localizedBundle(for: language) ?? .main,
+            locale: locale
         )
+    }
+
+    private static func localizedBundle(for language: String) -> Bundle? {
+        let resourceLanguage = resourceLanguage(for: language)
+        guard let path = Bundle.main.path(forResource: resourceLanguage, ofType: "lproj") else {
+            return nil
+        }
+        return Bundle(path: path)
+    }
+
+    private static func resourceLanguage(for language: String) -> String {
+        language == "zh-Hans" ? "zh-Hans" : "en"
     }
 }
 
