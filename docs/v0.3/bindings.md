@@ -81,6 +81,22 @@ through the typed UniFFI function. Only the opaque process reference leaves
 that trusted call; the duplicate byte-array JNI registration entry has been
 removed.
 
+Remembered-credential Manifest v2 sends now restore and explicitly seal the
+canonical job, open the session, observe typed progress/failure/path/timing
+facts, and cancel through UniFFI. Android publishes delivery only after the
+native send future returns, rather than treating the earlier observer callback
+as proof of completion. Job and cancellation handles have explicit owners and
+are closed on success, failure, and service shutdown; Kotlin contract tests
+cover request projection, failure policy fields, terminal-event deferral, and
+both handle lifetimes.
+
+The persistent Room outbox deliberately negotiates a fresh one-time InviteV2
+for each accepted data-plane Transfer, so that main product path still uses the
+invitation session rather than a remembered credential. It remains on the
+legacy session entry point until invitation production and consumption move
+together; the typed remembered-send slice does not weaken that credential
+separation.
+
 The Swift concurrency adapter projects the same Room error variants. A rejected
 authenticated command leaves the current Room usable, while network loss,
 cancellation, and native failure follow terminal paths without inspecting the

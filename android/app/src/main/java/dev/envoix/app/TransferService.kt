@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -25,6 +26,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /** Android projection of the canonical Manifest-v2 session. This service owns
  * foreground lifetime and platform save effects only; it does not select an
@@ -35,6 +37,7 @@ class TransferService : Service() {
     private val specs = ConcurrentHashMap<Long, ManifestSpec>()
     private val progressTrackers = ConcurrentHashMap<Long, TransferProgressTracker>()
     private val destinationWriter by lazy { ManifestV2DestinationWriter(this) }
+    private val sendGateway = ManifestV2SendGateway.shared
     private val clock =
         DateTimeFormatter
             .ofPattern("HH:mm:ss")
@@ -58,11 +61,11 @@ class TransferService : Service() {
     }
 
     override fun onDestroy() {
-        val activeAttempts = callbacks.values.map(ManifestCallback::nativeId)
+        val activeAttempts = callbacks.values.toList()
         callbacks.clear()
         specs.values.forEach(::releaseRememberedSession)
         progressTrackers.clear()
-        activeAttempts.forEach(Native::cancelManifestV2Session)
+        activeAttempts.forEach(ManifestCallback::cancelAttempt)
         scope.cancel()
         super.onDestroy()
     }
@@ -303,17 +306,87 @@ class TransferService : Service() {
         progressTrackers[spec.id] = TransferProgressTracker(initialBytes)
         val callback = ManifestCallback(spec, nextNativeAttemptIds.getAndIncrement())
         callbacks[spec.id] = callback
-        Native.startManifestV2Session(callback.nativeId, spec.paramsJson(this), callback)
+        if (spec.direction == Direction.Send && spec.mode == "remembered") {
+            val cancellation = sendGateway.newCancellation()
+            callback.bindTypedCancellation(cancellation)
+            scope.launch { runTypedRememberedSend(spec, callback, cancellation) }
+        } else {
+            Native.startManifestV2Session(callback.nativeId, spec.paramsJson(this), callback)
+        }
         updateNotification()
+    }
+
+    private suspend fun runTypedRememberedSend(
+        spec: ManifestSpec,
+        callback: ManifestCallback,
+        cancellation: ManifestV2SendCancellation,
+    ) {
+        try {
+            val completion =
+                sendGateway.sendRemembered(
+                    request =
+                        RememberedManifestV2SendRequest(
+                            jobStoreDirectory = jobStoreDirectory(this).absolutePath,
+                            jobId = requireNotNull(spec.jobId),
+                            stateDirectory = stateDirectory(spec.id).apply { mkdirs() }.absolutePath,
+                            language = SettingsStore.settings.value.language,
+                            broker = spec.broker,
+                            relay = spec.relay,
+                            credentialReference = requireNotNull(spec.rememberedCredentialReference),
+                            generation = spec.rememberedGeneration,
+                            previousGeneration = spec.rememberedPreviousGeneration,
+                        ),
+                    cancellation = cancellation,
+                    observer = callback,
+                )
+            if (callbacks[spec.id] === callback) {
+                finishCompleted(
+                    id = spec.id,
+                    callback = callback,
+                    totalBytes = completion.totalBytes,
+                )
+            }
+        } catch (error: Throwable) {
+            if (callbacks[spec.id] === callback) {
+                finishFailed(
+                    id = spec.id,
+                    callback = callback,
+                    cause = "start_failed",
+                    detail = error.message ?: error::class.java.simpleName,
+                    retryable = true,
+                    recoveryAction = RecoveryAction.Retry,
+                    outcome = FailureOutcome.Failed,
+                    disposition = FailureSessionDisposition.Release,
+                )
+            }
+        } finally {
+            callback.closeTypedCancellation(cancellation)
+        }
     }
 
     private inner class ManifestCallback(
         private val spec: ManifestSpec,
         val nativeId: Long,
-    ) : ManifestV2Callback {
+    ) : ManifestV2Callback,
+        ManifestV2SendObserver {
         private val id = spec.id
+        private val typedCancellation = AtomicReference<ManifestV2SendCancellation?>()
         private val rememberedPersistence =
             RememberedPersistenceState(spec.pendingRemember, spec.rememberedRelationshipId)
+
+        fun bindTypedCancellation(cancellation: ManifestV2SendCancellation) {
+            check(typedCancellation.compareAndSet(null, cancellation)) {
+                "Manifest v2 cancellation is already bound"
+            }
+        }
+
+        fun cancelAttempt() {
+            typedCancellation.get()?.cancel() ?: Native.cancelManifestV2Session(nativeId)
+        }
+
+        fun closeTypedCancellation(cancellation: ManifestV2SendCancellation) {
+            if (typedCancellation.compareAndSet(cancellation, null)) cancellation.close()
+        }
 
         override fun onEvent(json: String) {
             val event = runCatching { JSONObject(json) }.getOrNull() ?: return
@@ -326,27 +399,11 @@ class TransferService : Service() {
             if (callbacks[id] !== this) return
             when (kind) {
                 "progress" -> {
-                    progressTrackers[id]
-                        ?.update(event.optLong("bytes"), event.optLong("total"))
-                        ?.let { progress ->
-                            TransferRepository.update(id) {
-                                it.copy(
-                                    bytes = maxOf(it.bytes, progress.bytes),
-                                    total = maxOf(it.total, progress.total),
-                                    speedBps = progress.speedBps,
-                                    avgBps = progress.avgBps,
-                                    speedHistory = progress.speedHistory,
-                                )
-                            }
-                            updateNotification()
-                        }
+                    updateProgress(id, event.optLong("bytes"), event.optLong("total"))
                     return
                 }
                 "diagnostic" -> {
-                    val message = event.optString("message")
-                    if (message.isNotBlank()) {
-                        TransferRepository.update(id) { it.copy(log = addLog(it.log, message)) }
-                    }
+                    appendDiagnostic(id, event.optString("message"))
                     return
                 }
                 "path" -> {
@@ -354,7 +411,7 @@ class TransferService : Service() {
                         ConnectionPathKind.fromWireOrLegacy(
                             event.optString("path_kind").ifBlank { event.optString("path") },
                         )
-                    TransferRepository.update(id) { it.copy(pathAddr = kind?.wire) }
+                    kind?.let { updateConnectionPath(id, it) }
                     return
                 }
             }
@@ -372,6 +429,60 @@ class TransferService : Service() {
                 "completed" -> onCompleted(id, event, this)
                 "failed" -> onFailed(id, event, this)
             }
+        }
+
+        override fun onStarted(
+            itemCount: Long,
+            totalBytes: Long,
+        ) {
+            if (callbacks[id] !== this) return
+            TransferRepository.update(id) {
+                it.copy(
+                    total = maxOf(it.total, totalBytes),
+                    log = addLog(it.log, "authenticated transfer started · $itemCount items"),
+                )
+            }
+        }
+
+        override fun onPhase(status: Status) {
+            if (callbacks[id] !== this) return
+            setState(id, status, status.wire.replace('_', ' '))
+        }
+
+        override fun onProgress(
+            transferred: Long,
+            total: Long,
+        ) {
+            if (callbacks[id] !== this) return
+            updateProgress(id, transferred, total)
+        }
+
+        override fun onFailure(failure: ManifestV2SendFailure) {
+            if (callbacks[id] !== this) return
+            finishFailed(
+                id = id,
+                callback = this,
+                cause = failure.cause,
+                detail = failure.diagnosticMessage,
+                retryable = failure.retryable,
+                recoveryAction = failure.recoveryAction,
+                outcome = failure.outcome,
+                disposition = failure.sessionDisposition,
+            )
+        }
+
+        override fun onConnectionPath(path: ConnectionPathKind) {
+            if (callbacks[id] !== this) return
+            updateConnectionPath(id, path)
+        }
+
+        override fun onStageTiming(timing: TransferStageTiming) {
+            onStageTiming(id, spec.direction, timing)
+        }
+
+        override fun onDiagnostic(message: String) {
+            if (callbacks[id] !== this) return
+            appendDiagnostic(id, message)
         }
 
         override fun onSaveRequired(requestJson: String): String {
@@ -559,10 +670,22 @@ class TransferService : Service() {
         val roots = event.optJSONArray("roots") ?: JSONArray()
         val uris = (0 until roots.length()).map { roots.getJSONObject(it).getString("uri") }
         val names = (0 until roots.length()).map { roots.getJSONObject(it).getString("final_name") }
+        finishCompleted(id, callback, uris, names)
+    }
+
+    private fun finishCompleted(
+        id: Long,
+        callback: ManifestCallback,
+        uris: List<String> = emptyList(),
+        names: List<String> = emptyList(),
+        totalBytes: Long? = null,
+    ) {
         TransferRepository.update(id) {
+            val deliveredBytes = maxOf(it.total, totalBytes ?: 0L)
             it.copy(
                 status = Status.Delivered,
-                bytes = it.total,
+                bytes = deliveredBytes,
+                total = deliveredBytes,
                 savedUri = uris.firstOrNull(),
                 savedUris = uris,
                 savedName = names.firstOrNull(),
@@ -591,6 +714,28 @@ class TransferService : Service() {
                 ?: FailureSessionDisposition.Release
         val retryable = event.optBoolean("retryable", false)
         val recoveryAction = RecoveryAction.fromWire(event.optString("recovery_action"))
+        finishFailed(
+            id = id,
+            callback = callback,
+            cause = cause,
+            detail = detail,
+            retryable = retryable,
+            recoveryAction = recoveryAction,
+            outcome = outcome,
+            disposition = disposition,
+        )
+    }
+
+    private fun finishFailed(
+        id: Long,
+        callback: ManifestCallback,
+        cause: String,
+        detail: String,
+        retryable: Boolean,
+        recoveryAction: RecoveryAction,
+        outcome: FailureOutcome,
+        disposition: FailureSessionDisposition,
+    ) {
         TransferRepository.update(id) {
             it.copy(
                 status = outcome.status,
@@ -614,7 +759,7 @@ class TransferService : Service() {
         if (id < 0) return
         val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
         if (!TransferPresentationPolicy.actions(transfer).canPause) return
-        callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        callbacks.remove(id)?.cancelAttempt()
         progressTrackers.remove(id)
         specs[id]?.let { specs[id] = it.copy(holdState = "paused") }
         persistSpecs()
@@ -650,7 +795,7 @@ class TransferService : Service() {
     private fun cancelTransfer(id: Long) {
         val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
         if (!TransferPresentationPolicy.actions(transfer).canCancel) return
-        callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        callbacks.remove(id)?.cancelAttempt()
         progressTrackers.remove(id)
         releaseRememberedSession(specs.remove(id))
         persistSpecs()
@@ -663,7 +808,7 @@ class TransferService : Service() {
     private fun removeTransfer(id: Long) {
         val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
         if (!TransferPresentationPolicy.actions(transfer).canRemove) return
-        callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        callbacks.remove(id)?.cancelAttempt()
         progressTrackers.remove(id)
         val spec = specs.remove(id)
         releaseRememberedSession(spec)
@@ -735,6 +880,43 @@ class TransferService : Service() {
         }
     }
 
+    private fun updateProgress(
+        id: Long,
+        transferred: Long,
+        total: Long,
+    ) {
+        progressTrackers[id]
+            ?.update(transferred, total)
+            ?.let { progress ->
+                TransferRepository.update(id) {
+                    it.copy(
+                        bytes = maxOf(it.bytes, progress.bytes),
+                        total = maxOf(it.total, progress.total),
+                        speedBps = progress.speedBps,
+                        avgBps = progress.avgBps,
+                        speedHistory = progress.speedHistory,
+                    )
+                }
+                updateNotification()
+            }
+    }
+
+    private fun appendDiagnostic(
+        id: Long,
+        message: String,
+    ) {
+        if (message.isNotBlank()) {
+            TransferRepository.update(id) { it.copy(log = addLog(it.log, message)) }
+        }
+    }
+
+    private fun updateConnectionPath(
+        id: Long,
+        kind: ConnectionPathKind,
+    ) {
+        TransferRepository.update(id) { it.copy(pathAddr = kind.wire) }
+    }
+
     private fun setState(
         id: Long,
         status: Status,
@@ -780,6 +962,14 @@ class TransferService : Service() {
         event: JSONObject,
     ) {
         val timing = parseStageTiming(event) ?: return
+        onStageTiming(id, expectedDirection, timing)
+    }
+
+    private fun onStageTiming(
+        id: Long,
+        expectedDirection: Direction,
+        timing: TransferStageTiming,
+    ) {
         if (timing.direction != expectedDirection) return
         TransferRepository.update(id) { transfer ->
             val result = TransferStageTimingHistory.append(transfer.stageTimings, timing)
@@ -937,7 +1127,7 @@ class TransferService : Service() {
                     "The Room service is busy. Retry shortly.",
                     "房间服务繁忙。请稍后重试。",
                 )
-            "malformed_join", "unsupported_version" ->
+            "malformed_join", "unsupported_rendezvous_version", "unsupported_version" ->
                 uiText(
                     "This app version cannot join the Room. Update Envoix.",
                     "当前应用版本无法加入房间。请更新 Envoix。",
