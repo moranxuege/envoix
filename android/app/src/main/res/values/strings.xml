@@ -446,4 +446,8 @@
     <string name="transfer_setup_secure_local_delivery">The room invitation will be encrypted to the selected local-network endpoint. The public device name is still unverified.</string>
     <string name="transfer_setup_insecure_ble_warning">Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device.</string>
     <string name="transfer_setup_ble_unreachable">This device is not currently reachable over BLE. Use QR or paste a complete invitation link.</string>
+
+    <string name="destination_choose_folder">Choose a folder</string>
+    <string name="destination_unavailable_folder">Unavailable folder</string>
+    <string name="destination_selected_folder">Selected folder</string>
 </resources>

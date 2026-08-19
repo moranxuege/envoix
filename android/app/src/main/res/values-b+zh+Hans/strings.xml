@@ -424,4 +424,8 @@
     <string name="transfer_setup_secure_local_delivery">房间邀请将加密发送到所选局域网端点；公开的设备名称仍未经验证。</string>
     <string name="transfer_setup_insecure_ble_warning">实验性非安全 BLE 配对：邀请未经对端身份认证。附近的攻击者可能冒充或中继此设备。</string>
     <string name="transfer_setup_ble_unreachable">当前无法通过 BLE 连接此设备。请使用二维码或粘贴完整邀请链接。</string>
+
+    <string name="destination_choose_folder">选择文件夹</string>
+    <string name="destination_unavailable_folder">文件夹不可用</string>
+    <string name="destination_selected_folder">已选文件夹</string>
 </resources>

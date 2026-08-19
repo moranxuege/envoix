@@ -70,7 +70,10 @@ internal fun roomOfferDestinationPresentation(
     context: Context,
     settings: Settings,
     directoryCount: Int,
-    language: String,
+    downloadsRootLabel: String,
+    chooseFolderLabel: String,
+    unavailableLabel: String,
+    selectedFolderLabel: String,
 ): RoomDestinationPresentation {
     val customUri = settings.saveTreeUri.trim()
     val customDestination =
@@ -80,32 +83,17 @@ internal fun roomOfferDestinationPresentation(
     val saveFolder = settings.saveFolder.trim()
     val downloadsLabel =
         if (saveFolder.isEmpty()) {
-            "Downloads"
+            downloadsRootLabel
         } else {
-            "Downloads / $saveFolder"
+            "$downloadsRootLabel / $saveFolder"
         }
     return resolveRoomDestinationPresentation(
         directoryCount = directoryCount,
         customDestination = customDestination,
         downloadsLabel = downloadsLabel,
-        chooseFolderLabel =
-            AppText.value(
-                "Choose a folder",
-                "选择文件夹",
-                language,
-            ),
-        unavailableLabel =
-            AppText.value(
-                "Unavailable folder",
-                "文件夹不可用",
-                language,
-            ),
-        selectedFolderLabel =
-            AppText.value(
-                "Selected folder",
-                "已选文件夹",
-                language,
-            ),
+        chooseFolderLabel = chooseFolderLabel,
+        unavailableLabel = unavailableLabel,
+        selectedFolderLabel = selectedFolderLabel,
     )
 }
 

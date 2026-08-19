@@ -53,6 +53,7 @@ import dev.envoix.app.ui.TransferActivityScreen
 import dev.envoix.app.ui.TransferSetupPreferences
 import dev.envoix.app.ui.TransferSourcePreparationCoordinator
 import dev.envoix.app.ui.WorkflowScreen
+import dev.envoix.app.ui.appString
 import dev.envoix.app.ui.roomOfferDestinationPresentation
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -125,6 +126,10 @@ class MainActivity : ComponentActivity() {
                     val nfcInvitation by nfcInvitationController.state.collectAsState()
                     val nfcPhoneHosting by nfcInvitationHostController.state.collectAsState()
                     val nfcPhoneReader by nfcInvitationReaderController.state.collectAsState()
+                    val downloadsRootLabel = appString(R.string.activity_downloads_folder)
+                    val chooseFolderLabel = appString(R.string.destination_choose_folder)
+                    val unavailableFolderLabel = appString(R.string.destination_unavailable_folder)
+                    val selectedFolderLabel = appString(R.string.destination_selected_folder)
                     LaunchedEffect(settings.devMode, workflow.screen) {
                         settingsDiagnosticsVm.setEnabled(
                             settings.devMode && workflow.screen == WorkflowScreen.Settings,
@@ -349,7 +354,10 @@ class MainActivity : ComponentActivity() {
                                                 context = this@MainActivity,
                                                 settings = settings,
                                                 directoryCount = offer.directoryCount,
-                                                language = settings.language,
+                                                downloadsRootLabel = downloadsRootLabel,
+                                                chooseFolderLabel = chooseFolderLabel,
+                                                unavailableLabel = unavailableFolderLabel,
+                                                selectedFolderLabel = selectedFolderLabel,
                                             )
                                         },
                                     transferPreferences = transferPreferences,
@@ -363,7 +371,10 @@ class MainActivity : ComponentActivity() {
                                             context = this@MainActivity,
                                             settings = currentSettings,
                                             directoryCount = directoryCount,
-                                            language = currentSettings.language,
+                                            downloadsRootLabel = downloadsRootLabel,
+                                            chooseFolderLabel = chooseFolderLabel,
+                                            unavailableLabel = unavailableFolderLabel,
+                                            selectedFolderLabel = selectedFolderLabel,
                                         )
                                     },
                                     onOfferNearbyInvite = discoveryVm::offerInvite,

@@ -154,8 +154,9 @@ are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,
 Settings, remembered Rooms, and the existing shared transfer-setup labels use
 `values` / `values-b+zh+Hans` resources. Activity components resolve typed
 status, stage, and connection-path projections through those resources; the
-transfer-setup sheet also uses native resources. The destination adapter still
-contains inline bilingual fallbacks to be migrated before M6 closes.
+transfer-setup sheet and destination adapter also use native resources. The
+primary Android presentation flow is migrated; background service and workflow
+errors are tracked separately from screen presentation before M6 closes.
 
 ## 8. M6 verification
 
