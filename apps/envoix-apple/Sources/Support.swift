@@ -280,6 +280,19 @@ enum AppText {
         }
         return languageBundle.localizedString(forKey: key, value: nil, table: "Localizable")
     }
+
+    static func localized(
+        _ key: StaticString,
+        defaultValue: String.LocalizationValue,
+        language: String
+    ) -> String {
+        String(
+            localized: key,
+            defaultValue: defaultValue,
+            bundle: .main,
+            locale: Locale(identifier: language == "zh-Hans" ? "zh-Hans" : "en")
+        )
+    }
 }
 
 private struct AppLanguageKey: EnvironmentKey {

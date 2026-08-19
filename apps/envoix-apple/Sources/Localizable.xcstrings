@@ -103,6 +103,25 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "待接收内容" } }
       }
     },
+    "activity.item_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld item" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld items" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 个项目" } }
+            }
+          }
+        }
+      }
+    },
     "activity.outgoing" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Outgoing transfer" } },
@@ -115,10 +134,60 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "查看已接收项目" } }
       }
     },
+    "activity.saved.in_folder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saved in %@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已保存到 %@" } }
+      }
+    },
+    "activity.saved.item_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "Saved %lld item" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "Saved %lld items" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "已保存 %lld 个项目" } }
+            }
+          }
+        }
+      }
+    },
     "activity.timeline" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer timeline" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输时间线" } }
+      }
+    },
+    "activity.transfer_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld transfer" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld transfers" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 次传输" } }
+            }
+          }
+        }
+      }
+    },
+    "activity.updated" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Updated %@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%@更新" } }
       }
     },
     "common.cancel" : {

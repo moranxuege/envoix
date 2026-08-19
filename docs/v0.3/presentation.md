@@ -153,9 +153,11 @@ Apple migration is incremental. The shared connection-path projection now
 resolves semantic keys from `Localizable.xcstrings`. Activity direction,
 lifecycle-state, and transfer-stage projections use the same catalog-backed
 pure mapper. Activity static actions, empty states, diagnostics labels, and
-accessibility phrases are catalog-backed as well; its remaining inline values
-are dynamic count, relative-time, and destination formats. Other SwiftUI
-feature text still using inline bilingual values also keeps M6 open.
+accessibility phrases are catalog-backed as well. Activity count, relative-time,
+and destination formats use explicit-locale catalog interpolation and native
+plural variations, so `TransferStageView` no longer uses inline bilingual
+values. Other SwiftUI feature text still using inline bilingual values keeps M6
+open.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

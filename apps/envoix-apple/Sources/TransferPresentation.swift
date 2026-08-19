@@ -116,6 +116,49 @@ enum TransferActivityText {
         }
         return AppText.localized(key, language: language)
     }
+
+    static func itemCount(_ count: UInt64, language: String) -> String {
+        let displayCount = Int64(min(count, UInt64(Int64.max)))
+        return AppText.localized(
+            "activity.item_count",
+            defaultValue: "\(displayCount) items",
+            language: language
+        )
+    }
+
+    static func transferCount(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "activity.transfer_count",
+            defaultValue: "\(displayCount) transfers",
+            language: language
+        )
+    }
+
+    static func updated(_ relative: String, language: String) -> String {
+        AppText.localized(
+            "activity.updated",
+            defaultValue: "Updated \(relative)",
+            language: language
+        )
+    }
+
+    static func savedIn(_ destination: String, language: String) -> String {
+        AppText.localized(
+            "activity.saved.in_folder",
+            defaultValue: "Saved in \(destination)",
+            language: language
+        )
+    }
+
+    static func savedItems(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "activity.saved.item_count",
+            defaultValue: "Saved \(displayCount) items",
+            language: language
+        )
+    }
 }
 
 enum ActivityStageTimingPresentationPolicy {

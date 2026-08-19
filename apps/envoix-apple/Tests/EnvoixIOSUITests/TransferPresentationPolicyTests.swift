@@ -91,6 +91,26 @@ final class TransferPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(TransferActivityText.direction(.receive, language: "zh-Hans"), "接收")
     }
 
+    func testActivityTextUsesLocalizedFormatsAndPluralRules() {
+        XCTAssertEqual(TransferActivityText.itemCount(0, language: "en"), "0 items")
+        XCTAssertEqual(TransferActivityText.itemCount(1, language: "en"), "1 item")
+        XCTAssertEqual(TransferActivityText.itemCount(2, language: "en"), "2 items")
+        XCTAssertEqual(TransferActivityText.itemCount(2, language: "zh-Hans"), "2 个项目")
+        XCTAssertEqual(
+            TransferActivityText.itemCount(UInt64.max, language: "en"),
+            "9223372036854775807 items"
+        )
+
+        XCTAssertEqual(TransferActivityText.transferCount(1, language: "en"), "1 transfer")
+        XCTAssertEqual(TransferActivityText.transferCount(3, language: "zh-Hans"), "3 次传输")
+        XCTAssertEqual(TransferActivityText.updated("2 min ago", language: "en"), "Updated 2 min ago")
+        XCTAssertEqual(TransferActivityText.updated("2 分钟前", language: "zh-Hans"), "2 分钟前更新")
+        XCTAssertEqual(TransferActivityText.savedIn("Downloads", language: "en"), "Saved in Downloads")
+        XCTAssertEqual(TransferActivityText.savedIn("下载", language: "zh-Hans"), "已保存到 下载")
+        XCTAssertEqual(TransferActivityText.savedItems(1, language: "en"), "Saved 1 item")
+        XCTAssertEqual(TransferActivityText.savedItems(4, language: "zh-Hans"), "已保存 4 个项目")
+    }
+
     @MainActor
     func testNativeObserverHopsBackgroundCallbacksToMainActor() async {
         let model = TransferViewModel()

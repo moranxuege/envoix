@@ -502,17 +502,11 @@ struct TransferStageView: View {
     }
 
     private func itemCountText(_ count: UInt64) -> String {
-        if count == 1 {
-            return AppText.value("1 item", "1 个项目", language: language)
-        }
-        return AppText.value("\(count) items", "\(count) 个项目", language: language)
+        TransferActivityText.itemCount(count, language: language)
     }
 
     private func transferCountText(_ count: Int) -> String {
-        if count == 1 {
-            return AppText.value("1 transfer", "1 次传输", language: language)
-        }
-        return AppText.value("\(count) transfers", "\(count) 次传输", language: language)
+        TransferActivityText.transferCount(count, language: language)
     }
 
     private func updatedText(_ date: Date) -> String {
@@ -520,11 +514,7 @@ struct TransferStageView: View {
         formatter.unitsStyle = .abbreviated
         formatter.locale = Locale(identifier: language.hasPrefix("zh") ? "zh_Hans" : "en")
         let relative = formatter.localizedString(for: date, relativeTo: Date())
-        return AppText.value(
-            "Updated \(relative)",
-            "\(relative)更新",
-            language: language
-        )
+        return TransferActivityText.updated(relative, language: language)
     }
 
     private func aggregateMetrics(for group: ActivityRoomGroup) -> ActivityMetrics {
@@ -718,17 +708,9 @@ struct TransferStageView: View {
     private func completedDestinationText(_ urls: [URL]) -> String {
         let parentPaths = Set(urls.map { $0.deletingLastPathComponent().path })
         if parentPaths.count == 1, let parent = urls.first?.deletingLastPathComponent() {
-            return AppText.value(
-                "Saved in \(parent.lastPathComponent)",
-                "已保存到 \(parent.lastPathComponent)",
-                language: language
-            )
+            return TransferActivityText.savedIn(parent.lastPathComponent, language: language)
         }
-        return AppText.value(
-            "Saved \(urls.count) items",
-            "已保存 \(urls.count) 个项目",
-            language: language
-        )
+        return TransferActivityText.savedItems(urls.count, language: language)
     }
 
     private func icon(for record: TransferActivityRecord) -> String {
@@ -761,8 +743,7 @@ struct TransferStageView: View {
                 ? AppText.localized("activity.outgoing", language: language)
                 : AppText.localized("activity.incoming", language: language)
         }
-        if count == 1 { return AppText.value("1 item", "1 个项目", language: language) }
-        return AppText.value("\(count) items", "\(count) 个项目", language: language)
+        return TransferActivityText.itemCount(UInt64(count), language: language)
     }
 
     private func tint(for state: TransferActivityState) -> Color {
