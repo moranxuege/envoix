@@ -106,12 +106,12 @@ struct OneTimeRoomView: View {
     private var timeline: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(AppText.value("Room activity", "房间活动", language: language))
+                Text(AppText.localized("room.activity.title", language: language))
                     .font(.headline)
                     .foregroundStyle(Theme.text)
                 Spacer()
                 Button(action: onShowActivity) {
-                    Text(AppText.value("All Activity", "全部活动", language: language))
+                    Text(AppText.localized("room.activity.all", language: language))
                         .font(.subheadline.weight(.semibold))
                 }
                 .buttonStyle(.plain)
@@ -124,11 +124,7 @@ struct OneTimeRoomView: View {
                     Image(systemName: "arrow.up.arrow.down.circle")
                         .font(.system(size: 30, weight: .medium))
                         .foregroundStyle(Theme.muted)
-                    Text(AppText.value(
-                        "Transfers started here will appear in this timeline.",
-                        "从这里开始的传输会显示在此时间线中。",
-                        language: language
-                    ))
+                    Text(AppText.localized("room.activity.empty", language: language))
                     .font(.subheadline)
                     .foregroundStyle(Theme.muted)
                     .multilineTextAlignment(.center)
@@ -149,13 +145,13 @@ struct OneTimeRoomView: View {
     private func incomingOfferCard(_ offer: RoomControlTransferOffer) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(
-                AppText.value("Incoming transfer", "收到传输邀请", language: language),
+                AppText.localized("room.offer.incoming", language: language),
                 systemImage: "tray.and.arrow.down.fill"
             )
             .font(.headline)
             .foregroundStyle(Theme.text)
 
-            Text(AppText.value("Offer summary", "内容摘要", language: language))
+            Text(AppText.localized("room.offer.summary", language: language))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.muted)
                 .textCase(.uppercase)
@@ -164,7 +160,7 @@ struct OneTimeRoomView: View {
                 .font(.subheadline)
                 .foregroundStyle(Theme.text)
 
-            Text(AppText.value("Destination", "保存位置", language: language))
+            Text(AppText.localized("room.offer.destination", language: language))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.muted)
                 .textCase(.uppercase)
@@ -174,7 +170,7 @@ struct OneTimeRoomView: View {
                 .foregroundStyle(Theme.text)
 
             if !offer.rootNames.isEmpty {
-                Text(AppText.value("Contents", "内容", language: language))
+                Text(AppText.localized("room.offer.contents", language: language))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.muted)
                     .textCase(.uppercase)
@@ -199,7 +195,7 @@ struct OneTimeRoomView: View {
 
             HStack(spacing: 10) {
                 Button(role: .cancel, action: onRejectOffer) {
-                    Text(AppText.value("Decline", "拒绝", language: language))
+                    Text(AppText.localized("common.decline", language: language))
                         .frame(maxWidth: .infinity, minHeight: 42)
                 }
                 .buttonStyle(.bordered)
@@ -210,25 +206,21 @@ struct OneTimeRoomView: View {
                     if isAcceptingOffer {
                         HStack(spacing: 8) {
                             ProgressView()
-                            Text(AppText.value(
-                                "Preparing receiver…",
-                                "正在准备接收…",
-                                language: language
-                            ))
+                            Text(AppText.localized("room.offer.preparing_receiver", language: language))
                         }
                         .frame(maxWidth: .infinity, minHeight: 42)
                     } else {
-                        Text(AppText.value("Receive", "接收", language: language))
+                        Text(AppText.localized("common.receive", language: language))
                             .frame(maxWidth: .infinity, minHeight: 42)
                     }
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
                 .disabled(isAcceptingOffer)
-                .accessibilityLabel(AppText.value(
-                    isAcceptingOffer ? "Preparing receiver…" : "Receive",
-                    isAcceptingOffer ? "正在准备接收…" : "接收",
-                    language: language
-                ))
+                .accessibilityLabel(
+                    isAcceptingOffer
+                        ? AppText.localized("room.offer.preparing_receiver", language: language)
+                        : AppText.localized("common.receive", language: language)
+                )
                 .accessibilityIdentifier("room_offer_accept")
             }
         }
@@ -346,7 +338,7 @@ struct OneTimeRoomView: View {
         VStack(spacing: 10) {
             Button(action: onAddFiles) {
                 Label(
-                    AppText.value("Add files", "添加文件", language: language),
+                    AppText.localized("room.action.add_files", language: language),
                     systemImage: "plus"
                 )
                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -363,14 +355,16 @@ struct OneTimeRoomView: View {
                 Spacer()
                 if isRoomCreator && controlPhase == .connected {
                     Toggle(
-                        AppText.value("Keep open", "保持开启", language: language),
+                        AppText.localized("room.action.keep_open", language: language),
                         isOn: Binding(
                             get: { lifetimePolicy == .untilForegroundEnds },
                             set: onSetKeepOpen
                         )
                     )
                     .labelsHidden()
-                    .accessibilityLabel(AppText.value("Keep room open", "保持房间开启", language: language))
+                    .accessibilityLabel(
+                        AppText.localized("room.action.keep_open_accessibility", language: language)
+                    )
                     .accessibilityIdentifier("room_keep_open")
                 }
             }
@@ -378,7 +372,7 @@ struct OneTimeRoomView: View {
             if roomIsTerminal {
                 Button(action: onClose) {
                     Label(
-                        AppText.value("Done", "完成", language: language),
+                        AppText.localized("common.done", language: language),
                         systemImage: "checkmark.circle"
                     )
                     .frame(maxWidth: .infinity, minHeight: 42)
@@ -388,7 +382,7 @@ struct OneTimeRoomView: View {
             } else {
                 Button(role: .destructive, action: onClose) {
                     Label(
-                        AppText.value("End room", "结束房间", language: language),
+                        AppText.localized("room.action.end", language: language),
                         systemImage: "xmark.circle"
                     )
                     .frame(maxWidth: .infinity, minHeight: 42)

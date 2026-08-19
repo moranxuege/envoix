@@ -196,6 +196,18 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
       }
     },
+    "common.decline" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Decline" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拒绝" } }
+      }
+    },
+    "common.done" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Done" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "完成" } }
+      }
+    },
     "common.open" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Open" } },
@@ -266,6 +278,78 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer files" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输文件" } }
+      }
+    },
+    "room.action.add_files" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加文件" } }
+      }
+    },
+    "room.action.end" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "End room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结束房间" } }
+      }
+    },
+    "room.action.keep_open" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keep open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保持开启" } }
+      }
+    },
+    "room.action.keep_open_accessibility" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keep room open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保持房间开启" } }
+      }
+    },
+    "room.activity.all" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "All Activity" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "全部活动" } }
+      }
+    },
+    "room.activity.empty" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfers started here will appear in this timeline." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "从这里开始的传输会显示在此时间线中。" } }
+      }
+    },
+    "room.activity.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Room activity" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间活动" } }
+      }
+    },
+    "room.offer.contents" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Contents" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内容" } }
+      }
+    },
+    "room.offer.destination" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Destination" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存位置" } }
+      }
+    },
+    "room.offer.incoming" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Incoming transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "收到传输邀请" } }
+      }
+    },
+    "room.offer.preparing_receiver" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing receiver…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备接收…" } }
+      }
+    },
+    "room.offer.summary" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Offer summary" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内容摘要" } }
       }
     },
     "transfer.path.changed" : {
