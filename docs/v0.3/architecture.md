@@ -285,6 +285,9 @@ The Settings screen renders a settings snapshot and
 `SettingsDiagnosticsUiState`. The Activity applies persistence and launches
 runtime permission requests, while `SettingsDiagnosticsViewModel` owns and
 stops the Wi-Fi Aware diagnostic probe outside the Composable lifetime.
+The unreachable legacy log screen is not a v0.3 navigation surface; active
+Transfer diagnostics remain contextual and use the host-owned upload/copy
+effects.
 
 The default typed control binding is UniFFI after the application surface has
 been reduced. Hand-written JNI remains only for proven platform or performance
