@@ -1,11 +1,11 @@
 # App diagnostics (design)
 
-Roadmap #6 of `architecture-review-2026-07.md`. Status: DESIGN — for review
-before implementation. Builds on `docs/observability.md` (planes, correlation
-ids, level policy); this doc covers the ANDROID app's diagnostics system,
-which grew by accretion during the July debugging arc and now gets a shape.
+Roadmap #6 of `architecture-review-2026-07.md`. The baseline design is
+implemented; v0.3 routes both raw trace and timeline records through the typed
+UniFFI `FfiLogSink`. Builds on `docs/observability.md` (planes, correlation ids,
+level policy); this doc covers the Android app's diagnostics system.
 
-## What exists today (accreted) and its failures
+## Original accreted system and addressed failures
 
 | Piece | Problem |
 |---|---|
@@ -31,14 +31,14 @@ remains purely a UI view; it is no longer any upload's source.
 
 ## Typed routing (the regex dies)
 
-Today: Kotlin regex-parses `room="…"` out of FORMATTED lines. The room is a
-SPAN FIELD (observability.md) — extract it where the structure lives:
+The original implementation regex-parsed `room="…"` out of formatted lines.
+The room is a span field (observability.md), so v0.3 extracts it where the
+structure lives:
 
-- The JNI tracing subscriber gains a `Layer` that walks the span scope for
+- The core tracing subscriber has a `Layer` that walks the span scope for
   `room` (the pattern `apps/envoix-rendezvous-server/src/logs.rs` already
   uses server-side) and delivers it as a separate argument:
-  `LogCallback.log(room: String?, line: String)` (FFI change; fleet moves
-  together).
+  `FfiLogSink.log(room: String?, line: String)`.
 - Kotlin routes by the typed room: append to the matching card's UI log AND
   to its `transfer-<id>.log` file. No regex, no re-stamping games.
 - A `Room` value class (Kotlin) with `code` and `id` (the numeric prefix)
@@ -91,7 +91,7 @@ Dismiss = ack without upload. No modal, no nagging: one banner, one tap.
 
 ## Implementation order
 
-1. FFI: `LogCallback.log(room, line)` + JNI span-field Layer (kills the regex).
+1. FFI: `FfiLogSink.log(room, line)` + core span-field Layer (kills the regex).
 2. `Room` value class + replace the 5 split sites.
 3. Per-transfer files: write path in the service (typed routing), count-GC,
    Remove/D2 deletion, record-id alignment.
@@ -211,7 +211,7 @@ both sides at the rdz. Six principles:
   fields and builds the envelope. The target is a *classifier*, not the
   serializer — the raw `fmt` formatter is for the raw-trace tier only.
 - **P4 — route by durable session_id, carried on the wire.** The durable
-  card/record id (`session_id`) rides on the session span AND the structured JNI
+  card/record id (`session_id`) rides on the session span AND the typed FFI
   callback envelope; Kotlin routes the timeline file **directly by session_id**.
   The room→newest-card lookup is DELETED — room is reusable transport
   correlation, not ownership (two live cards can share a room). `room_id` and
@@ -275,7 +275,7 @@ tail cell on the **first** `=` → percent-decode the value. That is the whole
 grammar; there is no quoting mode.
 
 **`source_seq` ownership.** A single device has two timeline producers — the Rust
-core (via the JNI callback) and Kotlin `TransferTimeline`. They funnel through
+core (via the typed callback) and Kotlin `TransferTimeline`. They funnel through
 **one** per-transfer Kotlin writer (`TransferLogs`), which stamps `source_seq`
 from a single atomic counter as it appends. Rust does **not** assign it. The rdz
 is its own lane and stamps its own. Per-lane = one writer = no collisions; seq
@@ -336,10 +336,11 @@ A small `redact()` helper at each boundary, not a PII-classification framework.
 - **`envoix-transfer`** — emit `protocol.complete_ack` (sent/failed) where the
   fact is actually known (P2); the client's `transfer` span must carry
   `session_id` so those events route by card-id like the rest.
-- **JNI subscriber** (`android-jni/src/lib.rs`) — a custom timeline layer
+- **Core subscriber** (`envoix-ffi/src/logging.rs`) — a custom timeline layer
   (target `envoix::timeline`) with its OWN always-on filter (P7) that builds the
-  delimited envelope and hands `(session_id, line)` across JNI; everything else
-  formats to the raw-trace tier under the reloadable `EnvFilter`. The low-volume
+  delimited envelope and hands `(session_id, line)` across typed UniFFI;
+  everything else formats to the raw-trace tier under the reloadable
+  `EnvFilter`. The low-volume
   timeline lane stays synchronous and reliable. The raw tier keeps its current
   synchronous per-line path for now; batching it through a bounded background
   writer (observer effect) is DEFERRED (§sequence item 4), not part of this work.
@@ -361,8 +362,9 @@ A small `redact()` helper at each boundary, not a PII-classification framework.
 
 ### Decisions (settled 2026-07-12, after codex cross-review)
 
-- File keyed by durable **session_id** (card/record id) carried on span + JNI
-  envelope; room→card lookup deleted; room/transfer_id are correlation fields.
+- File keyed by durable **session_id** (card/record id) carried on the span and
+  typed FFI envelope; room→card lookup deleted; room/transfer_id are correlation
+  fields.
 - **Delimited structured line**, not JSON (greppability + parse both matter).
 - Per-source **lanes canonical**, time-merge a **labelled secondary** view.
 - Timeline has an **always-on** filter, independent of the raw-trace knob.
@@ -388,7 +390,7 @@ unit-commit standard); a1 is the spine, a2/a3 are independent after it.
 
 1. **a1 — envelope + routing** (the spine): `session_id` on the **session**
    span; the custom always-on timeline layer building the delimited envelope
-   (with the escaping grammar); `(session_id, line)` JNI callback; Kotlin routes
+   (with the escaping grammar); `(session_id, line)` typed callback; Kotlin routes
    `TransferLogs.appendTimeline` by `session_id` and stamps `source_seq`;
    `session.created` proves the path. (The `transfer` span gains `session_id` in
    a4, where the protocol events that need it live. The legacy room→card lookup
@@ -472,9 +474,9 @@ UserDefaults or SharedPreferences. This developer provisioning is temporary;
 if authenticated remote diagnostics becomes a distributed product feature,
 its credential moves behind the v0.3 vault port rather than into UI settings.
 
-**raw-trace batching (observer effect).** The raw tier crosses JNI synchronously
-one line at a time and does Kotlin file I/O on the logging path, which can
-perturb transfer timing under load. Proposal: a bounded MPSC queue drained by a
+**raw-trace batching (observer effect).** The raw tier crosses UniFFI
+synchronously one line at a time and does Kotlin file I/O on the logging path,
+which can perturb transfer timing under load. Proposal: a bounded MPSC queue drained by a
 single background writer thread; on overflow, drop and emit one
 `raw dropped N lines` marker (never silent). The low-volume timeline lane stays
 synchronous/reliable. NOT built — a perf change best validated on-device under a

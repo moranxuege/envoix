@@ -1,10 +1,14 @@
-use super::*;
 use std::io::Write;
+use std::sync::{Arc, OnceLock};
 
-/// VM + Kotlin log sink for [`Java_dev_envoix_app_Native_initLogging`]. The
-/// `tracing` subscriber below forwards every formatted line to `sink.log(String)`.
-static LOG_VM: OnceLock<JavaVM> = OnceLock::new();
-static LOG_SINK: OnceLock<GlobalRef> = OnceLock::new();
+#[uniffi::export(with_foreign)]
+pub trait FfiLogSink: Send + Sync {
+    fn log(&self, room: Option<String>, line: String);
+    fn timeline(&self, session_id: u64, line: String);
+}
+
+/// Typed platform sink for formatted core lines and structured timelines.
+static LOG_SINK: OnceLock<Arc<dyn FfiLogSink>> = OnceLock::new();
 
 /// The always-on baseline: envoix internals + iroh's connection story. The
 /// `envoix::timeline=off` directive keeps the structured timeline tier OUT of
@@ -31,26 +35,15 @@ type LogReload = tracing_subscriber::reload::Handle<
 >;
 static LOG_RELOAD: OnceLock<LogReload> = OnceLock::new();
 /// Install a `tracing` subscriber that forwards every formatted log line to the
-/// Kotlin `sink.log(String)`, so the app can show/copy the core's logs - the same
-/// stream the CLI prints with `-v`. Safe to call once; later calls no-op. The
+/// platform sink, so an app can show/copy the core's logs - the same stream the
+/// CLI prints with `-v`. Safe to call once; later calls no-op. The
 /// filter defaults to `envoix=debug,iroh=info,warn` (captures iroh's connection
 /// story, not just warnings); override with the `ENVOIX_LOG` env.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
-    env: JNIEnv,
-    _class: JClass,
-    sink: JObject,
-) {
-    let Ok(vm) = env.get_java_vm() else {
-        tracing::warn!("initLogging: failed to get JavaVM");
+#[uniffi::export]
+pub fn init_logging(sink: Arc<dyn FfiLogSink>) {
+    if LOG_SINK.set(sink).is_err() {
         return;
-    };
-    let Ok(sink) = env.new_global_ref(&sink) else {
-        tracing::warn!("initLogging: failed to create global log sink ref");
-        return;
-    };
-    let _ = LOG_VM.set(vm);
-    let _ = LOG_SINK.set(sink);
+    }
 
     let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| DEFAULT_LOG.to_string());
     let filter = tracing_subscriber::EnvFilter::try_new(&spec)
@@ -67,7 +60,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     // `TimelineLayer::on_event` restricts it to authority events. RoomTag stays
     // unfiltered so it stashes room + session_id into span extensions.
     let raw = tracing_subscriber::fmt::layer()
-        .with_writer(JniLogWriter)
+        .with_writer(TypedLogWriter)
         .with_ansi(false)
         .with_target(false)
         .with_filter(raw_filter);
@@ -94,17 +87,9 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
 /// Change the log filter at runtime (the dev-mode `-vv` toggle). `spec` is an
 /// env-filter directive, e.g. `envoix=trace,iroh=debug` for verbose or
 /// `envoix=debug,iroh=info,warn` for the baseline. Invalid specs are ignored.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
-    mut env: JNIEnv,
-    _class: JClass,
-    spec: JString,
-) {
-    let Ok(spec) = env.get_string(&spec) else {
-        tracing::warn!("setLogLevel: failed to read log filter string");
-        return;
-    };
-    let spec = format!("{}{}", String::from(spec), TIMELINE_OFF);
+#[uniffi::export]
+pub fn set_log_level(spec: String) {
+    let spec = format!("{spec}{TIMELINE_OFF}");
     if let (Some(handle), Ok(filter)) = (
         LOG_RELOAD.get(),
         tracing_subscriber::EnvFilter::try_new(&spec),
@@ -115,26 +100,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
 
 /// Forward one formatted `tracing` line to `sink.log(...)`.
 fn log_line(line: &str) {
-    let (Some(vm), Some(sink)) = (LOG_VM.get(), LOG_SINK.get()) else {
-        return;
-    };
-    let Ok(mut env) = vm.attach_current_thread() else {
+    let Some(sink) = LOG_SINK.get() else {
         return;
     };
     // The room captured by RoomTag for THIS event (same thread, synchronous).
     let room = CURRENT_ROOM.with(|r| r.borrow_mut().take());
-    let room_obj = match room.as_deref().map(|r| env.new_string(r)) {
-        Some(Ok(js)) => js,
-        _ => jni::objects::JString::default(),
-    };
-    if let Ok(js) = env.new_string(line) {
-        let _ = env.call_method(
-            sink,
-            "log",
-            "(Ljava/lang/String;Ljava/lang/String;)V",
-            &[JValue::Object(&room_obj), JValue::Object(&js)],
-        );
-    }
+    sink.log(room, line.to_string());
 }
 
 thread_local! {
@@ -376,27 +347,17 @@ where
 
 /// Forward one built timeline line to `sink.timeline(sessionId, line)`.
 fn timeline_line(session_id: u64, line: &str) {
-    let (Some(vm), Some(sink)) = (LOG_VM.get(), LOG_SINK.get()) else {
+    let Some(sink) = LOG_SINK.get() else {
         return;
     };
-    let Ok(mut env) = vm.attach_current_thread() else {
-        return;
-    };
-    if let Ok(js) = env.new_string(line) {
-        let _ = env.call_method(
-            sink,
-            "timeline",
-            "(JLjava/lang/String;)V",
-            &[JValue::Long(session_id as i64), JValue::Object(&js)],
-        );
-    }
+    sink.timeline(session_id, line.to_string());
 }
 
-/// A `MakeWriter` whose per-event buffer ships its line to the Kotlin sink on drop.
+/// A `MakeWriter` whose per-event buffer ships its line to the typed sink on drop.
 #[derive(Clone)]
-struct JniLogWriter;
+struct TypedLogWriter;
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for JniLogWriter {
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TypedLogWriter {
     type Writer = LineBuf;
     fn make_writer(&'a self) -> Self::Writer {
         LineBuf(Vec::new())

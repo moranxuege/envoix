@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import dev.envoix.app.discovery.DiscoveryPeerRegistry
+import dev.envoix.app.ffi.setLogLevel
 import dev.envoix.app.ui.AppText
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -158,7 +159,7 @@ object SettingsStore {
     /** Push the current verbosity down to the native reloadable filter. -vvv (trace
      *  iroh internals) wins over -vv (verbose) wins over the baseline. */
     fun applyLogLevel() =
-        Native.setLogLevel(
+        setLogLevel(
             when {
                 _settings.value.traceIroh -> LOG_TRACE_IROH
                 _settings.value.verboseLog -> LOG_VERBOSE

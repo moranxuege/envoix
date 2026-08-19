@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn core_info_advertises_the_typed_log_sink() {
+    let info = crate::envoix_core_info();
+    assert_eq!(info.ffi_api_version, 20);
+    assert!(
+        info.capabilities
+            .iter()
+            .any(|capability| capability == "typed_log_sink_v1")
+    );
+}
+
+#[test]
 fn escape_touches_only_delimiter_octets() {
     // URIs, spaces, and `=` survive; only %, TAB, LF are encoded.
     assert_eq!(
@@ -67,7 +78,7 @@ use std::sync::{Arc, Mutex};
 type Captured = Vec<(Option<u64>, String)>;
 
 // A capturing stand-in for TimelineLayer: same session_id lookup + target
-// guard, but records to a Vec instead of the JNI sink.
+// guard, but records to a Vec instead of the typed sink.
 struct Cap {
     guard: bool,
     out: Arc<Mutex<Captured>>,

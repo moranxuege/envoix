@@ -9,9 +9,7 @@
 //! those crates panic ("android context was not initialized").
 
 use jni::JNIEnv;
-use jni::JavaVM;
-use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
-use std::sync::OnceLock;
+use jni::objects::{JClass, JObject};
 
 /// Wire the Android VM + application context into `ndk_context`. Must be called
 /// once (e.g. from `Application.onCreate`) before any transfer runs.
@@ -42,5 +40,3 @@ pub extern "system" fn Java_dev_envoix_app_Native_initContext(
     // raw pointer to it.
     std::mem::forget(ctx);
 }
-
-mod logging;

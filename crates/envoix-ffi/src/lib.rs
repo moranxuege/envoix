@@ -25,6 +25,8 @@ mod manifest_v2_job;
 pub use manifest_v2_job::*;
 mod manifest_v2_session;
 pub use manifest_v2_session::*;
+mod logging;
+pub use logging::*;
 mod native_transport;
 pub use native_transport::*;
 mod platform_destination;
@@ -501,6 +503,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "remembered_room_control_v1".into(),
             "typed_room_control_errors_v1".into(),
             "nearby_invite_inbox_v1".into(),
+            "typed_log_sink_v1".into(),
             "remembered_devices_v1".into(),
             "typed_application_contract_v6".into(),
         ],

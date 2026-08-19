@@ -6,7 +6,7 @@ import org.junit.Test
 /**
  * Pins the Kotlin timeline builder against the Rust one. The golden line below
  * MUST be byte-identical to the Rust `golden_line_matches_the_kotlin_builder`
- * test (crates/envoix-ffi/src/android_jni) — same inputs, same column order, same
+ * test (crates/envoix-ffi/src/logging_tests.rs) — same inputs, same column order, same
  * escaping — so a Rust line and a Kotlin line are indistinguishable to a reader.
  */
 class TimelineEnvelopeTest {
@@ -30,5 +30,13 @@ class TimelineEnvelopeTest {
                 fields = linkedMapOf("cause" to "a%b\tc\nd"),
             )
         assertEquals(golden, line)
+    }
+
+    @Test
+    fun typed_sink_rejects_session_ids_outside_the_android_record_range() {
+        assertEquals(0L, timelineSessionId(0uL))
+        assertEquals(Long.MAX_VALUE, timelineSessionId(Long.MAX_VALUE.toULong()))
+        assertEquals(null, timelineSessionId(Long.MAX_VALUE.toULong() + 1uL))
+        assertEquals(null, timelineSessionId(ULong.MAX_VALUE))
     }
 }

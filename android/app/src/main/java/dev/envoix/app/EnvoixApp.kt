@@ -1,6 +1,7 @@
 package dev.envoix.app
 
 import android.app.Application
+import dev.envoix.app.ffi.initLogging
 import dev.envoix.app.ui.NativeRoomControlGateway
 import dev.envoix.app.ui.RememberedRoomConnectionManager
 import dev.envoix.app.ui.RememberedRoomTransferCoordinator
@@ -17,7 +18,7 @@ class EnvoixApp : Application() {
         Diagnostics.init(filesDir)
         TransferRepository.seedNextId(TransferService.nextSessionIdFloor(this))
         LogStore.append("envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT})")
-        Native.initLogging(LogSink) // before initContext, so init logs are captured
+        initLogging(LogSink) // before initContext, so init logs are captured
         SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
         Native.initContext(this)
         RoomControlGatewayProvider.gateway = NativeRoomControlGateway(this)

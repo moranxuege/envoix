@@ -129,9 +129,9 @@ Activity identity; complete InviteV2 material remains only in the immediate
 connection flow.
 
 All Android native entry points are compiled into `libenvoix_ffi.so`; the
-`android-jni` Cargo feature adds the exceptional JNI symbols to the same
-library that owns UniFFI handles and process-local credentials. The former
-`libenvoix_jni.so` and its second runtime/state registry no longer exist.
+`android-jni` Cargo feature adds the exceptional context-bootstrap symbol to
+the same library that owns UniFFI handles and process-local credentials. The
+former `libenvoix_jni.so` and its second runtime/state registry no longer exist.
 
 The direct physical-test driver now exercises the same typed UniFFI send and
 receive gateways as the product instead of a parallel JSON JNI session API.
@@ -149,10 +149,14 @@ mDNS/TXT advertising and lifecycle coordination in Kotlin, but the duplicate
 JNI session registry, request correlation, and JSON callbacks have been
 deleted.
 
-The remaining hand-written JNI surface is limited to Android context
-initialization and log routing. Context initialization is a required platform
-bootstrap: `ndk-context` must receive the process `JavaVM` and application
-object before Rust networking touches Android DNS, interfaces, or trust-store
-services. Log routing is still under M5 audit because its sink and runtime
-filter can be represented as typed callbacks. No retained JNI entry point may
-expose application orchestration or a parallel product state machine.
+Core trace and structured timeline routing now use the typed `FfiLogSink`
+callback. Runtime filtering is the typed `setLogLevel` function, and
+`typed_log_sink_v1` advertises the capability. The prior `GetMethodID` callback,
+Java `Long` cast, and two logging JNI symbols have been removed without changing
+the envelope grammar or per-transfer routing policy.
+
+Android context initialization is the sole hand-written JNI exception. It is a
+required platform bootstrap: `ndk-context` must receive the process `JavaVM`
+and application object before Rust networking touches Android DNS, interfaces,
+or trust-store services. It is called once at process startup, exposes no
+application command or secret, and cannot be represented by a UniFFI value.
