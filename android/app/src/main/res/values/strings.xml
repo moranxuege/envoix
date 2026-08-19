@@ -31,6 +31,7 @@
     <string name="common_continue">Continue</string>
     <string name="common_cancel">Cancel</string>
     <string name="common_ok">OK</string>
+    <string name="common_back">Back</string>
     <string name="nfc_open_invitation_title">Open NFC invitation?</string>
     <string name="nfc_untrusted_invitation_explanation">This untrusted tag only carries an invitation. Continue to validate it and use the normal room flow; NFC does not authenticate the other device.</string>
     <string name="nfc_invitation_failed_title">NFC could not continue</string>
@@ -51,4 +52,46 @@
     <string name="room_end_explanation">New file offers will stop. Transfers already in progress will continue in Activity.</string>
     <string name="room_end_action">End room</string>
     <string name="room_keep_action">Keep room</string>
+
+    <string name="settings_basic_section">BASIC</string>
+    <string name="settings_language">Language</string>
+    <string name="settings_default_transfer_role">Default role for a new transfer</string>
+    <string name="settings_compression_section">COMPRESSION</string>
+    <string name="settings_compression_info">Compression info</string>
+    <string name="settings_avoid_tailscale">Avoid Tailscale addresses</string>
+    <string name="settings_avoid_tailscale_description">Don\'t advertise your 100.x Tailscale IP, so transfers take the real WAN or relay path.</string>
+    <string name="settings_servers_section">SERVERS</string>
+    <string name="settings_broker_label">Broker · rendezvous</string>
+    <string name="settings_relay_label">Relay · data path</string>
+    <string name="settings_log_server_label">Log server · diagnostics</string>
+    <string name="settings_config_file_section" translatable="false">CONFIG.TOML</string>
+    <string name="settings_data_stream_window">Data stream window · e.g. 32MB (default 16MB)</string>
+    <string name="settings_candidate_allow">Candidate allow · one CIDR per line</string>
+    <string name="settings_candidate_deny">Candidate deny · one CIDR per line</string>
+    <string name="settings_developer_section">DEVELOPER</string>
+    <string name="settings_developer_mode">Developer mode</string>
+    <string name="settings_developer_mode_description">Reveal diagnostics — verbose logging (and, later, log upload).</string>
+    <string name="settings_verbose_logging">Verbose logging (-vv)</string>
+    <string name="settings_verbose_logging_description">Also capture iroh internals: path selection, hole-punching. High volume.</string>
+    <string name="settings_trace_iroh">Trace iroh internals (-vvv)</string>
+    <string name="settings_trace_iroh_description">Deepest: iroh path/QUIC state machine at trace. Very high volume — for chasing a crash.</string>
+    <string name="settings_wifi_aware_status">Wi-Fi Aware · %1$s</string>
+    <string name="settings_checking">checking</string>
+    <string name="settings_probe_status">Probe · %1$s</string>
+    <string name="settings_grant_nearby_wifi_permission">Grant nearby Wi-Fi permission</string>
+    <string name="settings_receive_probe">Receive probe</string>
+    <string name="settings_send_probe">Send probe</string>
+    <string name="settings_stop_probe">Stop probe</string>
+    <string name="settings_save_received_files_to">SAVE RECEIVED FILES TO</string>
+    <string name="settings_change_destination">Change</string>
+    <string name="settings_reset_to_downloads">Reset to Downloads</string>
+    <string name="language_english_short" translatable="false">EN</string>
+    <string name="language_chinese_short" translatable="false">中文</string>
+    <string name="settings_compression_never">Never</string>
+    <string name="settings_compression_always">Always</string>
+    <string name="settings_compression_smart">Smart</string>
+    <string name="settings_compression_explanation">Smart compression detects if the file type you\'re sending has already been compressed and avoids unnecessary recompression.</string>
+    <string name="settings_advanced">Advanced</string>
+    <string name="common_collapse">Collapse</string>
+    <string name="common_expand">Expand</string>
 </resources>

@@ -62,6 +62,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.R
 import dev.envoix.app.Settings
 import dev.envoix.app.WifiAwareProbeRole
 import kotlin.math.roundToInt
@@ -130,16 +131,16 @@ internal fun SettingsScreen(
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = appText("Back", "返回"),
+                    contentDescription = appString(R.string.common_back),
                     tint = colors.accent,
                     modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(6.dp),
                 )
                 Spacer(Modifier.width(8.dp))
-                Text(appText("Settings", "设置"), color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+                Text(appString(R.string.settings), color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
             }
 
-            SectionLabel(appText("BASIC", "基本"))
-            LabeledControl(appText("Language", "语言")) {
+            SectionLabel(appString(R.string.settings_basic_section))
+            LabeledControl(appString(R.string.settings_language)) {
                 LanguageToggle(settings.language) {
                     onUpdateSettings { current -> current.copy(language = it) }
                 }
@@ -152,14 +153,14 @@ internal fun SettingsScreen(
                 onReset = onResetSaveTree,
             )
             Spacer(Modifier.height(18.dp))
-            LabeledControl(appText("Default role for a new transfer", "新传输的默认角色")) {
+            LabeledControl(appString(R.string.settings_default_transfer_role)) {
                 RoleToggle(settings.defaultRole) { onUpdateSettings { s -> s.copy(defaultRole = it) } }
             }
             Spacer(Modifier.height(18.dp))
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        appText("COMPRESSION", "压缩"),
+                        appString(R.string.settings_compression_section),
                         color = colors.muted,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -168,7 +169,7 @@ internal fun SettingsScreen(
                     Spacer(Modifier.width(6.dp))
                     Icon(
                         Icons.Filled.Info,
-                        contentDescription = appText("Compression info", "压缩说明"),
+                        contentDescription = appString(R.string.settings_compression_info),
                         tint = colors.muted,
                         modifier =
                             Modifier
@@ -184,12 +185,8 @@ internal fun SettingsScreen(
             }
             Spacer(Modifier.height(18.dp))
             ToggleRow(
-                title = appText("Avoid Tailscale addresses", "避开 Tailscale 地址"),
-                subtitle =
-                    appText(
-                        "Don't advertise your 100.x Tailscale IP, so transfers take the real WAN or relay path.",
-                        "不公布 100.x Tailscale IP，使传输使用真实广域网或中继路径。",
-                    ),
+                title = appString(R.string.settings_avoid_tailscale),
+                subtitle = appString(R.string.settings_avoid_tailscale_description),
                 checked = avoidsTailscale,
             ) { onAvoidTailscaleChanged(it) }
 
@@ -197,81 +194,80 @@ internal fun SettingsScreen(
             AdvancedHeader(showAdvanced) { showAdvanced = !showAdvanced }
             if (showAdvanced) {
                 Spacer(Modifier.height(16.dp))
-                SectionLabel(appText("SERVERS", "服务器"))
-                Field(appText("Broker · rendezvous", "会合服务器"), broker) {
+                SectionLabel(appString(R.string.settings_servers_section))
+                Field(appString(R.string.settings_broker_label), broker) {
                     broker = it
                     onUpdateSettings { s -> s.copy(broker = it) }
                 }
                 Spacer(Modifier.height(12.dp))
-                Field(appText("Relay · data path", "中继服务器 · 数据路径"), relay) {
+                Field(appString(R.string.settings_relay_label), relay) {
                     relay = it
                     onUpdateSettings { s -> s.copy(relay = it) }
                 }
                 Spacer(Modifier.height(12.dp))
-                Field(appText("Log server · diagnostics", "日志服务器 · 诊断"), logServer) {
+                Field(appString(R.string.settings_log_server_label), logServer) {
                     logServer = it
                     onUpdateSettings { s -> s.copy(logServer = it) }
                 }
 
                 Spacer(Modifier.height(22.dp))
-                SectionLabel("CONFIG.TOML")
-                Field(appText("Data stream window · e.g. 32MB (default 16MB)", "数据流窗口 · 例如 32MB（默认 16MB）"), dataStreamWindow) {
+                SectionLabel(appString(R.string.settings_config_file_section))
+                Field(appString(R.string.settings_data_stream_window), dataStreamWindow) {
                     dataStreamWindow = it
                     onUpdateSettings { s -> s.copy(dataStreamWindow = it) }
                 }
                 Spacer(Modifier.height(12.dp))
-                MultilineField(appText("Candidate allow · one CIDR per line", "允许的候选地址 · 每行一个 CIDR"), allowText) {
+                MultilineField(appString(R.string.settings_candidate_allow), allowText) {
                     allowText = it
                     onUpdateSettings { s -> s.copy(candidatesAllow = cidrLines(it)) }
                 }
                 Spacer(Modifier.height(12.dp))
-                MultilineField(appText("Candidate deny · one CIDR per line", "拒绝的候选地址 · 每行一个 CIDR"), denyText) {
+                MultilineField(appString(R.string.settings_candidate_deny), denyText) {
                     denyText = it
                     onUpdateSettings { s -> s.copy(candidatesDeny = cidrLines(it)) }
                 }
 
                 Spacer(Modifier.height(22.dp))
-                SectionLabel(appText("DEVELOPER", "开发者"))
+                SectionLabel(appString(R.string.settings_developer_section))
                 ToggleRow(
-                    title = appText("Developer mode", "开发者模式"),
-                    subtitle = appText("Reveal diagnostics — verbose logging (and, later, log upload).", "显示诊断信息、详细日志及后续的日志上传功能。"),
+                    title = appString(R.string.settings_developer_mode),
+                    subtitle = appString(R.string.settings_developer_mode_description),
                     checked = settings.devMode,
                 ) { onUpdateSettings { s -> s.copy(devMode = it) } }
                 if (settings.devMode) {
                     Spacer(Modifier.height(16.dp))
                     ToggleRow(
-                        title = appText("Verbose logging (-vv)", "详细日志（-vv）"),
-                        subtitle =
-                            appText(
-                                "Also capture iroh internals: path selection, hole-punching. High volume.",
-                                "同时记录 iroh 内部信息：路径选择与打洞。日志量较大。",
-                            ),
+                        title = appString(R.string.settings_verbose_logging),
+                        subtitle = appString(R.string.settings_verbose_logging_description),
                         checked = settings.verboseLog,
                     ) {
                         onLoggingSettingsChanged { s -> s.copy(verboseLog = it) }
                     }
                     Spacer(Modifier.height(12.dp))
                     ToggleRow(
-                        title = appText("Trace iroh internals (-vvv)", "跟踪 iroh 内部状态（-vvv）"),
-                        subtitle =
-                            appText(
-                                "Deepest: iroh path/QUIC state machine at trace. Very high volume — for chasing a crash.",
-                                "最详细地跟踪 iroh 路径与 QUIC 状态机。日志量极大，仅用于排查崩溃。",
-                            ),
+                        title = appString(R.string.settings_trace_iroh),
+                        subtitle = appString(R.string.settings_trace_iroh_description),
                         checked = settings.traceIroh,
                     ) {
                         onLoggingSettingsChanged { s -> s.copy(traceIroh = it) }
                     }
                     Spacer(Modifier.height(16.dp))
                     Text(
-                        "Wi-Fi Aware · ${diagnostics.capability?.diagnosticSummary ?: "checking"}",
+                        appString(
+                            R.string.settings_wifi_aware_status,
+                            diagnostics.capability?.diagnosticSummary
+                                ?: appString(R.string.settings_checking),
+                        ),
                         color = colors.muted,
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "Probe · ${diagnostics.probe.diagnosticSummary}",
+                        appString(
+                            R.string.settings_probe_status,
+                            diagnostics.probe.diagnosticSummary,
+                        ),
                         color =
                             if (diagnostics.probe.phase == dev.envoix.app.WifiAwareProbePhase.FAILED) {
                                 colors.danger
@@ -288,12 +284,7 @@ internal fun SettingsScreen(
                         OutlinedButton(
                             onClick = onRequestNearbyWifiPermission,
                         ) {
-                            Text(
-                                appText(
-                                    "Grant nearby Wi-Fi permission",
-                                    "授予附近 Wi-Fi 权限",
-                                ),
-                            )
+                            Text(appString(R.string.settings_grant_nearby_wifi_permission))
                         }
                         Spacer(Modifier.height(8.dp))
                     }
@@ -306,14 +297,14 @@ internal fun SettingsScreen(
                             enabled = diagnostics.canStartProbe,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text(appText("Receive probe", "接收探测"))
+                            Text(appString(R.string.settings_receive_probe))
                         }
                         OutlinedButton(
                             onClick = { onStartWifiAwareProbe(WifiAwareProbeRole.SUBSCRIBER) },
                             enabled = diagnostics.canStartProbe,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text(appText("Send probe", "发送探测"))
+                            Text(appString(R.string.settings_send_probe))
                         }
                     }
                     if (diagnostics.probeRunning) {
@@ -322,7 +313,7 @@ internal fun SettingsScreen(
                             onClick = onStopWifiAwareProbe,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text(appText("Stop probe", "停止探测"))
+                            Text(appString(R.string.settings_stop_probe))
                         }
                     }
                 }
@@ -341,7 +332,11 @@ private fun LanguageToggle(
     onChange: (String) -> Unit,
 ) {
     SegmentedControl(
-        options = listOf("EN", "中文"),
+        options =
+            listOf(
+                appString(R.string.language_english_short),
+                appString(R.string.language_chinese_short),
+            ),
         selectedIndex = if (language == AppText.ENGLISH) 0 else 1,
         onSelect = { i -> onChange(if (i == 0) AppText.ENGLISH else AppText.SIMPLIFIED_CHINESE) },
     )
@@ -370,7 +365,7 @@ private fun FolderPickerRow(
 ) {
     val colors = Envoix.colors
     Text(
-        appText("SAVE RECEIVED FILES TO", "接收文件保存到"),
+        appString(R.string.settings_save_received_files_to),
         color = colors.muted,
         fontSize = 11.sp,
         fontWeight = FontWeight.Bold,
@@ -397,12 +392,17 @@ private fun FolderPickerRow(
             modifier = Modifier.weight(1f, fill = false),
         )
         Spacer(Modifier.width(10.dp))
-        Text(appText("Change", "更改"), color = colors.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(
+            appString(R.string.settings_change_destination),
+            color = colors.accent,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+        )
     }
     if (custom) {
         Spacer(Modifier.height(6.dp))
         Text(
-            appText("Reset to Downloads", "恢复为 Downloads"),
+            appString(R.string.settings_reset_to_downloads),
             color = colors.accent,
             fontSize = 12.sp,
             modifier =
@@ -473,7 +473,11 @@ private fun RoleToggle(
     onChange: (String) -> Unit,
 ) {
     SegmentedControl(
-        options = listOf(appText("Send", "发送"), appText("Receive", "接收")),
+        options =
+            listOf(
+                appString(R.string.send_action_title),
+                appString(R.string.receive_action_title),
+            ),
         selectedIndex = if (role == "send") 0 else 1,
         onSelect = { i -> onChange(if (i == 0) "send" else "receive") },
     )
@@ -485,7 +489,12 @@ private fun CompressionToggle(
     onChange: (String) -> Unit,
 ) {
     SegmentedControl(
-        options = listOf(appText("Never", "从不"), appText("Always", "始终"), appText("Smart", "智能")),
+        options =
+            listOf(
+                appString(R.string.settings_compression_never),
+                appString(R.string.settings_compression_always),
+                appString(R.string.settings_compression_smart),
+            ),
         selectedIndex =
             when (policy) {
                 "never" -> 0
@@ -582,16 +591,13 @@ private fun CompressionInfoOverlay(onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text(appText("OK", "确定"))
+                Text(appString(R.string.common_ok))
             }
         },
         title = null,
         text = {
             Text(
-                appText(
-                    "Smart compression detects if the file type you're sending has already been compressed and avoids unnecessary recompression.",
-                    "智能压缩会检测您发送的文件类型是否已经被压缩，避免不必要的重复压缩。",
-                ),
+                appString(R.string.settings_compression_explanation),
                 color = colors.text,
                 fontSize = 15.sp,
             )
@@ -613,11 +619,21 @@ private fun AdvancedHeader(
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(appText("Advanced", "高级"), color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text(
+            appString(R.string.settings_advanced),
+            color = colors.text,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+        )
         Spacer(Modifier.weight(1f))
         Icon(
             if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-            contentDescription = if (expanded) appText("Collapse", "收起") else appText("Expand", "展开"),
+            contentDescription =
+                if (expanded) {
+                    appString(R.string.common_collapse)
+                } else {
+                    appString(R.string.common_expand)
+                },
             tint = colors.muted,
         )
     }
