@@ -172,7 +172,9 @@ item pluralization, connection states, name editing, and drag-and-drop feedback
 use the same catalog boundary instead of view-local bilingual branches. Nearby
 visibility, availability, invitation trust, and discovery-source combinations
 are also tested projections; `ConnectionHubView` now has no inline bilingual
-values.
+values. Typed transfer failures resolve semantic catalog keys for every FFI
+failure code; raw diagnostic messages remain diagnostic data rather than
+localized presentation policy.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

@@ -3083,7 +3083,11 @@ struct RateTracker {
 }
 
 func friendlyError(_ reason: String, language: String = "en") -> String {
-    AppText.value("Transfer failed: \(reason)", "传输失败：\(reason)", language: language)
+    AppText.localized(
+        "transfer.failure.generic_with_reason",
+        defaultValue: "Transfer failed: \(reason)",
+        language: language
+    )
 }
 
 func friendlyFailure(_ failure: FfiTransferFailure, language: String = "en") -> String {
@@ -3095,54 +3099,48 @@ func friendlyFailure(
     diagnosticMessage: String,
     language: String = "en"
 ) -> String {
+    let key: String
     switch code {
     case .userCanceled, .senderCanceled:
-        return AppText.value("Transfer canceled.", "传输已取消。", language: language)
+        key = "transfer.failure.canceled.detail"
     case .networkLost:
-        return AppText.value("Connection lost. Resume to continue.", "连接已断开，可恢复继续。", language: language)
+        key = "transfer.failure.network_lost.detail"
     case .authenticationFailed:
-        return AppText.value("Pairing authentication failed.", "配对认证失败。", language: language)
+        key = "transfer.failure.authentication_failed.detail"
     case .roomNotFound:
-        return AppText.value("The Room is not available yet. Ask the creator to keep it open and retry.", "房间尚不可用。请让创建者保持房间开启后重试。", language: language)
+        key = "transfer.failure.room_not_found.detail"
     case .roomExpired:
-        return AppText.value("This Room expired. Create a new Room Code.", "此房间已过期。请创建新的房间码。", language: language)
+        key = "transfer.failure.room_expired.detail"
     case .roomFull:
-        return AppText.value("This Room is already in use. Retry shortly.", "此房间正在使用中。请稍后重试。", language: language)
+        key = "transfer.failure.room_full.detail"
     case .roomRateLimited, .endpointRateLimited, .ipRateLimited:
-        return AppText.value("Too many Room attempts. Wait before retrying.", "房间尝试次数过多。请稍后再试。", language: language)
+        key = "transfer.failure.rate_limited.detail"
     case .roomUnderAttack:
-        return AppText.value("This Room was closed for security. Create a new Room Code.", "此房间因安全原因已关闭。请创建新的房间码。", language: language)
+        key = "transfer.failure.room_under_attack.detail"
     case .serverBusy:
-        return AppText.value("The Room service is busy. Retry shortly.", "房间服务繁忙。请稍后重试。", language: language)
+        key = "transfer.failure.server_busy.detail"
     case .malformedJoin, .unsupportedRendezvousVersion:
-        return AppText.value("Update Envoix before joining this Room.", "请更新 Envoix 后再加入此房间。", language: language)
+        key = "transfer.failure.update_required.detail"
     case .senderPermissionLost:
-        return AppText.value("Source permission expired. Choose the source again.", "来源权限已失效，请重新选择。", language: language)
+        key = "transfer.failure.sender_permission_lost.detail"
     case .senderSourceUnavailable, .senderItemRemoved:
-        return AppText.value("A selected source is unavailable.", "所选来源不可用。", language: language)
+        key = "transfer.failure.sender_source_unavailable.detail"
     case .senderSourceChanged, .protocolOrIntegrityFailure:
-        return AppText.value("Content verification failed.", "内容校验失败。", language: language)
+        key = "transfer.failure.verification_failed.detail"
     case .receiverSpaceInsufficient:
-        return AppText.value("The destination does not have enough space.", "目标位置空间不足。", language: language)
+        key = "transfer.failure.receiver_space_insufficient.detail"
     case .receiverDestinationDecisionRequired, .receiverDestinationUnavailable:
-        return AppText.value("Choose an available destination.", "请选择可用的目标位置。", language: language)
+        key = "transfer.failure.receiver_destination_unavailable.detail"
     case .receiverSaveFailed:
-        return AppText.value("The receiver could not finish saving. Resume to reconcile it.", "接收端未能完成保存，请恢复以进行确认。", language: language)
+        key = "transfer.failure.receiver_save_failed.detail"
     case .receiverReusedObjectLost:
-        return AppText.value(
-            "An existing destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer.",
-            "接收端原定复用的已有项目已更改或消失。请恢复该项目后继续，或重新发起传输。",
-            language: language
-        )
+        key = "transfer.failure.receiver_reused_object_lost.detail"
     case .receiverFinalizationOutcomeUnknown:
-        return AppText.value(
-            "The receiver cannot yet confirm the final save after an interruption. Resume to reconcile the destination.",
-            "中断后接收端暂时无法确认最终保存结果，请恢复传输以核对目标位置。",
-            language: language
-        )
+        key = "transfer.failure.receiver_finalization_unknown.detail"
     case .unsupportedFeature:
-        return AppText.value("This transfer request is not supported.", "不支持此传输请求。", language: language)
+        key = "transfer.failure.unsupported_feature.detail"
     case .internalError:
-        return AppText.value("The transfer failed.", "传输失败。", language: language)
+        key = "transfer.failure.internal.detail"
     }
+    return AppText.localized(key, language: language)
 }

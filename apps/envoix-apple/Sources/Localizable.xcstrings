@@ -913,6 +913,132 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未经验证" } }
       }
     },
+    "transfer.failure.authentication_failed.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing authentication failed." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对认证失败。" } }
+      }
+    },
+    "transfer.failure.canceled.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer canceled." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输已取消。" } }
+      }
+    },
+    "transfer.failure.generic_with_reason" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer failed: %@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输失败：%@" } }
+      }
+    },
+    "transfer.failure.internal.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The transfer failed." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输失败。" } }
+      }
+    },
+    "transfer.failure.network_lost.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connection lost. Resume to continue." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接已断开，可恢复继续。" } }
+      }
+    },
+    "transfer.failure.rate_limited.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Too many Room attempts. Wait before retrying." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间尝试次数过多。请稍后再试。" } }
+      }
+    },
+    "transfer.failure.receiver_destination_unavailable.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose an available destination." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请选择可用的目标位置。" } }
+      }
+    },
+    "transfer.failure.receiver_finalization_unknown.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiver cannot yet confirm the final save after an interruption. Resume to reconcile the destination." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "中断后接收端暂时无法确认最终保存结果，请恢复传输以核对目标位置。" } }
+      }
+    },
+    "transfer.failure.receiver_reused_object_lost.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "An existing destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收端原定复用的已有项目已更改或消失。请恢复该项目后继续，或重新发起传输。" } }
+      }
+    },
+    "transfer.failure.receiver_save_failed.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiver could not finish saving. Resume to reconcile it." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收端未能完成保存，请恢复以进行确认。" } }
+      }
+    },
+    "transfer.failure.receiver_space_insufficient.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The destination does not have enough space." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "目标位置空间不足。" } }
+      }
+    },
+    "transfer.failure.room_expired.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This Room expired. Create a new Room Code." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间已过期。请创建新的房间码。" } }
+      }
+    },
+    "transfer.failure.room_full.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This Room is already in use. Retry shortly." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间正在使用中。请稍后重试。" } }
+      }
+    },
+    "transfer.failure.room_not_found.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The Room is not available yet. Ask the creator to keep it open and retry." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间尚不可用。请让创建者保持房间开启后重试。" } }
+      }
+    },
+    "transfer.failure.room_under_attack.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This Room was closed for security. Create a new Room Code." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间因安全原因已关闭。请创建新的房间码。" } }
+      }
+    },
+    "transfer.failure.sender_permission_lost.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Source permission expired. Choose the source again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "来源权限已失效，请重新选择。" } }
+      }
+    },
+    "transfer.failure.sender_source_unavailable.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "A selected source is unavailable." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "所选来源不可用。" } }
+      }
+    },
+    "transfer.failure.server_busy.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The Room service is busy. Retry shortly." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间服务繁忙。请稍后重试。" } }
+      }
+    },
+    "transfer.failure.unsupported_feature.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This transfer request is not supported." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不支持此传输请求。" } }
+      }
+    },
+    "transfer.failure.update_required.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Update Envoix before joining this Room." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请更新 Envoix 后再加入此房间。" } }
+      }
+    },
+    "transfer.failure.verification_failed.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Content verification failed." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内容校验失败。" } }
+      }
+    },
     "transfer.path.changed" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "changed" } },

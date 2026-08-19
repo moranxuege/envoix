@@ -112,6 +112,91 @@ final class TransferPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(TransferActivityText.savedItems(4, language: "zh-Hans"), "已保存 4 个项目")
     }
 
+    func testFriendlyFailureProjectsEveryTypedFailureWithoutLeakingDiagnostics() {
+        let cases: [(FfiFailureCode, String, String)] = [
+            (.userCanceled, "Transfer canceled.", "传输已取消。"),
+            (.senderCanceled, "Transfer canceled.", "传输已取消。"),
+            (.networkLost, "Connection lost. Resume to continue.", "连接已断开，可恢复继续。"),
+            (.authenticationFailed, "Pairing authentication failed.", "配对认证失败。"),
+            (
+                .roomNotFound,
+                "The Room is not available yet. Ask the creator to keep it open and retry.",
+                "房间尚不可用。请让创建者保持房间开启后重试。"
+            ),
+            (.roomExpired, "This Room expired. Create a new Room Code.", "此房间已过期。请创建新的房间码。"),
+            (.roomFull, "This Room is already in use. Retry shortly.", "此房间正在使用中。请稍后重试。"),
+            (.roomRateLimited, "Too many Room attempts. Wait before retrying.", "房间尝试次数过多。请稍后再试。"),
+            (.endpointRateLimited, "Too many Room attempts. Wait before retrying.", "房间尝试次数过多。请稍后再试。"),
+            (.ipRateLimited, "Too many Room attempts. Wait before retrying.", "房间尝试次数过多。请稍后再试。"),
+            (
+                .roomUnderAttack,
+                "This Room was closed for security. Create a new Room Code.",
+                "此房间因安全原因已关闭。请创建新的房间码。"
+            ),
+            (.serverBusy, "The Room service is busy. Retry shortly.", "房间服务繁忙。请稍后重试。"),
+            (.malformedJoin, "Update Envoix before joining this Room.", "请更新 Envoix 后再加入此房间。"),
+            (.unsupportedRendezvousVersion, "Update Envoix before joining this Room.", "请更新 Envoix 后再加入此房间。"),
+            (
+                .senderPermissionLost,
+                "Source permission expired. Choose the source again.",
+                "来源权限已失效，请重新选择。"
+            ),
+            (.senderSourceUnavailable, "A selected source is unavailable.", "所选来源不可用。"),
+            (.senderItemRemoved, "A selected source is unavailable.", "所选来源不可用。"),
+            (.senderSourceChanged, "Content verification failed.", "内容校验失败。"),
+            (.protocolOrIntegrityFailure, "Content verification failed.", "内容校验失败。"),
+            (
+                .receiverSpaceInsufficient,
+                "The destination does not have enough space.",
+                "目标位置空间不足。"
+            ),
+            (
+                .receiverDestinationDecisionRequired,
+                "Choose an available destination.",
+                "请选择可用的目标位置。"
+            ),
+            (
+                .receiverDestinationUnavailable,
+                "Choose an available destination.",
+                "请选择可用的目标位置。"
+            ),
+            (
+                .receiverSaveFailed,
+                "The receiver could not finish saving. Resume to reconcile it.",
+                "接收端未能完成保存，请恢复以进行确认。"
+            ),
+            (
+                .receiverReusedObjectLost,
+                "An existing destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer.",
+                "接收端原定复用的已有项目已更改或消失。请恢复该项目后继续，或重新发起传输。"
+            ),
+            (
+                .receiverFinalizationOutcomeUnknown,
+                "The receiver cannot yet confirm the final save after an interruption. Resume to reconcile the destination.",
+                "中断后接收端暂时无法确认最终保存结果，请恢复传输以核对目标位置。"
+            ),
+            (.unsupportedFeature, "This transfer request is not supported.", "不支持此传输请求。"),
+            (.internalError, "The transfer failed.", "传输失败。"),
+        ]
+
+        for (code, english, chinese) in cases {
+            XCTAssertEqual(
+                friendlyFailure(code: code, diagnosticMessage: "not user-facing", language: "en"),
+                english
+            )
+            XCTAssertEqual(
+                friendlyFailure(
+                    code: code,
+                    diagnosticMessage: "not user-facing",
+                    language: "zh-Hans"
+                ),
+                chinese
+            )
+        }
+        XCTAssertEqual(friendlyError("disk", language: "en"), "Transfer failed: disk")
+        XCTAssertEqual(friendlyError("磁盘", language: "zh-Hans"), "传输失败：磁盘")
+    }
+
     @MainActor
     func testNativeObserverHopsBackgroundCallbacksToMainActor() async {
         let model = TransferViewModel()
