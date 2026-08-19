@@ -36,14 +36,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Direction
-import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.humanBytes
@@ -169,6 +167,7 @@ private fun RoomCloseReason?.roomEndedLabel(): String =
 @Composable
 internal fun RoomTransferSummary(
     transfer: Transfer,
+    defaultDestinationLabel: String,
     onOpen: (Transfer) -> Unit,
     onShare: (Transfer) -> Unit,
 ) {
@@ -176,7 +175,7 @@ internal fun RoomTransferSummary(
     val saveLocation =
         resolvedSavedDestinationLabel(
             recordedDestinationLabel = transfer.savedDestinationLabel,
-            fallbackDestinationLabel = SettingsStore.saveLabel(LocalContext.current),
+            fallbackDestinationLabel = defaultDestinationLabel,
         )
     val itemCount = transfer.fileCount + transfer.directoryCount
     val title =

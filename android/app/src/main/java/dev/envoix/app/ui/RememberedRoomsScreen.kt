@@ -252,6 +252,7 @@ internal fun RememberedRoomDetailScreen(
                         )
                         RoomTransferSummary(
                             transfer = transfer,
+                            defaultDestinationLabel = transferPreferences.saveLocationLabel,
                             onOpen = onOpenReceived,
                             onShare = onShareReceived,
                         )

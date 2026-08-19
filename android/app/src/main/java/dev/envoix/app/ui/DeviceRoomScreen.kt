@@ -238,6 +238,7 @@ internal fun DeviceRoomScreen(
                 items(roomTransfers.sortedByDescending(Transfer::id), key = Transfer::id) { transfer ->
                     RoomTransferSummary(
                         transfer = transfer,
+                        defaultDestinationLabel = transferPreferences.saveLocationLabel,
                         onOpen = onOpenReceived,
                         onShare = onShareReceived,
                     )
