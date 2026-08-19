@@ -432,4 +432,54 @@
     <string name="room_file_invitation_invalid">此文件邀请无效或已过期。</string>
     <string name="room_route_unavailable">房间连接地址不可用，请重新连接后再接收文件。</string>
     <string name="room_file_offer_wrong_room">此文件邀请不属于当前房间。</string>
+
+    <string name="service_notification_channel">传输</string>
+    <string name="service_start_failed">无法开始此次传输，请重试。</string>
+    <string name="service_remembered_device_missing">此已记住设备已不可用</string>
+    <string name="service_room_unavailable">传输房间不可用</string>
+    <string name="service_remembered_device_unlock_failed">暂时无法解锁此已记住设备，请重试。</string>
+    <string name="service_pairing_route_required">请至少选择一种可用的配对方式</string>
+    <string name="service_room_broker_required">配对房间需要配置会合服务器</string>
+    <string name="service_prepared_job_missing">缺少已准备的传输任务</string>
+    <string name="service_remembered_device_busy">此已记住设备已有进行中的传输</string>
+    <string name="service_writable_folder_required">接收文件夹前，请先选择可写入的保存位置。</string>
+    <string name="service_destination_extra_copy">此 Android 目标位置需要先在私有目录验证，再额外复制一次。</string>
+    <string name="service_large_transfer_review">此传输体积异常大，请确认后继续。</string>
+    <string name="service_settings_folder_required">请先在设置中选择可写入的保存位置，然后继续。</string>
+
+    <string name="service_failure_sender_permission_lost">发送端已失去所选项目的读取权限。请重新授权后重试。</string>
+    <string name="service_failure_sender_source_unavailable">所选来源已不可用。请检查所选内容后重试。</string>
+    <string name="service_failure_sender_source_changed">所选项目在准备完成后发生了变化。请检查并重新发送。</string>
+    <string name="service_failure_receiver_space_insufficient">接收端没有足够空间完成此次传输。</string>
+    <string name="service_failure_destination_decision_required">接收端必须选择或确认保存位置。</string>
+    <string name="service_failure_destination_unavailable">所选接收位置已不可用。</string>
+    <string name="service_failure_receiver_save_failed">接收端未能完成保存。请继续任务以核对目标位置。</string>
+    <string name="service_failure_reused_object_lost">计划复用的目标项目已变化或消失。请恢复后继续，或重新开始传输。</string>
+    <string name="service_failure_finalization_unknown">中断后无法确认最终保存结果。请继续任务以核对目标位置。</string>
+    <string name="service_failure_integrity">完整性验证失败；未交付任何未经验证的文件。</string>
+    <string name="service_failure_authentication">无法验证对端身份。请重新配对设备。</string>
+    <string name="service_failure_room_not_found">房间尚不可用。请让创建者保持房间开启后重试。</string>
+    <string name="service_failure_room_expired">此房间已过期。请创建新的房间码。</string>
+    <string name="service_failure_room_full">此房间正在使用中。请稍后重试。</string>
+    <string name="service_failure_room_rate_limited">房间尝试次数过多。请稍后再试。</string>
+    <string name="service_failure_room_security">此房间因安全原因已关闭。请创建新的房间码。</string>
+    <string name="service_failure_server_busy">房间服务繁忙。请稍后重试。</string>
+    <string name="service_failure_unsupported_version">当前应用版本无法加入房间。请更新 Envoix。</string>
+    <string name="service_failure_unsupported_feature">不支持此传输请求。</string>
+    <string name="service_failure_discovery">无法连接另一台设备。请检查两台设备后继续任务。</string>
+    <string name="service_failure_transport">连接已中断。继续任务即可从已验证的数据恢复。</string>
+    <string name="service_failure_unknown">传输失败。请重试，或打开开发者模式查看详情。</string>
+
+    <string name="service_notification_preparing_transfer">正在准备传输…</string>
+    <string name="service_notification_no_active_transfer">当前没有进行中的传输</string>
+    <string name="service_notification_preparing_files">正在准备文件…</string>
+    <string name="service_notification_waiting_peer">正在等待对端…</string>
+    <string name="service_notification_pairing">正在配对…</string>
+    <string name="service_notification_connecting">正在连接…</string>
+    <string name="service_notification_awaiting_decision">等待确认保存方式</string>
+    <string name="service_notification_transferring">正在传输文件…</string>
+    <string name="service_notification_verifying">正在验证…</string>
+    <string name="service_notification_saving">正在保存…</string>
+    <string name="service_notification_receiver_saving">等待接收端保存…</string>
+    <string name="service_notification_finalizing">已保存，正在确认送达…</string>
 </resources>

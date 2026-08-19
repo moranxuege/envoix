@@ -454,4 +454,54 @@
     <string name="room_file_invitation_invalid">This file invitation is invalid or expired.</string>
     <string name="room_route_unavailable">The room route is unavailable. Reconnect before receiving files.</string>
     <string name="room_file_offer_wrong_room">This file offer does not belong to the current room.</string>
+
+    <string name="service_notification_channel">Transfers</string>
+    <string name="service_start_failed">Could not start this transfer. Try again.</string>
+    <string name="service_remembered_device_missing">This remembered device is no longer available</string>
+    <string name="service_room_unavailable">The transfer room is unavailable</string>
+    <string name="service_remembered_device_unlock_failed">This remembered device could not be unlocked. Try again.</string>
+    <string name="service_pairing_route_required">Choose at least one available pairing route</string>
+    <string name="service_room_broker_required">Room pairing requires a rendezvous broker</string>
+    <string name="service_prepared_job_missing">Prepared transfer job is missing</string>
+    <string name="service_remembered_device_busy">This remembered device already has an active transfer</string>
+    <string name="service_writable_folder_required">Choose a writable save folder before receiving directories.</string>
+    <string name="service_destination_extra_copy">This Android destination requires private verification followed by an extra copy.</string>
+    <string name="service_large_transfer_review">Review this unusually large transfer before continuing.</string>
+    <string name="service_settings_folder_required">Choose a writable save folder in Settings, then continue.</string>
+
+    <string name="service_failure_sender_permission_lost">The sender lost permission to read a selected item. Reauthorize it and retry.</string>
+    <string name="service_failure_sender_source_unavailable">A selected source is no longer available. Review the selection and try again.</string>
+    <string name="service_failure_sender_source_changed">A selected item changed after preparation. Review and send it again.</string>
+    <string name="service_failure_receiver_space_insufficient">The receiver does not have enough space for this transfer.</string>
+    <string name="service_failure_destination_decision_required">The receiver must choose or approve a save destination.</string>
+    <string name="service_failure_destination_unavailable">The selected receive destination is no longer available.</string>
+    <string name="service_failure_receiver_save_failed">The receiver could not finish saving. Resume to reconcile the destination.</string>
+    <string name="service_failure_reused_object_lost">A destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer.</string>
+    <string name="service_failure_finalization_unknown">The final save could not be confirmed after an interruption. Resume to reconcile the destination.</string>
+    <string name="service_failure_integrity">Integrity verification failed; no unverified file was delivered.</string>
+    <string name="service_failure_authentication">The peer could not be authenticated. Pair the devices again.</string>
+    <string name="service_failure_room_not_found">The Room is not available yet. Ask the creator to keep it open and retry.</string>
+    <string name="service_failure_room_expired">This Room expired. Create a new Room Code.</string>
+    <string name="service_failure_room_full">This Room is already in use. Retry shortly.</string>
+    <string name="service_failure_room_rate_limited">Too many Room attempts. Wait before retrying.</string>
+    <string name="service_failure_room_security">This Room was closed for security. Create a new Room Code.</string>
+    <string name="service_failure_server_busy">The Room service is busy. Retry shortly.</string>
+    <string name="service_failure_unsupported_version">This app version cannot join the Room. Update Envoix.</string>
+    <string name="service_failure_unsupported_feature">This transfer request is not supported.</string>
+    <string name="service_failure_discovery">The other device could not be reached. Check both devices and resume.</string>
+    <string name="service_failure_transport">The connection was interrupted. Resume to continue from verified data.</string>
+    <string name="service_failure_unknown">The transfer failed. Try again or open Developer mode for details.</string>
+
+    <string name="service_notification_preparing_transfer">Preparing transfer…</string>
+    <string name="service_notification_no_active_transfer">No active transfer</string>
+    <string name="service_notification_preparing_files">Preparing files…</string>
+    <string name="service_notification_waiting_peer">Waiting for peer…</string>
+    <string name="service_notification_pairing">Pairing…</string>
+    <string name="service_notification_connecting">Connecting…</string>
+    <string name="service_notification_awaiting_decision">Waiting for your save decision</string>
+    <string name="service_notification_transferring">Transferring files…</string>
+    <string name="service_notification_verifying">Verifying…</string>
+    <string name="service_notification_saving">Saving…</string>
+    <string name="service_notification_receiver_saving">Waiting for receiver to save…</string>
+    <string name="service_notification_finalizing">Saved; finalizing delivery…</string>
 </resources>

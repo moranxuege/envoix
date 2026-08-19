@@ -158,8 +158,9 @@ transfer-setup sheet and destination adapter also use native resources. The
 primary Android presentation flow is migrated; background service and workflow
 errors are tracked separately from screen presentation before M6 closes.
 Workflow-owned local validation now carries typed resource messages while
-gateway and engine failures remain dynamic text; foreground-service and system
-chooser messages are the remaining Android resource migration.
+gateway and engine failures remain dynamic text. Foreground-service validation,
+failure, and notification messages use the same locale-aware Android resource
+adapter; system chooser messages are the remaining Android resource migration.
 
 ## 8. M6 verification
 

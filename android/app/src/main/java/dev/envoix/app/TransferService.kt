@@ -8,9 +8,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
+import androidx.annotation.StringRes
 import androidx.core.app.NotificationCompat
 import dev.envoix.app.ffi.registerProtectedRememberedCredential
-import dev.envoix.app.ui.AppText
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -55,7 +55,7 @@ class TransferService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(
                 CHANNEL,
-                uiText("Transfers", "传输"),
+                uiText(R.string.service_notification_channel),
                 NotificationManager.IMPORTANCE_LOW,
             ),
         )
@@ -102,10 +102,7 @@ class TransferService : Service() {
         } catch (error: Throwable) {
             failReservedStart(
                 intent.getLongExtra(EXTRA_ID, -1L),
-                uiText(
-                    "Could not start this transfer. Try again.",
-                    "无法开始此次传输，请重试。",
-                ),
+                uiText(R.string.service_start_failed),
                 "start_failed",
                 RecoveryAction.Retry,
             )
@@ -145,7 +142,7 @@ class TransferService : Service() {
         if (rememberedRelationshipId != null && remembered == null) {
             failReservedStart(
                 reservedId,
-                uiText("This remembered device is no longer available", "此已记住设备已不可用"),
+                uiText(R.string.service_remembered_device_missing),
                 "remembered_device_missing",
                 RecoveryAction.RePair,
             )
@@ -157,7 +154,7 @@ class TransferService : Service() {
                 ?: run {
                     failReservedStart(
                         reservedId,
-                        uiText("The transfer room is unavailable", "传输房间不可用"),
+                        uiText(R.string.service_room_unavailable),
                         "room_unavailable",
                         RecoveryAction.RePair,
                     )
@@ -179,10 +176,7 @@ class TransferService : Service() {
                 if (reference.isNullOrBlank()) {
                     failReservedStart(
                         reservedId,
-                        uiText(
-                            "This remembered device could not be unlocked. Try again.",
-                            "暂时无法解锁此已记住设备，请重试。",
-                        ),
+                        uiText(R.string.service_remembered_device_unlock_failed),
                         "remembered_credential_unavailable",
                         RecoveryAction.Retry,
                     )
@@ -258,7 +252,7 @@ class TransferService : Service() {
             TransferRepository.update(id) {
                 it.copy(
                     status = Status.Failed,
-                    error = uiText("Choose at least one available pairing route", "请至少选择一种可用的配对方式"),
+                    error = uiText(R.string.service_pairing_route_required),
                 )
             }
             return
@@ -267,7 +261,7 @@ class TransferService : Service() {
             TransferRepository.update(id) {
                 it.copy(
                     status = Status.Failed,
-                    error = uiText("Room pairing requires a rendezvous broker", "配对房间需要配置会合服务器"),
+                    error = uiText(R.string.service_room_broker_required),
                 )
             }
             return
@@ -276,7 +270,7 @@ class TransferService : Service() {
             TransferRepository.update(id) {
                 it.copy(
                     status = Status.Failed,
-                    error = uiText("Prepared transfer job is missing", "缺少已准备的传输任务"),
+                    error = uiText(R.string.service_prepared_job_missing),
                 )
             }
             return
@@ -288,11 +282,7 @@ class TransferService : Service() {
             TransferRepository.update(id) {
                 it.copy(
                     status = Status.Failed,
-                    error =
-                        uiText(
-                            "This remembered device already has an active transfer",
-                            "此已记住设备已有进行中的传输",
-                        ),
+                    error = uiText(R.string.service_remembered_device_busy),
                 )
             }
             return
@@ -678,20 +668,11 @@ class TransferService : Service() {
                 error =
                     when {
                         needsFolder ->
-                            uiText(
-                                "Choose a writable save folder before receiving directories.",
-                                "接收文件夹前，请先选择可写入的保存位置。",
-                            )
+                            uiText(R.string.service_writable_folder_required)
                         !spec.destinationCopyApproved ->
-                            uiText(
-                                "This Android destination requires private verification followed by an extra copy.",
-                                "此 Android 目标位置需要先在私有目录验证，再额外复制一次。",
-                            )
+                            uiText(R.string.service_destination_extra_copy)
                         offer.exceptional ->
-                            uiText(
-                                "Review this unusually large transfer before continuing.",
-                                "此传输体积异常大，请确认后继续。",
-                            )
+                            uiText(R.string.service_large_transfer_review)
                         else -> null
                     },
                 log = addLog(it.log, "authenticated inventory received"),
@@ -715,11 +696,7 @@ class TransferService : Service() {
         ) {
             TransferRepository.update(id) {
                 it.copy(
-                    error =
-                        uiText(
-                            "Choose a writable save folder in Settings, then continue.",
-                            "请先在设置中选择可写入的保存位置，然后继续。",
-                        ),
+                    error = uiText(R.string.service_settings_folder_required),
                 )
             }
             return
@@ -1047,121 +1024,54 @@ class TransferService : Service() {
     private fun explainFailure(cause: String): String =
         when (cause) {
             "sender_permission_lost" ->
-                uiText(
-                    "The sender lost permission to read a selected item. Reauthorize it and retry.",
-                    "发送端已失去所选项目的读取权限。请重新授权后重试。",
-                )
+                uiText(R.string.service_failure_sender_permission_lost)
             "sender_source_unavailable", "sender_item_removed" ->
-                uiText(
-                    "A selected source is no longer available. Review the selection and try again.",
-                    "所选来源已不可用。请检查所选内容后重试。",
-                )
+                uiText(R.string.service_failure_sender_source_unavailable)
             "sender_source_changed" ->
-                uiText(
-                    "A selected item changed after preparation. Review and send it again.",
-                    "所选项目在准备完成后发生了变化。请检查并重新发送。",
-                )
+                uiText(R.string.service_failure_sender_source_changed)
             "receiver_space_insufficient" ->
-                uiText(
-                    "The receiver does not have enough space for this transfer.",
-                    "接收端没有足够空间完成此次传输。",
-                )
+                uiText(R.string.service_failure_receiver_space_insufficient)
             "receiver_destination_decision_required" ->
-                uiText(
-                    "The receiver must choose or approve a save destination.",
-                    "接收端必须选择或确认保存位置。",
-                )
+                uiText(R.string.service_failure_destination_decision_required)
             "receiver_destination_unavailable" ->
-                uiText(
-                    "The selected receive destination is no longer available.",
-                    "所选接收位置已不可用。",
-                )
+                uiText(R.string.service_failure_destination_unavailable)
             "receiver_save_failed" ->
-                uiText(
-                    "The receiver could not finish saving. Resume to reconcile the destination.",
-                    "接收端未能完成保存。请继续任务以核对目标位置。",
-                )
+                uiText(R.string.service_failure_receiver_save_failed)
             "receiver_reused_object_lost" ->
-                uiText(
-                    "A destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer.",
-                    "计划复用的目标项目已变化或消失。请恢复后继续，或重新开始传输。",
-                )
+                uiText(R.string.service_failure_reused_object_lost)
             "receiver_finalization_outcome_unknown" ->
-                uiText(
-                    "The final save could not be confirmed after an interruption. Resume to reconcile the destination.",
-                    "中断后无法确认最终保存结果。请继续任务以核对目标位置。",
-                )
+                uiText(R.string.service_failure_finalization_unknown)
             "protocol_or_integrity_failure" ->
-                uiText(
-                    "Integrity verification failed; no unverified file was delivered.",
-                    "完整性验证失败；未交付任何未经验证的文件。",
-                )
+                uiText(R.string.service_failure_integrity)
             "authentication_failed" ->
-                uiText(
-                    "The peer could not be authenticated. Pair the devices again.",
-                    "无法验证对端身份。请重新配对设备。",
-                )
+                uiText(R.string.service_failure_authentication)
             "room_not_found" ->
-                uiText(
-                    "The Room is not available yet. Ask the creator to keep it open and retry.",
-                    "房间尚不可用。请让创建者保持房间开启后重试。",
-                )
+                uiText(R.string.service_failure_room_not_found)
             "room_expired" ->
-                uiText(
-                    "This Room expired. Create a new Room Code.",
-                    "此房间已过期。请创建新的房间码。",
-                )
+                uiText(R.string.service_failure_room_expired)
             "room_full" ->
-                uiText(
-                    "This Room is already in use. Retry shortly.",
-                    "此房间正在使用中。请稍后重试。",
-                )
+                uiText(R.string.service_failure_room_full)
             "room_rate_limited", "endpoint_rate_limited", "ip_rate_limited" ->
-                uiText(
-                    "Too many Room attempts. Wait before retrying.",
-                    "房间尝试次数过多。请稍后再试。",
-                )
+                uiText(R.string.service_failure_room_rate_limited)
             "room_under_attack" ->
-                uiText(
-                    "This Room was closed for security. Create a new Room Code.",
-                    "此房间因安全原因已关闭。请创建新的房间码。",
-                )
+                uiText(R.string.service_failure_room_security)
             "server_busy" ->
-                uiText(
-                    "The Room service is busy. Retry shortly.",
-                    "房间服务繁忙。请稍后重试。",
-                )
+                uiText(R.string.service_failure_server_busy)
             "malformed_join", "unsupported_rendezvous_version", "unsupported_version" ->
-                uiText(
-                    "This app version cannot join the Room. Update Envoix.",
-                    "当前应用版本无法加入房间。请更新 Envoix。",
-                )
+                uiText(R.string.service_failure_unsupported_version)
             "unsupported_feature" ->
-                uiText(
-                    "This transfer request is not supported.",
-                    "不支持此传输请求。",
-                )
+                uiText(R.string.service_failure_unsupported_feature)
             "discovery" ->
-                uiText(
-                    "The other device could not be reached. Check both devices and resume.",
-                    "无法连接另一台设备。请检查两台设备后继续任务。",
-                )
+                uiText(R.string.service_failure_discovery)
             "transport" ->
-                uiText(
-                    "The connection was interrupted. Resume to continue from verified data.",
-                    "连接已中断。继续任务即可从已验证的数据恢复。",
-                )
+                uiText(R.string.service_failure_transport)
             else ->
-                uiText(
-                    "The transfer failed. Try again or open Developer mode for details.",
-                    "传输失败。请重试，或打开开发者模式查看详情。",
-                )
+                uiText(R.string.service_failure_unknown)
         }
 
     private fun uiText(
-        english: String,
-        simplifiedChinese: String,
-    ): String = AppText.value(english, simplifiedChinese, SettingsStore.settings.value.language)
+        @StringRes id: Int,
+    ): String = localizedString(id, SettingsStore.settings.value.language)
 
     private fun receiveBase(id: Long) = File(filesDir, "manifest-v2/receiver/$id")
 
@@ -1208,7 +1118,7 @@ class TransferService : Service() {
         if (!foreground) {
             startForeground(
                 NOTIFICATION_ID,
-                notification(uiText("Preparing transfer…", "正在准备传输…")),
+                notification(uiText(R.string.service_notification_preparing_transfer)),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
             )
             foreground = true
@@ -1220,7 +1130,7 @@ class TransferService : Service() {
         val active = TransferRepository.transfers.value.filterNot { it.status.isTerminal }
         val text =
             active.lastOrNull()?.let { statusLabel(it.status) }
-                ?: uiText("No active transfer", "当前没有进行中的传输")
+                ?: uiText(R.string.service_notification_no_active_transfer)
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))
     }
 
@@ -1238,7 +1148,7 @@ class TransferService : Service() {
         NotificationCompat
             .Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("Envoix")
+            .setContentTitle(uiText(R.string.app_name))
             .setContentText(text)
             .setOnlyAlertOnce(true)
             .setOngoing(true)
@@ -1253,20 +1163,20 @@ class TransferService : Service() {
 
     private fun statusLabel(status: Status): String =
         when (status) {
-            Status.Preparing -> uiText("Preparing files…", "正在准备文件…")
-            Status.WaitingForPeer -> uiText("Waiting for peer…", "正在等待对端…")
-            Status.Pairing -> uiText("Pairing…", "正在配对…")
-            Status.Connecting -> uiText("Connecting…", "正在连接…")
-            Status.AwaitingDecision -> uiText("Waiting for your save decision", "等待确认保存方式")
-            Status.Transferring -> uiText("Transferring files…", "正在传输文件…")
-            Status.Verifying -> uiText("Verifying…", "正在验证…")
-            Status.Saving -> uiText("Saving…", "正在保存…")
-            Status.WaitingForReceiverSave -> uiText("Waiting for receiver to save…", "等待接收端保存…")
-            Status.FinalizingDelivery -> uiText("Saved; finalizing delivery…", "已保存，正在确认送达…")
-            Status.Paused -> uiText("Paused", "已暂停")
-            Status.Delivered -> uiText("Delivered", "已送达")
-            Status.Failed -> uiText("Failed", "失败")
-            Status.Canceled -> uiText("Canceled", "已取消")
+            Status.Preparing -> uiText(R.string.service_notification_preparing_files)
+            Status.WaitingForPeer -> uiText(R.string.service_notification_waiting_peer)
+            Status.Pairing -> uiText(R.string.service_notification_pairing)
+            Status.Connecting -> uiText(R.string.service_notification_connecting)
+            Status.AwaitingDecision -> uiText(R.string.service_notification_awaiting_decision)
+            Status.Transferring -> uiText(R.string.service_notification_transferring)
+            Status.Verifying -> uiText(R.string.service_notification_verifying)
+            Status.Saving -> uiText(R.string.service_notification_saving)
+            Status.WaitingForReceiverSave -> uiText(R.string.service_notification_receiver_saving)
+            Status.FinalizingDelivery -> uiText(R.string.service_notification_finalizing)
+            Status.Paused -> uiText(R.string.transfer_status_paused)
+            Status.Delivered -> uiText(R.string.transfer_status_delivered)
+            Status.Failed -> uiText(R.string.transfer_status_failed)
+            Status.Canceled -> uiText(R.string.transfer_status_canceled)
         }
 
     companion object {
@@ -1336,9 +1246,8 @@ class TransferService : Service() {
                     it.copy(
                         status = Status.Failed,
                         error =
-                            AppText.value(
-                                "Could not start this transfer. Try again.",
-                                "无法开始此次传输，请重试。",
+                            context.localizedString(
+                                R.string.service_start_failed,
                                 SettingsStore.settings.value.language,
                             ),
                         failureCause = "start_failed",

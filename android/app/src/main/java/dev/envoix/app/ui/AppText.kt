@@ -1,13 +1,12 @@
 package dev.envoix.app.ui
 
-import android.content.Context
-import android.content.res.Configuration
-import android.os.LocaleList
 import androidx.annotation.PluralsRes
 import androidx.annotation.StringRes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
+import dev.envoix.app.localizedResources
+import dev.envoix.app.localizedString
 
 object AppText {
     fun value(
@@ -39,46 +38,15 @@ fun appString(
         *formatArgs,
     )
 
-internal fun Context.localizedString(
-    @StringRes id: Int,
-    language: String,
-    vararg formatArgs: Any,
-): String {
-    val configuration = Configuration(resources.configuration)
-    configuration.setLocales(LocaleList.forLanguageTags(language))
-    val resources = createConfigurationContext(configuration).resources
-    return if (formatArgs.isEmpty()) {
-        resources.getString(id)
-    } else {
-        resources.getString(id, *formatArgs)
-    }
-}
-
 @Composable
 fun appQuantityString(
     @PluralsRes id: Int,
     quantity: Int,
     vararg formatArgs: Any,
 ): String =
-    LocalContext.current.localizedQuantityString(
-        id,
-        quantity,
-        LocalAppLanguage.current,
-        *formatArgs,
-    )
-
-private fun Context.localizedQuantityString(
-    @PluralsRes id: Int,
-    quantity: Int,
-    language: String,
-    vararg formatArgs: Any,
-): String {
-    val configuration = Configuration(resources.configuration)
-    configuration.setLocales(LocaleList.forLanguageTags(language))
-    return createConfigurationContext(configuration)
-        .resources
+    LocalContext.current
+        .localizedResources(LocalAppLanguage.current)
         .getQuantityString(id, quantity, *formatArgs)
-}
 
 internal sealed interface UiMessage {
     data class Dynamic(
