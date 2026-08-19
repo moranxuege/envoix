@@ -300,4 +300,13 @@
     <string name="remembered_connection_connecting_description">正在验证受保护的配对关系。</string>
     <string name="remembered_connection_connected_description">受保护的控制连接已建立。</string>
     <string name="remembered_connection_attention_description">配对关系仍已保留；请在两台设备都可用时重试。</string>
+
+    <string name="activity_empty">暂无传输；建立房间后，传输记录会显示在这里。</string>
+    <string name="activity_transfers_section">传输记录</string>
+    <string name="activity_collapse_room">收起房间活动</string>
+    <string name="activity_expand_room">展开房间活动</string>
+    <string name="activity_expanded">已展开</string>
+    <string name="activity_collapsed">已收起</string>
+    <string name="activity_completed">已完成</string>
+    <string name="activity_finished">已结束</string>
 </resources>

@@ -317,4 +317,13 @@
     <string name="remembered_connection_connecting_description">Authenticating the protected relationship.</string>
     <string name="remembered_connection_connected_description">The protected control connection is active.</string>
     <string name="remembered_connection_attention_description">The relationship was preserved. Retry when both devices are available.</string>
+
+    <string name="activity_empty">No transfers yet. They will appear here after a room starts.</string>
+    <string name="activity_transfers_section">TRANSFERS</string>
+    <string name="activity_collapse_room">Collapse room activity</string>
+    <string name="activity_expand_room">Expand room activity</string>
+    <string name="activity_expanded">Expanded</string>
+    <string name="activity_collapsed">Collapsed</string>
+    <string name="activity_completed">Completed</string>
+    <string name="activity_finished">Finished</string>
 </resources>

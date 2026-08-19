@@ -46,6 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.ConnectionPathKind
+import dev.envoix.app.R
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.connectionPathLabel
@@ -256,12 +257,12 @@ internal fun TransferActivityScreen(
             IconButton(onClick = onBack) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = appText("Back", "返回"),
+                    contentDescription = appString(R.string.common_back),
                     tint = colors.accent,
                 )
             }
             Text(
-                appText("Activity", "活动"),
+                appString(R.string.activity_title),
                 color = colors.text,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.ExtraBold,
@@ -276,10 +277,7 @@ internal fun TransferActivityScreen(
             if (transfers.isEmpty()) {
                 item {
                     Text(
-                        appText(
-                            "No transfers yet. They will appear here after a room starts.",
-                            "暂无传输；建立房间后，传输记录会显示在这里。",
-                        ),
+                        appString(R.string.activity_empty),
                         color = colors.muted,
                         fontSize = 14.sp,
                         modifier = Modifier.padding(vertical = 32.dp),
@@ -304,7 +302,7 @@ internal fun TransferActivityScreen(
                     if (group.key in expandedRooms) {
                         item(key = "room_section:${group.key}") {
                             Text(
-                                appText("TRANSFERS", "传输记录"),
+                                appString(R.string.activity_transfers_section),
                                 color = colors.muted,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -373,15 +371,15 @@ private fun ActivityRoomCard(
         }
     val actionLabel =
         if (expanded) {
-            appText("Collapse room activity", "收起房间活动")
+            appString(R.string.activity_collapse_room)
         } else {
-            appText("Expand room activity", "展开房间活动")
+            appString(R.string.activity_expand_room)
         }
     val expansionState =
         if (expanded) {
-            appText("Expanded", "已展开")
+            appString(R.string.activity_expanded)
         } else {
-            appText("Collapsed", "已收起")
+            appString(R.string.activity_collapsed)
         }
 
     Column(
@@ -459,7 +457,11 @@ private fun ActivityRoomCard(
             Spacer(Modifier.height(7.dp))
             Row(Modifier.fillMaxWidth()) {
                 Text(
-                    "${humanBytes(metrics.bytes)} / ${humanBytes(metrics.total)}",
+                    appString(
+                        R.string.transfer_progress_bytes,
+                        humanBytes(metrics.bytes),
+                        humanBytes(metrics.total),
+                    ),
                     color = colors.text,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -540,26 +542,34 @@ private fun ActivityRoomStatus(
         when (status) {
             ActivityRoomStatusKind.Active ->
                 Triple(
-                    appText("${metrics.activeCount} active", "${metrics.activeCount} 个进行中"),
+                    appQuantityString(
+                        R.plurals.active_transfer_count,
+                        metrics.activeCount,
+                        metrics.activeCount,
+                    ),
                     colors.accent,
                     colors.accentSoft,
                 )
             ActivityRoomStatusKind.Paused ->
                 Triple(
-                    appText("Paused", "已暂停"),
+                    appString(R.string.transfer_status_paused),
                     colors.warning,
                     colors.warning.copy(alpha = 0.12f),
                 )
             ActivityRoomStatusKind.NeedsAttention ->
                 Triple(
-                    appText("Needs attention", "需要处理"),
+                    appString(R.string.transfer_status_needs_attention),
                     colors.danger,
                     colors.danger.copy(alpha = 0.12f),
                 )
             ActivityRoomStatusKind.Completed ->
-                Triple(appText("Completed", "已完成"), colors.success, colors.successSoft)
+                Triple(appString(R.string.activity_completed), colors.success, colors.successSoft)
             ActivityRoomStatusKind.Finished ->
-                Triple(appText("Finished", "已结束"), colors.muted, colors.line.copy(alpha = 0.5f))
+                Triple(
+                    appString(R.string.activity_finished),
+                    colors.muted,
+                    colors.line.copy(alpha = 0.5f),
+                )
         }
     Text(
         label,
