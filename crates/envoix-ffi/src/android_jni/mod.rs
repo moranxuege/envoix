@@ -14,12 +14,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_client::api::{
     Capabilities, InvitationBootstrap, InvitationError, InviteSecretRef, InviteV2, PeerSource,
-    TransferRole, ValidatedInvitation, register_remembered_credential,
+    TransferRole, ValidatedInvitation,
 };
 use envoix_client::{DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER};
 use jni::JNIEnv;
 use jni::JavaVM;
-use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -152,27 +152,6 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInviteForRole(
         })
     });
     let json = prepared.unwrap_or_else(|error| invitation_error_json(&error));
-    to_jstring(&mut env, &json)
-}
-
-/// Validate protected bytes loaded by Android and retain them only in process
-/// memory for the next remembered session.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_registerRememberedCredential(
-    mut env: JNIEnv,
-    _class: JClass,
-    opaque_credential: JByteArray,
-) -> jni::sys::jstring {
-    let json = match env.convert_byte_array(&opaque_credential) {
-        Ok(opaque) => match register_remembered_credential(&opaque) {
-            Ok(reference) => format!(r#"{{"reference":{}}}"#, json_str(reference.as_str())),
-            Err(error) => format!(r#"{{"error":{}}}"#, json_str(&error.to_string())),
-        },
-        Err(error) => format!(
-            r#"{{"error":{}}}"#,
-            json_str(&format!("read protected remembered credential: {error}")),
-        ),
-    };
     to_jstring(&mut env, &json)
 }
 

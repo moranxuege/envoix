@@ -76,6 +76,11 @@ handle is closed after the operation, including failure paths, and sealing is
 idempotent so a caller can safely retry after losing the first response. The
 seven superseded job-preparation JNI calls have been removed.
 
+Android Room and Transfer adapters register protected remembered credentials
+through the typed UniFFI function. Only the opaque process reference leaves
+that trusted call; the duplicate byte-array JNI registration entry has been
+removed.
+
 The Swift concurrency adapter projects the same Room error variants. A rejected
 authenticated command leaves the current Room usable, while network loss,
 cancellation, and native failure follow terminal paths without inspecting the

@@ -94,9 +94,6 @@ object Native {
         role: String,
     ): String
 
-    /** Validate protected bytes and return a process-only core reference. */
-    external fun registerRememberedCredential(opaqueCredential: ByteArray): String
-
     /** Start the only Android transfer engine. A send seals its existing job;
      * a receive first emits an authenticated offer and waits for a decision. */
     external fun startManifestV2Session(

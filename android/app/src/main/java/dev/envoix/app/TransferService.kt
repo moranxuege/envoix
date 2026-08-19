@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import dev.envoix.app.ffi.registerProtectedRememberedCredential
 import dev.envoix.app.ui.AppText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -164,9 +165,11 @@ class TransferService : Service() {
         val useMdns = intent.getBooleanExtra(EXTRA_USE_MDNS, true)
         val protectedReference =
             remembered?.let {
-                val response = JSONObject(Native.registerRememberedCredential(it.opaqueCredential))
-                val reference = response.optString("reference")
-                if (response.optString("error").isNotBlank() || reference.isBlank()) {
+                val reference =
+                    runCatching {
+                        registerProtectedRememberedCredential(it.opaqueCredential)
+                    }.getOrNull()
+                if (reference.isNullOrBlank()) {
                     failReservedStart(
                         reservedId,
                         uiText(
