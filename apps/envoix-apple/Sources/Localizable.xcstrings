@@ -353,6 +353,156 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设备名称" } }
       }
     },
+    "connection.identity.visible_as" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Visible as" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示为" } }
+      }
+    },
+    "connection.nearby.aware" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Aware" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "感知" } }
+      }
+    },
+    "connection.nearby.empty.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby is paused." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近发现已暂停。" } }
+      }
+    },
+    "connection.nearby.empty.searching" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Looking for devices…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在搜索设备…" } }
+      }
+    },
+    "connection.nearby.empty.unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby is unavailable." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近发现不可用。" } }
+      }
+    },
+    "connection.nearby.macos_note" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Discovery uses Bluetooth and the local network. Wi‑Fi Aware and NFC phone scanning are not available on macOS." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "通过蓝牙和局域网发现设备；macOS 暂不支持 Wi‑Fi Aware 和手机 NFC 扫描。" } }
+      }
+    },
+    "connection.nearby.open_bluetooth_settings" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Bluetooth settings" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开蓝牙设置" } }
+      }
+    },
+    "connection.nearby.peer.fallback" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby Envoix device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近的 Envoix 设备" } }
+      }
+    },
+    "connection.nearby.peer.invitation_not_ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invitation path not ready" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "邀请路径尚未就绪" } }
+      }
+    },
+    "connection.nearby.peer.open_hint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open an unverified one-time room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开未经验证的一次性房间" } }
+      }
+    },
+    "connection.nearby.peer.tap_to_verify" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Tap to verify" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "轻触验证" } }
+      }
+    },
+    "connection.nearby.peer.waiting_hint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for a secure invitation path" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待安全邀请路径" } }
+      }
+    },
+    "connection.nearby.source.bluetooth" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Bluetooth" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "蓝牙" } }
+      }
+    },
+    "connection.nearby.source.discovered_via" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Discovered via %@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发现路径：%@" } }
+      }
+    },
+    "connection.nearby.source.local_network" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local network" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "局域网" } }
+      }
+    },
+    "connection.nearby.source.unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Discovery path unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发现路径不可用" } }
+      }
+    },
+    "connection.nearby.status.off" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby off" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近已关闭" } }
+      }
+    },
+    "connection.nearby.status.on" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby on" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近已开启" } }
+      }
+    },
+    "connection.nearby.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby devices" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近设备" } }
+      }
+    },
+    "connection.nearby.try_again" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Try again" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "connection.nearby.visibility.app_open" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "On while app is open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "应用打开时开启" } }
+      }
+    },
+    "connection.nearby.visibility.off" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Turn Nearby off" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭附近功能" } }
+      }
+    },
+    "connection.nearby.visibility.ten_minutes" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "On for 10 minutes" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开启 10 分钟" } }
+      }
+    },
+    "connection.nearby.wifi_aware.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pair once using Apple's system controls. Paired Envoix devices are then discovered automatically when both apps are open." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "使用 Apple 系统控件完成一次配对。之后双方打开 Envoix 时，已配对设备会被自动发现。" } }
+      }
+    },
+    "connection.nearby.wifi_aware.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Wi‑Fi Aware" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Wi‑Fi Aware" } }
+      }
+    },
     "connection.room.action.create" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Create room" } },

@@ -169,7 +169,10 @@ has started with its Room invitation card: static labels are catalog-backed,
 while invitation action and availability status come from the tested
 `ConnectionHubPresentationText` projection. Remembered-device counts, pending
 item pluralization, connection states, name editing, and drag-and-drop feedback
-use the same catalog boundary instead of view-local bilingual branches.
+use the same catalog boundary instead of view-local bilingual branches. Nearby
+visibility, availability, invitation trust, and discovery-source combinations
+are also tested projections; `ConnectionHubView` now has no inline bilingual
+values.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

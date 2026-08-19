@@ -123,6 +123,81 @@ final class ConnectionHubPresentationTests: XCTestCase {
         }
     }
 
+    func testNearbyCatalogKeysPreserveEnglishAndChineseLabels() {
+        let labels = [
+            ("connection.identity.visible_as", "Visible as", "显示为"),
+            ("connection.nearby.aware", "Aware", "感知"),
+            (
+                "connection.nearby.macos_note",
+                "Discovery uses Bluetooth and the local network. Wi‑Fi Aware and NFC phone scanning are not available on macOS.",
+                "通过蓝牙和局域网发现设备；macOS 暂不支持 Wi‑Fi Aware 和手机 NFC 扫描。"
+            ),
+            (
+                "connection.nearby.open_bluetooth_settings",
+                "Open Bluetooth settings",
+                "打开蓝牙设置"
+            ),
+            (
+                "connection.nearby.peer.fallback",
+                "Nearby Envoix device",
+                "附近的 Envoix 设备"
+            ),
+            ("connection.nearby.title", "Nearby devices", "附近设备"),
+            ("connection.nearby.try_again", "Try again", "重试"),
+            (
+                "connection.nearby.wifi_aware.detail",
+                "Pair once using Apple's system controls. Paired Envoix devices are then discovered automatically when both apps are open.",
+                "使用 Apple 系统控件完成一次配对。之后双方打开 Envoix 时，已配对设备会被自动发现。"
+            ),
+            ("connection.nearby.wifi_aware.title", "Wi‑Fi Aware", "Wi‑Fi Aware"),
+        ]
+
+        for (key, english, chinese) in labels {
+            XCTAssertEqual(AppText.localized(key, language: "en"), english, key)
+            XCTAssertEqual(AppText.localized(key, language: "zh-Hans"), chinese, key)
+        }
+    }
+
+    func testNearbyPresentationCoversVisibilityAvailabilityAndTrust() {
+        XCTAssertEqual(nearbyStatus(.hidden), "Nearby off")
+        XCTAssertEqual(nearbyStatus(.everyoneTenMinutes), "Nearby on")
+        XCTAssertEqual(nearbyStatus(.whileAppOpen), "Nearby on")
+        XCTAssertEqual(visibilityOption(.hidden), "Turn Nearby off")
+        XCTAssertEqual(visibilityOption(.everyoneTenMinutes), "On for 10 minutes")
+        XCTAssertEqual(visibilityOption(.whileAppOpen), "On while app is open")
+
+        XCTAssertEqual(nearbyEmpty(isActive: false, ready: true), "Nearby is paused.")
+        XCTAssertEqual(nearbyEmpty(isActive: true, ready: false), "Nearby is unavailable.")
+        XCTAssertEqual(nearbyEmpty(isActive: true, ready: true), "Looking for devices…")
+
+        XCTAssertEqual(peerHint(true), "Open an unverified one-time room")
+        XCTAssertEqual(peerHint(false), "Waiting for a secure invitation path")
+        XCTAssertEqual(peerTrust(available: false, requiresTap: false), "Invitation path not ready")
+        XCTAssertEqual(peerTrust(available: true, requiresTap: true), "Tap to verify")
+        XCTAssertEqual(peerTrust(available: true, requiresTap: false), "Unverified")
+    }
+
+    func testDiscoverySourcesAreStableAndLocalized() {
+        XCTAssertEqual(
+            ConnectionHubPresentationText.discoverySources([], language: "en"),
+            "Discovery path unavailable"
+        )
+        XCTAssertEqual(
+            ConnectionHubPresentationText.discoverySources(
+                [.bluetooth, .mdns, .wifiAware],
+                language: "en"
+            ),
+            "Discovered via Bluetooth · Local network · Wi‑Fi Aware"
+        )
+        XCTAssertEqual(
+            ConnectionHubPresentationText.discoverySources(
+                [.bluetooth, .mdns],
+                language: "zh-Hans"
+            ),
+            "发现路径：蓝牙 · 局域网"
+        )
+    }
+
     func testRoomActionsAndQRCodeUseTheSameSquareFootprint() {
         XCTAssertEqual(RoomInvitationLayout.viewportHeight, 240)
         XCTAssertEqual(RoomInvitationLayout.contentSide(availableWidth: 320), 240)
@@ -162,6 +237,40 @@ final class ConnectionHubPresentationTests: XCTestCase {
         ConnectionHubPresentationText.roomStatus(
             isStarting: isStarting,
             hasInvitation: hasInvitation,
+            language: "en"
+        )
+    }
+
+    private func nearbyStatus(_ visibility: NearbyVisibilityMode) -> String {
+        ConnectionHubPresentationText.nearbyStatus(
+            visibility: visibility,
+            language: "en"
+        )
+    }
+
+    private func visibilityOption(_ visibility: NearbyVisibilityMode) -> String {
+        ConnectionHubPresentationText.visibilityOption(visibility, language: "en")
+    }
+
+    private func nearbyEmpty(isActive: Bool, ready: Bool) -> String {
+        ConnectionHubPresentationText.nearbyEmptyState(
+            isActive: isActive,
+            hasReadyProvider: ready,
+            language: "en"
+        )
+    }
+
+    private func peerHint(_ available: Bool) -> String {
+        ConnectionHubPresentationText.peerInvitationHint(
+            isAvailable: available,
+            language: "en"
+        )
+    }
+
+    private func peerTrust(available: Bool, requiresTap: Bool) -> String {
+        ConnectionHubPresentationText.peerTrust(
+            invitationAvailable: available,
+            requiresTapToVerify: requiresTap,
             language: "en"
         )
     }
