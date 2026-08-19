@@ -167,7 +167,9 @@ use explicit-locale catalog formats and native plural variations, leaving the
 one-time Room screen without inline bilingual values. Connection Hub migration
 has started with its Room invitation card: static labels are catalog-backed,
 while invitation action and availability status come from the tested
-`ConnectionHubPresentationText` projection.
+`ConnectionHubPresentationText` projection. Remembered-device counts, pending
+item pluralization, connection states, name editing, and drag-and-drop feedback
+use the same catalog boundary instead of view-local bilingual branches.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

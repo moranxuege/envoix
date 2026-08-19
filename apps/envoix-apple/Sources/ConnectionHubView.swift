@@ -162,7 +162,7 @@ struct ConnectionHubView: View {
             NavigationStack {
                 VStack(alignment: .leading, spacing: 16) {
                     TextField(
-                        AppText.value("Visible name", "显示名称", language: language),
+                        AppText.localized("connection.identity.name_field", language: language),
                         text: $editedDisplayName
                     )
                     #if os(iOS)
@@ -171,9 +171,8 @@ struct ConnectionHubView: View {
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("nearby_display_name_input")
 
-                    Text(AppText.value(
-                        "This name is visible to nearby Envoix users.",
-                        "附近的 Envoix 用户会看到这个名称。",
+                    Text(AppText.localized(
+                        "connection.identity.name_help",
                         language: language
                     ))
                     .font(.footnote)
@@ -183,18 +182,21 @@ struct ConnectionHubView: View {
                 }
                 .padding(20)
                 .background(Theme.bg)
-                .navigationTitle(AppText.value("Device name", "设备名称", language: language))
+                .navigationTitle(AppText.localized(
+                    "connection.identity.name_title",
+                    language: language
+                ))
                 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
                 #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button(AppText.value("Cancel", "取消", language: language)) {
+                        Button(AppText.localized("common.cancel", language: language)) {
                             isNameEditorPresented = false
                         }
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button(AppText.value("Save", "保存", language: language)) {
+                        Button(AppText.localized("common.save", language: language)) {
                             if onRename(editedDisplayName) {
                                 isNameEditorPresented = false
                             }
@@ -232,12 +234,11 @@ struct ConnectionHubView: View {
         if !rememberedRooms.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text(AppText.value("Devices", "设备", language: language))
+                    Text(AppText.localized("connection.devices.title", language: language))
                         .font(.headline.weight(.semibold))
                     Spacer()
-                    Text(AppText.value(
-                        "\(rememberedRooms.count) remembered",
-                        "已记住 \(rememberedRooms.count) 台",
+                    Text(ConnectionHubPresentationText.rememberedDeviceCount(
+                        rememberedRooms.count,
                         language: language
                     ))
                     .font(.caption)
@@ -246,11 +247,8 @@ struct ConnectionHubView: View {
 
                 if pendingSendItemCount > 0 {
                     Label(
-                        AppText.value(
-                            pendingSendItemCount == 1
-                                ? "1 item ready. Choose a device to send it."
-                                : "\(pendingSendItemCount) items ready. Choose a device to send them.",
-                            "已有 \(pendingSendItemCount) 个项目，请选择发送设备。",
+                        ConnectionHubPresentationText.pendingItemCount(
+                            pendingSendItemCount,
                             language: language
                         ),
                         systemImage: "tray.and.arrow.up.fill"
@@ -283,12 +281,14 @@ struct ConnectionHubView: View {
                                         .foregroundStyle(Theme.text)
                                         .lineLimit(1)
                                     Text(hasIncomingOffer
-                                         ? AppText.value(
-                                             "Incoming files",
-                                             "收到文件邀请",
+                                         ? AppText.localized(
+                                             "connection.devices.incoming",
                                              language: language
                                          )
-                                         : rememberedRoomStatusText(status))
+                                         : ConnectionHubPresentationText.rememberedRoomStatus(
+                                             status,
+                                             language: language
+                                         ))
                                     .font(.caption)
                                     .foregroundStyle(
                                         hasIncomingOffer ? Theme.accentStrong : Theme.muted
@@ -297,9 +297,8 @@ struct ConnectionHubView: View {
                                 }
                                 Spacer()
                                 if hasIncomingOffer {
-                                    Text(AppText.value(
-                                        "Open",
-                                        "查看",
+                                    Text(AppText.localized(
+                                        "connection.devices.open_offer",
                                         language: language
                                     ))
                                     .font(.caption2.weight(.bold))
@@ -318,18 +317,20 @@ struct ConnectionHubView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityValue(hasIncomingOffer
-                            ? AppText.value(
-                                "Incoming files waiting for your decision",
-                                "有文件邀请等待处理",
+                            ? AppText.localized(
+                                "connection.devices.incoming_accessibility",
                                 language: language
                             )
-                            : rememberedRoomStatusText(status))
+                            : ConnectionHubPresentationText.rememberedRoomStatus(
+                                status,
+                                language: language
+                            ))
 
                         Button {
                             onSendToRememberedRoom(room.relationshipID)
                         } label: {
                             Label(
-                                AppText.value("Send", "发送", language: language),
+                                AppText.localized("home.send.title", language: language),
                                 systemImage: "paperplane.fill"
                             )
                         }
@@ -372,9 +373,8 @@ struct ConnectionHubView: View {
                 }
 
                 #if os(macOS)
-                Text(AppText.value(
-                    "Choose Send, or drop files and folders directly onto a device.",
-                    "点击“发送”，或把文件和文件夹直接拖到设备上。",
+                Text(AppText.localized(
+                    "connection.devices.drop_hint",
                     language: language
                 ))
                 .font(.caption)
@@ -418,31 +418,13 @@ struct ConnectionHubView: View {
         group.notify(queue: .main) {
             let urls = loaded.compactMap { $0 }
             guard urls.count == providers.count else {
-                ToastCenter.shared.show(AppText.value(
-                    "Envoix could not read every dropped item.",
-                    "Envoix 无法读取全部拖入项目。",
+                ToastCenter.shared.show(AppText.localized(
+                    "connection.devices.drop_failed",
                     language: language
                 ))
                 return
             }
             onSendDroppedItems(relationshipID, urls)
-        }
-    }
-
-    private func rememberedRoomStatusText(
-        _ status: RememberedRoomConnectionStatus
-    ) -> String {
-        switch status {
-        case .offline:
-            return AppText.value("Available when both apps are open", "双方打开应用时可连接", language: language)
-        case .connecting:
-            return AppText.value("Connecting…", "正在连接…", language: language)
-        case .waiting:
-            return AppText.value("Available to the other device…", "正在等待另一台设备…", language: language)
-        case .connected:
-            return AppText.value("Connected", "已连接", language: language)
-        case .needsRepair:
-            return AppText.value("Pair again to reconnect", "请重新配对后连接", language: language)
         }
     }
 

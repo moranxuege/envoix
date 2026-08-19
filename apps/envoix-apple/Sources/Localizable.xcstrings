@@ -232,10 +232,125 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "恢复" } }
       }
     },
+    "common.save" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存" } }
+      }
+    },
     "common.share" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Share" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分享" } }
+      }
+    },
+    "connection.devices.drop_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix could not read every dropped item." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 无法读取全部拖入项目。" } }
+      }
+    },
+    "connection.devices.drop_hint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose Send, or drop files and folders directly onto a device." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "点击“发送”，或把文件和文件夹直接拖到设备上。" } }
+      }
+    },
+    "connection.devices.incoming" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Incoming files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "收到文件邀请" } }
+      }
+    },
+    "connection.devices.incoming_accessibility" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Incoming files waiting for your decision" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "有文件邀请等待处理" } }
+      }
+    },
+    "connection.devices.open_offer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "查看" } }
+      }
+    },
+    "connection.devices.pending_item_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld item ready. Choose a device to send it." } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld items ready. Choose a device to send them." } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "已有 %lld 个项目，请选择发送设备。" } }
+            }
+          }
+        }
+      }
+    },
+    "connection.devices.remembered_count" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld remembered" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已记住 %lld 台" } }
+      }
+    },
+    "connection.devices.status.connected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已连接" } }
+      }
+    },
+    "connection.devices.status.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connecting…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在连接…" } }
+      }
+    },
+    "connection.devices.status.needs_repair" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pair again to reconnect" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请重新配对后连接" } }
+      }
+    },
+    "connection.devices.status.offline" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Available when both apps are open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "双方打开应用时可连接" } }
+      }
+    },
+    "connection.devices.status.waiting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Available to the other device…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待另一台设备…" } }
+      }
+    },
+    "connection.devices.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Devices" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设备" } }
+      }
+    },
+    "connection.identity.name_field" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Visible name" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示名称" } }
+      }
+    },
+    "connection.identity.name_help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This name is visible to nearby Envoix users." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近的 Envoix 用户会看到这个名称。" } }
+      }
+    },
+    "connection.identity.name_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Device name" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设备名称" } }
       }
     },
     "connection.room.action.create" : {
