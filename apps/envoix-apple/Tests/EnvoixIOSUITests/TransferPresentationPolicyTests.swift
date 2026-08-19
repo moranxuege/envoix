@@ -1,8 +1,33 @@
+import Foundation
 import XCTest
 import EnvoixCore
 @testable import Envoix_iOS
 
 final class TransferPresentationPolicyTests: XCTestCase {
+    @MainActor
+    func testNativeObserverHopsBackgroundCallbacksToMainActor() async {
+        let model = TransferViewModel()
+        let observer = model.makeTransferObserver(activityID: nil)
+
+        let callbackUsedMainThread = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                let usedMainThread = Thread.isMainThread
+                observer.onStarted(itemCount: 2, totalBytes: 42)
+                observer.onDiagnostic(message: "background callback")
+                continuation.resume(returning: usedMainThread)
+            }
+        }
+
+        for _ in 0..<100 where model.total != 42 || model.eventLog.isEmpty {
+            await Task.yield()
+        }
+
+        XCTAssertFalse(callbackUsedMainThread)
+        XCTAssertEqual(model.fileName, "2 items")
+        XCTAssertEqual(model.total, 42)
+        XCTAssertEqual(model.eventLog.last, "background callback")
+    }
+
     func testRateTrackerFirstSampleOnlyEstablishesBaseline() {
         var tracker = RateTracker()
         let start = Date(timeIntervalSinceReferenceDate: 1_000)

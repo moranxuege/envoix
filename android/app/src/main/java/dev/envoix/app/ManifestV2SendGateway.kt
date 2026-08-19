@@ -63,6 +63,7 @@ internal data class ManifestV2SessionFailure(
 )
 
 internal interface ManifestV2SessionObserver {
+    /** Native callbacks may arrive on any thread. Implementations must be thread-safe. */
     fun onStarted(
         itemCount: Long,
         totalBytes: Long,

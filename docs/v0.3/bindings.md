@@ -39,6 +39,13 @@ Foreign transport and inbox ports use `shutdown()` for their asynchronous
 protocol operation. Generated object-handle disposal remains `close()`; the two
 names must stay distinct because Kotlin objects implement `AutoCloseable`.
 
+Foreign callbacks are not assumed to run on a UI thread. Apple observers hop
+to `MainActor` before touching observable application state and reject events
+from stale operation identities. Android callback targets are thread-safe and
+may be invoked concurrently; they never mutate Compose state directly. Tests
+exercise both contracts so a generated-binding runtime change cannot silently
+introduce UI-thread violations.
+
 `ManifestV2PlatformDestination` is the typed exception to Rust-owned local
 filesystem output. It freezes public root names before Accept and asynchronously
 commits platform-owned roots before receiver results or delivery proof. The

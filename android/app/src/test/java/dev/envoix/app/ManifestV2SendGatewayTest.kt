@@ -29,6 +29,11 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class ManifestV2SendGatewayTest {
     @Test
@@ -221,6 +226,36 @@ class ManifestV2SendGatewayTest {
         assertEquals(1, native.cancellation.closeCount)
     }
 
+    @Test
+    fun `observer accepts callbacks from concurrent native threads`() {
+        val target = ConcurrentManifestV2SendObserver()
+        val observer = UniFfiManifestV2Observer(target)
+        val ready = CountDownLatch(4)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(4)
+
+        try {
+            val workers =
+                (0 until 4).map { worker ->
+                    executor.submit {
+                        ready.countDown()
+                        assertTrue(start.await(5, TimeUnit.SECONDS))
+                        repeat(25) { index ->
+                            observer.onProgress((worker * 25 + index).toULong(), 100uL)
+                        }
+                    }
+                }
+            assertTrue(ready.await(5, TimeUnit.SECONDS))
+            start.countDown()
+            workers.forEach { it.get(5, TimeUnit.SECONDS) }
+        } finally {
+            executor.shutdownNow()
+        }
+
+        assertEquals(100, target.progressCalls.get())
+        assertEquals(4, target.callbackThreads.size)
+    }
+
     private fun request() =
         RememberedManifestV2SendRequest(
             jobStoreDirectory = "/tmp/jobs",
@@ -362,6 +397,34 @@ private class RecordingManifestV2SendObserver : ManifestV2SessionObserver {
     override fun onDiagnostic(message: String) {
         diagnostics += message
     }
+}
+
+private class ConcurrentManifestV2SendObserver : ManifestV2SessionObserver {
+    val progressCalls = AtomicInteger()
+    val callbackThreads = ConcurrentHashMap.newKeySet<String>()
+
+    override fun onStarted(
+        itemCount: Long,
+        totalBytes: Long,
+    ) = Unit
+
+    override fun onPhase(status: Status) = Unit
+
+    override fun onProgress(
+        transferred: Long,
+        total: Long,
+    ) {
+        callbackThreads += Thread.currentThread().name
+        progressCalls.incrementAndGet()
+    }
+
+    override fun onFailure(failure: ManifestV2SessionFailure) = Unit
+
+    override fun onConnectionPath(path: ConnectionPathKind) = Unit
+
+    override fun onStageTiming(timing: TransferStageTiming) = Unit
+
+    override fun onDiagnostic(message: String) = Unit
 }
 
 private class RecordingManifestV2CredentialVault : ManifestV2RememberedCredentialVault {

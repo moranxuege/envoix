@@ -868,6 +868,20 @@ final class TransferViewModel: ObservableObject {
         nativeSendReleaseActions[activityID, default: []].append(action)
     }
 
+    func makeTransferObserver(
+        activityID: String?,
+        onNativePhase: (@MainActor (FfiManifestV2Phase) -> Void)? = nil,
+        defersDeliveryUntilNativeReturn: Bool = false
+    ) -> Observer {
+        Observer(
+            viewModel: self,
+            operationID: operationID,
+            activityID: activityID,
+            onNativePhase: onNativePhase,
+            defersDeliveryUntilNativeReturn: defersDeliveryUntilNativeReturn
+        )
+    }
+
     func prepareManifestSelection(selectedPaths: [String], sourceAccess: AnyObject? = nil) {
         let paths = normalizedPaths(selectedPaths)
         guard !paths.isEmpty, nativeSendOperationActivityID == nil else { return }
@@ -1997,9 +2011,7 @@ final class TransferViewModel: ObservableObject {
         let expectedOperationID = operationID
         nativeSendOperationActivityID = activityID
         nativeSendOperationJobID = operation.jobID
-        let observer = Observer(
-            viewModel: self,
-            operationID: expectedOperationID,
+        let observer = makeTransferObserver(
             activityID: activityID,
             defersDeliveryUntilNativeReturn: true
         )
@@ -2125,9 +2137,7 @@ final class TransferViewModel: ObservableObject {
         updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for sender", "等待发送方"))
         let expectedOperationID = operationID
         let activityID = transferActivity?.activityId
-        let observer = Observer(
-            viewModel: self,
-            operationID: expectedOperationID,
+        let observer = makeTransferObserver(
             activityID: activityID,
             onNativePhase: { phase in
                 guard phase == .waitingForPeer else { return }
@@ -2299,9 +2309,7 @@ final class TransferViewModel: ObservableObject {
     ) {
         let expectedOperationID = operationID
         let activityID = transferActivity?.activityId
-        let observer = Observer(
-            viewModel: self,
-            operationID: expectedOperationID,
+        let observer = makeTransferObserver(
             activityID: activityID,
             defersDeliveryUntilNativeReturn: true
         )
