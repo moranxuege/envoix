@@ -266,6 +266,11 @@ to invoke platform effects. The Connection Hub is the sole nearby-discovery
 entry point; the retired standalone discovery and mode-first send/receive home
 screens are not part of the v0.3 application topology.
 
+The Room screen receives that same discovery snapshot and explicit nearby
+offer callbacks. Destination inspection and SAF authorization stay in the
+Activity adapter; the Composable receives only the resulting destination
+projection and picker intent callbacks.
+
 The Settings screen renders a settings snapshot and
 `SettingsDiagnosticsUiState`. The Activity applies persistence and launches
 runtime permission requests, while `SettingsDiagnosticsViewModel` owns and

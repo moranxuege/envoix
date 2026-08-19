@@ -50,6 +50,7 @@ import dev.envoix.app.ui.SettingsScreen
 import dev.envoix.app.ui.TransferActivityPresentationEnvironment
 import dev.envoix.app.ui.TransferActivityScreen
 import dev.envoix.app.ui.WorkflowScreen
+import dev.envoix.app.ui.roomOfferDestinationPresentation
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -317,6 +318,31 @@ class MainActivity : ComponentActivity() {
                                     },
                                     onOpenReceived = ::openReceived,
                                     onShareReceived = ::shareReceived,
+                                    discovery = discovery,
+                                    incomingDestination =
+                                        workflow.control.incomingOffer?.let { offer ->
+                                            roomOfferDestinationPresentation(
+                                                context = this@MainActivity,
+                                                settings = settings,
+                                                directoryCount = offer.directoryCount,
+                                                language = settings.language,
+                                            )
+                                        },
+                                    savePickerInitialUri = SettingsStore.savePickerInitialUri(),
+                                    onSaveTreePicked = { uri ->
+                                        SettingsStore.setSaveTree(this@MainActivity, uri)
+                                    },
+                                    resolveRoomDestination = { directoryCount ->
+                                        val currentSettings = SettingsStore.settings.value
+                                        roomOfferDestinationPresentation(
+                                            context = this@MainActivity,
+                                            settings = currentSettings,
+                                            directoryCount = directoryCount,
+                                            language = currentSettings.language,
+                                        )
+                                    },
+                                    onOfferNearbyInvite = discoveryVm::offerInvite,
+                                    onConsumeNearbyOffer = discoveryVm::consumeRendezvousOffer,
                                     onSend = {
                                         c,
                                         b,
@@ -336,7 +362,6 @@ class MainActivity : ComponentActivity() {
                                             rememberedRelationshipId,
                                         )
                                     },
-                                    discoveryViewModel = discoveryVm,
                                 )
                             }
                         }
