@@ -57,8 +57,10 @@ final class ApplicationEngineAdapterTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(try await adapter.apply(observed), .applied)
-        XCTAssertEqual(try await adapter.apply(observed), .ignoredDuplicate)
+        let applied = try await adapter.apply(observed)
+        let duplicate = try await adapter.apply(observed)
+        XCTAssertEqual(applied, .applied)
+        XCTAssertEqual(duplicate, .ignoredDuplicate)
         let snapshot = try await adapter.snapshot()
         XCTAssertEqual(snapshot.lastSequence, 1)
         XCTAssertEqual(snapshot.devices.map(\.id), ["device_binding_fixture"])
@@ -75,7 +77,7 @@ final class ApplicationEngineAdapterTests: XCTestCase {
             _ = try await adapter.apply(gap)
             XCTFail("event gap should fail")
         } catch let error as FfiApplicationError {
-            guard case let .failed(code, _) = error else {
+            guard case let .Failed(code, _) = error else {
                 return XCTFail("unexpected application error: \(error)")
             }
             XCTAssertEqual(code, .eventGap)
