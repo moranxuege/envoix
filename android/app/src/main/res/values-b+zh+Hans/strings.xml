@@ -171,4 +171,19 @@
     <string name="room_nearby_not_visible">附近设备当前不可见</string>
     <string name="room_ready_unverified">已就绪 · 未验证</string>
     <string name="room_waiting">等待中</string>
+
+    <string name="hub_invalid_nearby_name">请输入 1 到 48 个字符的名称。</string>
+    <string name="hub_unsupported_invitation">暂不支持这个邀请。</string>
+    <plurals name="hub_pending_share_count">
+        <item quantity="other">已有 %1$d 个项目就绪。连接设备后即可发送。</item>
+    </plurals>
+    <string name="hub_allow_nearby_access">允许附近设备访问</string>
+    <string name="hub_discovery_paused">附近发现已暂停。</string>
+    <string name="hub_discovery_unavailable">附近发现当前不可用。</string>
+    <string name="hub_discovery_looking">正在寻找附近设备…</string>
+    <string name="hub_room_replacement_title">已有一个房间</string>
+    <string name="hub_room_replacement_explanation">Envoix 同时只能保留一个房间。开始新房间前需要结束当前房间。</string>
+    <string name="hub_end_and_replace">结束并替换</string>
+    <string name="hub_return_to_room">返回房间</string>
+    <string name="hub_keep_current_room">保留当前房间</string>
 </resources>

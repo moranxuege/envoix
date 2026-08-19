@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.NfcPhoneHostingState
 import dev.envoix.app.NfcPhoneReaderState
+import dev.envoix.app.R
 import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveredPeer
 import dev.envoix.app.discovery.DiscoverySource
@@ -85,16 +86,8 @@ internal fun ConnectionHubScreen(
     var wifiAwareDialogOpen by remember { mutableStateOf(false) }
     var nearbyListExpanded by rememberSaveable { mutableStateOf(true) }
     var localError by remember { mutableStateOf<String?>(null) }
-    val invalidDisplayName =
-        appText(
-            "Enter a name between 1 and 48 characters.",
-            "请输入 1 到 48 个字符的名称。",
-        )
-    val unsupportedInvitation =
-        appText(
-            "This invitation is not supported.",
-            "暂不支持这个邀请。",
-        )
+    val invalidDisplayName = appString(R.string.hub_invalid_nearby_name)
+    val unsupportedInvitation = appString(R.string.hub_unsupported_invitation)
 
     Column(
         Modifier
@@ -116,9 +109,10 @@ internal fun ConnectionHubScreen(
             if (pendingShareCount > 0) {
                 item {
                     Text(
-                        appText(
-                            "$pendingShareCount items are ready. Connect to a device to offer them.",
-                            "已有 $pendingShareCount 个项目就绪。连接设备后即可发送。",
+                        appQuantityString(
+                            R.plurals.hub_pending_share_count,
+                            pendingShareCount,
+                            pendingShareCount,
                         ),
                         color = colors.accentStrong,
                         fontSize = 13.sp,
@@ -179,7 +173,7 @@ internal fun ConnectionHubScreen(
                         Button(
                             onClick = onRequestNearbyPermission,
                         ) {
-                            Text(appText("Allow nearby access", "允许附近设备访问"))
+                            Text(appString(R.string.hub_allow_nearby_access))
                         }
                     }
                 }
@@ -194,20 +188,11 @@ internal fun ConnectionHubScreen(
                                 )
                             ) {
                                 NearbyEmptyState.Paused ->
-                                    appText(
-                                        "Nearby discovery is paused.",
-                                        "附近发现已暂停。",
-                                    )
+                                    appString(R.string.hub_discovery_paused)
                                 NearbyEmptyState.Unavailable ->
-                                    appText(
-                                        "Nearby discovery is currently unavailable.",
-                                        "附近发现当前不可用。",
-                                    )
+                                    appString(R.string.hub_discovery_unavailable)
                                 NearbyEmptyState.Looking ->
-                                    appText(
-                                        "Looking for nearby devices…",
-                                        "正在寻找附近设备…",
-                                    )
+                                    appString(R.string.hub_discovery_looking)
                             }
                         Text(
                             message,
@@ -313,7 +298,7 @@ internal fun ConnectionHubScreen(
             verificationOffer = verificationOffer,
             peerName =
                 offer.senderDisplayName
-                    ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
+                    ?: appString(R.string.nearby_envoix_device),
             onAccept = { code ->
                 if (!onAcceptIncomingOffer(offer, code)) {
                     localError = unsupportedInvitation
@@ -336,18 +321,13 @@ internal fun ConnectionHubScreen(
                 } else {
                     onCancelReplacement
                 },
-            title = { Text(appText("Another room is active", "已有一个房间")) },
+            title = { Text(appString(R.string.hub_room_replacement_title)) },
             text = {
-                Text(
-                    appText(
-                        "Envoix can keep one room at a time. End the current room before starting another.",
-                        "Envoix 同时只能保留一个房间。开始新房间前需要结束当前房间。",
-                    ),
-                )
+                Text(appString(R.string.hub_room_replacement_explanation))
             },
             confirmButton = {
                 TextButton(onClick = onConfirmReplacement) {
-                    Text(appText("End and replace", "结束并替换"))
+                    Text(appString(R.string.hub_end_and_replace))
                 }
             },
             dismissButton = {
@@ -361,9 +341,9 @@ internal fun ConnectionHubScreen(
                 ) {
                     Text(
                         if (canReturnToRoom) {
-                            appText("Return to room", "返回房间")
+                            appString(R.string.hub_return_to_room)
                         } else {
-                            appText("Keep current", "保留当前房间")
+                            appString(R.string.hub_keep_current_room)
                         },
                     )
                 }

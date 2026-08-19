@@ -181,4 +181,20 @@
     <string name="room_nearby_not_visible">Nearby device not visible</string>
     <string name="room_ready_unverified">Ready · unverified</string>
     <string name="room_waiting">Waiting</string>
+
+    <string name="hub_invalid_nearby_name">Enter a name between 1 and 48 characters.</string>
+    <string name="hub_unsupported_invitation">This invitation is not supported.</string>
+    <plurals name="hub_pending_share_count">
+        <item quantity="one">%1$d item is ready. Connect to a device to offer it.</item>
+        <item quantity="other">%1$d items are ready. Connect to a device to offer them.</item>
+    </plurals>
+    <string name="hub_allow_nearby_access">Allow nearby access</string>
+    <string name="hub_discovery_paused">Nearby discovery is paused.</string>
+    <string name="hub_discovery_unavailable">Nearby discovery is currently unavailable.</string>
+    <string name="hub_discovery_looking">Looking for nearby devices…</string>
+    <string name="hub_room_replacement_title">Another room is active</string>
+    <string name="hub_room_replacement_explanation">Envoix can keep one room at a time. End the current room before starting another.</string>
+    <string name="hub_end_and_replace">End and replace</string>
+    <string name="hub_return_to_room">Return to room</string>
+    <string name="hub_keep_current_room">Keep current</string>
 </resources>
