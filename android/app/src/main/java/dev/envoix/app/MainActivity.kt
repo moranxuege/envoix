@@ -27,6 +27,8 @@ import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveryMode
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
+import dev.envoix.app.ffi.FfiRoomControlInvite
+import dev.envoix.app.ffi.parseRoomControlInvite
 import dev.envoix.app.ui.AppText
 import dev.envoix.app.ui.ConnectionHubScreen
 import dev.envoix.app.ui.ConnectionWorkflowUiState
@@ -48,7 +50,6 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
     private val vm: TransferViewModel by viewModels()
@@ -699,7 +700,8 @@ internal fun isStrictNativeRoomNfcInvitation(
     fallbackBroker: String,
     fallbackRelay: String,
     nowEpochMs: Long = System.currentTimeMillis(),
-    parseRoomInvite: (String, String, String) -> String = Native::parseRoomControlInvite,
+    parseRoomInvite: (String, String, String) -> FfiRoomControlInvite =
+        ::parseRoomControlInvite,
 ): Boolean {
     if (!NfcInvitationContract.isCanonicalInvitation(value) ||
         !RoomControlInviteFormat.looksLikeRoomInvite(value)
@@ -707,9 +709,9 @@ internal fun isStrictNativeRoomNfcInvitation(
         return false
     }
     return runCatching {
-        val parsed = JSONObject(parseRoomInvite(value, fallbackBroker, fallbackRelay))
-        parsed.optString("error").isBlank() &&
-            parsed.getString("payload") == value &&
-            parsed.getLong("expires_at_epoch_ms") > nowEpochMs
+        val parsed = parseRoomInvite(value, fallbackBroker, fallbackRelay)
+        parsed.payload == value &&
+            parsed.expiresAtEpochMs <= Long.MAX_VALUE.toULong() &&
+            parsed.expiresAtEpochMs.toLong() > nowEpochMs
     }.getOrDefault(false)
 }

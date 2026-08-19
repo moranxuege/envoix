@@ -886,7 +886,7 @@ internal class RememberedRoomConnectionManager private constructor(
 
         private fun schedulePreAuthenticationRetry(
             message: String?,
-            failureCode: String? = null,
+            failureCode: RoomConnectFailureCode? = null,
             retryAfterSeconds: Long? = null,
         ) {
             if (!desired || needsAttention || connected || retryJob?.isActive == true) return
@@ -917,7 +917,7 @@ internal class RememberedRoomConnectionManager private constructor(
             var delayMs =
                 backoffCeiling +
                     Random.nextLong(RETRY_JITTER_MIN_MS, RETRY_JITTER_MAX_MS + 1)
-            if (failureCode == ROOM_EXPIRED_FAILURE_CODE) {
+            if (failureCode == RoomConnectFailureCode.RoomExpired) {
                 delayMs =
                     ROOM_EXPIRED_COOLDOWN_MS +
                     Random.nextLong(RETRY_JITTER_MIN_MS, RETRY_JITTER_MAX_MS + 1)
@@ -1024,7 +1024,6 @@ internal class RememberedRoomConnectionManager private constructor(
         private const val CONNECTOR_WATCHDOG_MS = 75_000L
         private const val RESPONDER_WATCHDOG_MS = 240_000L
         private const val ROOM_EXPIRED_COOLDOWN_MS = 300_000L
-        private const val ROOM_EXPIRED_FAILURE_CODE = "room_expired"
         private const val MAX_RETRY_AFTER_SECONDS = 300L
         private const val BASE_BACKOFF_MS = 30_000L
         private const val MAX_BACKOFF_MS = 300_000L

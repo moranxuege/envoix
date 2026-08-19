@@ -18,10 +18,6 @@ interface ManifestV2Callback {
     ): Boolean
 }
 
-interface RoomControlCallback {
-    fun onEvent(json: String)
-}
-
 interface NearbyInviteCallback {
     fun onEvent(json: String)
 }
@@ -76,30 +72,6 @@ object Native {
         broker: String,
         relay: String,
     ): String
-
-    external fun generateRoomControlInvite(
-        broker: String,
-        relay: String,
-    ): String
-
-    external fun parseRoomControlInvite(
-        input: String,
-        fallbackBroker: String,
-        fallbackRelay: String,
-    ): String
-
-    external fun startRoomControlSession(
-        id: Long,
-        paramsJson: String,
-        callback: RoomControlCallback,
-    )
-
-    external fun sendRoomControlCommand(
-        id: Long,
-        commandJson: String,
-    ): String
-
-    external fun cancelRoomControlSession(id: Long)
 
     external fun startNearbyInviteInbox(
         id: Long,

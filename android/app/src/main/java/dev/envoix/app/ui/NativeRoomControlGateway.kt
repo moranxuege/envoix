@@ -1,58 +1,61 @@
 package dev.envoix.app.ui
 
 import android.content.Context
-import dev.envoix.app.Native
 import dev.envoix.app.OpLog
 import dev.envoix.app.RememberedPeerStore
-import dev.envoix.app.RoomControlCallback
-import kotlinx.coroutines.CompletableDeferred
+import dev.envoix.app.SettingsStore
+import dev.envoix.app.ffi.FfiFailureCode
+import dev.envoix.app.ffi.FfiRememberedRoomConnectException
+import dev.envoix.app.ffi.FfiRememberedRoomConnectMode
+import dev.envoix.app.ffi.FfiRoomCloseReason
+import dev.envoix.app.ffi.FfiRoomConnectMode
+import dev.envoix.app.ffi.FfiRoomControlEventKind
+import dev.envoix.app.ffi.FfiRoomControlException
+import dev.envoix.app.ffi.FfiRoomControlInvite
+import dev.envoix.app.ffi.FfiRoomControlSnapshot
+import dev.envoix.app.ffi.FfiRoomLifetimePolicy
+import dev.envoix.app.ffi.FfiRoomLifetimeState
+import dev.envoix.app.ffi.FfiRoomOfferRejection
+import dev.envoix.app.ffi.FfiRoomTransferOffer
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.receiveAsFlow
-import org.json.JSONArray
-import org.json.JSONObject
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.security.MessageDigest
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 
-internal class NativeRoomControlGateway(
-    context: Context,
-    rememberedRelationshipId: String? = null,
+internal class NativeRoomControlGateway internal constructor(
+    private val identityPath: String,
+    private val persistVerifiedDevice: (String, RoomControlEndpoint, ByteArray) -> Boolean,
+    private val native: RoomControlNativeCore,
+    private val scope: CoroutineScope,
 ) : RoomControlGateway {
+    constructor(
+        context: Context,
+        rememberedRelationshipId: String? = null,
+    ) : this(
+        identityPath = roomControlIdentityPath(context.filesDir, rememberedRelationshipId),
+        persistVerifiedDevice = rememberedDevicePersistence(RememberedPeerStore.get(context)),
+        native = UniFfiRoomControlNativeCore,
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    )
+
     override val available: Boolean = true
-    private val eventChannel = Channel<GeneratedRoomControlEvent>(Channel.UNLIMITED)
-    override val events: Flow<RoomControlEvent> =
-        eventChannel.receiveAsFlow().mapNotNull { generated ->
-            synchronized(sessionLock) {
-                val terminal =
-                    generated.event is RoomControlEvent.Closed ||
-                        generated.event is RoomControlEvent.Failed
-                generated.event.takeIf {
-                    activeSessionId == generated.sessionId ||
-                        (terminal && latestSessionId == generated.sessionId)
-                }
-            }
-        }
+    private val eventChannel = Channel<RoomControlEvent>(Channel.UNLIMITED)
+    override val events: Flow<RoomControlEvent> = eventChannel.receiveAsFlow()
 
-    private val identityPath =
-        roomControlIdentityPath(context.filesDir, rememberedRelationshipId)
-    private val rememberedStore = RememberedPeerStore.get(context)
     private val sessionLock = Any()
-
-    @Volatile
-    private var activeSessionId: Long? = null
-    private var latestSessionId: Long? = null
-
-    @Volatile
-    private var connected = false
-
-    @Volatile
-    private var localCloseReason: RoomCloseReason? = null
+    private var activeGeneration: SessionGeneration? = null
     private var hostSettings: HostSettings? = null
-    private var pendingDeviceVerification: DeviceVerificationPersistence? = null
-    private val pendingOfferResponses = ConcurrentHashMap<String, PendingOfferResponse>()
 
     override suspend fun host(
         displayName: String,
@@ -60,16 +63,25 @@ internal class NativeRoomControlGateway(
         relay: String,
     ) {
         hostSettings = HostSettings(displayName, broker, relay)
-        val invite = parseInviteResponse(Native.generateRoomControlInvite(broker, relay))
+        val invitation = native.makeInvitation(broker, relay).project()
         startSession(
-            mode = "host",
-            input = invite.payload,
-            displayName = displayName,
-            fallbackBroker = broker,
-            fallbackRelay = relay,
-            endpoint = invite.endpoint,
-            initialEvent = RoomControlEvent.Hosting(invite),
-        )
+            endpoint = invitation.endpoint,
+            initialEvent = RoomControlEvent.Hosting(invitation),
+            pendingVerification = null,
+        ) { cancellation ->
+            native.connect(
+                RoomControlConnectionRequest(
+                    input = invitation.payload,
+                    displayName = displayName,
+                    mode = FfiRoomConnectMode.HOST,
+                    verifiedPairing = false,
+                    identityPath = identityPath,
+                    fallbackBroker = broker,
+                    fallbackRelay = relay,
+                ),
+                cancellation,
+            )
+        }
     }
 
     override suspend fun hostVerified(
@@ -78,7 +90,7 @@ internal class NativeRoomControlGateway(
         peerLabel: String,
     ) {
         hostSettings = null
-        startVerifiedSession("host", input, displayName, peerLabel)
+        startVerifiedSession(FfiRoomConnectMode.HOST, input, displayName, peerLabel)
     }
 
     override suspend fun join(
@@ -86,24 +98,26 @@ internal class NativeRoomControlGateway(
         displayName: String,
     ) {
         hostSettings = null
-        val settings = dev.envoix.app.SettingsStore.settings.value
-        val invite =
-            parseInviteResponse(
-                Native.parseRoomControlInvite(
-                    input,
-                    settings.broker,
-                    settings.relay,
-                ),
-            )
+        val settings = SettingsStore.settings.value
+        val invitation = native.parseInvitation(input, settings.broker, settings.relay).project()
         startSession(
-            mode = "join",
-            input = invite.payload,
-            displayName = displayName,
-            fallbackBroker = settings.broker,
-            fallbackRelay = settings.relay,
-            endpoint = invite.endpoint,
-            initialEvent = RoomControlEvent.Joining(invite.endpoint),
-        )
+            endpoint = invitation.endpoint,
+            initialEvent = RoomControlEvent.Joining(invitation.endpoint),
+            pendingVerification = null,
+        ) { cancellation ->
+            native.connect(
+                RoomControlConnectionRequest(
+                    input = invitation.payload,
+                    displayName = displayName,
+                    mode = FfiRoomConnectMode.JOIN,
+                    verifiedPairing = false,
+                    identityPath = identityPath,
+                    fallbackBroker = settings.broker,
+                    fallbackRelay = settings.relay,
+                ),
+                cancellation,
+            )
+        }
     }
 
     override suspend fun joinVerified(
@@ -112,35 +126,44 @@ internal class NativeRoomControlGateway(
         peerLabel: String,
     ) {
         hostSettings = null
-        startVerifiedSession("join", input, displayName, peerLabel)
+        startVerifiedSession(FfiRoomConnectMode.JOIN, input, displayName, peerLabel)
     }
 
     private fun startVerifiedSession(
-        mode: String,
+        mode: FfiRoomConnectMode,
         input: String,
         displayName: String,
         peerLabel: String,
     ) {
-        val settings = dev.envoix.app.SettingsStore.settings.value
-        val invite =
-            parseInviteResponse(
-                Native.parseRoomControlInvite(input, settings.broker, settings.relay),
-            )
+        val settings = SettingsStore.settings.value
+        val invitation = native.parseInvitation(input, settings.broker, settings.relay).project()
         startSession(
-            mode = mode,
-            input = invite.payload,
-            displayName = displayName,
-            fallbackBroker = settings.broker,
-            fallbackRelay = settings.relay,
-            endpoint = invite.endpoint,
+            endpoint = invitation.endpoint,
             initialEvent =
-                if (mode == "host") {
-                    RoomControlEvent.Hosting(invite)
+                if (mode == FfiRoomConnectMode.HOST) {
+                    RoomControlEvent.Hosting(invitation)
                 } else {
-                    RoomControlEvent.Joining(invite.endpoint)
+                    RoomControlEvent.Joining(invitation.endpoint)
                 },
-            pendingVerification = DeviceVerificationPersistence(peerLabel, invite.endpoint),
-        )
+            pendingVerification =
+                DeviceVerificationPersistence(
+                    fallbackLabel = peerLabel,
+                    endpoint = invitation.endpoint,
+                ),
+        ) { cancellation ->
+            native.connect(
+                RoomControlConnectionRequest(
+                    input = invitation.payload,
+                    displayName = displayName,
+                    mode = mode,
+                    verifiedPairing = true,
+                    identityPath = identityPath,
+                    fallbackBroker = settings.broker,
+                    fallbackRelay = settings.relay,
+                ),
+                cancellation,
+            )
+        }
     }
 
     override suspend fun connectRemembered(
@@ -154,461 +177,433 @@ internal class NativeRoomControlGateway(
         require(credentialReference.isNotBlank()) { "Remembered credential reference is missing" }
         require(generation >= 0) { "Remembered generation must be non-negative" }
         hostSettings = null
+        val endpoint = RoomControlEndpoint(broker, relay)
         startSession(
-            mode =
-                when (role) {
-                    RememberedRoomConnectRole.Connector -> "remembered_connector"
-                    RememberedRoomConnectRole.Responder -> "remembered_responder"
-                },
-            input = "",
-            displayName = displayName,
-            fallbackBroker = broker,
-            fallbackRelay = relay,
-            endpoint = RoomControlEndpoint(broker, relay),
+            endpoint = endpoint,
             initialEvent = null,
-            rememberedCredentialReference = credentialReference,
+            pendingVerification = null,
             rememberedGeneration = generation,
-        )
+        ) { cancellation ->
+            native.connectRemembered(
+                RememberedRoomControlConnectionRequest(
+                    credentialReference = credentialReference,
+                    generation = generation.toULong(),
+                    displayName = displayName,
+                    mode =
+                        when (role) {
+                            RememberedRoomConnectRole.Connector ->
+                                FfiRememberedRoomConnectMode.CONNECTOR
+                            RememberedRoomConnectRole.Responder ->
+                                FfiRememberedRoomConnectMode.RESPONDER
+                        },
+                    identityPath = identityPath,
+                    broker = broker,
+                    relay = relay,
+                ),
+                cancellation,
+            )
+        }
     }
 
     override suspend fun refreshInvite() {
         val settings = hostSettings ?: error("Only a hosted room invitation can be refreshed")
-        // host() generates and validates the replacement first; startSession()
-        // swaps generations only after that succeeds.
         host(settings.displayName, settings.broker, settings.relay)
     }
 
     override suspend fun offerTransfer(draft: RoomTransferOfferDraft) {
-        sendCommand(
-            JSONObject()
-                .put("command", "offer")
-                .put("offer_id", draft.id)
-                .put("transfer_invite", draft.transferInvite)
-                .put("root_names", JSONArray(draft.rootNames.take(3)))
-                .put("item_count", draft.itemCount.coerceAtLeast(0))
-                .put("directory_count", draft.directoryCount.coerceAtLeast(0))
-                .put("total_bytes", draft.totalBytes.coerceAtLeast(0L)),
-        )
+        val result =
+            runCommand { session ->
+                session.offerTransfer(
+                    FfiRoomTransferOffer(
+                        offerId = draft.id,
+                        transferInvite = draft.transferInvite,
+                        rootNames = draft.rootNames.take(3),
+                        itemCount = draft.itemCount.coerceAtLeast(0).toUInt(),
+                        directoryCount = draft.directoryCount.coerceAtLeast(0).toUInt(),
+                        totalBytes = draft.totalBytes.coerceAtLeast(0L).toULong(),
+                    ),
+                )
+            }
+        emitLifetime(result)
     }
 
     override suspend fun respondToOffer(
         offerId: String,
         accept: Boolean,
     ) {
-        val pending =
-            PendingOfferResponse(
-                accepted = accept,
-                delivered = CompletableDeferred(),
-            )
-        check(pendingOfferResponses.putIfAbsent(offerId, pending) == null) {
-            "A response for this file offer is already pending"
-        }
-        try {
-            sendCommand(
-                JSONObject()
-                    .put("command", "respond")
-                    .put("offer_id", offerId)
-                    .put("accept", accept),
-            )
-            // JNI queueing is not delivery. Wait until the Rust control task
-            // confirms that the response was actually sent to the peer.
-            // Do not impose a local timeout: the Rust send may still complete
-            // after a stalled stream recovers. Canceling the receiver while a
-            // late Accept can reach the peer would create a one-sided transfer.
-            // Closed/Failed/command_failed are the authoritative barriers.
-            pending.delivered.await()
-        } finally {
-            pendingOfferResponses.remove(offerId, pending)
-        }
+        val result =
+            runCommand { session ->
+                if (accept) {
+                    session.acceptOffer(offerId)
+                } else {
+                    session.rejectOffer(offerId, FfiRoomOfferRejection.DECLINED)
+                }
+            }
+        emitLifetime(result)
     }
 
     override suspend fun updatePolicy(policy: RoomLifetimePolicy) {
-        sendCommand(
-            JSONObject()
-                .put("command", "policy")
-                .put("policy", policy.wireValue()),
-        )
+        val result =
+            runCommand { session ->
+                session.setPolicy(policy.toFfi())
+            }
+        emitLifetime(result)
     }
 
     override suspend fun updateTransferActive(active: Boolean) {
-        sendCommand(
-            JSONObject()
-                .put("command", "transfer_active")
-                .put("active", active),
-        )
+        val result =
+            runCommand { session ->
+                session.setLocalTransferActive(active)
+            }
+        emitLifetime(result)
     }
 
     override suspend fun close(reason: RoomCloseReason) {
-        val localCloseGeneration =
+        val generation = synchronized(sessionLock) { activeGeneration } ?: return
+        val connecting =
             synchronized(sessionLock) {
-                val id = activeSessionId ?: return@synchronized null
-                localCloseReason = reason
-                if (!connected) {
-                    cancelGenerationLocked(id)
-                    id
+                if (activeGeneration !== generation) return@synchronized false
+                generation.localCloseReason = reason
+                if (generation.session == null) {
+                    activeGeneration = null
+                    generation.cancellation.cancel()
+                    eventChannel.trySend(RoomControlEvent.Closed(reason))
+                    true
                 } else {
-                    runCatching {
-                        sendCommandLocked(
-                            expectedSessionId = id,
-                            command =
-                                JSONObject()
-                                    .put("command", "close")
-                                    .put("reason", reason.wireValue()),
-                        )
-                    }.fold(
-                        onSuccess = { null },
-                        onFailure = {
-                            cancelGenerationLocked(id)
-                            id
-                        },
-                    )
+                    false
                 }
             }
-        localCloseGeneration?.let { generation ->
-            emit(generation, RoomControlEvent.Closed(reason))
+        if (connecting) {
+            generation.job?.cancel()
+            return
+        }
+
+        try {
+            val closed =
+                generation.commands.withLock {
+                    val session =
+                        synchronized(sessionLock) {
+                            generation.session.takeIf { activeGeneration === generation }
+                        } ?: return@withLock false
+                    session.close(reason.toFfi())
+                    true
+                }
+            if (closed) terminate(generation, RoomControlEvent.Closed(reason))
+        } catch (cancelled: CancellationException) {
+            clearLocalCloseReason(generation)
+            throw cancelled
+        } catch (error: FfiRoomControlException.Rejected) {
+            clearLocalCloseReason(generation)
+            throw IllegalStateException(error.reason)
+        } catch (error: FfiRoomControlException) {
+            terminate(generation, error.terminalEvent(reason))
+        } catch (error: Throwable) {
+            terminate(
+                generation,
+                RoomControlEvent.Failed(error.message ?: "Room control close failed"),
+            )
         }
     }
 
     private fun startSession(
-        mode: String,
-        input: String,
-        displayName: String,
-        fallbackBroker: String,
-        fallbackRelay: String,
         endpoint: RoomControlEndpoint,
         initialEvent: RoomControlEvent?,
-        rememberedCredentialReference: String? = null,
+        pendingVerification: DeviceVerificationPersistence?,
         rememberedGeneration: Long? = null,
-        pendingVerification: DeviceVerificationPersistence? = null,
-    ) = synchronized(sessionLock) {
-        cancelCurrentLocked()
-        val id = nextSessionId.getAndIncrement()
-        activeSessionId = id
-        latestSessionId = id
-        connected = false
-        localCloseReason = null
-        pendingDeviceVerification = pendingVerification
-        initialEvent?.let { emit(id, it) }
-        val params =
-            JSONObject()
-                .put("mode", mode)
-                .put("input", input)
-                .put("display_name", displayName)
-                .put("identity_path", identityPath)
-                .put("fallback_broker", fallbackBroker)
-                .put("fallback_relay", fallbackRelay)
-                .put("verified_pairing", pendingVerification != null)
-                .apply {
-                    rememberedCredentialReference?.let {
-                        put("remembered_credential_ref", it)
-                    }
-                    rememberedGeneration?.let { put("remembered_generation", it) }
-                }
-        Native.startRoomControlSession(
-            id,
-            params.toString(),
-            object : RoomControlCallback {
-                override fun onEvent(json: String) {
-                    handleNativeEvent(id, endpoint, json)
-                }
-            },
-        )
-    }
-
-    private fun sendCommand(command: JSONObject) =
-        synchronized(sessionLock) {
-            val id = activeSessionId ?: error("Room control is not active")
-            sendCommandLocked(id, command)
-        }
-
-    private fun sendCommandLocked(
-        expectedSessionId: Long,
-        command: JSONObject,
+        connect: suspend (RoomControlNativeCancellation) -> RoomControlNativeSession,
     ) {
-        check(activeSessionId == expectedSessionId) {
-            "Room-control session changed before the command was queued"
-        }
-        val response =
-            JSONObject(
-                Native.sendRoomControlCommand(
-                    expectedSessionId,
-                    command.toString(),
-                ),
+        val generation =
+            SessionGeneration(
+                endpoint = endpoint,
+                cancellation = native.newCancellation(),
+                pendingVerification = pendingVerification,
+                rememberedGeneration = rememberedGeneration,
             )
-        response.optString("error").takeIf(String::isNotBlank)?.let(::error)
-        check(response.optBoolean("queued")) { "Room-control command was not queued" }
+        val job =
+            scope.launch(start = CoroutineStart.LAZY) {
+                runGeneration(generation, connect)
+            }
+        generation.job = job
+        val previous =
+            synchronized(sessionLock) {
+                val current = activeGeneration
+                activeGeneration = generation
+                initialEvent?.let(eventChannel::trySend)
+                current
+            }
+        previous?.let(::stopReplacedGeneration)
+        job.start()
     }
 
-    private fun handleNativeEvent(
-        id: Long,
-        endpoint: RoomControlEndpoint,
-        json: String,
-    ) = synchronized(sessionLock) {
-        // A callback from an old generation may already be in flight while a
-        // replacement starts. Re-check under the same lock used by start and
-        // cancel before touching any state or completing any operation.
-        if (activeSessionId != id) return@synchronized
-        val value =
-            runCatching { JSONObject(json) }
-                .getOrElse {
-                    cancelGenerationLocked(id)
-                    OpLog.add("ROOM_CONTROL state=failed cause=invalid_event")
-                    emit(id, RoomControlEvent.Failed("Room control returned an invalid event"))
-                    return@synchronized
-                }
-        when (value.optString("state")) {
-            "connected" -> {
-                val lifetime =
-                    runCatching { value.roomLifetime() }
-                        .getOrElse {
-                            failInvalidLifetimeLocked(id)
-                            return@synchronized
-                        }
-                val peerName = value.optString("peer_name").takeIf(String::isNotBlank)
-                pendingDeviceVerification?.let { pending ->
-                    val credential = value.byteArray("pairing_credential")
-                    val rememberedPeer =
-                        runCatching {
-                            rememberedStore.prepare(
-                                peerName ?: pending.fallbackLabel,
-                                pending.endpoint.broker,
-                                pending.endpoint.relay,
-                            )
-                        }.getOrNull()
-                    if (credential == null ||
-                        rememberedPeer == null ||
-                        !rememberedStore.create(rememberedPeer, credential, 0L)
-                    ) {
-                        pendingDeviceVerification = null
-                        cancelGenerationLocked(id)
-                        OpLog.add("ROOM_CONTROL state=failed cause=verification_persistence")
-                        emit(
-                            id,
-                            RoomControlEvent.Failed(
-                                "The verified device credential could not be protected on this device",
-                                peerAuthenticated = true,
-                            ),
-                        )
-                        return@synchronized
+    private suspend fun runGeneration(
+        generation: SessionGeneration,
+        connect: suspend (RoomControlNativeCancellation) -> RoomControlNativeSession,
+    ) {
+        var openedSession: RoomControlNativeSession? = null
+        try {
+            val session = connect(generation.cancellation)
+            openedSession = session
+            val snapshot = session.snapshot()
+            val current =
+                synchronized(sessionLock) {
+                    if (activeGeneration !== generation) {
+                        false
+                    } else {
+                        generation.session = session
+                        true
                     }
-                    pendingDeviceVerification = null
                 }
-                connected = true
-                OpLog.add("ROOM_CONTROL state=connected")
-                emit(
-                    id,
-                    RoomControlEvent.Connected(
-                        peerName = peerName,
-                        creator = value.optBoolean("creator"),
-                        endpoint = endpoint,
-                        lifetime = lifetime,
-                        rememberedGeneration =
-                            value
-                                .takeIf { it.has("remembered_generation") && !it.isNull("remembered_generation") }
-                                ?.getLong("remembered_generation"),
+            if (!current) {
+                runCatching { session.close(FfiRoomCloseReason.BACKGROUNDED) }
+                return
+            }
+            if (!persistVerification(generation, snapshot)) {
+                runCatching { session.close(FfiRoomCloseReason.PROTOCOL_FAILURE) }
+                terminate(
+                    generation,
+                    RoomControlEvent.Failed(
+                        message =
+                            "The verified device credential could not be protected on this device",
+                        peerAuthenticated = true,
                     ),
                 )
+                return
             }
-            "incoming_offer" -> {
-                val offer = value.optJSONObject("offer")
-                val parsedOffer = offer?.let { runCatching { it.roomOffer() }.getOrNull() }
-                if (parsedOffer == null) {
-                    cancelGenerationLocked(id)
-                    OpLog.add("ROOM_CONTROL state=failed cause=invalid_offer")
-                    emit(id, RoomControlEvent.Failed("Room control returned an invalid file offer"))
-                } else {
-                    emit(id, RoomControlEvent.IncomingOffer(parsedOffer))
-                }
-            }
-            "offer_accepted" ->
-                emit(id, RoomControlEvent.OfferAccepted(value.getString("offer_id")))
-            "offer_rejected" ->
-                emit(
-                    id,
-                    RoomControlEvent.OfferRejected(
-                        offerId = value.getString("offer_id"),
-                        reason = value.optString("reason").takeIf(String::isNotBlank),
+            val rememberedGeneration = snapshot.rememberedGeneration?.toPlatformLong()
+            if (generation.rememberedGeneration != null &&
+                rememberedGeneration != generation.rememberedGeneration
+            ) {
+                runCatching { session.close(FfiRoomCloseReason.PROTOCOL_FAILURE) }
+                terminate(
+                    generation,
+                    RoomControlEvent.Failed(
+                        message = "Remembered-room authentication returned inconsistent state",
+                        peerAuthenticated = true,
+                        attemptedRememberedGeneration = generation.rememberedGeneration,
                     ),
                 )
-            "offer_response_sent" -> {
-                val offerId = value.optString("offer_id")
-                val accepted = value.optBoolean("accepted")
-                pendingOfferResponses[offerId]
-                    ?.takeIf { it.accepted == accepted }
-                    ?.delivered
-                    ?.complete(Unit)
+                return
             }
-            "command_failed" -> {
-                val command = value.optString("command")
-                val message =
-                    value.optString("message").ifBlank {
-                        "Room-control command failed"
-                    }
-                if (command == "close") {
-                    // A validated close can be rejected while the session
-                    // remains live (for example, activity cleared its idle
-                    // deadline). Release correlation and let the workflow
-                    // retain the room.
-                    localCloseReason = null
-                    emit(
-                        id,
-                        RoomControlEvent.CommandFailed(
-                            command = command,
-                            offerId = null,
-                            message = message,
+            val connected =
+                RoomControlEvent.Connected(
+                    peerName = snapshot.peerName.takeIf(String::isNotBlank),
+                    creator = snapshot.creator,
+                    endpoint = generation.endpoint,
+                    lifetime = snapshot.lifetime.project(),
+                    rememberedGeneration = rememberedGeneration,
+                )
+            if (!emitIfActive(generation, connected)) return
+            OpLog.add("ROOM_CONTROL state=connected")
+            runEventLoop(generation, session)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: FfiRememberedRoomConnectException) {
+            handleRememberedConnectFailure(generation, error)
+        } catch (error: Throwable) {
+            if (isActive(generation)) {
+                val cause = if (openedSession == null) "connect" else "session"
+                OpLog.add("ROOM_CONTROL state=failed cause=$cause")
+                terminate(
+                    generation,
+                    RoomControlEvent.Failed(error.message ?: "Room connection failed"),
+                )
+            }
+        } finally {
+            openedSession?.close()
+            generation.cancellation.close()
+        }
+    }
+
+    private suspend fun runEventLoop(
+        generation: SessionGeneration,
+        session: RoomControlNativeSession,
+    ) {
+        while (scope.isActive && isActive(generation)) {
+            val event =
+                try {
+                    session.nextEvent()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: FfiRoomControlException) {
+                    terminate(generation, error.terminalEvent(localCloseReason(generation)))
+                    return
+                }
+            when (event.kind) {
+                FfiRoomControlEventKind.VERIFICATION_REQUESTED,
+                FfiRoomControlEventKind.VERIFICATION_SUCCEEDED,
+                FfiRoomControlEventKind.VERIFICATION_FAILED,
+                FfiRoomControlEventKind.PONG,
+                -> Unit
+                FfiRoomControlEventKind.INCOMING_OFFER -> {
+                    val offer = requireNotNull(event.offer) { "Room offer is missing" }
+                    emitIfActive(generation, RoomControlEvent.IncomingOffer(offer.project()))
+                }
+                FfiRoomControlEventKind.OFFER_ACCEPTED ->
+                    emitIfActive(generation, RoomControlEvent.OfferAccepted(event.offerId))
+                FfiRoomControlEventKind.OFFER_REJECTED ->
+                    emitIfActive(
+                        generation,
+                        RoomControlEvent.OfferRejected(
+                            offerId = event.offerId,
+                            reason = event.rejection?.wireName(),
                         ),
                     )
-                } else if (localCloseReason != null) {
-                    return@synchronized
-                } else if (command == "respond") {
-                    pendingOfferResponses[value.optString("offer_id")]
-                        ?.delivered
-                        ?.completeExceptionally(IllegalStateException(message))
-                } else {
-                    emit(
-                        id,
-                        RoomControlEvent.CommandFailed(
-                            command = command,
-                            offerId = value.optString("offer_id").takeIf(String::isNotBlank),
-                            message = message,
-                        ),
+                FfiRoomControlEventKind.LIFETIME_CHANGED -> {
+                    val lifetime = requireNotNull(event.lifetime) { "Room lifetime is missing" }
+                    emitIfActive(
+                        generation,
+                        RoomControlEvent.LifetimeChanged(lifetime.project()),
                     )
                 }
-            }
-            "lifetime_changed" -> {
-                val lifetime =
-                    runCatching { value.roomLifetime() }
-                        .getOrElse {
-                            failInvalidLifetimeLocked(id)
-                            return@synchronized
-                        }
-                emit(id, RoomControlEvent.LifetimeChanged(lifetime))
-            }
-            "closed" -> {
-                failPendingResponses("The room closed before the response was delivered")
-                connected = false
-                activeSessionId = null
-                pendingDeviceVerification = null
-                val localReason = localCloseReason
-                localCloseReason = null
-                val nativeReason = value.optString("reason").roomCloseReason()
-                OpLog.add("ROOM_CONTROL state=closed reason=${nativeReason.name}")
-                emit(
-                    id,
-                    RoomControlEvent.Closed(
+                FfiRoomControlEventKind.PEER_CLOSED -> {
+                    val nativeReason =
+                        requireNotNull(event.closeReason) { "Room close reason is missing" }
+                            .project()
+                    val localReason = synchronized(sessionLock) { generation.localCloseReason }
+                    val reason =
                         localReason
                             ?: if (nativeReason == RoomCloseReason.UserEnded) {
                                 RoomCloseReason.PeerEnded
                             } else {
                                 nativeReason
-                            },
-                    ),
-                )
-            }
-            "failed" -> {
-                val message =
-                    value.optString("message").ifBlank { "Room connection failed" }
-                failPendingResponses(
-                    message,
-                )
-                connected = false
-                activeSessionId = null
-                pendingDeviceVerification = null
-                Native.cancelRoomControlSession(id)
-                OpLog.add("ROOM_CONTROL state=failed message=$message")
-                emit(
-                    id,
-                    RoomControlEvent.Failed(
-                        message,
-                        peerAuthenticated = value.optBoolean("peer_authenticated"),
-                        attemptedRememberedGeneration =
-                            value
-                                .takeIf {
-                                    it.has("attempted_remembered_generation") &&
-                                        !it.isNull("attempted_remembered_generation")
-                                }?.getLong("attempted_remembered_generation"),
-                        failureCode =
-                            value.optString("failure_code").takeIf(String::isNotBlank),
-                        retryAfterSeconds =
-                            value
-                                .takeIf {
-                                    it.has("retry_after_seconds") &&
-                                        !it.isNull("retry_after_seconds")
-                                }?.getLong("retry_after_seconds"),
-                    ),
-                )
+                            }
+                    terminate(generation, RoomControlEvent.Closed(reason))
+                    return
+                }
             }
         }
     }
 
-    private fun cancelCurrentLocked() {
-        val id = activeSessionId
-        if (id != null) {
-            cancelGenerationLocked(id)
-        } else {
-            failPendingResponses("The room-control session was canceled")
-            connected = false
-            localCloseReason = null
-            pendingDeviceVerification = null
+    private suspend fun <T> runCommand(operation: suspend (RoomControlNativeSession) -> T): NativeCommandResult<T> {
+        val generation =
+            synchronized(sessionLock) { activeGeneration }
+                ?: error("Room control is not active")
+        return generation.commands.withLock {
+            val session =
+                synchronized(sessionLock) {
+                    generation.session.takeIf { activeGeneration === generation }
+                } ?: error("Room control is not connected")
+            try {
+                NativeCommandResult(generation, operation(session))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: FfiRoomControlException.Rejected) {
+                throw IllegalStateException(error.reason)
+            } catch (error: FfiRoomControlException) {
+                terminate(generation, error.terminalEvent(localCloseReason(generation)))
+                throw IllegalStateException(error.reason())
+            }
         }
     }
 
-    private fun failInvalidLifetimeLocked(id: Long) {
-        cancelGenerationLocked(id)
-        emit(id, RoomControlEvent.Failed("Room control returned an invalid lifetime"))
+    private fun emitLifetime(result: NativeCommandResult<FfiRoomLifetimeState?>) {
+        val lifetime = result.value ?: return
+        emitIfActive(result.generation, RoomControlEvent.LifetimeChanged(lifetime.project()))
     }
 
-    private fun cancelGenerationLocked(id: Long) {
-        if (activeSessionId != id) return
-        failPendingResponses("The room-control session was canceled")
-        activeSessionId = null
-        connected = false
-        localCloseReason = null
-        pendingDeviceVerification = null
-        Native.cancelRoomControlSession(id)
+    private fun persistVerification(
+        generation: SessionGeneration,
+        snapshot: FfiRoomControlSnapshot,
+    ): Boolean {
+        val pending = generation.pendingVerification ?: return true
+        val credential = snapshot.pairingCredential
+        if (credential.isEmpty()) return false
+        val label = snapshot.peerName.takeIf(String::isNotBlank) ?: pending.fallbackLabel
+        return persistVerifiedDevice(label, pending.endpoint, credential)
     }
 
-    private fun emit(
-        sessionId: Long,
-        event: RoomControlEvent,
+    private fun handleRememberedConnectFailure(
+        generation: SessionGeneration,
+        error: FfiRememberedRoomConnectException,
     ) {
-        eventChannel.trySend(GeneratedRoomControlEvent(sessionId, event))
-    }
-
-    private fun failPendingResponses(message: String) {
-        pendingOfferResponses.values.forEach {
-            it.delivered.completeExceptionally(IllegalStateException(message))
+        if (!isActive(generation)) return
+        when (error) {
+            is FfiRememberedRoomConnectException.Failed -> {
+                OpLog.add("ROOM_CONTROL state=failed cause=remembered_connect")
+                terminate(
+                    generation,
+                    RoomControlEvent.Failed(
+                        message = error.reason,
+                        peerAuthenticated = error.peerAuthenticated,
+                        attemptedRememberedGeneration = generation.rememberedGeneration,
+                        failureCode = error.failureCode?.projectRoomConnectFailure(),
+                        retryAfterSeconds = error.retryAfterSeconds?.toPlatformLong(),
+                    ),
+                )
+            }
         }
-        pendingOfferResponses.clear()
     }
 
-    private fun parseInviteResponse(json: String): RoomControlInvite {
-        val value = JSONObject(json)
-        value.optString("error").takeIf(String::isNotBlank)?.let(::error)
-        return RoomControlInvite(
-            code = value.getString("code"),
-            payload = value.getString("payload"),
-            endpoint =
-                RoomControlEndpoint(
-                    broker = value.getString("broker"),
-                    relay =
-                        value
-                            .optString("relay")
-                            .takeUnless { value.isNull("relay") }
-                            .orEmpty(),
-                ),
-            expiresAtEpochMs = value.getLong("expires_at_epoch_ms"),
-        )
+    private fun stopReplacedGeneration(generation: SessionGeneration) {
+        generation.cancellation.cancel()
+        val session = synchronized(sessionLock) { generation.session }
+        if (session == null) {
+            generation.job?.cancel()
+            return
+        }
+        scope.launch {
+            generation.commands.withLock {
+                runCatching { session.close(FfiRoomCloseReason.BACKGROUNDED) }
+            }
+            generation.job?.cancel()
+        }
     }
 
-    private data class PendingOfferResponse(
-        val accepted: Boolean,
-        val delivered: CompletableDeferred<Unit>,
+    private fun terminate(
+        generation: SessionGeneration,
+        event: RoomControlEvent,
+    ): Boolean {
+        val job =
+            synchronized(sessionLock) {
+                if (activeGeneration !== generation) return false
+                activeGeneration = null
+                generation.localCloseReason = null
+                generation.cancellation.cancel()
+                eventChannel.trySend(event)
+                generation.job
+            }
+        job?.cancel()
+        return true
+    }
+
+    private fun emitIfActive(
+        generation: SessionGeneration,
+        event: RoomControlEvent,
+    ): Boolean =
+        synchronized(sessionLock) {
+            if (activeGeneration !== generation) return@synchronized false
+            eventChannel.trySend(event)
+            true
+        }
+
+    private fun isActive(generation: SessionGeneration): Boolean =
+        synchronized(sessionLock) {
+            activeGeneration === generation
+        }
+
+    private fun clearLocalCloseReason(generation: SessionGeneration) {
+        synchronized(sessionLock) {
+            if (activeGeneration === generation) generation.localCloseReason = null
+        }
+    }
+
+    private fun localCloseReason(generation: SessionGeneration): RoomCloseReason? =
+        synchronized(sessionLock) { generation.localCloseReason }
+
+    private data class SessionGeneration(
+        val endpoint: RoomControlEndpoint,
+        val cancellation: RoomControlNativeCancellation,
+        val pendingVerification: DeviceVerificationPersistence?,
+        val commands: Mutex = Mutex(),
+        var session: RoomControlNativeSession? = null,
+        var job: Job? = null,
+        var localCloseReason: RoomCloseReason? = null,
+        val rememberedGeneration: Long? = null,
     )
 
-    private data class GeneratedRoomControlEvent(
-        val sessionId: Long,
-        val event: RoomControlEvent,
+    private data class NativeCommandResult<T>(
+        val generation: SessionGeneration,
+        val value: T,
     )
 
     private data class HostSettings(
@@ -616,10 +611,6 @@ internal class NativeRoomControlGateway(
         val broker: String,
         val relay: String,
     )
-
-    private companion object {
-        val nextSessionId = AtomicLong(1L)
-    }
 }
 
 private data class DeviceVerificationPersistence(
@@ -627,18 +618,13 @@ private data class DeviceVerificationPersistence(
     val endpoint: RoomControlEndpoint,
 )
 
-private fun JSONObject.byteArray(name: String): ByteArray? {
-    val values = optJSONArray(name) ?: return null
-    if (values.length() !in 1..256) return null
-    val output = ByteArray(values.length())
-    for (index in output.indices) {
-        val value = values.opt(index) as? Number ?: return null
-        val byte = value.toInt()
-        if (byte !in 0..255 || value.toLong() != byte.toLong()) return null
-        output[index] = byte.toByte()
+private typealias VerifiedDevicePersistence = (String, RoomControlEndpoint, ByteArray) -> Boolean
+
+private fun rememberedDevicePersistence(store: RememberedPeerStore): VerifiedDevicePersistence =
+    { label, endpoint, credential ->
+        val pending = runCatching { store.prepare(label, endpoint.broker, endpoint.relay) }.getOrNull()
+        pending != null && store.create(pending, credential, 0L)
     }
-    return output
-}
 
 /**
  * Every concurrently live Iroh endpoint needs a distinct transport identity.
@@ -669,74 +655,120 @@ internal fun roomControlIdentityPath(
     return File(filesDirectory, relativePath).absolutePath
 }
 
-private fun JSONObject.roomOffer(): RoomTransferOffer {
-    val names = optJSONArray("root_names") ?: JSONArray()
-    return RoomTransferOffer(
-        id = getString("id"),
-        transferInvite = getString("transfer_invite"),
-        rootNames =
-            (0 until names.length())
-                .mapNotNull { index -> names.optString(index).takeIf(String::isNotBlank) }
-                .take(3),
-        itemCount = optInt("item_count").coerceAtLeast(0),
-        directoryCount = getInt("directory_count").coerceAtLeast(0),
-        totalBytes = optLong("total_bytes").coerceAtLeast(0L),
+private fun FfiRoomControlInvite.project(): RoomControlInvite =
+    RoomControlInvite(
+        code = code,
+        payload = payload,
+        endpoint = RoomControlEndpoint(broker, relay),
+        expiresAtEpochMs = expiresAtEpochMs.toPlatformLong(),
     )
-}
 
-private fun JSONObject.roomLifetime(): RoomLifetimeSnapshot {
-    val lifetime = getJSONObject("lifetime")
-    val revision = lifetime.getLong("revision")
-    require(revision > 0L) { "Room lifetime revision is invalid" }
-    val deadline =
-        if (lifetime.isNull("idle_deadline_epoch_ms")) {
-            null
-        } else {
-            lifetime.getLong("idle_deadline_epoch_ms")
-        }
-    val policy = lifetime.getString("policy").roomPolicy()
-    require(deadline == null || deadline > 0L) { "Room lifetime deadline is invalid" }
-    require(policy != RoomLifetimePolicy.UntilForegroundEnds || deadline == null) {
+private fun FfiRoomTransferOffer.project(): RoomTransferOffer =
+    RoomTransferOffer(
+        id = offerId,
+        transferInvite = transferInvite,
+        rootNames = rootNames.filter(String::isNotBlank).take(3),
+        itemCount = itemCount.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt(),
+        directoryCount = directoryCount.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt(),
+        totalBytes = totalBytes.toPlatformLong(),
+    )
+
+private fun FfiRoomLifetimeState.project(): RoomLifetimeSnapshot {
+    val projectedRevision = revision.toPlatformLong()
+    require(projectedRevision > 0) { "Room lifetime revision is invalid" }
+    val projectedDeadline = idleDeadlineEpochMs?.toPlatformLong()
+    require(projectedDeadline == null || projectedDeadline > 0) {
+        "Room lifetime deadline is invalid"
+    }
+    val projectedPolicy = policy.project()
+    require(projectedPolicy != RoomLifetimePolicy.UntilForegroundEnds || projectedDeadline == null) {
         "Foreground room lifetime cannot have an idle deadline"
     }
     return RoomLifetimeSnapshot(
-        revision = revision,
-        policy = policy,
-        idleDeadlineEpochMs = deadline,
+        revision = projectedRevision,
+        policy = projectedPolicy,
+        idleDeadlineEpochMs = projectedDeadline,
     )
 }
 
-private fun String.roomPolicy(): RoomLifetimePolicy =
+private fun FfiRoomLifetimePolicy.project(): RoomLifetimePolicy =
     when (this) {
-        "idle_15_minutes" -> RoomLifetimePolicy.Idle15Minutes
-        "until_foreground_ends" -> RoomLifetimePolicy.UntilForegroundEnds
-        else -> error("Room lifetime policy is invalid")
+        FfiRoomLifetimePolicy.IDLE15_MINUTES -> RoomLifetimePolicy.Idle15Minutes
+        FfiRoomLifetimePolicy.UNTIL_FOREGROUND_ENDS -> RoomLifetimePolicy.UntilForegroundEnds
     }
 
-private fun RoomLifetimePolicy.wireValue(): String =
+private fun RoomLifetimePolicy.toFfi(): FfiRoomLifetimePolicy =
     when (this) {
-        RoomLifetimePolicy.Idle15Minutes -> "idle_15_minutes"
-        RoomLifetimePolicy.UntilForegroundEnds -> "until_foreground_ends"
+        RoomLifetimePolicy.Idle15Minutes -> FfiRoomLifetimePolicy.IDLE15_MINUTES
+        RoomLifetimePolicy.UntilForegroundEnds -> FfiRoomLifetimePolicy.UNTIL_FOREGROUND_ENDS
     }
 
-private fun String.roomCloseReason(): RoomCloseReason =
+private fun FfiRoomOfferRejection.wireName(): String =
     when (this) {
-        "idle_expired" -> RoomCloseReason.IdleExpired
-        "invitation_expired" -> RoomCloseReason.InvitationExpired
-        "peer_ended" -> RoomCloseReason.PeerEnded
-        "backgrounded" -> RoomCloseReason.Backgrounded
-        "network_lost" -> RoomCloseReason.NetworkLost
-        "protocol_failure" -> RoomCloseReason.ProtocolFailure
-        else -> RoomCloseReason.UserEnded
+        FfiRoomOfferRejection.DECLINED -> "declined"
+        FfiRoomOfferRejection.BUSY -> "busy"
+        FfiRoomOfferRejection.EXPIRED -> "expired"
+        FfiRoomOfferRejection.INVALID -> "invalid"
     }
 
-private fun RoomCloseReason.wireValue(): String =
+private fun FfiRoomCloseReason.project(): RoomCloseReason =
     when (this) {
-        RoomCloseReason.UserEnded -> "user_ended"
-        RoomCloseReason.IdleExpired -> "idle_expired"
-        RoomCloseReason.InvitationExpired -> "invitation_expired"
-        RoomCloseReason.PeerEnded -> "peer_ended"
-        RoomCloseReason.Backgrounded -> "backgrounded"
-        RoomCloseReason.NetworkLost -> "network_lost"
-        RoomCloseReason.ProtocolFailure -> "protocol_failure"
+        FfiRoomCloseReason.USER_ENDED -> RoomCloseReason.UserEnded
+        FfiRoomCloseReason.IDLE_EXPIRED -> RoomCloseReason.IdleExpired
+        FfiRoomCloseReason.INVITATION_EXPIRED -> RoomCloseReason.InvitationExpired
+        FfiRoomCloseReason.PEER_ENDED -> RoomCloseReason.PeerEnded
+        FfiRoomCloseReason.BACKGROUNDED -> RoomCloseReason.Backgrounded
+        FfiRoomCloseReason.NETWORK_LOST -> RoomCloseReason.NetworkLost
+        FfiRoomCloseReason.PROTOCOL_FAILURE -> RoomCloseReason.ProtocolFailure
     }
+
+private fun RoomCloseReason.toFfi(): FfiRoomCloseReason =
+    when (this) {
+        RoomCloseReason.UserEnded -> FfiRoomCloseReason.USER_ENDED
+        RoomCloseReason.IdleExpired -> FfiRoomCloseReason.IDLE_EXPIRED
+        RoomCloseReason.InvitationExpired -> FfiRoomCloseReason.INVITATION_EXPIRED
+        RoomCloseReason.PeerEnded -> FfiRoomCloseReason.PEER_ENDED
+        RoomCloseReason.Backgrounded -> FfiRoomCloseReason.BACKGROUNDED
+        RoomCloseReason.NetworkLost -> FfiRoomCloseReason.NETWORK_LOST
+        RoomCloseReason.ProtocolFailure -> FfiRoomCloseReason.PROTOCOL_FAILURE
+    }
+
+private fun FfiRoomControlException.reason(): String =
+    when (this) {
+        is FfiRoomControlException.Rejected -> reason
+        is FfiRoomControlException.NetworkLost -> reason
+        is FfiRoomControlException.Canceled -> reason
+        is FfiRoomControlException.Failed -> reason
+    }
+
+private fun FfiRoomControlException.terminalEvent(localCloseReason: RoomCloseReason?): RoomControlEvent =
+    when (this) {
+        is FfiRoomControlException.NetworkLost ->
+            RoomControlEvent.Closed(localCloseReason ?: RoomCloseReason.NetworkLost)
+        is FfiRoomControlException.Canceled ->
+            localCloseReason?.let(RoomControlEvent::Closed)
+                ?: RoomControlEvent.Failed(reason)
+        is FfiRoomControlException.Rejected -> RoomControlEvent.Failed(reason)
+        is FfiRoomControlException.Failed -> RoomControlEvent.Failed(reason)
+    }
+
+private fun FfiFailureCode.projectRoomConnectFailure(): RoomConnectFailureCode? =
+    when (this) {
+        FfiFailureCode.ROOM_NOT_FOUND -> RoomConnectFailureCode.RoomNotFound
+        FfiFailureCode.ROOM_EXPIRED -> RoomConnectFailureCode.RoomExpired
+        FfiFailureCode.ROOM_FULL -> RoomConnectFailureCode.RoomFull
+        FfiFailureCode.ROOM_RATE_LIMITED -> RoomConnectFailureCode.RoomRateLimited
+        FfiFailureCode.ROOM_UNDER_ATTACK -> RoomConnectFailureCode.RoomUnderAttack
+        FfiFailureCode.ENDPOINT_RATE_LIMITED -> RoomConnectFailureCode.EndpointRateLimited
+        FfiFailureCode.IP_RATE_LIMITED -> RoomConnectFailureCode.IpRateLimited
+        FfiFailureCode.SERVER_BUSY -> RoomConnectFailureCode.ServerBusy
+        FfiFailureCode.MALFORMED_JOIN -> RoomConnectFailureCode.MalformedJoin
+        FfiFailureCode.UNSUPPORTED_RENDEZVOUS_VERSION ->
+            RoomConnectFailureCode.UnsupportedVersion
+        else -> null
+    }
+
+private fun ULong.toPlatformLong(): Long {
+    require(this <= Long.MAX_VALUE.toULong()) { "Native unsigned value exceeds platform range" }
+    return toLong()
+}

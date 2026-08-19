@@ -5,7 +5,7 @@ import android.nfc.NdefRecord
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.envoix.app.ffi.FfiInviteRole
 import dev.envoix.app.ffi.makePairingInvite
-import org.json.JSONObject
+import dev.envoix.app.ffi.parseRoomControlInvite
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -73,18 +73,10 @@ class NfcInvitationNdefInstrumentedTest {
         val room =
             "envoix://room/123456-a1b2-c3d4" +
                 "?broker=test&relay=https%3A%2F%2Frelay.test&expires=9999999999"
-        val parsedRoom =
-            JSONObject(
-                Native.parseRoomControlInvite(
-                    room,
-                    "fallback",
-                    "",
-                ),
-            )
+        val parsedRoom = parseRoomControlInvite(room, "fallback", "")
         val parsedAsTransfer = InviteCodec.parseForRouting(room)
 
-        assertFalse(parsedRoom.toString(), parsedRoom.has("error"))
-        assertEquals(room, parsedRoom.getString("payload"))
+        assertEquals(room, parsedRoom.payload)
         assertNull(parsedAsTransfer)
     }
 

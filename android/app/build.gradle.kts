@@ -232,8 +232,16 @@ tasks.configureEach {
     }
 }
 
+tasks.matching { it.name == "runKtlintCheckOverMainSourceSet" }.configureEach {
+    mustRunAfter(generateEnvoixUniFfiKotlin)
+}
+
 ktlint {
     android = true
+    filter {
+        exclude("**/generated/**")
+        exclude("**/envoix_ffi.kt")
+    }
 }
 
 dependencies {
