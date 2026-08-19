@@ -181,6 +181,10 @@ Incoming inventory, completed-item actions, logs, and performance labels use
 the same boundary. Shared root/file/folder pluralization lives in
 `TransferContentText`, leaving `TransferStatusView` without inline bilingual
 values and avoiding a Room-specific dependency for transfer content counts.
+Shared send/receive pairing controls use one catalog contract, while
+direction-specific guidance, scan targets, QR accessibility labels, desktop
+instructions, and join-other-role titles come from tested
+`TransferPairingText` projections without merging the platform layouts.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

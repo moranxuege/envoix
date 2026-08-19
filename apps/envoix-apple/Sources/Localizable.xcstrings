@@ -202,6 +202,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制" } }
       }
     },
+    "common.copy_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制失败" } }
+      }
+    },
     "common.decline" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Decline" } },
@@ -214,6 +220,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "完成" } }
       }
     },
+    "common.new" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "New" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "新建" } }
+      }
+    },
     "common.open" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Open" } },
@@ -224,6 +236,12 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Pause" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂停" } }
+      }
+    },
+    "common.paste" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paste" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "粘贴" } }
       }
     },
     "common.receive" : {
@@ -1407,6 +1425,198 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for the other device" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待另一台设备" } }
+      }
+    },
+    "transfer.pairing.action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing action" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对操作" } }
+      }
+    },
+    "transfer.pairing.clear_show_qr" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Clear and show my QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "清除并显示我的二维码" } }
+      }
+    },
+    "transfer.pairing.clipboard_empty" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Clipboard is empty" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "剪贴板为空" } }
+      }
+    },
+    "transfer.pairing.copy_link" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy invite link" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制邀请链接" } }
+      }
+    },
+    "transfer.pairing.device_label" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Device label" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设备名称" } }
+      }
+    },
+    "transfer.pairing.enter_complete_link" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Or enter a complete InviteV2 link" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "或输入完整 InviteV2 链接" } }
+      }
+    },
+    "transfer.pairing.forget_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Forget device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "忘记设备" } }
+      }
+    },
+    "transfer.pairing.input_pasted" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invitation pasted" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "邀请已粘贴" } }
+      }
+    },
+    "transfer.pairing.input_scanned" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "QR scanned" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "二维码已扫描" } }
+      }
+    },
+    "transfer.pairing.invalid_link" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This is not a valid complete Envoix InviteV2 link." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这不是有效的完整 Envoix InviteV2 链接。" } }
+      }
+    },
+    "transfer.pairing.link_copied" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Invite link copied" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "邀请链接已复制" } }
+      }
+    },
+    "transfer.pairing.link_ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "InviteV2 link ready" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "InviteV2 链接已就绪" } }
+      }
+    },
+    "transfer.pairing.open_scanner" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open scanner" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开扫描器" } }
+      }
+    },
+    "transfer.pairing.qr_placeholder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "QR code" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "二维码" } }
+      }
+    },
+    "transfer.pairing.receive.desktop_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The sender can scan this QR or paste the complete InviteV2 link." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送方可以扫描此二维码或粘贴完整 InviteV2 链接。" } }
+      }
+    },
+    "transfer.pairing.receive.guidance" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Show your receive QR, or scan the other device's send QR." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可以显示本机接收码，也可以扫描另一台设备的发送码。" } }
+      }
+    },
+    "transfer.pairing.receive.join_sender" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Join sender instead" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "改为加入发送端" } }
+      }
+    },
+    "transfer.pairing.receive.qr_accessibility" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive QR code" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收二维码" } }
+      }
+    },
+    "transfer.pairing.receive.scan_action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Scan sender QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "扫描发送端二维码" } }
+      }
+    },
+    "transfer.pairing.receive.scan_prompt" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Scan a send QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "扫描发送码" } }
+      }
+    },
+    "transfer.pairing.remember_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Remember this device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "记住此设备" } }
+      }
+    },
+    "transfer.pairing.remembered_devices" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Remembered devices" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已记住的设备" } }
+      }
+    },
+    "transfer.pairing.scan_qr" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Scan a QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "扫描二维码" } }
+      }
+    },
+    "transfer.pairing.send.desktop_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiver can scan this QR or paste the complete InviteV2 link. You can also scan a receiver QR below." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收端可以扫描此二维码或粘贴完整 InviteV2 链接；你也可以在下方扫描接收端二维码。" } }
+      }
+    },
+    "transfer.pairing.send.guidance" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Show your send QR, or scan the other device's receive QR." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可以显示本机发送码，也可以扫描另一台设备的接收码。" } }
+      }
+    },
+    "transfer.pairing.send.join_receiver" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Join receiver instead" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "改为加入接收端" } }
+      }
+    },
+    "transfer.pairing.send.join_receiver_helper" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter the receiver's complete InviteV2 link, or leave empty to use your QR above." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "输入接收端的完整 InviteV2 链接，或留空使用上方二维码。" } }
+      }
+    },
+    "transfer.pairing.send.qr_accessibility" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send QR code" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送二维码" } }
+      }
+    },
+    "transfer.pairing.send.scan_action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Scan QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "扫码" } }
+      }
+    },
+    "transfer.pairing.send.scan_prompt" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Scan a receive QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "扫描接收码" } }
+      }
+    },
+    "transfer.pairing.share_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Share this QR or invite link" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分享二维码或邀请链接" } }
+      }
+    },
+    "transfer.pairing.show_qr" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Show my QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示我的二维码" } }
       }
     },
     "transfer.path.changed" : {

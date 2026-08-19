@@ -214,7 +214,10 @@ struct ReceiveView: View {
     #if os(macOS)
     private var rememberedPeerSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value("Remembered devices", "已记住的设备", language: uiLanguage))
+            Text(AppText.localized(
+                "transfer.pairing.remembered_devices",
+                language: uiLanguage
+            ))
                 .font(.headline.weight(.semibold))
             ForEach(rememberedPeers) { peer in
                 HStack {
@@ -236,9 +239,8 @@ struct ReceiveView: View {
                         Image(systemName: "trash")
                     }
                     .disabled(viewModel.isBusy)
-                    .accessibilityLabel(AppText.value(
-                        "Forget device",
-                        "忘记设备",
+                    .accessibilityLabel(AppText.localized(
+                        "transfer.pairing.forget_device",
                         language: uiLanguage
                     ))
                 }
@@ -251,13 +253,13 @@ struct ReceiveView: View {
     private var rememberConsentSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle(
-                AppText.value("Remember this device", "记住此设备", language: uiLanguage),
+                AppText.localized("transfer.pairing.remember_device", language: uiLanguage),
                 isOn: $rememberAfterPairing
             )
             .disabled(viewModel.isBusy)
             if rememberAfterPairing {
                 TextField(
-                    AppText.value("Device label", "设备名称", language: uiLanguage),
+                    AppText.localized("transfer.pairing.device_label", language: uiLanguage),
                     text: $rememberLabel
                 )
                 .textFieldStyle(.roundedBorder)
@@ -515,11 +517,7 @@ struct ReceiveView: View {
     private var mobileRoomSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             PairingPanelSelector(selection: $pairingPanel, disabled: viewModel.isBusy)
-            Text(AppText.value(
-                "Show your receive QR, or scan the other device's send QR.",
-                "可以显示本机接收码，也可以扫描另一台设备的发送码。",
-                language: uiLanguage
-            ))
+            Text(TransferPairingText.guidance(direction: .receive, language: uiLanguage))
             .font(.footnote)
             .foregroundStyle(Theme.muted)
             .fixedSize(horizontal: false, vertical: true)
@@ -531,13 +529,22 @@ struct ReceiveView: View {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: 48, weight: .medium))
                             .foregroundStyle(Theme.accentStrong)
-                        Text(AppText.value("Scan a send QR", "扫描发送码", language: uiLanguage))
+                        Text(TransferPairingText.scanPrompt(
+                            direction: .receive,
+                            language: uiLanguage
+                        ))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
                         Button {
                             isQRScannerPresented = true
                         } label: {
-                            Label(AppText.value("Open scanner", "打开扫描器", language: uiLanguage), systemImage: "camera")
+                            Label(
+                                AppText.localized(
+                                    "transfer.pairing.open_scanner",
+                                    language: uiLanguage
+                                ),
+                                systemImage: "camera"
+                            )
                                 .frame(maxWidth: .infinity, minHeight: 48)
                         }
                         .buttonStyle(.borderedProminent)
@@ -550,10 +557,16 @@ struct ReceiveView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 42))
                             .foregroundStyle(Theme.success)
-                        Text(AppText.value("InviteV2 link ready", "InviteV2 链接已就绪", language: uiLanguage))
+                        Text(AppText.localized(
+                            "transfer.pairing.link_ready",
+                            language: uiLanguage
+                        ))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
-                        Button(AppText.value("Clear and show my QR", "清除并显示我的二维码", language: uiLanguage)) {
+                        Button(AppText.localized(
+                            "transfer.pairing.clear_show_qr",
+                            language: uiLanguage
+                        )) {
                             joiningInvite = ""
                         }
                         .buttonStyle(.bordered)
@@ -563,19 +576,28 @@ struct ReceiveView: View {
                     VStack(spacing: 12) {
                         if let image = roomQRCodeImage {
                             QRCard(image: image, size: 184)
-                                .accessibilityLabel(AppText.value("Receive QR code", "接收二维码", language: uiLanguage))
+                                .accessibilityLabel(TransferPairingText.qrAccessibility(
+                                    direction: .receive,
+                                    language: uiLanguage
+                                ))
                         } else {
                             qrPlaceholder
                         }
                         Button {
                             copyWithToast(
                                 pairingInvite?.payload ?? "",
-                                AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                                AppText.localized(
+                                    "transfer.pairing.link_copied",
+                                    language: uiLanguage
+                                ),
                                 language: uiLanguage
                             )
                         } label: {
                             Label(
-                                AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage),
+                                AppText.localized(
+                                    "transfer.pairing.copy_link",
+                                    language: uiLanguage
+                                ),
                                 systemImage: "doc.on.doc"
                             )
                             .frame(maxWidth: .infinity, minHeight: 40)
@@ -591,7 +613,10 @@ struct ReceiveView: View {
             RoomCodeField(
                 code: joiningInviteBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Or enter a complete InviteV2 link", "或输入完整 InviteV2 链接", language: uiLanguage),
+                title: AppText.localized(
+                    "transfer.pairing.enter_complete_link",
+                    language: uiLanguage
+                ),
                 placeholder: "envoix://invite/v2/…",
                 pasteAction: pastePairingInput,
                 helper: "",
@@ -605,10 +630,16 @@ struct ReceiveView: View {
     private var desktopRoomSection: some View {
         VStack(alignment: .center, spacing: 16) {
             VStack(spacing: 4) {
-                Text(AppText.value("Share this QR or invite link", "分享二维码或邀请链接", language: uiLanguage))
+                Text(AppText.localized(
+                    "transfer.pairing.share_title",
+                    language: uiLanguage
+                ))
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value("The sender can scan this QR or paste the complete InviteV2 link.", "发送方可以扫描此二维码或粘贴完整 InviteV2 链接。", language: uiLanguage))
+                Text(TransferPairingText.desktopDetail(
+                    direction: .receive,
+                    language: uiLanguage
+                ))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
                     .multilineTextAlignment(.center)
@@ -616,7 +647,10 @@ struct ReceiveView: View {
 
             if let image = roomQRCodeImage {
                 QRCard(image: image, size: 208)
-                    .accessibilityLabel(AppText.value("Receive QR code", "接收二维码", language: uiLanguage))
+                    .accessibilityLabel(TransferPairingText.qrAccessibility(
+                        direction: .receive,
+                        language: uiLanguage
+                    ))
             } else {
                 qrPlaceholder
             }
@@ -625,11 +659,17 @@ struct ReceiveView: View {
                 Button {
                     copyWithToast(
                         pairingInvite?.payload ?? "",
-                        AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                        AppText.localized(
+                            "transfer.pairing.link_copied",
+                            language: uiLanguage
+                        ),
                         language: uiLanguage
                     )
                 } label: {
-                    Label(AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage), systemImage: "doc.on.doc")
+                    Label(
+                        AppText.localized("transfer.pairing.copy_link", language: uiLanguage),
+                        systemImage: "doc.on.doc"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -639,7 +679,10 @@ struct ReceiveView: View {
                     joiningInvite = ""
                     refreshPairingInvite()
                 } label: {
-                    Label(AppText.value("New", "新建", language: uiLanguage), systemImage: "arrow.clockwise")
+                    Label(
+                        AppText.localized("common.new", language: uiLanguage),
+                        systemImage: "arrow.clockwise"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -650,7 +693,10 @@ struct ReceiveView: View {
             RoomCodeField(
                 code: joiningInviteBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Join sender instead", "改为加入发送端", language: uiLanguage),
+                title: TransferPairingText.joinOtherTitle(
+                    direction: .receive,
+                    language: uiLanguage
+                ),
                 placeholder: "envoix://invite/v2/…",
                 helper: "",
                 accessibilityIdentifier: "receive_invite_input"
@@ -660,7 +706,10 @@ struct ReceiveView: View {
                 Button {
                     pastePairingInput()
                 } label: {
-                    Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
+                    Label(
+                        AppText.localized("common.paste", language: uiLanguage),
+                        systemImage: "doc.on.clipboard"
+                    )
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
@@ -670,7 +719,13 @@ struct ReceiveView: View {
                 Button {
                     isQRScannerPresented = true
                 } label: {
-                    Label(AppText.value("Scan sender QR", "扫描发送端二维码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                    Label(
+                        TransferPairingText.scanAction(
+                            direction: .receive,
+                            language: uiLanguage
+                        ),
+                        systemImage: "qrcode.viewfinder"
+                    )
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
@@ -695,7 +750,7 @@ struct ReceiveView: View {
             Image(systemName: "qrcode")
                 .font(.system(size: 72, weight: .medium))
                 .foregroundStyle(Theme.muted)
-            Text(AppText.value("QR code", "二维码", language: uiLanguage))
+            Text(AppText.localized("transfer.pairing.qr_placeholder", language: uiLanguage))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
         }
@@ -824,7 +879,10 @@ struct ReceiveView: View {
 
     private func pastePairingInput() {
         guard let value = pasteboardString()?.trimmed, !value.isEmpty else {
-            ToastCenter.shared.show(AppText.value("Clipboard is empty", "剪贴板为空", language: uiLanguage))
+            ToastCenter.shared.show(AppText.localized(
+                "transfer.pairing.clipboard_empty",
+                language: uiLanguage
+            ))
             return
         }
         _ = applyPairingInput(value, source: .paste)
@@ -840,20 +898,17 @@ struct ReceiveView: View {
             _ = try parsePairingInviteForRole(input: input, localRole: .receive)
             joiningInvite = input
             mode = .invite
-            let message = source == .scan
-                ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
-                : AppText.value("Invitation pasted", "邀请已粘贴", language: uiLanguage)
+            let message = TransferPairingText.inputAccepted(
+                scanned: source == .scan,
+                language: uiLanguage
+            )
             ToastCenter.shared.show(message)
             return nil
         } catch {
             let message = if error is RuntimeSettingsError {
                 error.localizedDescription
             } else {
-                AppText.value(
-                    "This is not a valid complete Envoix InviteV2 link.",
-                    "这不是有效的完整 Envoix InviteV2 链接。",
-                    language: uiLanguage
-                )
+                AppText.localized("transfer.pairing.invalid_link", language: uiLanguage)
             }
             ToastCenter.shared.show(message)
             return message

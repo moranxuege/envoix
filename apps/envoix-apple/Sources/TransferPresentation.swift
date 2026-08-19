@@ -190,6 +190,89 @@ enum TransferContentText {
     }
 }
 
+enum TransferPairingText {
+    static func guidance(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.guidance"
+                : "transfer.pairing.receive.guidance",
+            language: language
+        )
+    }
+
+    static func scanPrompt(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.scan_prompt"
+                : "transfer.pairing.receive.scan_prompt",
+            language: language
+        )
+    }
+
+    static func scanAction(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.scan_action"
+                : "transfer.pairing.receive.scan_action",
+            language: language
+        )
+    }
+
+    static func qrAccessibility(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.qr_accessibility"
+                : "transfer.pairing.receive.qr_accessibility",
+            language: language
+        )
+    }
+
+    static func desktopDetail(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.desktop_detail"
+                : "transfer.pairing.receive.desktop_detail",
+            language: language
+        )
+    }
+
+    static func joinOtherTitle(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.join_receiver"
+                : "transfer.pairing.receive.join_sender",
+            language: language
+        )
+    }
+
+    static func inputAccepted(scanned: Bool, language: String) -> String {
+        AppText.localized(
+            scanned
+                ? "transfer.pairing.input_scanned"
+                : "transfer.pairing.input_pasted",
+            language: language
+        )
+    }
+}
+
 struct TransferFailurePresentationCopy: Equatable {
     let title: String
     let detail: String

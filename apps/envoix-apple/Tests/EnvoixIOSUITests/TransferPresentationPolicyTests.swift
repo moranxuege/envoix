@@ -430,6 +430,107 @@ final class TransferPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(TransferStatusText.savedAs("报告.pdf", language: "zh-Hans"), "已保存为 报告.pdf")
     }
 
+    func testTransferPairingCatalogProvidesSharedControls() {
+        let cases: [(String, String, String)] = [
+            ("common.copy_failed", "Copy failed", "复制失败"),
+            ("common.new", "New", "新建"),
+            ("common.paste", "Paste", "粘贴"),
+            ("transfer.pairing.action", "Pairing action", "配对操作"),
+            ("transfer.pairing.clear_show_qr", "Clear and show my QR", "清除并显示我的二维码"),
+            ("transfer.pairing.clipboard_empty", "Clipboard is empty", "剪贴板为空"),
+            ("transfer.pairing.copy_link", "Copy invite link", "复制邀请链接"),
+            ("transfer.pairing.device_label", "Device label", "设备名称"),
+            (
+                "transfer.pairing.enter_complete_link",
+                "Or enter a complete InviteV2 link",
+                "或输入完整 InviteV2 链接"
+            ),
+            ("transfer.pairing.forget_device", "Forget device", "忘记设备"),
+            (
+                "transfer.pairing.invalid_link",
+                "This is not a valid complete Envoix InviteV2 link.",
+                "这不是有效的完整 Envoix InviteV2 链接。"
+            ),
+            ("transfer.pairing.link_copied", "Invite link copied", "邀请链接已复制"),
+            ("transfer.pairing.link_ready", "InviteV2 link ready", "InviteV2 链接已就绪"),
+            ("transfer.pairing.open_scanner", "Open scanner", "打开扫描器"),
+            ("transfer.pairing.qr_placeholder", "QR code", "二维码"),
+            ("transfer.pairing.remember_device", "Remember this device", "记住此设备"),
+            ("transfer.pairing.remembered_devices", "Remembered devices", "已记住的设备"),
+            ("transfer.pairing.scan_qr", "Scan a QR", "扫描二维码"),
+            (
+                "transfer.pairing.send.join_receiver_helper",
+                "Enter the receiver's complete InviteV2 link, or leave empty to use your QR above.",
+                "输入接收端的完整 InviteV2 链接，或留空使用上方二维码。"
+            ),
+            ("transfer.pairing.share_title", "Share this QR or invite link", "分享二维码或邀请链接"),
+            ("transfer.pairing.show_qr", "Show my QR", "显示我的二维码"),
+        ]
+        for (key, english, chinese) in cases {
+            XCTAssertEqual(AppText.localized(key, language: "en"), english, key)
+            XCTAssertEqual(AppText.localized(key, language: "zh-Hans"), chinese, key)
+        }
+    }
+
+    func testTransferPairingRoleProjectionKeepsSendAndReceiveTerminologyDistinct() {
+        XCTAssertEqual(
+            TransferPairingText.guidance(direction: .send, language: "en"),
+            "Show your send QR, or scan the other device's receive QR."
+        )
+        XCTAssertEqual(
+            TransferPairingText.guidance(direction: .receive, language: "zh-Hans"),
+            "可以显示本机接收码，也可以扫描另一台设备的发送码。"
+        )
+        XCTAssertEqual(
+            TransferPairingText.scanPrompt(direction: .send, language: "en"),
+            "Scan a receive QR"
+        )
+        XCTAssertEqual(
+            TransferPairingText.scanPrompt(direction: .receive, language: "en"),
+            "Scan a send QR"
+        )
+        XCTAssertEqual(
+            TransferPairingText.scanAction(direction: .send, language: "zh-Hans"),
+            "扫码"
+        )
+        XCTAssertEqual(
+            TransferPairingText.scanAction(direction: .receive, language: "en"),
+            "Scan sender QR"
+        )
+        XCTAssertEqual(
+            TransferPairingText.qrAccessibility(direction: .send, language: "zh-Hans"),
+            "发送二维码"
+        )
+        XCTAssertEqual(
+            TransferPairingText.qrAccessibility(direction: .receive, language: "en"),
+            "Receive QR code"
+        )
+        XCTAssertEqual(
+            TransferPairingText.desktopDetail(direction: .send, language: "en"),
+            "The receiver can scan this QR or paste the complete InviteV2 link. You can also scan a receiver QR below."
+        )
+        XCTAssertEqual(
+            TransferPairingText.desktopDetail(direction: .receive, language: "zh-Hans"),
+            "发送方可以扫描此二维码或粘贴完整 InviteV2 链接。"
+        )
+        XCTAssertEqual(
+            TransferPairingText.joinOtherTitle(direction: .send, language: "en"),
+            "Join receiver instead"
+        )
+        XCTAssertEqual(
+            TransferPairingText.joinOtherTitle(direction: .receive, language: "zh-Hans"),
+            "改为加入发送端"
+        )
+        XCTAssertEqual(
+            TransferPairingText.inputAccepted(scanned: true, language: "en"),
+            "QR scanned"
+        )
+        XCTAssertEqual(
+            TransferPairingText.inputAccepted(scanned: false, language: "zh-Hans"),
+            "邀请已粘贴"
+        )
+    }
+
     @MainActor
     func testNativeObserverHopsBackgroundCallbacksToMainActor() async {
         let model = TransferViewModel()

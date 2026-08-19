@@ -45,11 +45,20 @@ struct PairingPanelSelector: View {
     var disabled = false
 
     var body: some View {
-        Picker(AppText.value("Pairing action", "配对操作", language: language), selection: $selection) {
-            Label(AppText.value("Show my QR", "显示我的二维码", language: language), systemImage: "qrcode")
+        Picker(
+            AppText.localized("transfer.pairing.action", language: language),
+            selection: $selection
+        ) {
+            Label(
+                AppText.localized("transfer.pairing.show_qr", language: language),
+                systemImage: "qrcode"
+            )
                 .tag(PairingPanelMode.show)
                 .accessibilityIdentifier("pairing_show_qr")
-            Label(AppText.value("Scan a QR", "扫描二维码", language: language), systemImage: "qrcode.viewfinder")
+            Label(
+                AppText.localized("transfer.pairing.scan_qr", language: language),
+                systemImage: "qrcode.viewfinder"
+            )
                 .tag(PairingPanelMode.scan)
                 .accessibilityIdentifier("pairing_scan_qr")
         }
@@ -360,5 +369,7 @@ extension View {
 @MainActor
 func copyWithToast(_ text: String, _ message: String, language: String) {
     let copied = copyToPasteboard(text)
-    ToastCenter.shared.show(copied ? message : AppText.value("Copy failed", "复制失败", language: language))
+    ToastCenter.shared.show(
+        copied ? message : AppText.localized("common.copy_failed", language: language)
+    )
 }
