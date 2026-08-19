@@ -10,7 +10,9 @@
     <string name="nearby_devices">附近设备</string>
     <string name="logs">日志</string>
     <string name="settings">设置</string>
-    <string name="active_transfer_count">%1$d 个进行中</string>
+    <plurals name="active_transfer_count">
+        <item quantity="other">%1$d 个进行中</item>
+    </plurals>
 
     <string name="send_setup_subtitle">选择项目，然后连接接收设备。</string>
     <string name="receive_setup_subtitle">选择保存位置，然后连接发送设备。</string>
@@ -32,6 +34,10 @@
     <string name="common_cancel">取消</string>
     <string name="common_ok">确定</string>
     <string name="common_back">返回</string>
+    <string name="common_open">打开</string>
+    <string name="common_share">分享</string>
+    <string name="common_done">完成</string>
+    <string name="common_decline">拒绝</string>
     <string name="nfc_open_invitation_title">打开 NFC 邀请？</string>
     <string name="nfc_untrusted_invitation_explanation">此未受信任的标签仅携带邀请。继续后仍会验证并使用常规房间流程；NFC 不会认证另一台设备。</string>
     <string name="nfc_invitation_failed_title">NFC 无法继续</string>
@@ -91,4 +97,78 @@
     <string name="settings_advanced">高级</string>
     <string name="common_collapse">收起</string>
     <string name="common_expand">展开</string>
+
+    <string name="room_authenticated">已为此房间认证</string>
+    <string name="connection_failed">连接失败</string>
+    <string name="room_header_title">房间</string>
+    <string name="room_header_ended">房间已结束</string>
+    <string name="room_header_one_time">一次性房间</string>
+    <string name="room_closed_after_idle">闲置 15 分钟后已关闭</string>
+    <string name="room_invitation_expired">邀请已过期</string>
+    <string name="room_peer_ended">另一台设备已结束房间</string>
+    <string name="room_background_closed">离开 Envoix 后已关闭</string>
+    <string name="connection_lost">连接已断开</string>
+    <string name="room_connection_failed">房间连接失败</string>
+    <string name="room_ended">房间已结束</string>
+    <plurals name="room_item_count">
+        <item quantity="other">%1$d 个项目</item>
+    </plurals>
+    <string name="room_outgoing_transfer">待发送内容</string>
+    <string name="room_incoming_transfer">待接收内容</string>
+    <string name="room_saved_to">已保存到 %1$s</string>
+    <string name="transfer_progress_bytes">%1$s / %2$s</string>
+    <string name="transfer_status_preparing">正在准备</string>
+    <string name="transfer_status_waiting_peer">等待另一台设备</string>
+    <string name="transfer_status_connecting">正在连接</string>
+    <string name="transfer_status_awaiting_confirmation">等待确认</string>
+    <string name="transfer_status_transferring">正在传输</string>
+    <string name="transfer_status_verifying">正在校验</string>
+    <string name="transfer_status_finishing">正在完成</string>
+    <string name="transfer_status_paused">已暂停</string>
+    <string name="transfer_status_delivered">已送达</string>
+    <string name="transfer_status_received">已接收</string>
+    <string name="transfer_status_needs_attention">需要处理</string>
+    <string name="transfer_status_canceled">已取消</string>
+    <string name="room_empty_timeline">这个房间中还没有传输。准备好后即可添加文件。</string>
+    <string name="room_transfer_invite_ready">传输邀请已就绪</string>
+    <plurals name="room_shared_items_ready">
+        <item quantity="other">%1$d 个共享项目已就绪</item>
+    </plurals>
+    <string name="room_ready_for_files">此设备已准备好传输文件</string>
+    <string name="room_review_invitation_destination">确认邀请和接收位置。</string>
+    <string name="room_review_selection">发送给另一台设备前，请先确认所选内容。</string>
+    <plurals name="room_continue_with_items">
+        <item quantity="other">继续发送 %1$d 个项目</item>
+    </plurals>
+    <string name="room_choose_files">选择文件</string>
+    <string name="room_incoming_offer">收到传输邀请</string>
+    <string name="room_offer_summary_section">传输摘要</string>
+    <plurals name="room_file_count">
+        <item quantity="other">%1$d 个文件</item>
+    </plurals>
+    <plurals name="room_folder_count">
+        <item quantity="other">%1$d 个文件夹</item>
+    </plurals>
+    <string name="room_offer_summary_format">%1$s · %2$s · %3$s</string>
+    <string name="room_destination_section">保存位置</string>
+    <string name="room_contents_section">内容</string>
+    <plurals name="room_more_items">
+        <item quantity="other">另有 %1$d 项</item>
+    </plurals>
+    <string name="room_preparing_receiver">正在准备接收…</string>
+    <string name="room_add_files">添加文件</string>
+    <string name="room_closed">房间已关闭</string>
+    <string name="room_show_transfer_qr">显示传输二维码</string>
+    <string name="room_creator_controls_lifetime">房间时限由创建者控制。</string>
+    <string name="room_use_15_minutes">使用 15 分钟</string>
+    <string name="room_keep_open">保持开启</string>
+    <string name="room_kept_open_while_active">Envoix 使用期间保持开启</string>
+    <string name="room_idle_timer_paused">闲置计时已暂停</string>
+    <string name="room_closing">正在关闭房间…</string>
+    <string name="room_waiting_for_creator">等待房间创建者…</string>
+    <string name="room_closes_after_idle">闲置 %1$s 后关闭</string>
+    <string name="room_nearby_unverified">附近可见 · 未验证</string>
+    <string name="room_nearby_not_visible">附近设备当前不可见</string>
+    <string name="room_ready_unverified">已就绪 · 未验证</string>
+    <string name="room_waiting">等待中</string>
 </resources>

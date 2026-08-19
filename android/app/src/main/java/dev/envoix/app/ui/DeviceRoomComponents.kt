@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Direction
+import dev.envoix.app.R
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.humanBytes
@@ -64,11 +65,11 @@ internal fun RoomHeader(
     val state =
         when (control.phase) {
             RoomControlPhase.Connected ->
-                RoomStatus(appText("Authenticated for this room", "已为此房间认证"), colors.success)
+                RoomStatus(appString(R.string.room_authenticated), colors.success)
             RoomControlPhase.Closed ->
                 RoomStatus(control.closeReason.roomEndedLabel(), colors.danger)
             RoomControlPhase.Failed ->
-                RoomStatus(appText("Connection failed", "连接失败"), colors.danger)
+                RoomStatus(appString(R.string.connection_failed), colors.danger)
             else -> legacyState
         }
     Row(
@@ -78,7 +79,7 @@ internal fun RoomHeader(
         IconButton(onClick = onBack) {
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = appText("Back", "返回"),
+                contentDescription = appString(R.string.common_back),
                 tint = colors.accent,
             )
         }
@@ -93,10 +94,10 @@ internal fun RoomHeader(
             Text(
                 when (control.phase) {
                     RoomControlPhase.Connected ->
-                        appText("ROOM", "房间")
+                        appString(R.string.room_header_title)
                     RoomControlPhase.Closed, RoomControlPhase.Failed ->
-                        appText("ROOM ENDED", "房间已结束")
-                    else -> appText("ONE-TIME ROOM", "一次性房间")
+                        appString(R.string.room_header_ended)
+                    else -> appString(R.string.room_header_one_time)
                 },
                 color =
                     if (control.phase == RoomControlPhase.Closed ||
@@ -135,7 +136,7 @@ internal fun RoomHeader(
         ) {
             Icon(
                 Icons.Default.History,
-                contentDescription = appText("Activity", "活动"),
+                contentDescription = appString(R.string.activity_title),
                 tint = colors.accent,
             )
         }
@@ -145,7 +146,7 @@ internal fun RoomHeader(
         ) {
             Icon(
                 Icons.Default.Settings,
-                contentDescription = appText("Settings", "设置"),
+                contentDescription = appString(R.string.settings),
                 tint = colors.accent,
             )
         }
@@ -155,13 +156,13 @@ internal fun RoomHeader(
 @Composable
 private fun RoomCloseReason?.roomEndedLabel(): String =
     when (this) {
-        RoomCloseReason.IdleExpired -> appText("Closed after 15 minutes idle", "闲置 15 分钟后已关闭")
-        RoomCloseReason.InvitationExpired -> appText("Invitation expired", "邀请已过期")
-        RoomCloseReason.PeerEnded -> appText("The other device ended the room", "另一台设备已结束房间")
-        RoomCloseReason.Backgrounded -> appText("Closed when Envoix left the foreground", "离开 Envoix 后已关闭")
-        RoomCloseReason.NetworkLost -> appText("Connection lost", "连接已断开")
-        RoomCloseReason.ProtocolFailure -> appText("Room connection failed", "房间连接失败")
-        else -> appText("Room ended", "房间已结束")
+        RoomCloseReason.IdleExpired -> appString(R.string.room_closed_after_idle)
+        RoomCloseReason.InvitationExpired -> appString(R.string.room_invitation_expired)
+        RoomCloseReason.PeerEnded -> appString(R.string.room_peer_ended)
+        RoomCloseReason.Backgrounded -> appString(R.string.room_background_closed)
+        RoomCloseReason.NetworkLost -> appString(R.string.connection_lost)
+        RoomCloseReason.ProtocolFailure -> appString(R.string.room_connection_failed)
+        else -> appString(R.string.room_ended)
     }
 
 @Composable
@@ -182,10 +183,9 @@ internal fun RoomTransferSummary(
         when {
             transfer.savedUris.size == 1 && !transfer.savedName.isNullOrBlank() -> transfer.savedName
             !transfer.fileName.isNullOrBlank() -> transfer.fileName
-            itemCount == 1 -> appText("1 item", "1 个项目")
-            itemCount > 1 -> appText("$itemCount items", "$itemCount 个项目")
-            transfer.direction == Direction.Send -> appText("Outgoing transfer", "待发送内容")
-            else -> appText("Incoming transfer", "待接收内容")
+            itemCount > 0 -> appQuantityString(R.plurals.room_item_count, itemCount, itemCount)
+            transfer.direction == Direction.Send -> appString(R.string.room_outgoing_transfer)
+            else -> appString(R.string.room_incoming_transfer)
         }
     val progress =
         if (transfer.total <= 0L) {
@@ -239,7 +239,7 @@ internal fun RoomTransferSummary(
         if (received) {
             Spacer(Modifier.height(10.dp))
             Text(
-                appText("Saved to $saveLocation", "已保存到 $saveLocation"),
+                appString(R.string.room_saved_to, saveLocation),
                 color = colors.success,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -254,7 +254,7 @@ internal fun RoomTransferSummary(
                             onClick = { onOpen(transfer) },
                             modifier = Modifier.testTag("room_open_received"),
                         ) {
-                            Text(appText("Open", "打开"), color = colors.accent)
+                            Text(appString(R.string.common_open), color = colors.accent)
                         }
                     }
                     if (transfer.savedUris.isNotEmpty()) {
@@ -262,7 +262,7 @@ internal fun RoomTransferSummary(
                             onClick = { onShare(transfer) },
                             modifier = Modifier.testTag("room_share_received"),
                         ) {
-                            Text(appText("Share", "分享"), color = colors.accent)
+                            Text(appString(R.string.common_share), color = colors.accent)
                         }
                     }
                 }
@@ -277,7 +277,11 @@ internal fun RoomTransferSummary(
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "${humanBytes(transfer.bytes)} / ${humanBytes(transfer.total)}",
+                appString(
+                    R.string.transfer_progress_bytes,
+                    humanBytes(transfer.bytes),
+                    humanBytes(transfer.total),
+                ),
                 color = colors.muted,
                 fontSize = 11.sp,
             )
@@ -288,23 +292,23 @@ internal fun RoomTransferSummary(
 @Composable
 private fun roomTransferStatus(transfer: Transfer): String =
     when (transfer.status) {
-        Status.Preparing -> appText("Preparing", "正在准备")
-        Status.WaitingForPeer -> appText("Waiting for the other device", "等待另一台设备")
-        Status.Pairing, Status.Connecting -> appText("Connecting", "正在连接")
-        Status.AwaitingDecision -> appText("Waiting for confirmation", "等待确认")
-        Status.Transferring -> appText("Transferring", "正在传输")
-        Status.Verifying -> appText("Verifying", "正在校验")
+        Status.Preparing -> appString(R.string.transfer_status_preparing)
+        Status.WaitingForPeer -> appString(R.string.transfer_status_waiting_peer)
+        Status.Pairing, Status.Connecting -> appString(R.string.transfer_status_connecting)
+        Status.AwaitingDecision -> appString(R.string.transfer_status_awaiting_confirmation)
+        Status.Transferring -> appString(R.string.transfer_status_transferring)
+        Status.Verifying -> appString(R.string.transfer_status_verifying)
         Status.Saving, Status.WaitingForReceiverSave, Status.FinalizingDelivery ->
-            appText("Finishing", "正在完成")
-        Status.Paused -> appText("Paused", "已暂停")
+            appString(R.string.transfer_status_finishing)
+        Status.Paused -> appString(R.string.transfer_status_paused)
         Status.Delivered ->
             if (transfer.direction == Direction.Send) {
-                appText("Delivered", "已送达")
+                appString(R.string.transfer_status_delivered)
             } else {
-                appText("Received", "已接收")
+                appString(R.string.transfer_status_received)
             }
-        Status.Failed -> appText("Needs attention", "需要处理")
-        Status.Canceled -> appText("Canceled", "已取消")
+        Status.Failed -> appString(R.string.transfer_status_needs_attention)
+        Status.Canceled -> appString(R.string.transfer_status_canceled)
     }
 
 @Composable
@@ -320,10 +324,7 @@ internal fun EmptyRoomTimeline() {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            appText(
-                "No transfers in this room yet. Add files when you are ready.",
-                "这个房间中还没有传输。准备好后即可添加文件。",
-            ),
+            appString(R.string.room_empty_timeline),
             color = colors.muted,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
@@ -347,11 +348,15 @@ internal fun PendingRoomAction(
     ) {
         Text(
             if (role == "receive") {
-                appText("A transfer invite is ready", "传输邀请已就绪")
+                appString(R.string.room_transfer_invite_ready)
             } else if (pendingShareCount > 0) {
-                appText("$pendingShareCount shared items are ready", "$pendingShareCount 个共享项目已就绪")
+                appQuantityString(
+                    R.plurals.room_shared_items_ready,
+                    pendingShareCount,
+                    pendingShareCount,
+                )
             } else {
-                appText("This device is ready for files", "此设备已准备好传输文件")
+                appString(R.string.room_ready_for_files)
             },
             color = colors.accentStrong,
             fontSize = 14.sp,
@@ -360,15 +365,9 @@ internal fun PendingRoomAction(
         Spacer(Modifier.height(4.dp))
         Text(
             if (role == "receive") {
-                appText(
-                    "Review the invitation and receive location.",
-                    "确认邀请和接收位置。",
-                )
+                appString(R.string.room_review_invitation_destination)
             } else {
-                appText(
-                    "Review the selection before offering it to the other device.",
-                    "发送给另一台设备前，请先确认所选内容。",
-                )
+                appString(R.string.room_review_selection)
             },
             color = colors.muted,
             fontSize = 12.sp,
@@ -378,13 +377,14 @@ internal fun PendingRoomAction(
         Button(onClick = onContinue, modifier = Modifier.testTag("room_review_invite")) {
             Text(
                 when {
-                    role == "receive" -> appText("Continue", "继续")
+                    role == "receive" -> appString(R.string.common_continue)
                     pendingShareCount > 0 ->
-                        appText(
-                            "Continue with $pendingShareCount items",
-                            "继续发送 $pendingShareCount 个项目",
+                        appQuantityString(
+                            R.plurals.room_continue_with_items,
+                            pendingShareCount,
+                            pendingShareCount,
                         )
-                    else -> appText("Choose files", "选择文件")
+                    else -> appString(R.string.room_choose_files)
                 },
             )
         }
@@ -404,9 +404,13 @@ internal fun IncomingRoomOfferCard(
     val fileCount = (offer.itemCount - offer.directoryCount).coerceAtLeast(0)
     val visibleRoots = offer.rootNames.take(3)
     val hiddenItemCount = (offer.itemCount - visibleRoots.size).coerceAtLeast(0)
-    val fileSummary = if (fileCount == 1) "1 file" else "$fileCount files"
+    val fileSummary = appQuantityString(R.plurals.room_file_count, fileCount, fileCount)
     val folderSummary =
-        if (offer.directoryCount == 1) "1 folder" else "${offer.directoryCount} folders"
+        appQuantityString(
+            R.plurals.room_folder_count,
+            offer.directoryCount,
+            offer.directoryCount,
+        )
     Column(
         Modifier
             .fillMaxWidth()
@@ -416,30 +420,32 @@ internal fun IncomingRoomOfferCard(
             .padding(16.dp),
     ) {
         Text(
-            appText("Incoming transfer", "收到传输邀请"),
+            appString(R.string.room_incoming_offer),
             color = colors.accentStrong,
             fontSize = 15.sp,
             fontWeight = FontWeight.Bold,
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            appText("OFFER SUMMARY", "传输摘要"),
+            appString(R.string.room_offer_summary_section),
             color = colors.muted,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.6.sp,
         )
         Text(
-            appText(
-                "$fileSummary · $folderSummary · ${humanBytes(offer.totalBytes)}",
-                "$fileCount 个文件 · ${offer.directoryCount} 个文件夹 · ${humanBytes(offer.totalBytes)}",
+            appString(
+                R.string.room_offer_summary_format,
+                fileSummary,
+                folderSummary,
+                humanBytes(offer.totalBytes),
             ),
             color = colors.text,
             fontSize = 13.sp,
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            appText("DESTINATION", "保存位置"),
+            appString(R.string.room_destination_section),
             color = colors.muted,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
@@ -453,7 +459,7 @@ internal fun IncomingRoomOfferCard(
         if (visibleRoots.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
             Text(
-                appText("CONTENTS", "内容"),
+                appString(R.string.room_contents_section),
                 color = colors.muted,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -472,9 +478,10 @@ internal fun IncomingRoomOfferCard(
         if (hiddenItemCount > 0) {
             if (visibleRoots.isEmpty()) Spacer(Modifier.height(10.dp))
             Text(
-                appText(
-                    "+$hiddenItemCount more",
-                    "另有 $hiddenItemCount 项",
+                appQuantityString(
+                    R.plurals.room_more_items,
+                    hiddenItemCount,
+                    hiddenItemCount,
                 ),
                 color = colors.muted,
                 fontSize = 12.sp,
@@ -495,7 +502,7 @@ internal fun IncomingRoomOfferCard(
                 enabled = !busy,
                 modifier = Modifier.weight(1f).testTag("room_offer_reject"),
             ) {
-                Text(appText("Decline", "拒绝"))
+                Text(appString(R.string.common_decline))
             }
             Button(
                 onClick = onAccept,
@@ -504,9 +511,9 @@ internal fun IncomingRoomOfferCard(
             ) {
                 Text(
                     if (busy) {
-                        appText("Preparing receiver…", "正在准备接收…")
+                        appString(R.string.room_preparing_receiver)
                     } else {
-                        appText("Receive", "接收")
+                        appString(R.string.receive_action_title)
                     },
                 )
             }
@@ -549,7 +556,7 @@ internal fun RoomControlPanel(
         if (terminal) {
             Text(
                 if (control.phase == RoomControlPhase.Failed) {
-                    control.error ?: appText("Room connection failed", "房间连接失败")
+                    control.error ?: appString(R.string.room_connection_failed)
                 } else {
                     control.closeReason.roomEndedLabel()
                 },
@@ -581,7 +588,7 @@ internal fun RoomControlPanel(
             }
         }
         RoomActionButton(
-            label = appText("Add files", "添加文件"),
+            label = appString(R.string.room_add_files),
             icon = Icons.Default.Add,
             onClick = onAddFiles,
             enabled = canAddFiles,
@@ -592,27 +599,27 @@ internal fun RoomControlPanel(
                 Spacer(Modifier.height(8.dp))
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        appText("Room closed", "房间已关闭"),
+                        appString(R.string.room_closed),
                         color = colors.muted,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f),
                     )
                     TextButton(onClick = onDone, modifier = Modifier.testTag("room_done")) {
-                        Text(appText("Done", "完成"), color = colors.accent)
+                        Text(appString(R.string.common_done), color = colors.accent)
                     }
                 }
             }
             legacy -> {
                 TextButton(onClick = onShowQr, modifier = Modifier.testTag("room_show_qr")) {
-                    Text(appText("Show transfer QR", "显示传输二维码"), color = colors.accent)
+                    Text(appString(R.string.room_show_transfer_qr), color = colors.accent)
                 }
                 OutlinedButton(
                     onClick = onEnd,
                     modifier = Modifier.fillMaxWidth().testTag("room_close"),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.danger),
                 ) {
-                    Text(appText("End room", "结束房间"))
+                    Text(appString(R.string.room_end_action))
                 }
             }
             else -> {
@@ -627,7 +634,7 @@ internal fun RoomControlPanel(
                         )
                         if (!control.creator) {
                             Text(
-                                appText("The room creator controls its lifetime.", "房间时限由创建者控制。"),
+                                appString(R.string.room_creator_controls_lifetime),
                                 color = colors.muted,
                                 fontSize = 10.sp,
                             )
@@ -644,9 +651,9 @@ internal fun RoomControlPanel(
                         ) {
                             Text(
                                 if (control.policy == RoomLifetimePolicy.UntilForegroundEnds) {
-                                    appText("Use 15 min", "使用 15 分钟")
+                                    appString(R.string.room_use_15_minutes)
                                 } else {
-                                    appText("Keep open", "保持开启")
+                                    appString(R.string.room_keep_open)
                                 },
                                 color = colors.accent,
                             )
@@ -658,7 +665,7 @@ internal fun RoomControlPanel(
                     modifier = Modifier.fillMaxWidth().testTag("room_close"),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.danger),
                 ) {
-                    Text(appText("End room", "结束房间"))
+                    Text(appString(R.string.room_end_action))
                 }
             }
         }
@@ -668,24 +675,24 @@ internal fun RoomControlPanel(
 @Composable
 private fun roomLifetimeLabel(control: RoomControlUiState): String {
     if (control.policy == RoomLifetimePolicy.UntilForegroundEnds) {
-        return appText("Kept open while Envoix is active", "Envoix 使用期间保持开启")
+        return appString(R.string.room_kept_open_while_active)
     }
     val deadline =
         control.idleDeadlineEpochMs
-            ?: return appText("Idle timer paused", "闲置计时已暂停")
+            ?: return appString(R.string.room_idle_timer_paused)
     val seconds = ((deadline - control.nowEpochMs).coerceAtLeast(0L) + 999L) / 1_000L
     if (seconds == 0L) {
         return if (control.creator) {
-            appText("Closing room…", "正在关闭房间…")
+            appString(R.string.room_closing)
         } else {
-            appText("Waiting for room creator…", "等待房间创建者…")
+            appString(R.string.room_waiting_for_creator)
         }
     }
     val minutesPart = seconds / 60L
     val secondsPart = seconds % 60L
-    return appText(
-        "Closes after ${"%d:%02d".format(minutesPart, secondsPart)} idle",
-        "闲置 ${"%d:%02d".format(minutesPart, secondsPart)} 后关闭",
+    return appString(
+        R.string.room_closes_after_idle,
+        "%d:%02d".format(minutesPart, secondsPart),
     )
 }
 
@@ -735,21 +742,26 @@ internal fun roomState(
                 label =
                     when {
                         hasNearbyContext && nearbyAvailable == true ->
-                            appText("Nearby · unverified", "附近可见 · 未验证")
+                            appString(R.string.room_nearby_unverified)
                         hasNearbyContext ->
-                            appText("Nearby device not visible", "附近设备当前不可见")
-                        else -> appText("Ready · unverified", "已就绪 · 未验证")
+                            appString(R.string.room_nearby_not_visible)
+                        else -> appString(R.string.room_ready_unverified)
                     },
                 foreground = if (hasNearbyContext && nearbyAvailable != true) colors.warning else colors.muted,
             )
         waiting ->
             RoomStatus(
-                label = appText("Waiting", "等待中"),
+                label = appString(R.string.room_waiting),
                 foreground = colors.warning,
             )
         else ->
             RoomStatus(
-                label = appText("${active.size} active", "${active.size} 个进行中"),
+                label =
+                    appQuantityString(
+                        R.plurals.active_transfer_count,
+                        active.size,
+                        active.size,
+                    ),
                 foreground = colors.success,
             )
     }

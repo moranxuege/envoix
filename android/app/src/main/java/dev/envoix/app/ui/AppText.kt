@@ -2,6 +2,7 @@ package dev.envoix.app.ui
 
 import android.content.res.Configuration
 import android.os.LocaleList
+import androidx.annotation.PluralsRes
 import androidx.annotation.StringRes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -40,4 +41,19 @@ fun appString(
     } else {
         resources.getString(id, *formatArgs)
     }
+}
+
+@Composable
+fun appQuantityString(
+    @PluralsRes id: Int,
+    quantity: Int,
+    vararg formatArgs: Any,
+): String {
+    val context = LocalContext.current
+    val configuration = Configuration(context.resources.configuration)
+    configuration.setLocales(LocaleList.forLanguageTags(LocalAppLanguage.current))
+    return context
+        .createConfigurationContext(configuration)
+        .resources
+        .getQuantityString(id, quantity, *formatArgs)
 }

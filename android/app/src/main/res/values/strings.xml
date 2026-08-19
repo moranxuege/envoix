@@ -10,7 +10,10 @@
     <string name="nearby_devices">Nearby devices</string>
     <string name="logs">Logs</string>
     <string name="settings">Settings</string>
-    <string name="active_transfer_count">%1$d active</string>
+    <plurals name="active_transfer_count">
+        <item quantity="one">%1$d active</item>
+        <item quantity="other">%1$d active</item>
+    </plurals>
 
     <string name="send_setup_subtitle">Choose items, then connect to the receiver.</string>
     <string name="receive_setup_subtitle">Choose where to save, then connect to the sender.</string>
@@ -32,6 +35,10 @@
     <string name="common_cancel">Cancel</string>
     <string name="common_ok">OK</string>
     <string name="common_back">Back</string>
+    <string name="common_open">Open</string>
+    <string name="common_share">Share</string>
+    <string name="common_done">Done</string>
+    <string name="common_decline">Decline</string>
     <string name="nfc_open_invitation_title">Open NFC invitation?</string>
     <string name="nfc_untrusted_invitation_explanation">This untrusted tag only carries an invitation. Continue to validate it and use the normal room flow; NFC does not authenticate the other device.</string>
     <string name="nfc_invitation_failed_title">NFC could not continue</string>
@@ -94,4 +101,84 @@
     <string name="settings_advanced">Advanced</string>
     <string name="common_collapse">Collapse</string>
     <string name="common_expand">Expand</string>
+
+    <string name="room_authenticated">Authenticated for this room</string>
+    <string name="connection_failed">Connection failed</string>
+    <string name="room_header_title">ROOM</string>
+    <string name="room_header_ended">ROOM ENDED</string>
+    <string name="room_header_one_time">ONE-TIME ROOM</string>
+    <string name="room_closed_after_idle">Closed after 15 minutes idle</string>
+    <string name="room_invitation_expired">Invitation expired</string>
+    <string name="room_peer_ended">The other device ended the room</string>
+    <string name="room_background_closed">Closed when Envoix left the foreground</string>
+    <string name="connection_lost">Connection lost</string>
+    <string name="room_connection_failed">Room connection failed</string>
+    <string name="room_ended">Room ended</string>
+    <plurals name="room_item_count">
+        <item quantity="one">%1$d item</item>
+        <item quantity="other">%1$d items</item>
+    </plurals>
+    <string name="room_outgoing_transfer">Outgoing transfer</string>
+    <string name="room_incoming_transfer">Incoming transfer</string>
+    <string name="room_saved_to">Saved to %1$s</string>
+    <string name="transfer_progress_bytes">%1$s / %2$s</string>
+    <string name="transfer_status_preparing">Preparing</string>
+    <string name="transfer_status_waiting_peer">Waiting for the other device</string>
+    <string name="transfer_status_connecting">Connecting</string>
+    <string name="transfer_status_awaiting_confirmation">Waiting for confirmation</string>
+    <string name="transfer_status_transferring">Transferring</string>
+    <string name="transfer_status_verifying">Verifying</string>
+    <string name="transfer_status_finishing">Finishing</string>
+    <string name="transfer_status_paused">Paused</string>
+    <string name="transfer_status_delivered">Delivered</string>
+    <string name="transfer_status_received">Received</string>
+    <string name="transfer_status_needs_attention">Needs attention</string>
+    <string name="transfer_status_canceled">Canceled</string>
+    <string name="room_empty_timeline">No transfers in this room yet. Add files when you are ready.</string>
+    <string name="room_transfer_invite_ready">A transfer invite is ready</string>
+    <plurals name="room_shared_items_ready">
+        <item quantity="one">%1$d shared item is ready</item>
+        <item quantity="other">%1$d shared items are ready</item>
+    </plurals>
+    <string name="room_ready_for_files">This device is ready for files</string>
+    <string name="room_review_invitation_destination">Review the invitation and receive location.</string>
+    <string name="room_review_selection">Review the selection before offering it to the other device.</string>
+    <plurals name="room_continue_with_items">
+        <item quantity="one">Continue with %1$d item</item>
+        <item quantity="other">Continue with %1$d items</item>
+    </plurals>
+    <string name="room_choose_files">Choose files</string>
+    <string name="room_incoming_offer">Incoming transfer</string>
+    <string name="room_offer_summary_section">OFFER SUMMARY</string>
+    <plurals name="room_file_count">
+        <item quantity="one">%1$d file</item>
+        <item quantity="other">%1$d files</item>
+    </plurals>
+    <plurals name="room_folder_count">
+        <item quantity="one">%1$d folder</item>
+        <item quantity="other">%1$d folders</item>
+    </plurals>
+    <string name="room_offer_summary_format">%1$s · %2$s · %3$s</string>
+    <string name="room_destination_section">DESTINATION</string>
+    <string name="room_contents_section">CONTENTS</string>
+    <plurals name="room_more_items">
+        <item quantity="one">+%1$d more</item>
+        <item quantity="other">+%1$d more</item>
+    </plurals>
+    <string name="room_preparing_receiver">Preparing receiver…</string>
+    <string name="room_add_files">Add files</string>
+    <string name="room_closed">Room closed</string>
+    <string name="room_show_transfer_qr">Show transfer QR</string>
+    <string name="room_creator_controls_lifetime">The room creator controls its lifetime.</string>
+    <string name="room_use_15_minutes">Use 15 min</string>
+    <string name="room_keep_open">Keep open</string>
+    <string name="room_kept_open_while_active">Kept open while Envoix is active</string>
+    <string name="room_idle_timer_paused">Idle timer paused</string>
+    <string name="room_closing">Closing room…</string>
+    <string name="room_waiting_for_creator">Waiting for room creator…</string>
+    <string name="room_closes_after_idle">Closes after %1$s idle</string>
+    <string name="room_nearby_unverified">Nearby · unverified</string>
+    <string name="room_nearby_not_visible">Nearby device not visible</string>
+    <string name="room_ready_unverified">Ready · unverified</string>
+    <string name="room_waiting">Waiting</string>
 </resources>
