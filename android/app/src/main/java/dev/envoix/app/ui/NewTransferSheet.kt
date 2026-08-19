@@ -1,5 +1,6 @@
 package dev.envoix.app.ui
 
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -35,7 +36,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,7 +65,6 @@ import dev.envoix.app.ManifestV2SourceStager
 import dev.envoix.app.ManifestV2StageResult
 import dev.envoix.app.PreparedManifestV2Source
 import dev.envoix.app.R
-import dev.envoix.app.SettingsStore
 import dev.envoix.app.TransferService
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyPairingSelection
@@ -90,6 +89,15 @@ internal typealias QueuePreparedSend = (
     totalBytes: Long,
     completion: (String?) -> Unit,
 ) -> Unit
+
+internal data class TransferSetupPreferences(
+    val broker: String,
+    val relay: String,
+    val defaultRole: String,
+    val compressionPolicy: String,
+    val saveLocationLabel: String,
+    val savePickerInitialUri: Uri,
+)
 
 /**
  * Role-specific transfer setup. Scanning an invite may switch to the opposite
@@ -118,6 +126,8 @@ internal fun NewTransferSheet(
         rememberLabel: String?,
         rememberedRelationshipId: String?,
     ) -> Unit,
+    preferences: TransferSetupPreferences,
+    onSaveTreePicked: (Uri) -> Unit,
     nearbySelection: NearbyPairingSelection? = null,
     nearbyDeliveryAvailable: Boolean = true,
     initialPairingInput: String? = null,
@@ -138,7 +148,6 @@ internal fun NewTransferSheet(
     val colors = Envoix.colors
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
-    val settings by SettingsStore.settings.collectAsState()
     val language = LocalAppLanguage.current
 
     fun text(
@@ -147,13 +156,13 @@ internal fun NewTransferSheet(
     ) = AppText.value(english, simplifiedChinese, language)
     val switchedToSendNotice = appString(R.string.switched_to_send_notice)
     val switchedToReceiveNotice = appString(R.string.switched_to_receive_notice)
-    val broker = roomEndpoint?.broker ?: settings.broker
-    val relay = roomEndpoint?.relay ?: settings.relay
+    val broker = roomEndpoint?.broker ?: preferences.broker
+    val relay = roomEndpoint?.relay ?: preferences.relay
 
     val fallbackPreparation =
         remember(draftId) {
             TransferDraftPreparationState(
-                initialRole = initialRole ?: settings.defaultRole,
+                initialRole = initialRole ?: preferences.defaultRole,
                 showQrInitially = showQrInitially,
             )
         }
@@ -209,7 +218,7 @@ internal fun NewTransferSheet(
                     val store = TransferService.jobStoreDirectory(context).absolutePath
                     jobStoreDirectory = store
                     val jobId =
-                        preparedJobId ?: jobGateway.create(store, settings.compressionPolicy).jobId.also {
+                        preparedJobId ?: jobGateway.create(store, preferences.compressionPolicy).jobId.also {
                             preparedJobId = it
                             stagingRootDirectory =
                                 java.io.File(context.filesDir, "manifest-v2/source-staging/$it").absolutePath
@@ -378,7 +387,7 @@ internal fun NewTransferSheet(
     val saveFolderPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             onExternalActivityChanged(false)
-            if (uri != null) SettingsStore.setSaveTree(context, uri)
+            if (uri != null) onSaveTreePicked(uri)
         }
     val joining = invitationInput != null || typed.isNotBlank()
 
@@ -716,9 +725,9 @@ internal fun NewTransferSheet(
                     )
                 }
             } else {
-                PathRow(appString(R.string.save_to), SettingsStore.saveLabel(context), placeholder = false) {
+                PathRow(appString(R.string.save_to), preferences.saveLocationLabel, placeholder = false) {
                     onExternalActivityChanged(true)
-                    saveFolderPicker.launch(SettingsStore.savePickerInitialUri())
+                    saveFolderPicker.launch(preferences.savePickerInitialUri)
                 }
             }
 

@@ -161,6 +161,8 @@ internal fun RememberedRoomDetailScreen(
     onShareReceived: (Transfer) -> Unit,
     onExternalActivityChanged: (Boolean) -> Unit,
     onDismissError: () -> Unit,
+    transferPreferences: TransferSetupPreferences,
+    onSaveTreePicked: (android.net.Uri) -> Unit,
 ) {
     val colors = Envoix.colors
     val relationshipId = peer?.relationshipId
@@ -361,6 +363,8 @@ internal fun RememberedRoomDetailScreen(
                 roomMode = true,
                 connectedRoom = true,
                 roomEndpoint = RoomControlEndpoint(peer.broker, peer.relay),
+                preferences = transferPreferences,
+                onSaveTreePicked = onSaveTreePicked,
                 onReceive = { _, _, _, _, _, _, _ -> },
                 onSend = { _, _, _, _, _, _, _ -> },
                 onExternalActivityChanged = onExternalActivityChanged,

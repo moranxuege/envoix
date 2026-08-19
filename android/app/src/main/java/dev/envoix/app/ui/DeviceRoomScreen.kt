@@ -72,7 +72,7 @@ internal fun DeviceRoomScreen(
     onShareReceived: (Transfer) -> Unit,
     discovery: DiscoveryUiState,
     incomingDestination: RoomDestinationPresentation?,
-    savePickerInitialUri: Uri,
+    transferPreferences: TransferSetupPreferences,
     onSaveTreePicked: (Uri) -> Unit,
     resolveRoomDestination: (directoryCount: Int) -> RoomDestinationPresentation,
     onOfferNearbyInvite: (NearbyPairingSelection, String, (String?) -> Unit) -> Unit,
@@ -210,7 +210,7 @@ internal fun DeviceRoomScreen(
                                     autoResumedDestinationOfferId = null
                                     onExternalActivityChanged(true)
                                     runCatching {
-                                        destinationPicker.launch(savePickerInitialUri)
+                                        destinationPicker.launch(transferPreferences.savePickerInitialUri)
                                     }.onFailure {
                                         pendingDestinationOfferId = null
                                         onExternalActivityChanged(false)
@@ -286,6 +286,8 @@ internal fun DeviceRoomScreen(
                 preparationState = activeDraft.preparation,
                 showQrInitially = activeDraft.showQrInitially,
                 initialRole = role,
+                preferences = transferPreferences,
+                onSaveTreePicked = onSaveTreePicked,
                 initialPairingInput = draft.pairingInput.takeIf { setupUsesPending },
                 initialSources =
                     if (setupUsesPending && role == "send") {

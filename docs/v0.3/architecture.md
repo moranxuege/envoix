@@ -271,6 +271,10 @@ offer callbacks. Destination inspection and SAF authorization stay in the
 Activity adapter; the Composable receives only the resulting destination
 projection and picker intent callbacks.
 
+Transfer setup consumes one immutable `TransferSetupPreferences` projection.
+Both active and remembered Rooms use the same projection, so the shared sheet
+does not observe or persist application settings itself.
+
 The Settings screen renders a settings snapshot and
 `SettingsDiagnosticsUiState`. The Activity applies persistence and launches
 runtime permission requests, while `SettingsDiagnosticsViewModel` owns and

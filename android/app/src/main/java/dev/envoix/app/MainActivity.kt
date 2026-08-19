@@ -19,6 +19,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -49,6 +50,7 @@ import dev.envoix.app.ui.SettingsDiagnosticsViewModel
 import dev.envoix.app.ui.SettingsScreen
 import dev.envoix.app.ui.TransferActivityPresentationEnvironment
 import dev.envoix.app.ui.TransferActivityScreen
+import dev.envoix.app.ui.TransferSetupPreferences
 import dev.envoix.app.ui.WorkflowScreen
 import dev.envoix.app.ui.roomOfferDestinationPresentation
 import kotlinx.coroutines.flow.collect
@@ -124,6 +126,24 @@ class MainActivity : ComponentActivity() {
                             settings.devMode && workflow.screen == WorkflowScreen.Settings,
                         )
                     }
+                    val transferPreferences =
+                        remember(
+                            settings.broker,
+                            settings.relay,
+                            settings.defaultRole,
+                            settings.compressionPolicy,
+                            settings.saveFolder,
+                            settings.saveTreeUri,
+                        ) {
+                            TransferSetupPreferences(
+                                broker = settings.broker,
+                                relay = settings.relay,
+                                defaultRole = settings.defaultRole,
+                                compressionPolicy = settings.compressionPolicy,
+                                saveLocationLabel = SettingsStore.saveLabel(this@MainActivity),
+                                savePickerInitialUri = SettingsStore.savePickerInitialUri(),
+                            )
+                        }
                     val selectedPeerKey = workflow.room?.nearbySelection?.discoveryPeerKey
                     val controlRoom = workflow.room?.controlSession == true
                     val activeRoomTransferCount =
@@ -328,7 +348,7 @@ class MainActivity : ComponentActivity() {
                                                 language = settings.language,
                                             )
                                         },
-                                    savePickerInitialUri = SettingsStore.savePickerInitialUri(),
+                                    transferPreferences = transferPreferences,
                                     onSaveTreePicked = { uri ->
                                         SettingsStore.setSaveTree(this@MainActivity, uri)
                                     },
@@ -398,6 +418,10 @@ class MainActivity : ComponentActivity() {
                                 onShareReceived = ::shareReceived,
                                 onExternalActivityChanged = ::setExternalActivityActive,
                                 onDismissError = rememberedRoomsVm::clearError,
+                                transferPreferences = transferPreferences,
+                                onSaveTreePicked = { uri ->
+                                    SettingsStore.setSaveTree(this@MainActivity, uri)
+                                },
                             )
                         }
                         WorkflowScreen.Activity ->
