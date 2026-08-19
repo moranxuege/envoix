@@ -406,7 +406,26 @@ class MainActivity : ComponentActivity() {
                                     }.getOrNull()
                                 },
                             )
-                        WorkflowScreen.Settings -> SettingsScreen(onBack = workflowVm::navigateBack)
+                        WorkflowScreen.Settings ->
+                            SettingsScreen(
+                                settings = settings,
+                                saveLocationLabel = SettingsStore.saveLabel(this@MainActivity),
+                                savePickerInitialUri = SettingsStore.savePickerInitialUri(),
+                                avoidsTailscale = SettingsStore.avoidsTailscale(settings),
+                                onUpdateSettings = SettingsStore::update,
+                                onSaveTreePicked = { uri ->
+                                    SettingsStore.setSaveTree(this@MainActivity, uri)
+                                },
+                                onResetSaveTree = {
+                                    SettingsStore.setSaveTree(this@MainActivity, null)
+                                },
+                                onAvoidTailscaleChanged = SettingsStore::setAvoidTailscale,
+                                onLoggingSettingsChanged = { transform ->
+                                    SettingsStore.update(transform)
+                                    SettingsStore.applyLogLevel()
+                                },
+                                onBack = workflowVm::navigateBack,
+                            )
                     }
                     NfcInvitationOverlay(
                         state = nfcInvitation,

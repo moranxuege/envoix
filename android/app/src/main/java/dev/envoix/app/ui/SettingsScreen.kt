@@ -1,6 +1,7 @@
 package dev.envoix.app.ui
 
 import android.Manifest
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -68,7 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.AndroidWifiAwareCapabilityProbe
 import dev.envoix.app.AndroidWifiAwareDiagnosticController
-import dev.envoix.app.SettingsStore
+import dev.envoix.app.Settings
 import dev.envoix.app.WifiAwareAvailability
 import dev.envoix.app.WifiAwareCapabilitySnapshot
 import dev.envoix.app.WifiAwareProbeRole
@@ -76,11 +77,21 @@ import dev.envoix.app.isRunning
 import kotlin.math.roundToInt
 
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(
+    settings: Settings,
+    saveLocationLabel: String,
+    savePickerInitialUri: Uri,
+    avoidsTailscale: Boolean,
+    onUpdateSettings: ((Settings) -> Settings) -> Unit,
+    onSaveTreePicked: (Uri) -> Unit,
+    onResetSaveTree: () -> Unit,
+    onAvoidTailscaleChanged: (Boolean) -> Unit,
+    onLoggingSettingsChanged: ((Settings) -> Settings) -> Unit,
+    onBack: () -> Unit,
+) {
     val colors = Envoix.colors
-    val settings by SettingsStore.settings.collectAsState()
 
-    // local buffers for text fields; each commits into the store on change
+    // Local buffers preserve in-progress text while each edit emits a settings intent.
     var broker by remember { mutableStateOf(settings.broker) }
     var relay by remember { mutableStateOf(settings.relay) }
     var dataStreamWindow by remember { mutableStateOf(settings.dataStreamWindow) }
@@ -88,7 +99,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val folderPicker =
         rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocumentTree(),
-        ) { uri -> if (uri != null) SettingsStore.setSaveTree(context, uri) }
+        ) { uri -> if (uri != null) onSaveTreePicked(uri) }
     var allowText by remember { mutableStateOf(settings.candidatesAllow.joinToString("\n")) }
     var denyText by remember { mutableStateOf(settings.candidatesDeny.joinToString("\n")) }
     var logServer by remember { mutableStateOf(settings.logServer) }
@@ -160,19 +171,19 @@ fun SettingsScreen(onBack: () -> Unit) {
             SectionLabel(appText("BASIC", "基本"))
             LabeledControl(appText("Language", "语言")) {
                 LanguageToggle(settings.language) {
-                    SettingsStore.update { current -> current.copy(language = it) }
+                    onUpdateSettings { current -> current.copy(language = it) }
                 }
             }
             Spacer(Modifier.height(18.dp))
             FolderPickerRow(
-                label = SettingsStore.saveLabel(context),
+                label = saveLocationLabel,
                 custom = settings.saveTreeUri.isNotBlank(),
-                onPick = { folderPicker.launch(SettingsStore.savePickerInitialUri()) },
-                onReset = { SettingsStore.setSaveTree(context, null) },
+                onPick = { folderPicker.launch(savePickerInitialUri) },
+                onReset = onResetSaveTree,
             )
             Spacer(Modifier.height(18.dp))
             LabeledControl(appText("Default role for a new transfer", "新传输的默认角色")) {
-                RoleToggle(settings.defaultRole) { SettingsStore.update { s -> s.copy(defaultRole = it) } }
+                RoleToggle(settings.defaultRole) { onUpdateSettings { s -> s.copy(defaultRole = it) } }
             }
             Spacer(Modifier.height(18.dp))
             Column {
@@ -198,7 +209,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(6.dp))
                 CompressionToggle(settings.compressionPolicy) {
-                    SettingsStore.update { current -> current.copy(compressionPolicy = it) }
+                    onUpdateSettings { current -> current.copy(compressionPolicy = it) }
                 }
             }
             Spacer(Modifier.height(18.dp))
@@ -209,8 +220,8 @@ fun SettingsScreen(onBack: () -> Unit) {
                         "Don't advertise your 100.x Tailscale IP, so transfers take the real WAN or relay path.",
                         "不公布 100.x Tailscale IP，使传输使用真实广域网或中继路径。",
                     ),
-                checked = SettingsStore.avoidsTailscale(settings),
-            ) { SettingsStore.setAvoidTailscale(it) }
+                checked = avoidsTailscale,
+            ) { onAvoidTailscaleChanged(it) }
 
             Spacer(Modifier.height(26.dp))
             AdvancedHeader(showAdvanced) { showAdvanced = !showAdvanced }
@@ -219,34 +230,34 @@ fun SettingsScreen(onBack: () -> Unit) {
                 SectionLabel(appText("SERVERS", "服务器"))
                 Field(appText("Broker · rendezvous", "会合服务器"), broker) {
                     broker = it
-                    SettingsStore.update { s -> s.copy(broker = it) }
+                    onUpdateSettings { s -> s.copy(broker = it) }
                 }
                 Spacer(Modifier.height(12.dp))
                 Field(appText("Relay · data path", "中继服务器 · 数据路径"), relay) {
                     relay = it
-                    SettingsStore.update { s -> s.copy(relay = it) }
+                    onUpdateSettings { s -> s.copy(relay = it) }
                 }
                 Spacer(Modifier.height(12.dp))
                 Field(appText("Log server · diagnostics", "日志服务器 · 诊断"), logServer) {
                     logServer = it
-                    SettingsStore.update { s -> s.copy(logServer = it) }
+                    onUpdateSettings { s -> s.copy(logServer = it) }
                 }
 
                 Spacer(Modifier.height(22.dp))
                 SectionLabel("CONFIG.TOML")
                 Field(appText("Data stream window · e.g. 32MB (default 16MB)", "数据流窗口 · 例如 32MB（默认 16MB）"), dataStreamWindow) {
                     dataStreamWindow = it
-                    SettingsStore.update { s -> s.copy(dataStreamWindow = it) }
+                    onUpdateSettings { s -> s.copy(dataStreamWindow = it) }
                 }
                 Spacer(Modifier.height(12.dp))
                 MultilineField(appText("Candidate allow · one CIDR per line", "允许的候选地址 · 每行一个 CIDR"), allowText) {
                     allowText = it
-                    SettingsStore.update { s -> s.copy(candidatesAllow = cidrLines(it)) }
+                    onUpdateSettings { s -> s.copy(candidatesAllow = cidrLines(it)) }
                 }
                 Spacer(Modifier.height(12.dp))
                 MultilineField(appText("Candidate deny · one CIDR per line", "拒绝的候选地址 · 每行一个 CIDR"), denyText) {
                     denyText = it
-                    SettingsStore.update { s -> s.copy(candidatesDeny = cidrLines(it)) }
+                    onUpdateSettings { s -> s.copy(candidatesDeny = cidrLines(it)) }
                 }
 
                 Spacer(Modifier.height(22.dp))
@@ -255,7 +266,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     title = appText("Developer mode", "开发者模式"),
                     subtitle = appText("Reveal diagnostics — verbose logging (and, later, log upload).", "显示诊断信息、详细日志及后续的日志上传功能。"),
                     checked = settings.devMode,
-                ) { SettingsStore.update { s -> s.copy(devMode = it) } }
+                ) { onUpdateSettings { s -> s.copy(devMode = it) } }
                 if (settings.devMode) {
                     Spacer(Modifier.height(16.dp))
                     ToggleRow(
@@ -267,8 +278,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                             ),
                         checked = settings.verboseLog,
                     ) {
-                        SettingsStore.update { s -> s.copy(verboseLog = it) }
-                        SettingsStore.applyLogLevel()
+                        onLoggingSettingsChanged { s -> s.copy(verboseLog = it) }
                     }
                     Spacer(Modifier.height(12.dp))
                     ToggleRow(
@@ -280,8 +290,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                             ),
                         checked = settings.traceIroh,
                     ) {
-                        SettingsStore.update { s -> s.copy(traceIroh = it) }
-                        SettingsStore.applyLogLevel()
+                        onLoggingSettingsChanged { s -> s.copy(traceIroh = it) }
                     }
                     Spacer(Modifier.height(16.dp))
                     Text(
