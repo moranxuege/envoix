@@ -160,7 +160,8 @@ errors are tracked separately from screen presentation before M6 closes.
 Workflow-owned local validation now carries typed resource messages while
 gateway and engine failures remain dynamic text. Foreground-service validation,
 failure, and notification messages use the same locale-aware Android resource
-adapter; system chooser messages are the remaining Android resource migration.
+adapter, as do system chooser titles. No inline bilingual selector remains in
+Android production code.
 
 ## 8. M6 verification
 

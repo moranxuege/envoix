@@ -32,7 +32,6 @@ import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.discovery.NearbyVisibility
 import dev.envoix.app.ffi.FfiRoomControlInvite
 import dev.envoix.app.ffi.parseRoomControlInvite
-import dev.envoix.app.ui.AppText
 import dev.envoix.app.ui.ConnectionHubScreen
 import dev.envoix.app.ui.ConnectionWorkflowUiState
 import dev.envoix.app.ui.ConnectionWorkflowViewModel
@@ -804,7 +803,10 @@ class MainActivity : ComponentActivity() {
             startActivity(
                 Intent.createChooser(
                     view,
-                    AppText.value("Open with", "打开方式", SettingsStore.settings.value.language),
+                    localizedString(
+                        R.string.system_open_with,
+                        SettingsStore.settings.value.language,
+                    ),
                 ),
             )
         }
@@ -828,7 +830,10 @@ class MainActivity : ComponentActivity() {
             startActivity(
                 Intent.createChooser(
                     share,
-                    AppText.value("Share received items", "分享已接收项目", SettingsStore.settings.value.language),
+                    localizedString(
+                        R.string.system_share_received_items,
+                        SettingsStore.settings.value.language,
+                    ),
                 ),
             )
         }

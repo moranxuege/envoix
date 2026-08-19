@@ -337,8 +337,8 @@ private fun LanguageToggle(
                 appString(R.string.language_english_short),
                 appString(R.string.language_chinese_short),
             ),
-        selectedIndex = if (language == AppText.ENGLISH) 0 else 1,
-        onSelect = { i -> onChange(if (i == 0) AppText.ENGLISH else AppText.SIMPLIFIED_CHINESE) },
+        selectedIndex = if (language == AppLanguage.ENGLISH) 0 else 1,
+        onSelect = { i -> onChange(if (i == 0) AppLanguage.ENGLISH else AppLanguage.SIMPLIFIED_CHINESE) },
     )
 }
 

@@ -482,4 +482,7 @@
     <string name="service_notification_saving">正在保存…</string>
     <string name="service_notification_receiver_saving">等待接收端保存…</string>
     <string name="service_notification_finalizing">已保存，正在确认送达…</string>
+
+    <string name="system_open_with">打开方式</string>
+    <string name="system_share_received_items">分享已接收项目</string>
 </resources>

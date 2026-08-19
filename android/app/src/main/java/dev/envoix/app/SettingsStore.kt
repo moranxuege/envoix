@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 import android.os.Build
 import dev.envoix.app.discovery.DiscoveryPeerRegistry
 import dev.envoix.app.ffi.setLogLevel
-import dev.envoix.app.ui.AppText
+import dev.envoix.app.ui.AppLanguage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,7 +19,7 @@ import java.util.Locale
  *    folder, default role); never sent to the core.
  */
 data class Settings(
-    val language: String = AppText.ENGLISH,
+    val language: String = AppLanguage.ENGLISH,
     // core connection defaults
     val broker: String = Endpoints.BROKER,
     val relay: String = Endpoints.RELAY,
@@ -68,9 +68,9 @@ object SettingsStore {
                 language =
                     prefs.getString("language", null)
                         ?: if (Locale.getDefault().language == "zh") {
-                            AppText.SIMPLIFIED_CHINESE
+                            AppLanguage.SIMPLIFIED_CHINESE
                         } else {
-                            AppText.ENGLISH
+                            AppLanguage.ENGLISH
                         },
                 broker = prefs.getString("broker", Endpoints.BROKER)!!,
                 relay = prefs.getString("relay", Endpoints.RELAY)!!,

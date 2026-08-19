@@ -504,4 +504,7 @@
     <string name="service_notification_saving">Saving…</string>
     <string name="service_notification_receiver_saving">Waiting for receiver to save…</string>
     <string name="service_notification_finalizing">Saved; finalizing delivery…</string>
+
+    <string name="system_open_with">Open with</string>
+    <string name="system_share_received_items">Share received items</string>
 </resources>

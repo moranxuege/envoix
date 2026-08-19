@@ -8,24 +8,12 @@ import androidx.compose.ui.platform.LocalContext
 import dev.envoix.app.localizedResources
 import dev.envoix.app.localizedString
 
-object AppText {
-    fun value(
-        english: String,
-        simplifiedChinese: String,
-        language: String,
-    ): String = if (language == SIMPLIFIED_CHINESE) simplifiedChinese else english
-
+object AppLanguage {
     const val ENGLISH = "en"
     const val SIMPLIFIED_CHINESE = "zh-Hans"
 }
 
-val LocalAppLanguage = staticCompositionLocalOf { AppText.ENGLISH }
-
-@Composable
-fun appText(
-    english: String,
-    simplifiedChinese: String,
-): String = AppText.value(english, simplifiedChinese, LocalAppLanguage.current)
+val LocalAppLanguage = staticCompositionLocalOf { AppLanguage.ENGLISH }
 
 @Composable
 fun appString(
