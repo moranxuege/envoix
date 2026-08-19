@@ -28,10 +28,11 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-let expectedCoreFFIAPIVersion: UInt32 = 17
+let expectedCoreFFIAPIVersion: UInt32 = 18
 let expectedRoomControlCoreCapability = "foreground_room_control_v5"
 let expectedNearbyInviteCoreCapability = "nearby_invite_inbox_v1"
 let expectedFailureProjectionCoreCapability = "canonical_failure_projection_v1"
+let expectedRoomControlErrorCoreCapability = "typed_room_control_errors_v1"
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 func coreMatchesExpectedRoomControlContract(_ info: FfiCoreInfo) -> Bool {
@@ -39,6 +40,7 @@ func coreMatchesExpectedRoomControlContract(_ info: FfiCoreInfo) -> Bool {
         && info.capabilities.contains(expectedRoomControlCoreCapability)
         && info.capabilities.contains(expectedNearbyInviteCoreCapability)
         && info.capabilities.contains(expectedFailureProjectionCoreCapability)
+        && info.capabilities.contains(expectedRoomControlErrorCoreCapability)
 }
 
 /// Generates a short, memorable, easy-to-type pairing token of the form

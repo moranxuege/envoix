@@ -734,7 +734,7 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 17)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 18)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
         XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v5")
         XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
@@ -743,6 +743,11 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(
             expectedFailureProjectionCoreCapability,
             "canonical_failure_projection_v1"
+        )
+        XCTAssertTrue(info.capabilities.contains(expectedRoomControlErrorCoreCapability))
+        XCTAssertEqual(
+            expectedRoomControlErrorCoreCapability,
+            "typed_room_control_errors_v1"
         )
     }
 

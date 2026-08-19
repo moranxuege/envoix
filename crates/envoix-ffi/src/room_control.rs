@@ -8,6 +8,7 @@ use envoix_client::api::{
     RoomOfferRejection, RoomTransferOffer, SessionError, TransferCancelToken, TransferOptions,
     acquire_remembered_credential, connect_remembered_room_control, connect_room_control,
 };
+use envoix_error::CoreError;
 
 use crate::{
     DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, EnvoixError, FfiFailureCode, non_empty, op_err,
@@ -49,6 +50,21 @@ pub enum FfiRememberedRoomConnectError {
         /// `failure_code`; the broker currently does not transmit its tombstone TTL.
         retry_after_seconds: Option<u64>,
     },
+}
+
+/// Stable classifications for operations on an authenticated Room session.
+/// Platform adapters must not inspect `reason` to decide whether the Room is
+/// still usable.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum FfiRoomControlError {
+    #[error("{reason}")]
+    Rejected { reason: String },
+    #[error("{reason}")]
+    NetworkLost { reason: String },
+    #[error("{reason}")]
+    Canceled { reason: String },
+    #[error("{reason}")]
+    Failed { reason: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -174,36 +190,39 @@ impl FfiRoomControlSession {
         ffi_lifetime(self.session.lifetime_state())
     }
 
-    pub async fn next_event(&self) -> Result<FfiRoomControlEvent, EnvoixError> {
+    pub async fn next_event(&self) -> Result<FfiRoomControlEvent, FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .next_event()
                 .await
                 .map(project_event)
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
     }
 
-    pub async fn request_verification(&self, expected_code: String) -> Result<(), EnvoixError> {
+    pub async fn request_verification(
+        &self,
+        expected_code: String,
+    ) -> Result<(), FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .request_verification(&expected_code)
                 .await
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
     }
 
-    pub async fn submit_verification_code(&self, code: String) -> Result<(), EnvoixError> {
+    pub async fn submit_verification_code(&self, code: String) -> Result<(), FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .submit_verification_code(&code)
                 .await
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
     }
@@ -211,14 +230,14 @@ impl FfiRoomControlSession {
     pub async fn offer_transfer(
         &self,
         offer: FfiRoomTransferOffer,
-    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
+    ) -> Result<Option<FfiRoomLifetimeState>, FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .offer_transfer(core_offer(offer))
                 .await
                 .map(|state| state.map(ffi_lifetime))
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
     }
@@ -226,14 +245,14 @@ impl FfiRoomControlSession {
     pub async fn accept_offer(
         &self,
         offer_id: String,
-    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
+    ) -> Result<Option<FfiRoomLifetimeState>, FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .accept_offer(&offer_id)
                 .await
                 .map(|state| state.map(ffi_lifetime))
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
     }
@@ -242,14 +261,14 @@ impl FfiRoomControlSession {
         &self,
         offer_id: String,
         reason: FfiRoomOfferRejection,
-    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
+    ) -> Result<Option<FfiRoomLifetimeState>, FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .reject_offer(&offer_id, core_rejection(reason))
                 .await
                 .map(|state| state.map(ffi_lifetime))
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
     }
@@ -257,14 +276,14 @@ impl FfiRoomControlSession {
     pub async fn set_policy(
         &self,
         policy: FfiRoomLifetimePolicy,
-    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
+    ) -> Result<Option<FfiRoomLifetimeState>, FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .set_policy(core_policy(policy))
                 .await
                 .map(|state| state.map(ffi_lifetime))
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
     }
@@ -272,32 +291,49 @@ impl FfiRoomControlSession {
     pub async fn set_local_transfer_active(
         &self,
         active: bool,
-    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
+    ) -> Result<Option<FfiRoomLifetimeState>, FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .set_local_transfer_active(active)
                 .await
                 .map(|state| state.map(ffi_lifetime))
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
     }
 
-    pub async fn ping(&self, nonce: u64) -> Result<(), EnvoixError> {
+    pub async fn ping(&self, nonce: u64) -> Result<(), FfiRoomControlError> {
         let session = self.session.clone();
-        spawn_on_ffi_runtime(async move { session.ping(nonce).await.map_err(op_err) }).await
+        spawn_on_ffi_runtime(async move { session.ping(nonce).await.map_err(room_control_err) })
+            .await
     }
 
-    pub async fn close(&self, reason: FfiRoomCloseReason) -> Result<(), EnvoixError> {
+    pub async fn close(&self, reason: FfiRoomCloseReason) -> Result<(), FfiRoomControlError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .close(core_close_reason(reason))
                 .await
-                .map_err(op_err)
+                .map_err(room_control_err)
         })
         .await
+    }
+}
+
+fn room_control_err(error: CoreError) -> FfiRoomControlError {
+    match error {
+        CoreError::InvalidInput(reason) => FfiRoomControlError::Rejected { reason },
+        CoreError::Io(reason) | CoreError::Transport(reason) => {
+            FfiRoomControlError::NetworkLost { reason }
+        }
+        CoreError::Cancelled => FfiRoomControlError::Canceled {
+            reason: "room-control operation canceled".into(),
+        },
+        CoreError::InvitationConsumed(source) => room_control_err(*source),
+        other => FfiRoomControlError::Failed {
+            reason: other.to_string(),
+        },
     }
 }
 
@@ -801,9 +837,39 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v5_ffi_v17() {
+    fn room_control_errors_have_stable_session_dispositions() {
+        assert!(matches!(
+            room_control_err(CoreError::InvalidInput("offer rejected".into())),
+            FfiRoomControlError::Rejected { reason } if reason == "offer rejected"
+        ));
+        assert!(matches!(
+            room_control_err(CoreError::Io("socket closed".into())),
+            FfiRoomControlError::NetworkLost { reason } if reason == "socket closed"
+        ));
+        assert!(matches!(
+            room_control_err(CoreError::Transport("relay unavailable".into())),
+            FfiRoomControlError::NetworkLost { reason } if reason == "relay unavailable"
+        ));
+        assert!(matches!(
+            room_control_err(CoreError::InvitationConsumed(Box::new(
+                CoreError::Transport("peer disconnected".into()),
+            ))),
+            FfiRoomControlError::NetworkLost { reason } if reason == "peer disconnected"
+        ));
+        assert!(matches!(
+            room_control_err(CoreError::Cancelled),
+            FfiRoomControlError::Canceled { .. }
+        ));
+        assert!(matches!(
+            room_control_err(CoreError::Protocol("invalid event".into())),
+            FfiRoomControlError::Failed { reason } if reason == "protocol error: invalid event"
+        ));
+    }
+
+    #[test]
+    fn core_info_advertises_room_control_v5_ffi_v18() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 17);
+        assert_eq!(info.ffi_api_version, 18);
         assert!(
             info.capabilities
                 .iter()
@@ -823,6 +889,11 @@ mod tests {
             info.capabilities
                 .iter()
                 .any(|capability| capability == "canonical_failure_projection_v1")
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == "typed_room_control_errors_v1")
         );
     }
 }

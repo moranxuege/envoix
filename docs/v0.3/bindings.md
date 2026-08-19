@@ -6,7 +6,7 @@ Status: normative for M5 and later platform migrations.
 
 The native library exposes two independent versions:
 
-- UniFFI API `17` identifies the complete native symbol/type surface;
+- UniFFI API `18` identifies the complete native symbol/type surface;
 - application binding `1` projects application contract `6`.
 
 Callers must check both `envoixCoreInfo()` and
@@ -37,6 +37,9 @@ names must stay distinct because Kotlin objects implement `AutoCloseable`.
   action, cancellation outcome, and terminal state.
 - Swift and Kotlin adapters may translate typed values for presentation but
   must not parse diagnostic text or maintain fallback tables.
+- Authenticated Room operations expose `Rejected`, `NetworkLost`, `Canceled`,
+  and `Failed` errors. Adapters use the variant, never `reason`, to decide
+  whether a Room remains usable.
 - A duplicate event is idempotent. A sequence gap is a typed `EventGap` error
   and requires a fresh Engine snapshot; callers must not skip the missing fact.
 - An invalid identifier or command value is rejected before it reaches the

@@ -163,9 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_nearby_invite_inbox_v1_ffi_v17() {
+    fn core_info_advertises_nearby_invite_inbox_v1_ffi_v18() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 17);
+        assert_eq!(info.ffi_api_version, 18);
         assert!(
             info.capabilities
                 .iter()

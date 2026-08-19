@@ -43,6 +43,11 @@ test -s "$swift_binding"
 rg -q 'sealed class FfiApplicationCommand' "$kotlin_binding"
 rg -q 'sealed class FfiApplicationEvent' "$kotlin_binding"
 rg -q 'data class FfiApplicationSnapshot' "$kotlin_binding"
+rg -q 'sealed class FfiRoomControlException' "$kotlin_binding"
+rg -q 'class Rejected' "$kotlin_binding"
+rg -q 'class NetworkLost' "$kotlin_binding"
+rg -q 'class Canceled' "$kotlin_binding"
+rg -q 'class Failed' "$kotlin_binding"
 if rg -q 'suspend fun `close`\(\)' "$kotlin_binding"; then
   echo "error: async close() conflicts with UniFFI AutoCloseable.close() in Kotlin" >&2
   exit 1
@@ -50,5 +55,10 @@ fi
 rg -q 'public enum FfiApplicationCommand' "$swift_binding"
 rg -q 'public enum FfiApplicationEvent' "$swift_binding"
 rg -q 'public struct FfiApplicationSnapshot' "$swift_binding"
+rg -q 'public enum FfiRoomControlError' "$swift_binding"
+rg -q 'case Rejected' "$swift_binding"
+rg -q 'case NetworkLost' "$swift_binding"
+rg -q 'case Canceled' "$swift_binding"
+rg -q 'case Failed' "$swift_binding"
 
 echo "Swift and Kotlin typed application bindings generated successfully."
