@@ -2001,9 +2001,9 @@ final class TransferViewModel: ObservableObject {
             viewModel: self,
             operationID: expectedOperationID,
             activityID: activityID,
-            rememberPersistence: operation.rememberPersistence,
             defersDeliveryUntilNativeReturn: true
         )
+        let credentialVault = RememberedCredentialVault(operation.rememberPersistence)
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { finishNativeSendOperation(activityID: activityID) }
@@ -2028,6 +2028,7 @@ final class TransferViewModel: ObservableObject {
                 let completion = try await performSend(
                     operation,
                     cancellation: token,
+                    credentialVault: credentialVault,
                     observer: observer
                 )
                 guard isCurrentOperation(
@@ -2045,6 +2046,7 @@ final class TransferViewModel: ObservableObject {
     private func performSend(
         _ operation: SendOperation,
         cancellation: FfiManifestV2Cancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: Observer
     ) async throws -> FfiManifestV2Completion {
         #if os(iOS) && canImport(WiFiAware)
@@ -2058,6 +2060,7 @@ final class TransferViewModel: ObservableObject {
                 request: operation.request,
                 stateDirectory: operation.stateDirectory,
                 cancellation: cancellation,
+                credentialVault: credentialVault,
                 observer: observer
             )
         }
@@ -2068,6 +2071,7 @@ final class TransferViewModel: ObservableObject {
             request: operation.request,
             stateDirectory: operation.stateDirectory,
             cancellation: cancellation,
+            credentialVault: credentialVault,
             observer: observer
         )
     }
@@ -2125,7 +2129,6 @@ final class TransferViewModel: ObservableObject {
             viewModel: self,
             operationID: expectedOperationID,
             activityID: activityID,
-            rememberPersistence: operation.rememberPersistence,
             onNativePhase: { phase in
                 guard phase == .waitingForPeer else { return }
                 // Joining is emitted by Rust only after the native receive
@@ -2136,6 +2139,7 @@ final class TransferViewModel: ObservableObject {
             },
             defersDeliveryUntilNativeReturn: true
         )
+        let credentialVault = RememberedCredentialVault(operation.rememberPersistence)
         task = Task { @MainActor [weak self] in
             defer { launchSignal?.resolve(nil) }
             guard let self else {
@@ -2149,6 +2153,7 @@ final class TransferViewModel: ObservableObject {
                 if let completion = try await receiveNearbyHybrid(
                     operation,
                     cancellation: token,
+                    credentialVault: credentialVault,
                     observer: observer,
                     onWifiAwareListenerReady: { [weak self] in
                         // The native receive phase cannot start until a Wi-Fi
@@ -2177,6 +2182,7 @@ final class TransferViewModel: ObservableObject {
                 let pending = try await receiveOffer(
                     operation,
                     cancellation: token,
+                    credentialVault: credentialVault,
                     observer: observer
                 )
                 guard isCurrentOperation(expectedOperationID, activityID: activityID) else { return }
@@ -2193,6 +2199,7 @@ final class TransferViewModel: ObservableObject {
     private func receiveOffer(
         _ operation: ReceiveOperation,
         cancellation: FfiManifestV2Cancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: Observer
     ) async throws -> FfiPendingManifestV2Receive {
         return try await receiveTransferOfferV2(
@@ -2200,6 +2207,7 @@ final class TransferViewModel: ObservableObject {
             request: operation.request,
             stateDirectory: operation.stateDirectory,
             cancellation: cancellation,
+            credentialVault: credentialVault,
             observer: observer
         )
     }
@@ -2207,6 +2215,7 @@ final class TransferViewModel: ObservableObject {
     private func receiveNearbyHybrid(
         _ operation: ReceiveOperation,
         cancellation: FfiManifestV2Cancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: Observer,
         onWifiAwareListenerReady: @escaping @MainActor @Sendable () -> Void
     ) async throws -> FfiManifestV2Completion? {
@@ -2220,6 +2229,7 @@ final class TransferViewModel: ObservableObject {
                 request: operation.request,
                 stateDirectory: operation.stateDirectory,
                 cancellation: cancellation,
+                credentialVault: credentialVault,
                 observer: observer,
                 onListenerReady: onWifiAwareListenerReady
             ) { [weak self] pending in
@@ -2914,7 +2924,6 @@ final class Observer: TransferObserver, @unchecked Sendable {
     private weak var viewModel: TransferViewModel?
     private let operationID: UUID
     private let activityID: String?
-    private let rememberPersistence: RememberPersistenceContext?
     private let onNativePhase: (@MainActor (FfiManifestV2Phase) -> Void)?
     private let defersDeliveryUntilNativeReturn: Bool
 
@@ -2922,14 +2931,12 @@ final class Observer: TransferObserver, @unchecked Sendable {
         viewModel: TransferViewModel,
         operationID: UUID,
         activityID: String?,
-        rememberPersistence: RememberPersistenceContext? = nil,
         onNativePhase: (@MainActor (FfiManifestV2Phase) -> Void)? = nil,
         defersDeliveryUntilNativeReturn: Bool = false
     ) {
         self.viewModel = viewModel
         self.operationID = operationID
         self.activityID = activityID
-        self.rememberPersistence = rememberPersistence
         self.onNativePhase = onNativePhase
         self.defersDeliveryUntilNativeReturn = defersDeliveryUntilNativeReturn
     }
@@ -2969,15 +2976,24 @@ final class Observer: TransferObserver, @unchecked Sendable {
         }
     }
     func onDiagnostic(message: String) { hop { $0.handleDiagnostic(message) } }
-    func onRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
-        rememberPersistence?.persist(opaqueCredential, generation: generation) ?? false
-    }
-
     private func hop(_ body: @escaping @MainActor (TransferViewModel) -> Void) {
         Task { @MainActor [weak viewModel, operationID] in
             guard let viewModel, viewModel.operationID == operationID else { return }
             body(viewModel)
         }
+    }
+}
+
+final class RememberedCredentialVault: FfiRememberedCredentialVault, @unchecked Sendable {
+    private let persistence: RememberPersistenceContext?
+
+    init(_ persistence: RememberPersistenceContext?) {
+        self.persistence = persistence
+    }
+
+    func storeRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
+        guard !opaqueCredential.isEmpty else { return false }
+        return persistence?.persist(opaqueCredential, generation: generation) ?? false
     }
 }
 

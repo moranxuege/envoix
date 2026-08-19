@@ -11,8 +11,8 @@ use envoix_client::api::{
 use envoix_error::CoreError;
 
 use crate::{
-    DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, EnvoixError, FfiFailureCode, non_empty, op_err,
-    spawn_on_ffi_runtime,
+    DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, EnvoixError, FfiFailureCode,
+    FfiRememberedCredentialVault, non_empty, op_err, spawn_on_ffi_runtime,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -138,7 +138,6 @@ pub struct FfiRoomControlSnapshot {
     pub peer_name: String,
     pub creator: bool,
     pub remembered_generation: Option<u64>,
-    pub pairing_credential: Vec<u8>,
     pub lifetime: FfiRoomLifetimeState,
 }
 
@@ -177,13 +176,17 @@ impl FfiRoomControlSession {
             peer_name: self.session.peer_name().to_string(),
             creator: self.session.is_creator(),
             remembered_generation: self.session.remembered_generation(),
-            pairing_credential: self
-                .session
-                .pairing_credential()
-                .map(|credential| credential.to_opaque())
-                .unwrap_or_default(),
             lifetime: ffi_lifetime(self.session.lifetime_state()),
         }
+    }
+
+    /// Stores a newly verified pairing credential without returning it in a
+    /// presentation-facing snapshot.
+    pub fn store_pairing_credential(&self, vault: Arc<dyn FfiRememberedCredentialVault>) -> bool {
+        self.session
+            .pairing_credential()
+            .map(|credential| vault.store_remembered_credential(credential.to_opaque(), 0))
+            .unwrap_or(false)
     }
 
     pub fn lifetime_snapshot(&self) -> FfiRoomLifetimeState {
@@ -867,9 +870,9 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v5_ffi_v20() {
+    fn core_info_advertises_room_control_v5_ffi_v21() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 20);
+        assert_eq!(info.ffi_api_version, 21);
         assert!(
             info.capabilities
                 .iter()
@@ -894,6 +897,11 @@ mod tests {
             info.capabilities
                 .iter()
                 .any(|capability| capability == "typed_room_control_errors_v1")
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == "typed_remembered_credential_vault_v1")
         );
     }
 }

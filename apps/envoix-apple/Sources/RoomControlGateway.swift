@@ -595,6 +595,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
             if let pendingVerification {
                 do {
                     try persistVerifiedDevice(
+                        session: connectedSession,
                         snapshot: snapshot,
                         pending: pendingVerification
                     )
@@ -660,6 +661,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
                     )
                 }
                 try persistVerifiedDevice(
+                    session: connectedSession,
                     snapshot: connectedSession.snapshot(),
                     pending: pending
                 )
@@ -701,24 +703,17 @@ final class LiveRoomControlGateway: RoomControlGateway {
     }
 
     private func persistVerifiedDevice(
+        session: FfiRoomControlSession,
         snapshot: FfiRoomControlSnapshot,
         pending: PendingDeviceVerification
     ) throws {
-        let credential = Data(snapshot.pairingCredential)
-        guard !credential.isEmpty else {
-            throw RuntimeSettingsError(
-                "The verified room did not provide a device credential."
-            )
-        }
         let authenticatedLabel = snapshot.peerName
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let prepared = try RememberedPeerStore.shared.prepare(
+        let vault = try RoomControlCredentialVault(
             label: authenticatedLabel.isEmpty ? pending.fallbackLabel : authenticatedLabel,
-            broker: pending.endpoint.broker,
-            relay: pending.endpoint.relay
+            endpoint: pending.endpoint
         )
-        let persistence = try RememberPersistenceContext(pending: prepared)
-        guard persistence.persist(credential, generation: 0) else {
+        guard session.storePairingCredential(vault: vault) else {
             throw RuntimeSettingsError(
                 "The verified device credential could not be protected on this device."
             )
@@ -827,6 +822,25 @@ final class LiveRoomControlGateway: RoomControlGateway {
         case .networkLost: return .networkLost
         case .protocolFailure: return .protocolFailure
         }
+    }
+}
+
+final class RoomControlCredentialVault: FfiRememberedCredentialVault, @unchecked Sendable {
+    private let persistence: RememberPersistenceContext
+
+    init(label: String, endpoint: RoomControlEndpoint) throws {
+        let prepared = try RememberedPeerStore.shared.prepare(
+            label: label,
+            broker: endpoint.broker,
+            relay: endpoint.relay
+        )
+        persistence = try RememberPersistenceContext(pending: prepared)
+    }
+
+    func storeRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
+        generation == 0
+            && !opaqueCredential.isEmpty
+            && persistence.persist(opaqueCredential, generation: generation)
     }
 }
 

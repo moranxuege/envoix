@@ -1,6 +1,7 @@
 package dev.envoix.app.ui
 
 import dev.envoix.app.EXPECTED_FFI_API_VERSION
+import dev.envoix.app.ffi.FfiRememberedCredentialVault
 import dev.envoix.app.ffi.FfiRememberedRoomConnectMode
 import dev.envoix.app.ffi.FfiRoomCloseReason
 import dev.envoix.app.ffi.FfiRoomConnectMode
@@ -72,6 +73,8 @@ internal interface RoomControlNativeCancellation : AutoCloseable {
 internal interface RoomControlNativeSession : AutoCloseable {
     fun snapshot(): FfiRoomControlSnapshot
 
+    fun storePairingCredential(vault: FfiRememberedCredentialVault): Boolean
+
     suspend fun nextEvent(): FfiRoomControlEvent
 
     suspend fun offerTransfer(offer: FfiRoomTransferOffer): FfiRoomLifetimeState?
@@ -97,7 +100,8 @@ internal object UniFfiRoomControlNativeCore : RoomControlNativeCore {
             info.ffiApiVersion == EXPECTED_FFI_API_VERSION &&
                 ROOM_CONTROL_CAPABILITY in info.capabilities &&
                 REMEMBERED_ROOM_CONTROL_CAPABILITY in info.capabilities &&
-                ROOM_CONTROL_ERROR_CAPABILITY in info.capabilities,
+                ROOM_CONTROL_ERROR_CAPABILITY in info.capabilities &&
+                REMEMBERED_CREDENTIAL_VAULT_CAPABILITY in info.capabilities,
         ) {
             "Unsupported Envoix Room binding: FFI ${info.ffiApiVersion}"
         }
@@ -167,6 +171,8 @@ internal object UniFfiRoomControlNativeCore : RoomControlNativeCore {
     private const val ROOM_CONTROL_CAPABILITY = "foreground_room_control_v5"
     private const val REMEMBERED_ROOM_CONTROL_CAPABILITY = "remembered_room_control_v1"
     private const val ROOM_CONTROL_ERROR_CAPABILITY = "typed_room_control_errors_v1"
+    private const val REMEMBERED_CREDENTIAL_VAULT_CAPABILITY =
+        "typed_remembered_credential_vault_v1"
 
     private fun requireCompatibleBinding() {
         check(compatibleBinding)
@@ -185,6 +191,8 @@ private class UniFfiRoomControlSession(
     private val value: FfiRoomControlSession,
 ) : RoomControlNativeSession {
     override fun snapshot(): FfiRoomControlSnapshot = value.snapshot()
+
+    override fun storePairingCredential(vault: FfiRememberedCredentialVault): Boolean = value.storePairingCredential(vault)
 
     override suspend fun nextEvent(): FfiRoomControlEvent = value.nextEvent()
 

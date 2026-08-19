@@ -35,6 +35,7 @@ target/debug/envoix-bindgen generate \
   --out-dir "$output_root/swift" \
   --config crates/envoix-ffi/uniffi.toml \
   "$library"
+python3 scripts/postprocess-apple-binding.py "$output_root/swift/envoix_ffi.swift"
 
 kotlin_binding="$output_root/kotlin/dev/envoix/app/ffi/envoix_ffi.kt"
 swift_binding="$output_root/swift/envoix_ffi.swift"
@@ -54,11 +55,23 @@ rg -q 'suspend fun `addStagedProviderRoots`' "$kotlin_binding"
 rg -q 'suspend fun `reauthorizeStagedProviderSource`' "$kotlin_binding"
 rg -q 'interface ManifestV2PlatformDestination' "$kotlin_binding"
 rg -q 'interface FfiLogSink' "$kotlin_binding"
+rg -q 'interface FfiRememberedCredentialVault' "$kotlin_binding"
 rg -q 'data class FfiDestinationPlanRequestV2' "$kotlin_binding"
 rg -q 'data class FfiDestinationCommitRequestV2' "$kotlin_binding"
 rg -q 'suspend fun `receiveWithPlatformDestination`' "$kotlin_binding"
 rg -q 'fun `initLogging`' "$kotlin_binding"
 rg -q 'fun `setLogLevel`' "$kotlin_binding"
+rg -q 'fun `storePairingCredential`' "$kotlin_binding"
+if awk '/data class FfiRoomControlSnapshot \(/{capture=1} capture{print} capture && /^\)/{exit}' \
+    "$kotlin_binding" | rg -q 'pairingCredential'; then
+  echo "error: Kotlin room snapshot exposes a pairing credential" >&2
+  exit 1
+fi
+if awk '/public interface TransferObserver/{capture=1} capture{print} capture && /^}/{exit}' \
+    "$kotlin_binding" | rg -q 'onRememberedCredential'; then
+  echo "error: Kotlin transfer observer exposes a remembered credential" >&2
+  exit 1
+fi
 if rg -q 'suspend fun `close`\(\)' "$kotlin_binding"; then
   echo "error: async close() conflicts with UniFFI AutoCloseable.close() in Kotlin" >&2
   exit 1
@@ -77,10 +90,22 @@ rg -q 'func addStagedProviderRoots' "$swift_binding"
 rg -q 'func reauthorizeStagedProviderSource' "$swift_binding"
 rg -q 'protocol ManifestV2PlatformDestination' "$swift_binding"
 rg -q 'protocol FfiLogSink' "$swift_binding"
+rg -q 'protocol FfiRememberedCredentialVault' "$swift_binding"
 rg -q 'struct FfiDestinationPlanRequestV2' "$swift_binding"
 rg -q 'struct FfiDestinationCommitRequestV2' "$swift_binding"
 rg -q 'func receiveWithPlatformDestination' "$swift_binding"
 rg -q 'func initLogging' "$swift_binding"
 rg -q 'func setLogLevel' "$swift_binding"
+rg -q 'func storePairingCredential' "$swift_binding"
+if awk '/public struct FfiRoomControlSnapshot:/{capture=1} capture{print} capture && /^}/{exit}' \
+    "$swift_binding" | rg -q 'pairingCredential'; then
+  echo "error: Swift room snapshot exposes a pairing credential" >&2
+  exit 1
+fi
+if awk '/public protocol TransferObserver:/{capture=1} capture{print} capture && /^}/{exit}' \
+    "$swift_binding" | rg -q 'onRememberedCredential'; then
+  echo "error: Swift transfer observer exposes a remembered credential" >&2
+  exit 1
+fi
 
 echo "Swift and Kotlin typed application bindings generated successfully."

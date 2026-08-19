@@ -5,6 +5,7 @@ import dev.envoix.app.OpLog
 import dev.envoix.app.RememberedPeerStore
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.ffi.FfiFailureCode
+import dev.envoix.app.ffi.FfiRememberedCredentialVault
 import dev.envoix.app.ffi.FfiRememberedRoomConnectException
 import dev.envoix.app.ffi.FfiRememberedRoomConnectMode
 import dev.envoix.app.ffi.FfiRoomCloseReason
@@ -357,7 +358,7 @@ internal class NativeRoomControlGateway internal constructor(
                 runCatching { session.close(FfiRoomCloseReason.BACKGROUNDED) }
                 return
             }
-            if (!persistVerification(generation, snapshot)) {
+            if (!persistVerification(generation, session, snapshot)) {
                 runCatching { session.close(FfiRoomCloseReason.PROTOCOL_FAILURE) }
                 terminate(
                     generation,
@@ -503,13 +504,14 @@ internal class NativeRoomControlGateway internal constructor(
 
     private fun persistVerification(
         generation: SessionGeneration,
+        session: RoomControlNativeSession,
         snapshot: FfiRoomControlSnapshot,
     ): Boolean {
         val pending = generation.pendingVerification ?: return true
-        val credential = snapshot.pairingCredential
-        if (credential.isEmpty()) return false
         val label = snapshot.peerName.takeIf(String::isNotBlank) ?: pending.fallbackLabel
-        return persistVerifiedDevice(label, pending.endpoint, credential)
+        return session.storePairingCredential(
+            RoomControlCredentialVault(label, pending.endpoint, persistVerifiedDevice),
+        )
     }
 
     private fun handleRememberedConnectFailure(
@@ -619,6 +621,20 @@ private data class DeviceVerificationPersistence(
 )
 
 private typealias VerifiedDevicePersistence = (String, RoomControlEndpoint, ByteArray) -> Boolean
+
+internal class RoomControlCredentialVault(
+    private val label: String,
+    private val endpoint: RoomControlEndpoint,
+    private val persist: VerifiedDevicePersistence,
+) : FfiRememberedCredentialVault {
+    override fun storeRememberedCredential(
+        opaqueCredential: ByteArray,
+        generation: ULong,
+    ): Boolean =
+        generation == 0uL &&
+            opaqueCredential.isNotEmpty() &&
+            persist(label, endpoint, opaqueCredential)
+}
 
 private fun rememberedDevicePersistence(store: RememberedPeerStore): VerifiedDevicePersistence =
     { label, endpoint, credential ->

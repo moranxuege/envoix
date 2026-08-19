@@ -9,6 +9,7 @@ import dev.envoix.app.ffi.FfiPathPolicy
 import dev.envoix.app.ffi.FfiPendingManifestV2Receive
 import dev.envoix.app.ffi.FfiPlatformManifestV2Completion
 import dev.envoix.app.ffi.FfiPlatformReceiveDestinationV2
+import dev.envoix.app.ffi.FfiRememberedCredentialVault
 import dev.envoix.app.ffi.FfiRendezvousPlan
 import dev.envoix.app.ffi.FfiTransferDirection
 import dev.envoix.app.ffi.FfiTransferMode
@@ -95,6 +96,7 @@ internal interface ManifestV2ReceiveNativeCore {
         request: FfiTransferRequest,
         stateDirectory: String,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: TransferObserver,
     ): ManifestV2ReceiveNativePending
 }
@@ -158,6 +160,7 @@ internal class ManifestV2ReceiveGateway(
     suspend fun receiveInvitationOffer(
         request: InvitationManifestV2ReceiveRequest,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: ManifestV2RememberedCredentialVault,
         observer: ManifestV2SessionObserver,
     ): ManifestV2PendingReceive {
         request.validate()
@@ -166,6 +169,7 @@ internal class ManifestV2ReceiveGateway(
             settings = manifestV2RuntimeSettings(request.language, request.broker, request.relay),
             request = request.transferRequest(),
             cancellation = cancellation,
+            credentialVault = credentialVault,
             observer = observer,
         )
     }
@@ -173,6 +177,7 @@ internal class ManifestV2ReceiveGateway(
     suspend fun receiveRememberedOffer(
         request: RememberedManifestV2ReceiveRequest,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: ManifestV2RememberedCredentialVault,
         observer: ManifestV2SessionObserver,
     ): ManifestV2PendingReceive {
         request.validate()
@@ -181,6 +186,7 @@ internal class ManifestV2ReceiveGateway(
             settings = manifestV2RuntimeSettings(request.language, request.broker, request.relay),
             request = request.transferRequest(),
             cancellation = cancellation,
+            credentialVault = credentialVault,
             observer = observer,
         )
     }
@@ -190,6 +196,7 @@ internal class ManifestV2ReceiveGateway(
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: ManifestV2RememberedCredentialVault,
         observer: ManifestV2SessionObserver,
     ): ManifestV2PendingReceive {
         val pending =
@@ -198,6 +205,7 @@ internal class ManifestV2ReceiveGateway(
                 request = request,
                 stateDirectory = stateDirectory,
                 cancellation = cancellation,
+                credentialVault = UniFfiRememberedCredentialVault(credentialVault),
                 observer = UniFfiManifestV2Observer(observer),
             )
         return try {
@@ -239,6 +247,7 @@ private object UniFfiManifestV2ReceiveNativeCore : ManifestV2ReceiveNativeCore {
         request: FfiTransferRequest,
         stateDirectory: String,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: TransferObserver,
     ): ManifestV2ReceiveNativePending {
         requireCompatibleBinding()
@@ -251,6 +260,7 @@ private object UniFfiManifestV2ReceiveNativeCore : ManifestV2ReceiveNativeCore {
                 request = request,
                 stateDirectory = stateDirectory,
                 cancellation = cancellation.value,
+                credentialVault = credentialVault,
                 observer = observer,
             ),
         )
@@ -265,6 +275,7 @@ private object UniFfiManifestV2ReceiveNativeCore : ManifestV2ReceiveNativeCore {
             "manifest_v2_session",
             "canonical_failure_projection_v1",
             "platform_manifest_v2_destination_v1",
+            "typed_remembered_credential_vault_v1",
         )
 }
 

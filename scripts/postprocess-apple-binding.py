@@ -7,8 +7,11 @@ import sys
 # Keep this explicit so a new callback interface cannot silently bypass the
 # reviewed Swift concurrency annotation below.
 EXPECTED_CALLBACK_INTERFACES = (
+    "FfiLogSink",
     "FfiNativeDatagramTransport",
     "FfiNativeDuplexTransport",
+    "FfiRememberedCredentialVault",
+    "ManifestV2PlatformDestination",
     "TransferObserver",
 )
 

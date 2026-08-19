@@ -108,6 +108,8 @@ presentation state and localization. Views render state and emit UI intent.
   is development-only and must not be a release fallback.
 - Keychain/Keystore/Windows vault access is owned by the Engine host, not UI or
   CLI presentation code.
+- Room snapshots and general transfer observers never expose credential bytes;
+  only the dedicated vault-port adapter may receive them.
 - Unit tests use fake vaults. Tests that touch a real platform vault are named,
   isolated, and never enumerate or modify unrelated user items.
 - Local Agent sockets/pipes are owner-only and validate their peer.

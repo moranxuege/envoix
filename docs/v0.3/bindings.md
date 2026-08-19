@@ -6,13 +6,21 @@ Status: normative for M5 and later platform migrations.
 
 The native library exposes two independent versions:
 
-- UniFFI API `20` identifies the complete native symbol/type surface;
+- UniFFI API `21` identifies the complete native symbol/type surface;
 - application binding `1` projects application contract `6`.
 
 Callers must check both `envoixCoreInfo()` and
 `envoixApplicationBindingInfo()` before opening a long-lived Engine handle.
 An unsupported version fails closed; a frontend must not guess field or state
 semantics.
+
+API 21 makes credential delivery a dedicated trusted boundary.
+`FfiRememberedCredentialVault` is the only foreign callback that receives a
+newly paired or rotated opaque credential. `FfiRoomControlSnapshot` and the
+general `TransferObserver` contain no credential bytes. Room pairing invokes
+`storePairingCredential(vault:)`; authenticated transfer entry points receive
+the vault separately from their progress observer. A platform vault adapter
+must store the value immediately and must not project, retain, or log it.
 
 ## Control boundary
 
@@ -63,9 +71,11 @@ scripts/check-generated-bindings.sh
 The script builds one metadata-bearing native library, generates Swift and
 Kotlin from it, and verifies that Command/Event/Snapshot types exist in both
 outputs. It also rejects an asynchronous zero-argument `close()` before UniFFI
-can emit an uncompilable Kotlin overload. Generated source is build output and
-is not checked into the repository; Apple packaging and Android staging
-generate from the same crate.
+can emit an uncompilable Kotlin overload. The gate also requires the dedicated
+credential-vault callback and rejects credential fields on Room snapshots or
+Transfer observers. Generated source is build output and is not checked into
+the repository; Apple packaging and Android staging generate from the same
+crate.
 
 ## Android migration ledger
 
@@ -87,6 +97,12 @@ Android Room and Transfer adapters register protected remembered credentials
 through the typed UniFFI function. Only the opaque process reference leaves
 that trusted call; the duplicate byte-array JNI registration entry has been
 removed.
+
+New and rotated credentials travel through a separate
+`FfiRememberedCredentialVault` adapter implemented by the Android Keystore
+owner. They are absent from general session observers and Room snapshots, so a
+presentation or progress adapter cannot accidentally acquire credential
+material.
 
 All production Android Manifest v2 sends now restore and explicitly seal the
 canonical job, open the session, observe typed progress/failure/path/timing
@@ -126,6 +142,11 @@ The Swift concurrency adapter projects the same Room error variants. A rejected
 authenticated command leaves the current Room usable, while network loss,
 cancellation, and native failure follow terminal paths without inspecting the
 diagnostic message.
+
+Apple uses the same split callback contract. Only the dedicated vault adapters
+may call `RememberPersistenceContext`; Swift Room snapshots and transfer
+observers remain secret-free. This keeps Keychain access tied to pairing or
+credential rotation rather than presentation updates or reconnect polling.
 
 Transfer-invitation generation, deep-link routing, and role-bound parsing are
 typed for both sender and receiver and no longer cross the legacy JSON JNI

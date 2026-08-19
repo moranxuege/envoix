@@ -163,6 +163,7 @@ enum AppleWifiAwareTransportSession {
         request: FfiTransferRequest,
         stateDirectory: String,
         cancellation: FfiManifestV2Cancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: TransferObserver,
         performanceObserver: AppleWifiAwarePerformanceObserver? = nil
     ) async throws -> FfiManifestV2Completion {
@@ -184,6 +185,7 @@ enum AppleWifiAwareTransportSession {
                     transport: transport,
                     maximumDatagramSize: maximumDatagramSize,
                     cancellation: cancellation,
+                    credentialVault: credentialVault,
                     observer: fallbackObserver
                 )
             }
@@ -208,6 +210,7 @@ enum AppleWifiAwareTransportSession {
                 request: request,
                 stateDirectory: stateDirectory,
                 cancellation: cancellation,
+                credentialVault: credentialVault,
                 observer: fallbackObserver
             )
         }
@@ -219,6 +222,7 @@ enum AppleWifiAwareTransportSession {
         request: FfiTransferRequest,
         stateDirectory: String,
         cancellation: FfiManifestV2Cancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: TransferObserver,
         performanceObserver: AppleWifiAwarePerformanceObserver? = nil,
         onListenerReady: (@MainActor @Sendable () -> Void)? = nil,
@@ -244,6 +248,7 @@ enum AppleWifiAwareTransportSession {
                     transport: transport,
                     maximumDatagramSize: maximumDatagramSize,
                     cancellation: cancellation,
+                    credentialVault: credentialVault,
                     observer: fallbackObserver
                 )
                 fallbackObserver.crossFallbackBoundary()
@@ -273,6 +278,7 @@ enum AppleWifiAwareTransportSession {
                 request: request,
                 stateDirectory: stateDirectory,
                 cancellation: cancellation,
+                credentialVault: credentialVault,
                 observer: fallbackObserver
             )
             let destination = try await destinationDecision(pending)
@@ -1282,13 +1288,6 @@ private final class AppleWifiAwareFallbackObserver: TransferObserver, @unchecked
             crossFallbackBoundary()
         }
         downstream.onDiagnostic(message: message)
-    }
-
-    func onRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
-        downstream.onRememberedCredential(
-            opaqueCredential: opaqueCredential,
-            generation: generation
-        )
     }
 }
 

@@ -38,7 +38,7 @@ pub use room_control::*;
 #[cfg(feature = "android-jni")]
 mod android_jni;
 
-const ENVOIX_FFI_API_VERSION: u32 = 20;
+const ENVOIX_FFI_API_VERSION: u32 = 21;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
@@ -468,10 +468,15 @@ pub trait TransferObserver: Send + Sync {
     fn on_connection_path(&self, event: FfiConnectionPathEvent);
     fn on_stage_timing(&self, event: FfiTransferStageTiming);
     fn on_diagnostic(&self, message: String);
-    /// Called only on the native worker at the authenticated persistence
-    /// boundary. Implementations store these bytes immediately and must never
-    /// project or log them.
-    fn on_remembered_credential(&self, opaque_credential: Vec<u8>, generation: u64) -> bool;
+}
+
+/// Trusted platform boundary for newly paired or rotated credentials.
+///
+/// Implementations store the bytes immediately in Keychain/Keystore-backed
+/// state and must never project, retain in presentation state, or log them.
+#[uniffi::export(with_foreign)]
+pub trait FfiRememberedCredentialVault: Send + Sync {
+    fn store_remembered_credential(&self, opaque_credential: Vec<u8>, generation: u64) -> bool;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -504,6 +509,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "typed_room_control_errors_v1".into(),
             "nearby_invite_inbox_v1".into(),
             "typed_log_sink_v1".into(),
+            "typed_remembered_credential_vault_v1".into(),
             "remembered_devices_v1".into(),
             "typed_application_contract_v6".into(),
         ],

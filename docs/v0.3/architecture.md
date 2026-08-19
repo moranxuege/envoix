@@ -143,7 +143,7 @@ translate those typed values into their native binding types, but must not
 maintain independent error-to-recovery or error-to-terminal-state tables or
 parse diagnostic prose. Application contract v6 makes the fine-grained failure
 codes canonical while preserving read compatibility for v1-v5 fixtures;
-UniFFI API 20 carries the complete projection to Apple and Android clients;
+UniFFI API 21 carries the complete projection to Apple and Android clients;
 application binding v1 projects application contract v6 as typed
 Command/Event/Snapshot/Effect values without JSON orchestration.
 
@@ -358,6 +358,13 @@ polling. Tests use an in-memory vault unless they explicitly test a platform
 adapter. The Engine host injects the `SecureVaultPort`; the contract exchanges
 only validated vault references and zeroizing, non-serializable secret values,
 and represents required user interaction as a typed result.
+
+The Apple/Android UniFFI boundary enforces the same ownership rule. Room
+snapshots and general transfer observers never contain credential bytes. Only
+the dedicated `FfiRememberedCredentialVault` callback receives a new or rotated
+opaque credential and must synchronously hand it to the platform vault owner.
+Loading an existing credential into the native process registry is likewise a
+trusted host operation; UI state receives only its opaque reference.
 
 ## 10. Presentation architecture
 

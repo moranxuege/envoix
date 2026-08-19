@@ -280,6 +280,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                                         transport: transport,
                                         maximumDatagramSize: maximumDatagramSize,
                                         cancellation: cancellation,
+                                        credentialVault: WifiAwareRejectingCredentialVault(),
                                         observer: observer
                                     )
                                 }
@@ -298,6 +299,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                             request: route.request,
                             stateDirectory: stateDirectory.path,
                             cancellation: cancellation,
+                            credentialVault: WifiAwareRejectingCredentialVault(),
                             observer: observer,
                             performanceObserver: { sample in
                                 timeline.record(sample)
@@ -404,6 +406,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                                         transport: transport,
                                         maximumDatagramSize: maximumDatagramSize,
                                         cancellation: cancellation,
+                                        credentialVault: WifiAwareRejectingCredentialVault(),
                                         observer: observer
                                     )
                                     let destinationRequest = try Self.destinationRequest(
@@ -432,6 +435,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                             request: route.request,
                             stateDirectory: stateDirectory.path,
                             cancellation: cancellation,
+                            credentialVault: WifiAwareRejectingCredentialVault(),
                             observer: observer,
                             performanceObserver: { sample in
                                 timeline.record(sample)
@@ -1503,7 +1507,11 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
         }
         timeline.mark("diagnostic=\(message)")
     }
-    func onRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool {
+}
+
+private final class WifiAwareRejectingCredentialVault:
+    FfiRememberedCredentialVault, @unchecked Sendable {
+    func storeRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool {
         false
     }
 }

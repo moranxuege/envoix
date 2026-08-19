@@ -376,10 +376,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn core_info_advertises_platform_destination_in_ffi_v20() {
+    fn core_info_advertises_platform_destination_in_ffi_v21() {
         let info = crate::envoix_core_info();
 
-        assert_eq!(info.ffi_api_version, 20);
+        assert_eq!(info.ffi_api_version, 21);
         assert!(
             info.capabilities
                 .iter()

@@ -13,6 +13,7 @@ import dev.envoix.app.ffi.FfiManifestOfferSummaryV2
 import dev.envoix.app.ffi.FfiManifestV2Completion
 import dev.envoix.app.ffi.FfiPlatformManifestV2Completion
 import dev.envoix.app.ffi.FfiPlatformReceiveDestinationV2
+import dev.envoix.app.ffi.FfiRememberedCredentialVault
 import dev.envoix.app.ffi.FfiTransferMode
 import dev.envoix.app.ffi.FfiTransferRequest
 import dev.envoix.app.ffi.ManifestV2PlatformDestination
@@ -36,6 +37,7 @@ class ManifestV2ReceiveGatewayTest {
                 .receiveInvitationOffer(
                     invitationRequest("123456-a1b2-c3d4", creator = true),
                     creatorCancellation,
+                    RejectingReceiveCredentialVault,
                     NoopManifestV2SessionObserver,
                 ).close()
 
@@ -50,6 +52,7 @@ class ManifestV2ReceiveGatewayTest {
                 .receiveInvitationOffer(
                     invitationRequest("envoix://invite/v2/secret", creator = false),
                     joinerNative.newCancellation(),
+                    RejectingReceiveCredentialVault,
                     NoopManifestV2SessionObserver,
                 ).close()
 
@@ -75,6 +78,7 @@ class ManifestV2ReceiveGatewayTest {
                             previousGeneration = 7,
                         ),
                     cancellation = native.newCancellation(),
+                    credentialVault = RejectingReceiveCredentialVault,
                     observer = NoopManifestV2SessionObserver,
                 ).close()
 
@@ -93,6 +97,7 @@ class ManifestV2ReceiveGatewayTest {
                 ManifestV2ReceiveGateway(native).receiveInvitationOffer(
                     invitationRequest("invite", creator = false),
                     native.newCancellation(),
+                    RejectingReceiveCredentialVault,
                     NoopManifestV2SessionObserver,
                 )
 
@@ -149,6 +154,7 @@ class ManifestV2ReceiveGatewayTest {
                     ManifestV2ReceiveGateway(native).receiveInvitationOffer(
                         invitationRequest("invite", creator = false),
                         native.newCancellation(),
+                        RejectingReceiveCredentialVault,
                         NoopManifestV2SessionObserver,
                     )
                 }
@@ -190,6 +196,7 @@ private class FakeManifestV2ReceiveNativeCore(
         request: FfiTransferRequest,
         stateDirectory: String,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: TransferObserver,
     ): ManifestV2ReceiveNativePending {
         this.settings = settings
@@ -280,8 +287,10 @@ private object NoopManifestV2SessionObserver : ManifestV2SessionObserver {
     override fun onStageTiming(timing: TransferStageTiming) = Unit
 
     override fun onDiagnostic(message: String) = Unit
+}
 
-    override fun onRememberedCredential(
+private object RejectingReceiveCredentialVault : ManifestV2RememberedCredentialVault {
+    override fun storeRememberedCredential(
         opaqueCredential: ByteArray,
         generation: Long,
     ): Boolean = false

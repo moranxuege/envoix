@@ -10,6 +10,7 @@ import dev.envoix.app.ffi.FfiManifestV2Completion
 import dev.envoix.app.ffi.FfiManifestV2Phase
 import dev.envoix.app.ffi.FfiPathPolicy
 import dev.envoix.app.ffi.FfiRecoveryAction
+import dev.envoix.app.ffi.FfiRememberedCredentialVault
 import dev.envoix.app.ffi.FfiRendezvousPlan
 import dev.envoix.app.ffi.FfiTransferDirection
 import dev.envoix.app.ffi.FfiTransferFailure
@@ -81,8 +82,10 @@ internal interface ManifestV2SessionObserver {
     fun onStageTiming(timing: TransferStageTiming)
 
     fun onDiagnostic(message: String)
+}
 
-    fun onRememberedCredential(
+internal interface ManifestV2RememberedCredentialVault {
+    fun storeRememberedCredential(
         opaqueCredential: ByteArray,
         generation: Long,
     ): Boolean
@@ -110,6 +113,7 @@ internal interface ManifestV2SendNativeCore {
         request: FfiTransferRequest,
         stateDirectory: String,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: TransferObserver,
     ): FfiManifestV2Completion
 }
@@ -122,6 +126,7 @@ internal class ManifestV2SendGateway(
     suspend fun sendRemembered(
         request: RememberedManifestV2SendRequest,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: ManifestV2RememberedCredentialVault,
         observer: ManifestV2SessionObserver,
     ): ManifestV2SendCompletion {
         request.validate()
@@ -132,6 +137,7 @@ internal class ManifestV2SendGateway(
             settings = manifestV2RuntimeSettings(request.language, request.broker, request.relay),
             transferRequest = request.transferRequest(),
             cancellation = cancellation,
+            credentialVault = credentialVault,
             observer = observer,
         )
     }
@@ -139,6 +145,7 @@ internal class ManifestV2SendGateway(
     suspend fun sendInvitation(
         request: InvitationManifestV2SendRequest,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: ManifestV2RememberedCredentialVault,
         observer: ManifestV2SessionObserver,
     ): ManifestV2SendCompletion {
         request.validate()
@@ -149,6 +156,7 @@ internal class ManifestV2SendGateway(
             settings = manifestV2RuntimeSettings(request.language, request.broker, request.relay),
             transferRequest = request.transferRequest(),
             cancellation = cancellation,
+            credentialVault = credentialVault,
             observer = observer,
         )
     }
@@ -160,6 +168,7 @@ internal class ManifestV2SendGateway(
         settings: EnvoixRuntimeSettings,
         transferRequest: FfiTransferRequest,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: ManifestV2RememberedCredentialVault,
         observer: ManifestV2SessionObserver,
     ): ManifestV2SendCompletion {
         val job = native.restoreJob(jobStoreDirectory, jobId)
@@ -172,6 +181,7 @@ internal class ManifestV2SendGateway(
                     request = transferRequest,
                     stateDirectory = stateDirectory,
                     cancellation = cancellation,
+                    credentialVault = UniFfiRememberedCredentialVault(credentialVault),
                     observer = UniFfiManifestV2Observer(observer),
                 )
             check(completion.jobId == jobId) {
@@ -222,6 +232,7 @@ private object UniFfiManifestV2SendNativeCore : ManifestV2SendNativeCore {
         request: FfiTransferRequest,
         stateDirectory: String,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: TransferObserver,
     ): FfiManifestV2Completion {
         requireCompatibleBinding()
@@ -235,6 +246,7 @@ private object UniFfiManifestV2SendNativeCore : ManifestV2SendNativeCore {
             request = request,
             stateDirectory = stateDirectory,
             cancellation = cancellation.value,
+            credentialVault = credentialVault,
             observer = observer,
         )
     }
@@ -248,6 +260,7 @@ private object UniFfiManifestV2SendNativeCore : ManifestV2SendNativeCore {
             "canonical_transfer_job_v2",
             "manifest_v2_session",
             "canonical_failure_projection_v1",
+            "typed_remembered_credential_vault_v1",
         )
 }
 
@@ -267,6 +280,18 @@ internal class UniFfiManifestV2SessionCancellation(
     override fun cancel() = value.cancel()
 
     override fun close() = value.close()
+}
+
+internal class UniFfiRememberedCredentialVault(
+    private val target: ManifestV2RememberedCredentialVault,
+) : FfiRememberedCredentialVault {
+    override fun storeRememberedCredential(
+        opaqueCredential: ByteArray,
+        generation: ULong,
+    ): Boolean {
+        val checkedGeneration = generation.toLongOrNull() ?: return false
+        return target.storeRememberedCredential(opaqueCredential, checkedGeneration)
+    }
 }
 
 internal class UniFfiManifestV2Observer(
@@ -312,14 +337,6 @@ internal class UniFfiManifestV2Observer(
 
     override fun onDiagnostic(message: String) {
         target.onDiagnostic(message)
-    }
-
-    override fun onRememberedCredential(
-        opaqueCredential: ByteArray,
-        generation: ULong,
-    ): Boolean {
-        val checkedGeneration = generation.toLongOrNull() ?: return false
-        return target.onRememberedCredential(opaqueCredential, checkedGeneration)
     }
 
     private fun ULong.checkedLongOrReport(name: String): Long? =

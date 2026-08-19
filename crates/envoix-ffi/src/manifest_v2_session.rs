@@ -42,11 +42,12 @@ use super::{
     FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailureOutcome,
     FfiFailurePhase, FfiFailureSessionDisposition, FfiManifestV2Phase, FfiNativeDatagramTransport,
     FfiNativeDuplexTransport, FfiPathPolicy, FfiPlatformReceiveDestinationV2, FfiRecoveryAction,
-    FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferMode,
-    FfiTransferRequest, FfiTransferStage, FfiTransferStageTiming, ManifestV2PlatformDestination,
-    TransferObserver, build_client_for_request, core_datagram_transport, core_native_transport,
-    on_ffi_runtime, op_err, peer_sources_for_request, prepare_platform_destination,
-    spawn_on_ffi_runtime, transfer_options_for_request,
+    FfiRememberedCredentialVault, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2,
+    FfiTransferMode, FfiTransferRequest, FfiTransferStage, FfiTransferStageTiming,
+    ManifestV2PlatformDestination, TransferObserver, build_client_for_request,
+    core_datagram_transport, core_native_transport, on_ffi_runtime, op_err,
+    peer_sources_for_request, prepare_platform_destination, spawn_on_ffi_runtime,
+    transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -444,7 +445,7 @@ fn project_connection_path(
 }
 
 struct NativeAuthentication {
-    observer: Arc<dyn TransferObserver>,
+    vault: Arc<dyn FfiRememberedCredentialVault>,
     remember_consent: bool,
     rotation: Option<(Vec<u8>, u64)>,
     invitation_consumption: Option<InvitationConsumption>,
@@ -459,18 +460,28 @@ struct SendAttemptContext<'a> {
     events: Arc<dyn EventSink>,
     cancel: &'a TransferCancelToken,
     relay: Option<&'a str>,
+    vault: Arc<dyn FfiRememberedCredentialVault>,
+    remember_consent: bool,
+}
+
+struct ReceiveAttemptContext<'a> {
+    config: envoix_client::api::SessionConfig,
+    events: Arc<dyn EventSink>,
+    vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
+    cancel: &'a TransferCancelToken,
+    relay: Option<&'a str>,
     remember_consent: bool,
 }
 
 impl NativeAuthentication {
     fn invitation(
-        observer: Arc<dyn TransferObserver>,
+        vault: Arc<dyn FfiRememberedCredentialVault>,
         remember_consent: bool,
         invitation_consumption: InvitationConsumption,
     ) -> Self {
         Self {
-            observer,
+            vault,
             remember_consent,
             rotation: None,
             invitation_consumption: Some(invitation_consumption),
@@ -480,12 +491,12 @@ impl NativeAuthentication {
     }
 
     fn rotation(
-        observer: Arc<dyn TransferObserver>,
+        vault: Arc<dyn FfiRememberedCredentialVault>,
         opaque_credential: Vec<u8>,
         next_generation: u64,
     ) -> Self {
         Self {
-            observer,
+            vault,
             remember_consent: false,
             rotation: Some((opaque_credential, next_generation)),
             invitation_consumption: None,
@@ -522,7 +533,7 @@ impl AuthenticationHandler for NativeAuthentication {
         let Some((opaque, generation)) = credential else {
             return Ok(());
         };
-        if !self.observer.on_remembered_credential(opaque, generation) {
+        if !self.vault.store_remembered_credential(opaque, generation) {
             return Err(SessionError::Storage(
                 "protected remembered credential could not be persisted".into(),
             ));
@@ -633,6 +644,7 @@ pub async fn send_transfer_job_v2(
     request: FfiTransferRequest,
     state_directory: String,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<FfiManifestV2Completion, EnvoixError> {
     spawn_on_ffi_runtime(async move {
@@ -670,7 +682,7 @@ pub async fn send_transfer_job_v2(
                     events,
                     cancel: &cancellation.token,
                     relay: options.relay.as_deref(),
-                    observer: observer.clone(),
+                    vault: credential_vault.clone(),
                     remember_consent: request.remember_consent,
                 },
             )
@@ -733,6 +745,7 @@ pub async fn send_transfer_job_v2_nearby_hybrid(
     transport: Arc<dyn FfiNativeDatagramTransport>,
     maximum_datagram_size: u32,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<FfiManifestV2Completion, EnvoixError> {
     spawn_on_ffi_runtime(async move {
@@ -756,7 +769,7 @@ pub async fn send_transfer_job_v2_nearby_hybrid(
             observer: observer.clone(),
         });
         let authentication = NativeAuthentication::invitation(
-            observer.clone(),
+            credential_vault,
             request.remember_consent,
             lease.consumption(),
         );
@@ -932,6 +945,7 @@ pub async fn receive_transfer_offer_v2(
     request: FfiTransferRequest,
     state_directory: String,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
     spawn_on_ffi_runtime(async move {
@@ -948,6 +962,7 @@ pub async fn receive_transfer_offer_v2(
             attempts,
             state_directory,
             cancellation,
+            credential_vault,
             observer,
         )
         .await
@@ -957,6 +972,7 @@ pub async fn receive_transfer_offer_v2(
 
 /// Receives a Nearby Room offer on one iroh endpoint carrying Wi-Fi Aware,
 /// direct IP, and relay candidates.
+#[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub async fn receive_transfer_offer_v2_nearby_hybrid(
     settings: EnvoixRuntimeSettings,
@@ -965,6 +981,7 @@ pub async fn receive_transfer_offer_v2_nearby_hybrid(
     transport: Arc<dyn FfiNativeDatagramTransport>,
     maximum_datagram_size: u32,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
     spawn_on_ffi_runtime(async move {
@@ -979,7 +996,7 @@ pub async fn receive_transfer_offer_v2_nearby_hybrid(
             observer: observer.clone(),
         });
         let authentication = NativeAuthentication::invitation(
-            observer.clone(),
+            credential_vault,
             request.remember_consent,
             lease.consumption(),
         );
@@ -1124,6 +1141,7 @@ async fn receive_offer_from_attempts(
     attempts: Vec<super::RouteAttempt>,
     state_directory: PathBuf,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
     if attempts.len() == 1 {
@@ -1137,6 +1155,7 @@ async fn receive_offer_from_attempts(
             &settings,
             &request,
             attempt,
+            credential_vault,
             observer.clone(),
             &cancellation.token,
         )
@@ -1165,12 +1184,14 @@ async fn receive_offer_from_attempts(
         route_cancellations.push(route_cancellation.clone());
         let settings = settings.clone();
         let request = request.clone();
+        let credential_vault = credential_vault.clone();
         let observer = observer.clone();
         routes.spawn(async move {
             let result = receive_one_offer_attempt(
                 &settings,
                 &request,
                 attempt,
+                credential_vault,
                 observer,
                 &route_cancellation,
             )
@@ -1253,6 +1274,7 @@ async fn receive_one_offer_attempt(
     settings: &EnvoixRuntimeSettings,
     request: &FfiTransferRequest,
     attempt: super::RouteAttempt,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, SessionError> {
@@ -1266,12 +1288,15 @@ async fn receive_one_offer_attempt(
     });
     receive_offer_attempt(
         &attempt.source,
-        config,
-        events,
-        observer,
-        cancel,
-        options.relay.as_deref(),
-        request.remember_consent,
+        ReceiveAttemptContext {
+            config,
+            events,
+            vault: credential_vault,
+            observer,
+            cancel,
+            relay: options.relay.as_deref(),
+            remember_consent: request.remember_consent,
+        },
     )
     .await
 }
@@ -1335,7 +1360,7 @@ async fn send_attempt(
         events,
         cancel,
         relay,
-        observer,
+        vault,
         remember_consent,
     } = context;
     match source {
@@ -1359,7 +1384,7 @@ async fn send_attempt(
             let lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
             let authentication =
-                NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
+                NativeAuthentication::invitation(vault, remember_consent, lease.consumption());
             let result = send_manifest_v2_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
@@ -1398,7 +1423,7 @@ async fn send_attempt(
                     )
                 })?;
                 let authentication = NativeAuthentication::rotation(
-                    observer.clone(),
+                    vault.clone(),
                     credential.to_opaque(),
                     next_generation,
                 );
@@ -1452,13 +1477,17 @@ async fn send_attempt(
 
 async fn receive_offer_attempt(
     source: &PeerSource,
-    config: envoix_client::api::SessionConfig,
-    events: Arc<dyn EventSink>,
-    observer: Arc<dyn TransferObserver>,
-    cancel: &TransferCancelToken,
-    relay: Option<&str>,
-    remember_consent: bool,
+    context: ReceiveAttemptContext<'_>,
 ) -> Result<PendingManifestV2Receive, SessionError> {
+    let ReceiveAttemptContext {
+        config,
+        events,
+        vault,
+        observer,
+        cancel,
+        relay,
+        remember_consent,
+    } = context;
     let listen = config.clone();
     match source {
         PeerSource::ShowManual { token_ref } => {
@@ -1505,7 +1534,7 @@ async fn receive_offer_attempt(
             let lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
             let authentication =
-                NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
+                NativeAuthentication::invitation(vault, remember_consent, lease.consumption());
             let result = receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
@@ -1544,7 +1573,7 @@ async fn receive_offer_attempt(
                     )
                 })?;
                 let authentication = NativeAuthentication::rotation(
-                    observer.clone(),
+                    vault.clone(),
                     credential.to_opaque(),
                     next_generation,
                 );
@@ -1915,8 +1944,16 @@ mod tests {
         fn on_diagnostic(&self, message: String) {
             self.diagnostics.lock().unwrap().push(message);
         }
+    }
 
-        fn on_remembered_credential(&self, _opaque_credential: Vec<u8>, _generation: u64) -> bool {
+    struct RejectingVault;
+
+    impl FfiRememberedCredentialVault for RejectingVault {
+        fn store_remembered_credential(
+            &self,
+            _opaque_credential: Vec<u8>,
+            _generation: u64,
+        ) -> bool {
             false
         }
     }
@@ -2142,8 +2179,7 @@ mod tests {
 
     #[test]
     fn authentication_milestone_precedes_credential_persistence() {
-        let authentication =
-            NativeAuthentication::rotation(Arc::new(RecordingObserver::default()), vec![1], 1);
+        let authentication = NativeAuthentication::rotation(Arc::new(RejectingVault), vec![1], 1);
 
         let result = authentication.on_authenticated(AuthenticationOutcome {
             remember_secret: None,

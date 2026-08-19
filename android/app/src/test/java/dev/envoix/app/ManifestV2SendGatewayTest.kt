@@ -14,6 +14,7 @@ import dev.envoix.app.ffi.FfiManifestV2Completion
 import dev.envoix.app.ffi.FfiManifestV2Phase
 import dev.envoix.app.ffi.FfiPathPolicy
 import dev.envoix.app.ffi.FfiRecoveryAction
+import dev.envoix.app.ffi.FfiRememberedCredentialVault
 import dev.envoix.app.ffi.FfiTransferDirection
 import dev.envoix.app.ffi.FfiTransferFailure
 import dev.envoix.app.ffi.FfiTransferMode
@@ -40,6 +41,7 @@ class ManifestV2SendGatewayTest {
                 ManifestV2SendGateway(native).sendRemembered(
                     request(),
                     cancellation,
+                    RejectingSendCredentialVault,
                     RecordingManifestV2SendObserver(),
                 )
 
@@ -69,6 +71,7 @@ class ManifestV2SendGatewayTest {
             ManifestV2SendGateway(creatorNative).sendInvitation(
                 invitationRequest("123456-a1b2-c3d4", creator = true),
                 creatorNative.newCancellation(),
+                RejectingSendCredentialVault,
                 RecordingManifestV2SendObserver(),
             )
 
@@ -82,6 +85,7 @@ class ManifestV2SendGatewayTest {
             ManifestV2SendGateway(joinerNative).sendInvitation(
                 invitationRequest("envoix://invite/v2/secret", creator = false),
                 joinerNative.newCancellation(),
+                RejectingSendCredentialVault,
                 RecordingManifestV2SendObserver(),
             )
 
@@ -95,13 +99,14 @@ class ManifestV2SendGatewayTest {
     fun `send failure still closes the restored job`() =
         runTest {
             val native = FakeManifestV2SendNativeCore()
-            native.sendResult = { error("native send failed") }
+            native.sendResult = { _, _ -> error("native send failed") }
 
             val failure =
                 runCatching {
                     ManifestV2SendGateway(native).sendRemembered(
                         request(),
                         native.newCancellation(),
+                        RejectingSendCredentialVault,
                         RecordingManifestV2SendObserver(),
                     )
                 }
@@ -121,6 +126,7 @@ class ManifestV2SendGatewayTest {
                     ManifestV2SendGateway(native).sendRemembered(
                         request().copy(generation = -1),
                         native.newCancellation(),
+                        RejectingSendCredentialVault,
                         RecordingManifestV2SendObserver(),
                     )
                 }
@@ -135,7 +141,8 @@ class ManifestV2SendGatewayTest {
         runTest {
             val native = FakeManifestV2SendNativeCore()
             val target = RecordingManifestV2SendObserver()
-            native.sendResult = { observer ->
+            val credentialVault = RecordingManifestV2CredentialVault()
+            native.sendResult = { vault, observer ->
                 observer.onStarted(3u, 42uL)
                 observer.onPhase(FfiManifestV2Phase.TRANSFERRING)
                 observer.onPhase(FfiManifestV2Phase.DELIVERED)
@@ -171,7 +178,7 @@ class ManifestV2SendGatewayTest {
                         diagnosticMessage = "connection closed",
                     ),
                 )
-                assertTrue(observer.onRememberedCredential(byteArrayOf(1, 2, 3), 8uL))
+                assertTrue(vault.storeRememberedCredential(byteArrayOf(1, 2, 3), 8uL))
                 observer.onCompleted(42uL)
                 completion()
             }
@@ -179,6 +186,7 @@ class ManifestV2SendGatewayTest {
             ManifestV2SendGateway(native).sendRemembered(
                 request(),
                 native.newCancellation(),
+                credentialVault,
                 target,
             )
 
@@ -196,8 +204,8 @@ class ManifestV2SendGatewayTest {
                 FailureSessionDisposition.RetainForRecovery,
                 target.failures.single().sessionDisposition,
             )
-            assertArrayEquals(byteArrayOf(1, 2, 3), target.rememberedCredential)
-            assertEquals(8L, target.rememberedGeneration)
+            assertArrayEquals(byteArrayOf(1, 2, 3), credentialVault.rememberedCredential)
+            assertEquals(8L, credentialVault.rememberedGeneration)
         }
 
     @Test
@@ -254,7 +262,8 @@ private class FakeManifestV2SendNativeCore : ManifestV2SendNativeCore {
     var sentSettings: EnvoixRuntimeSettings? = null
     var sentRequest: FfiTransferRequest? = null
     var sentCancellation: ManifestV2SessionCancellation? = null
-    var sendResult: suspend (TransferObserver) -> FfiManifestV2Completion = { completion() }
+    var sendResult: suspend (FfiRememberedCredentialVault, TransferObserver) -> FfiManifestV2Completion =
+        { _, _ -> completion() }
 
     override fun newCancellation(): ManifestV2SessionCancellation = cancellation
 
@@ -273,6 +282,7 @@ private class FakeManifestV2SendNativeCore : ManifestV2SendNativeCore {
         request: FfiTransferRequest,
         stateDirectory: String,
         cancellation: ManifestV2SessionCancellation,
+        credentialVault: FfiRememberedCredentialVault,
         observer: TransferObserver,
     ): FfiManifestV2Completion {
         assertSame(this.job, job)
@@ -280,7 +290,7 @@ private class FakeManifestV2SendNativeCore : ManifestV2SendNativeCore {
         sentSettings = settings
         sentRequest = request
         sentCancellation = cancellation
-        return sendResult(observer)
+        return sendResult(credentialVault, observer)
     }
 }
 
@@ -318,8 +328,6 @@ private class RecordingManifestV2SendObserver : ManifestV2SessionObserver {
     val paths = mutableListOf<ConnectionPathKind>()
     val timings = mutableListOf<TransferStageTiming>()
     val diagnostics = mutableListOf<String>()
-    var rememberedCredential: ByteArray? = null
-    var rememberedGeneration: Long? = null
 
     override fun onStarted(
         itemCount: Long,
@@ -354,8 +362,13 @@ private class RecordingManifestV2SendObserver : ManifestV2SessionObserver {
     override fun onDiagnostic(message: String) {
         diagnostics += message
     }
+}
 
-    override fun onRememberedCredential(
+private class RecordingManifestV2CredentialVault : ManifestV2RememberedCredentialVault {
+    var rememberedCredential: ByteArray? = null
+    var rememberedGeneration: Long? = null
+
+    override fun storeRememberedCredential(
         opaqueCredential: ByteArray,
         generation: Long,
     ): Boolean {
@@ -363,6 +376,13 @@ private class RecordingManifestV2SendObserver : ManifestV2SessionObserver {
         rememberedGeneration = generation
         return true
     }
+}
+
+private object RejectingSendCredentialVault : ManifestV2RememberedCredentialVault {
+    override fun storeRememberedCredential(
+        opaqueCredential: ByteArray,
+        generation: Long,
+    ): Boolean = false
 }
 
 private fun completion() =

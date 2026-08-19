@@ -320,6 +320,7 @@ class TransferService : Service() {
                 ?.bytes ?: 0
         progressTrackers[spec.id] = TransferProgressTracker(initialBytes)
         val callback = ManifestCallback(spec)
+        val credentialVault = ManifestCredentialVault(spec)
         callbacks[spec.id] = callback
         val cancellation =
             if (spec.direction == Direction.Send) {
@@ -330,9 +331,9 @@ class TransferService : Service() {
         callback.bindTypedCancellation(cancellation)
         scope.launch {
             if (spec.direction == Direction.Send) {
-                runTypedSend(spec, callback, cancellation)
+                runTypedSend(spec, callback, credentialVault, cancellation)
             } else {
-                runTypedReceive(spec, callback, cancellation)
+                runTypedReceive(spec, callback, credentialVault, cancellation)
             }
         }
         updateNotification()
@@ -341,6 +342,7 @@ class TransferService : Service() {
     private suspend fun runTypedSend(
         spec: ManifestSpec,
         callback: ManifestCallback,
+        credentialVault: ManifestCredentialVault,
         cancellation: ManifestV2SessionCancellation,
     ) {
         try {
@@ -364,6 +366,7 @@ class TransferService : Service() {
                                 previousGeneration = spec.rememberedPreviousGeneration,
                             ),
                         cancellation = cancellation,
+                        credentialVault = credentialVault,
                         observer = callback,
                     )
                 } else {
@@ -381,6 +384,7 @@ class TransferService : Service() {
                                 rememberConsent = spec.rememberConsent,
                             ),
                         cancellation = cancellation,
+                        credentialVault = credentialVault,
                         observer = callback,
                     )
                 }
@@ -412,6 +416,7 @@ class TransferService : Service() {
     private suspend fun runTypedReceive(
         spec: ManifestSpec,
         callback: ManifestCallback,
+        credentialVault: ManifestCredentialVault,
         cancellation: ManifestV2SessionCancellation,
     ) {
         var pending: ManifestV2PendingReceive? = null
@@ -432,6 +437,7 @@ class TransferService : Service() {
                                 previousGeneration = spec.rememberedPreviousGeneration,
                             ),
                         cancellation = cancellation,
+                        credentialVault = credentialVault,
                         observer = callback,
                     )
                 } else {
@@ -447,6 +453,7 @@ class TransferService : Service() {
                                 rememberConsent = spec.rememberConsent,
                             ),
                         cancellation = cancellation,
+                        credentialVault = credentialVault,
                         observer = callback,
                     )
                 }
@@ -513,8 +520,6 @@ class TransferService : Service() {
         private val typedCancellation = AtomicReference<ManifestV2SessionCancellation?>()
         private val pendingReceive = AtomicReference<ManifestV2PendingReceive?>()
         private val receiveDestination = CompletableDeferred<ManifestV2ReceiveDestination>()
-        private val rememberedPersistence =
-            RememberedPersistenceState(spec.pendingRemember, spec.rememberedRelationshipId)
 
         fun bindTypedCancellation(cancellation: ManifestV2SessionCancellation) {
             check(typedCancellation.compareAndSet(null, cancellation)) {
@@ -599,8 +604,16 @@ class TransferService : Service() {
             if (callbacks[id] !== this) return
             appendDiagnostic(id, message)
         }
+    }
 
-        override fun onRememberedCredential(
+    private inner class ManifestCredentialVault(
+        spec: ManifestSpec,
+    ) : ManifestV2RememberedCredentialVault {
+        private val id = spec.id
+        private val rememberedPersistence =
+            RememberedPersistenceState(spec.pendingRemember, spec.rememberedRelationshipId)
+
+        override fun storeRememberedCredential(
             opaqueCredential: ByteArray,
             generation: Long,
         ): Boolean =

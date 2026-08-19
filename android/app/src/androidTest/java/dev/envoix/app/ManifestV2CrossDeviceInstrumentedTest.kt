@@ -182,6 +182,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                                             rememberConsent = false,
                                         ),
                                     cancellation = cancellation,
+                                    credentialVault = RejectingTypedCredentialVault,
                                     observer = observer,
                                 )
                             }
@@ -272,6 +273,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                                             rememberConsent = false,
                                         ),
                                     cancellation = cancellation,
+                                    credentialVault = RejectingTypedCredentialVault,
                                     observer = observer,
                                 )
                             pending = opened
@@ -553,11 +555,6 @@ class ManifestV2CrossDeviceInstrumentedTest {
             message.takeIf(String::isNotBlank)?.let(::marker)
         }
 
-        override fun onRememberedCredential(
-            opaqueCredential: ByteArray,
-            generation: Long,
-        ): Boolean = false
-
         fun recordOffer() {
             states += "offer"
             evidence.recordPhase("offer")
@@ -571,6 +568,13 @@ class ManifestV2CrossDeviceInstrumentedTest {
             stageTimings.assertSuccessfulTransfer()
             marker(stageTimings.verificationMarker())
         }
+    }
+
+    private object RejectingTypedCredentialVault : ManifestV2RememberedCredentialVault {
+        override fun storeRememberedCredential(
+            opaqueCredential: ByteArray,
+            generation: Long,
+        ): Boolean = false
     }
 
     private class StageTimingCapture(

@@ -1,6 +1,7 @@
 package dev.envoix.app.ui
 
 import dev.envoix.app.ffi.FfiFailureCode
+import dev.envoix.app.ffi.FfiRememberedCredentialVault
 import dev.envoix.app.ffi.FfiRememberedRoomConnectException
 import dev.envoix.app.ffi.FfiRoomCloseReason
 import dev.envoix.app.ffi.FfiRoomControlEvent
@@ -82,6 +83,25 @@ class NativeRoomControlGatewayTest {
             assertEquals("relay.test", connected.endpoint.relay)
             assertEquals("/tmp/room-control.json", native.connectionRequests.single().identityPath)
         }
+
+    @Test
+    fun `verified pairing vault accepts only a non-empty initial credential`() {
+        val credential = byteArrayOf(1, 2, 3)
+        var persisted: Triple<String, RoomControlEndpoint, ByteArray>? = null
+        val endpoint = RoomControlEndpoint("broker.test", "relay.test")
+        val vault =
+            RoomControlCredentialVault("MacBook", endpoint) { label, savedEndpoint, value ->
+                persisted = Triple(label, savedEndpoint, value)
+                true
+            }
+
+        assertFalse(vault.storeRememberedCredential(byteArrayOf(), 0uL))
+        assertFalse(vault.storeRememberedCredential(credential, 1uL))
+        assertTrue(vault.storeRememberedCredential(credential, 0uL))
+        assertEquals("MacBook", persisted?.first)
+        assertEquals(endpoint, persisted?.second)
+        assertTrue(credential.contentEquals(persisted?.third))
+    }
 
     @Test
     fun `offer response returns only after the typed write completes`() =
@@ -309,6 +329,7 @@ private class FakeRoomControlCancellation : RoomControlNativeCancellation {
 
 private class FakeRoomControlSession(
     private val currentSnapshot: FfiRoomControlSnapshot,
+    private val credentialToStore: ByteArray? = null,
 ) : RoomControlNativeSession {
     val events = Channel<Result<FfiRoomControlEvent>>(Channel.UNLIMITED)
     val acceptedOfferIds = mutableListOf<String>()
@@ -316,6 +337,9 @@ private class FakeRoomControlSession(
     var setPolicy: suspend (FfiRoomLifetimePolicy) -> FfiRoomLifetimeState? = { null }
 
     override fun snapshot(): FfiRoomControlSnapshot = currentSnapshot
+
+    override fun storePairingCredential(vault: FfiRememberedCredentialVault): Boolean =
+        credentialToStore?.let { vault.storeRememberedCredential(it, 0uL) } ?: false
 
     override suspend fun nextEvent(): FfiRoomControlEvent = events.receive().getOrThrow()
 
@@ -356,7 +380,6 @@ private fun snapshot(
     peerName = peerName,
     creator = true,
     rememberedGeneration = rememberedGeneration,
-    pairingCredential = byteArrayOf(),
     lifetime = lifetime(),
 )
 
