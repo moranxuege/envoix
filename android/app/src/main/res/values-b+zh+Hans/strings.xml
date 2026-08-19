@@ -428,4 +428,8 @@
     <string name="destination_choose_folder">选择文件夹</string>
     <string name="destination_unavailable_folder">文件夹不可用</string>
     <string name="destination_selected_folder">已选文件夹</string>
+
+    <string name="room_file_invitation_invalid">此文件邀请无效或已过期。</string>
+    <string name="room_route_unavailable">房间连接地址不可用，请重新连接后再接收文件。</string>
+    <string name="room_file_offer_wrong_room">此文件邀请不属于当前房间。</string>
 </resources>

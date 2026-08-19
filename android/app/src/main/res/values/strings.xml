@@ -450,4 +450,8 @@
     <string name="destination_choose_folder">Choose a folder</string>
     <string name="destination_unavailable_folder">Unavailable folder</string>
     <string name="destination_selected_folder">Selected folder</string>
+
+    <string name="room_file_invitation_invalid">This file invitation is invalid or expired.</string>
+    <string name="room_route_unavailable">The room route is unavailable. Reconnect before receiving files.</string>
+    <string name="room_file_offer_wrong_room">This file offer does not belong to the current room.</string>
 </resources>

@@ -2,6 +2,7 @@ package dev.envoix.app.ui
 
 import dev.envoix.app.CreatedInvite
 import dev.envoix.app.ParsedInvite
+import dev.envoix.app.R
 import dev.envoix.app.Settings
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyInviteRoute
@@ -617,7 +618,7 @@ class ConnectionWorkflowViewModelTest {
             assertFalse(receiverPrepared)
             assertEquals(TEST_TRANSFER_OFFER.id to false, gateway.respondedOffer)
             assertEquals(
-                "This file offer does not belong to the current room.",
+                UiMessage.Resource(R.string.room_file_offer_wrong_room),
                 viewModel.uiState.value.control.error,
             )
             assertNull(viewModel.uiState.value.control.incomingOffer)

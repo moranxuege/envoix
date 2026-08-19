@@ -1,5 +1,6 @@
 package dev.envoix.app.ui
 
+import android.content.Context
 import android.content.res.Configuration
 import android.os.LocaleList
 import androidx.annotation.PluralsRes
@@ -31,11 +32,21 @@ fun appText(
 fun appString(
     @StringRes id: Int,
     vararg formatArgs: Any,
+): String =
+    LocalContext.current.localizedString(
+        id,
+        LocalAppLanguage.current,
+        *formatArgs,
+    )
+
+internal fun Context.localizedString(
+    @StringRes id: Int,
+    language: String,
+    vararg formatArgs: Any,
 ): String {
-    val context = LocalContext.current
-    val configuration = Configuration(context.resources.configuration)
-    configuration.setLocales(LocaleList.forLanguageTags(LocalAppLanguage.current))
-    val resources = context.createConfigurationContext(configuration).resources
+    val configuration = Configuration(resources.configuration)
+    configuration.setLocales(LocaleList.forLanguageTags(language))
+    val resources = createConfigurationContext(configuration).resources
     return if (formatArgs.isEmpty()) {
         resources.getString(id)
     } else {
@@ -48,12 +59,40 @@ fun appQuantityString(
     @PluralsRes id: Int,
     quantity: Int,
     vararg formatArgs: Any,
+): String =
+    LocalContext.current.localizedQuantityString(
+        id,
+        quantity,
+        LocalAppLanguage.current,
+        *formatArgs,
+    )
+
+private fun Context.localizedQuantityString(
+    @PluralsRes id: Int,
+    quantity: Int,
+    language: String,
+    vararg formatArgs: Any,
 ): String {
-    val context = LocalContext.current
-    val configuration = Configuration(context.resources.configuration)
-    configuration.setLocales(LocaleList.forLanguageTags(LocalAppLanguage.current))
-    return context
-        .createConfigurationContext(configuration)
+    val configuration = Configuration(resources.configuration)
+    configuration.setLocales(LocaleList.forLanguageTags(language))
+    return createConfigurationContext(configuration)
         .resources
         .getQuantityString(id, quantity, *formatArgs)
 }
+
+internal sealed interface UiMessage {
+    data class Dynamic(
+        val value: String,
+    ) : UiMessage
+
+    data class Resource(
+        @StringRes val id: Int,
+    ) : UiMessage
+}
+
+@Composable
+internal fun UiMessage.resolve(): String =
+    when (this) {
+        is UiMessage.Dynamic -> value
+        is UiMessage.Resource -> appString(id)
+    }

@@ -374,7 +374,7 @@ internal fun MainRoomInviteCard(
         }
         control.error?.let {
             Spacer(Modifier.height(8.dp))
-            Text(it, color = colors.danger, fontSize = 12.sp, textAlign = TextAlign.Center)
+            Text(it.resolve(), color = colors.danger, fontSize = 12.sp, textAlign = TextAlign.Center)
         }
     }
 }

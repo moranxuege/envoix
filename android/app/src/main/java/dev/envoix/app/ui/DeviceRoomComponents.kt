@@ -556,7 +556,7 @@ internal fun RoomControlPanel(
         if (terminal) {
             Text(
                 if (control.phase == RoomControlPhase.Failed) {
-                    control.error ?: appString(R.string.room_connection_failed)
+                    control.error?.resolve() ?: appString(R.string.room_connection_failed)
                 } else {
                     control.closeReason.roomEndedLabel()
                 },
@@ -574,7 +574,7 @@ internal fun RoomControlPanel(
         } else {
             control.error?.let { error ->
                 Text(
-                    error,
+                    error.resolve(),
                     color = colors.danger,
                     fontSize = 12.sp,
                     modifier =
