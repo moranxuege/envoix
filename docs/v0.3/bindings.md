@@ -109,6 +109,11 @@ an offer arrives after its Activity attempt was removed. Kotlin contract tests
 cover request roles and remembered generations, bounded offer projection,
 integer overflow, deferred completion, and handle ownership.
 
+The destination adapter keeps the generated request and reply records typed
+throughout the live call. JSON is used only for its versioned crash-recovery
+journal; there is no string request API or typed-to-JSON-to-typed orchestration
+loop in the Android process.
+
 The persistent Room outbox deliberately negotiates a fresh one-time InviteV2
 for each accepted data-plane Transfer, so that main product path still uses the
 invitation session rather than a remembered credential. Its sender-side invite
