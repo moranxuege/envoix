@@ -191,6 +191,10 @@ continues to own platform bookmark and file-system effects, not their copy.
 Destination authorization feedback, invitation validation, and unavailable
 offer/control failures resolve catalog keys as well, leaving `ReceiveView`
 without inline bilingual values or hard-coded user-facing error strings.
+The Send selection card now resolves source actions, platform guidance,
+inventory counts, source-access decisions, and accessibility labels through
+`SendPresentationText` and the native catalog; file-system selection and
+security-scoped access remain View-owned effects.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

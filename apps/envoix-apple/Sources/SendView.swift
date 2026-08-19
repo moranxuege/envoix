@@ -588,7 +588,10 @@ struct SendView: View {
 
     @ViewBuilder private var footerMessage: some View {
         if concurrencyBlocked {
-            Text(AppText.value("Finish receiving before starting a send.", "请先完成接收任务，再开始发送。", language: uiLanguage))
+            Text(AppText.localized(
+                "send.concurrent.finish_receive",
+                language: uiLanguage
+            ))
                 .font(.callout)
                 .foregroundStyle(Theme.muted)
                 .padding(.bottom, 8)
@@ -647,7 +650,7 @@ struct SendView: View {
 
     private var fileSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(AppText.value("Items to send", "要发送的项目", language: uiLanguage))
+            Text(AppText.localized("send.selection.title", language: uiLanguage))
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.text)
             #if os(iOS)
@@ -657,9 +660,9 @@ struct SendView: View {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
-                    Text(AppText.value(
-                        "Preparing photo \(photoImportItemNumber) of \(photoImportItemCount)…",
-                        "正在准备第 \(photoImportItemNumber)/\(photoImportItemCount) 个照片项目…",
+                    Text(SendPresentationText.photoImportProgress(
+                        itemNumber: photoImportItemNumber,
+                        itemCount: photoImportItemCount,
                         language: uiLanguage
                     ))
                     .font(.footnote)
@@ -692,11 +695,7 @@ struct SendView: View {
             .accessibilityValue(String(selectedItems.count))
             Button(action: pasteClipboardSelection) {
                 Label(
-                    AppText.value(
-                        "Paste File or Image",
-                        "粘贴文件或图片",
-                        language: uiLanguage
-                    ),
+                    AppText.localized("send.selection.clipboard_action", language: uiLanguage),
                     systemImage: "doc.on.clipboard"
                 )
                 .frame(maxWidth: .infinity, minHeight: 36)
@@ -740,9 +739,8 @@ struct SendView: View {
             HStack(spacing: 10) {
                 ProgressView()
                     .controlSize(.small)
-                Text(AppText.value(
-                    "Reading and validating the selected items…",
-                    "正在读取并验证所选项目…",
+                Text(AppText.localized(
+                    "send.selection.preparing",
                     language: uiLanguage
                 ))
                 .font(.footnote)
@@ -793,9 +791,8 @@ struct SendView: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(Theme.danger)
                         .disabled(viewModel.isPreparingManifest || viewModel.isBusy)
-                        .accessibilityLabel(AppText.value(
-                            "Remove \(item.name)",
-                            "移除 \(item.name)",
+                        .accessibilityLabel(SendPresentationText.removeItem(
+                            item.name,
                             language: uiLanguage
                         ))
                         .accessibilityIdentifier("remove_prepared_source_\(item.rootItemId)")
@@ -807,9 +804,8 @@ struct SendView: View {
                     .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 9))
                 }
                 if summary.rootCount > 6 {
-                    Text(AppText.value(
-                        "\(summary.rootCount - 6) more top-level items are included.",
-                        "还包含 \(summary.rootCount - 6) 个顶层项目。",
+                    Text(SendPresentationText.additionalTopLevelItems(
+                        Int(summary.rootCount - 6),
                         language: uiLanguage
                     ))
                     .font(.footnote)
@@ -825,7 +821,10 @@ struct SendView: View {
         if !viewModel.pendingSourceSelections.isEmpty {
             Divider().overlay(Theme.line)
             VStack(alignment: .leading, spacing: 10) {
-                Text(AppText.value("Source access decision", "来源访问决定", language: uiLanguage))
+                Text(AppText.localized(
+                    "send.selection.source_access.title",
+                    language: uiLanguage
+                ))
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(Theme.text)
                 ForEach(viewModel.pendingSourceSelections, id: \.rootItemId) { selection in
@@ -834,30 +833,27 @@ struct SendView: View {
                             .font(.body.weight(.semibold))
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Text(AppText.value(
-                            "Some descendants could not be read. Send only accessible content or remove this root.",
-                            "部分子项目无法读取。你可以仅发送可访问内容，或移除此根项目。",
+                        Text(AppText.localized(
+                            "send.selection.source_access.detail",
                             language: uiLanguage
                         ))
                         .font(.footnote)
                         .foregroundStyle(Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
                         HStack {
-                            Button(AppText.value(
-                                "Send accessible content",
-                                "发送可访问内容",
+                            Button(AppText.localized(
+                                "send.selection.source_access.approve",
                                 language: uiLanguage
                             )) {
                                 viewModel.approvePartialManifestSource(rootItemID: selection.rootItemId)
                             }
                             .buttonStyle(.borderedProminent)
-                            Button(AppText.value("Remove", "移除", language: uiLanguage)) {
+                            Button(AppText.localized("common.remove", language: uiLanguage)) {
                                 viewModel.removeManifestSource(rootItemID: selection.rootItemId)
                             }
                             .buttonStyle(.bordered)
-                            .accessibilityLabel(AppText.value(
-                                "Remove \(selection.requestedName)",
-                                "移除 \(selection.requestedName)",
+                            .accessibilityLabel(SendPresentationText.removeItem(
+                                selection.requestedName,
                                 language: uiLanguage
                             ))
                         }
@@ -868,15 +864,12 @@ struct SendView: View {
     }
 
     private func preparedInventorySummaryText(_ summary: FfiInventorySummaryV2) -> String {
-        let base = AppText.value(
-            "\(summary.rootCount) roots · \(summary.fileCount) files · \(summary.directoryCount) folders · \(byteString(summary.totalPlaintextBytes))",
-            "\(summary.rootCount) 个根项目 · \(summary.fileCount) 个文件 · \(summary.directoryCount) 个文件夹 · \(byteString(summary.totalPlaintextBytes))",
-            language: uiLanguage
-        )
-        guard summary.warningCount > 0 else { return base }
-        return base + AppText.value(
-            " · \(summary.warningCount) warnings",
-            " · \(summary.warningCount) 个警告",
+        SendPresentationText.inventorySummary(
+            rootCount: summary.rootCount,
+            fileCount: summary.fileCount,
+            folderCount: summary.directoryCount,
+            warningCount: summary.warningCount,
+            byteDescription: byteString(summary.totalPlaintextBytes),
             language: uiLanguage
         )
     }
@@ -895,15 +888,13 @@ struct SendView: View {
 
     private var selectionGuidance: String {
         #if os(iOS)
-        AppText.value(
-            "Choose Photos, files, or one or more folders. Folder structure is preserved.",
-            "可选择照片、文件或一个或多个文件夹；目录结构会完整保留。",
+        SendPresentationText.guidance(
+            platform: .mobile,
             language: uiLanguage
         )
         #else
-        AppText.value(
-            "Choose, drop, or paste files and images. Folder structure is preserved.",
-            "可选择、拖入或粘贴文件与图片；目录结构会完整保留。",
+        SendPresentationText.guidance(
+            platform: .desktop,
             language: uiLanguage
         )
         #endif
@@ -935,7 +926,7 @@ struct SendView: View {
     private var selectionSourceActions: some View {
         HStack(spacing: 10) {
             selectionSourceAction(
-                AppText.value("Photos", "照片", language: uiLanguage),
+                AppText.localized("send.selection.source.photos", language: uiLanguage),
                 systemImage: "photo.on.rectangle",
                 identifier: "send_photo_picker"
             ) {
@@ -943,7 +934,7 @@ struct SendView: View {
                 isPhotoPickerPresented = true
             }
             selectionSourceAction(
-                AppText.value("Files", "文件", language: uiLanguage),
+                AppText.localized("send.selection.source.files", language: uiLanguage),
                 systemImage: "doc.badge.plus",
                 identifier: "send_file_picker"
             ) {
@@ -951,7 +942,7 @@ struct SendView: View {
                 isFileImporterPresented = true
             }
             selectionSourceAction(
-                AppText.value("Folder", "文件夹", language: uiLanguage),
+                AppText.localized("send.selection.source.folder", language: uiLanguage),
                 systemImage: "folder.badge.plus",
                 identifier: "send_folder_picker"
             ) {
@@ -1358,43 +1349,25 @@ struct SendView: View {
     }
 
     private var selectionTitle: String {
-        switch selectedItems.count {
-        case 0:
-            return AppText.value("Choose files or folders", "选择文件或文件夹", language: uiLanguage)
-        case 1:
-            return selectedItems[0].lastPathComponent
-        default:
-            return AppText.value(
-                "\(selectedItems.count) items selected",
-                "已选择 \(selectedItems.count) 个项目",
-                language: uiLanguage
-            )
-        }
+        SendPresentationText.selectionTitle(
+            itemCount: selectedItems.count,
+            singleItemName: selectedItems.first?.lastPathComponent,
+            language: uiLanguage
+        )
     }
 
     private var selectionSubtitle: String {
-        switch selectedItems.count {
-        case 0:
-            #if os(iOS)
-            return AppText.value("Tap to open Files.", "点击打开文件。", language: uiLanguage)
-            #else
-            return AppText.value(
-                "Drop files or folders here, or click to choose.",
-                "把文件或文件夹拖到这里，或点击选择。",
-                language: uiLanguage
-            )
-            #endif
-        case 1 where sendSelectionContainsDirectory(selectedItems):
-            return AppText.value("Folder structure will be preserved.", "将完整保留文件夹结构。", language: uiLanguage)
-        case 1:
-            #if os(iOS)
-            return AppText.value("Ready to send.", "已准备发送。", language: uiLanguage)
-            #else
-            return AppText.value("Ready to send. Click to replace.", "已准备发送，点击可替换。", language: uiLanguage)
-            #endif
-        default:
-            return AppText.value("These items will be sent together.", "这些项目将作为一批发送。", language: uiLanguage)
-        }
+        #if os(iOS)
+        let platform = SendPresentationPlatform.mobile
+        #else
+        let platform = SendPresentationPlatform.desktop
+        #endif
+        return SendPresentationText.selectionSubtitle(
+            itemCount: selectedItems.count,
+            singleItemIsDirectory: sendSelectionContainsDirectory(selectedItems),
+            platform: platform,
+            language: uiLanguage
+        )
     }
 
     private var selectionIcon: String {
