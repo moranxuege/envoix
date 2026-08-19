@@ -1039,6 +1039,228 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内容校验失败。" } }
       }
     },
+    "transfer.failure.local_network.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Make sure the other device is receiving with the same token and both devices are on the same network." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请确认另一台设备正在使用相同口令接收，并且两台设备在同一网络中。" } }
+      }
+    },
+    "transfer.failure.retry.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Try again, or switch pairing method if discovery keeps failing." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请重试；如果一直无法发现设备，请切换配对方式。" } }
+      }
+    },
+    "transfer.failure.title.connection" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connection failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接失败" } }
+      }
+    },
+    "transfer.failure.title.generic" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输失败" } }
+      }
+    },
+    "transfer.failure.title.local_network" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No device found on the local network" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未在局域网发现设备" } }
+      }
+    },
+    "transfer.failure.title.new_room" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "New Room required" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要新房间" } }
+      }
+    },
+    "transfer.failure.title.pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对失败" } }
+      }
+    },
+    "transfer.failure.title.room_expired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Room expired" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间已过期" } }
+      }
+    },
+    "transfer.failure.title.room_in_use" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Room in use" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间正在使用" } }
+      }
+    },
+    "transfer.failure.title.room_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Room unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间不可用" } }
+      }
+    },
+    "transfer.failure.title.save" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not save" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法保存" } }
+      }
+    },
+    "transfer.failure.title.service_busy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Service busy" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务繁忙" } }
+      }
+    },
+    "transfer.failure.title.source_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Source unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送内容不可用" } }
+      }
+    },
+    "transfer.failure.title.space" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Not enough space" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "空间不足" } }
+      }
+    },
+    "transfer.failure.title.try_later" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Try again later" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请稍后重试" } }
+      }
+    },
+    "transfer.failure.title.update_required" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Update required" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要更新" } }
+      }
+    },
+    "transfer.failure.title.verification" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verification failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "校验失败" } }
+      }
+    },
+    "transfer.status.detail.canceled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready to start another transfer." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可以开始新的传输。" } }
+      }
+    },
+    "transfer.status.detail.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keep both devices awake while the connection is established." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "建立连接时请保持两台设备唤醒。" } }
+      }
+    },
+    "transfer.status.detail.delivered" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiver confirmed the saved content." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收方已确认内容保存完成。" } }
+      }
+    },
+    "transfer.status.detail.finalizing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Payload is complete; delivery is still being finalized." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内容传输已完成，正在完成最终交付。" } }
+      }
+    },
+    "transfer.status.detail.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Resume or remove this transfer from Activity." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请在活动页继续或移除此传输。" } }
+      }
+    },
+    "transfer.status.detail.preparing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reading and validating the selected items." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在读取并验证所选项目。" } }
+      }
+    },
+    "transfer.status.detail.received" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The received content is ready." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收内容已准备就绪。" } }
+      }
+    },
+    "transfer.status.detail.review_incoming" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Review the authenticated inventory before accepting." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收前请确认已认证的内容清单。" } }
+      }
+    },
+    "transfer.status.detail.transferring" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keep both devices awake until payload transfer finishes." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请保持两台设备唤醒，直到内容传输完成。" } }
+      }
+    },
+    "transfer.status.detail.verifying" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Checking received content before publication." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发布前正在校验接收内容。" } }
+      }
+    },
+    "transfer.status.detail.waiting_for_peer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keep this window open until the peer connects." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请保持此窗口打开，直到对方连接。" } }
+      }
+    },
+    "transfer.status.last_step" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Last step: %@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "上一步：%@" } }
+      }
+    },
+    "transfer.status.title.canceled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer canceled" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输已取消" } }
+      }
+    },
+    "transfer.status.title.finalizing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finalizing delivery" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在完成交付确认" } }
+      }
+    },
+    "transfer.status.title.pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing devices" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在配对设备" } }
+      }
+    },
+    "transfer.status.title.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer paused" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输已暂停" } }
+      }
+    },
+    "transfer.status.title.review_incoming" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Review incoming transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "确认接收内容" } }
+      }
+    },
+    "transfer.status.title.saving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saving" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在保存" } }
+      }
+    },
+    "transfer.status.title.selection" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Selection status" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择状态" } }
+      }
+    },
+    "transfer.status.title.waiting_for_peer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for the other device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待另一台设备" } }
+      }
+    },
     "transfer.path.changed" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "changed" } },

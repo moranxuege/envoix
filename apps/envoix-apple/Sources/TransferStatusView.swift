@@ -257,88 +257,37 @@ struct TransferStatusView: View {
     }
 
     private var titleText: String {
-        switch viewModel.presentationState {
-        case nil:
-            return AppText.value("Selection status", "选择状态", language: language)
-        case .preparing?:
-            return AppText.value("Preparing locally", "正在本地准备", language: language)
-        case .waitingForPeer?:
-            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
-        case .pairing?:
-            return AppText.value("Pairing devices", "正在配对设备", language: language)
-        case .connecting?:
-            return AppText.value("Connecting", "正在连接", language: language)
-        case .awaitingDecision?:
-            return AppText.value("Review incoming transfer", "确认接收内容", language: language)
-        case .transferring?:
-            if !viewModel.fileName.isEmpty { return viewModel.fileName }
-            return viewModel.transferActivity?.direction == .send
-                ? AppText.value("Sending", "正在发送", language: language)
-                : AppText.value("Receiving", "正在接收", language: language)
-        case .verifying?:
-            return AppText.value("Verifying", "正在校验", language: language)
-        case .saving?:
-            return AppText.value("Saving", "正在保存", language: language)
-        case .waitingForReceiverSave?:
-            return AppText.value("Waiting for receiver to save", "等待接收方完成保存", language: language)
-        case .finalizingDelivery?:
-            return AppText.value("Finalizing delivery", "正在完成交付确认", language: language)
-        case .paused?:
-            return AppText.value("Transfer paused", "传输已暂停", language: language)
-        case .delivered?:
-            return viewModel.transferActivity?.direction == .receive
-                ? AppText.value("Received", "已接收", language: language)
-                : AppText.value("Delivered", "已送达", language: language)
-        case .canceled?:
-            return AppText.value("Transfer canceled", "传输已取消", language: language)
-        case .failed?:
-            return failureText(reason: viewModel.statusText).title
-        }
+        let failureTitle = viewModel.presentationState == .failed
+            ? failureText(reason: viewModel.statusText).title
+            : nil
+        return TransferStatusText.title(
+            state: viewModel.presentationState,
+            direction: viewModel.transferActivity?.direction,
+            fileName: viewModel.fileName,
+            failureTitle: failureTitle,
+            language: language
+        )
     }
 
     private var detailText: String? {
-        if viewModel.presentationState == .failed {
-            return failureText(reason: viewModel.statusText).detail
-        }
-        switch viewModel.presentationState {
-        case nil:
-            return viewModel.statusText.isEmpty ? nil : viewModel.statusText
-        case .preparing?:
-            return AppText.value("Reading and validating the selected items.", "正在读取并验证所选项目。", language: language)
-        case .waitingForPeer?:
-            return AppText.value("Keep this window open until the peer connects.", "请保持此窗口打开，直到对方连接。", language: language)
-        case .pairing?, .connecting?:
-            return AppText.value("Keep both devices awake while the connection is established.", "建立连接时请保持两台设备唤醒。", language: language)
-        case .awaitingDecision?:
-            return viewModel.statusText.isEmpty
-                ? AppText.value("Review the authenticated inventory before accepting.", "接收前请确认已认证的内容清单。", language: language)
-                : viewModel.statusText
-        case .transferring?:
-            return AppText.value("Keep both devices awake until payload transfer finishes.", "请保持两台设备唤醒，直到内容传输完成。", language: language)
-        case .verifying?:
-            return AppText.value("Checking received content before publication.", "发布前正在校验接收内容。", language: language)
-        case .saving?, .waitingForReceiverSave?, .finalizingDelivery?:
-            return AppText.value("Payload is complete; delivery is still being finalized.", "内容传输已完成，正在完成最终交付。", language: language)
-        case .paused?:
-            return AppText.value("Resume or remove this transfer from Activity.", "请在活动页继续或移除此传输。", language: language)
-        case .delivered?:
-            return viewModel.transferActivity?.direction == .receive
-                ? AppText.value("The received content is ready.", "接收内容已准备就绪。", language: language)
-                : AppText.value("The receiver confirmed the saved content.", "接收方已确认内容保存完成。", language: language)
-        case .canceled?:
-            return AppText.value("Ready to start another transfer.", "可以开始新的传输。", language: language)
-        case .failed?:
-            return viewModel.statusText.isEmpty ? nil : viewModel.statusText
-        }
+        let failureDetail = viewModel.presentationState == .failed
+            ? failureText(reason: viewModel.statusText).detail
+            : nil
+        return TransferStatusText.detail(
+            state: viewModel.presentationState,
+            direction: viewModel.transferActivity?.direction,
+            statusText: viewModel.statusText,
+            failureDetail: failureDetail,
+            language: language
+        )
     }
 
     private var stepText: String? {
-        let text = viewModel.statusText.trimmed
-        guard !text.isEmpty else { return nil }
-        if viewModel.presentationState == .failed {
-            return AppText.value("Last step: \(text)", "上一步：\(text)", language: language)
-        }
-        return nil
+        TransferStatusText.lastStep(
+            state: viewModel.presentationState,
+            statusText: viewModel.statusText,
+            language: language
+        )
     }
 
     private var iconName: String {
@@ -383,71 +332,20 @@ struct TransferStatusView: View {
         viewModel.presentationState == nil ? 0.25 : 0.35
     }
 
-    private func failureText(reason: String) -> (title: String, detail: String) {
+    private func failureText(reason: String) -> TransferFailurePresentationCopy {
         if let failure = viewModel.failure {
             return structuredFailureText(failure)
         }
-        return fallbackFailureText(reason)
+        return TransferStatusText.fallbackFailure(reason: reason, language: language)
     }
 
-    private func structuredFailureText(_ failure: FfiTransferFailure) -> (title: String, detail: String) {
-        let title: String
-        switch failure.code {
-        case .userCanceled, .senderCanceled:
-            title = AppText.value("Transfer canceled", "传输已取消", language: language)
-        case .networkLost:
-            title = AppText.value("Connection failed", "连接失败", language: language)
-        case .authenticationFailed:
-            title = AppText.value("Pairing failed", "配对失败", language: language)
-        case .roomNotFound:
-            title = AppText.value("Room unavailable", "房间不可用", language: language)
-        case .roomExpired:
-            title = AppText.value("Room expired", "房间已过期", language: language)
-        case .roomFull:
-            title = AppText.value("Room in use", "房间正在使用", language: language)
-        case .roomRateLimited, .endpointRateLimited, .ipRateLimited:
-            title = AppText.value("Try again later", "请稍后重试", language: language)
-        case .roomUnderAttack:
-            title = AppText.value("New Room required", "需要新房间", language: language)
-        case .serverBusy:
-            title = AppText.value("Service busy", "服务繁忙", language: language)
-        case .malformedJoin, .unsupportedRendezvousVersion:
-            title = AppText.value("Update required", "需要更新", language: language)
-        case .unsupportedFeature:
-            title = AppText.value("Update required", "需要更新", language: language)
-        case .internalError:
-            title = AppText.value("Transfer failed", "传输失败", language: language)
-        case .senderSourceUnavailable, .senderPermissionLost, .senderSourceChanged,
-             .senderItemRemoved:
-            title = AppText.value("Source unavailable", "发送内容不可用", language: language)
-        case .protocolOrIntegrityFailure:
-            title = AppText.value("Verification failed", "校验失败", language: language)
-        case .receiverSpaceInsufficient:
-            title = AppText.value("Not enough space", "空间不足", language: language)
-        case .receiverDestinationDecisionRequired, .receiverDestinationUnavailable,
-             .receiverSaveFailed, .receiverReusedObjectLost,
-             .receiverFinalizationOutcomeUnknown:
-            title = AppText.value("Could not save", "无法保存", language: language)
-        }
-        return (title, friendlyFailure(failure, language: language))
-    }
-
-    private func fallbackFailureText(_ reason: String) -> (title: String, detail: String) {
-        let cleanReason = reason.trimmed
-        let lower = cleanReason.lowercased()
-        if lower.contains("mdns") && lower.contains("peers discovered") {
-            return (
-                AppText.value("No device found on the local network", "未在局域网发现设备", language: language),
-                AppText.value("Make sure the other device is receiving with the same token and both devices are on the same network.", "请确认另一台设备正在使用相同口令接收，并且两台设备在同一网络中。", language: language)
-            )
-        }
-        if cleanReason.isEmpty {
-            return (
-                AppText.value("Transfer failed", "传输失败", language: language),
-                AppText.value("Try again, or switch pairing method if discovery keeps failing.", "请重试；如果一直无法发现设备，请切换配对方式。", language: language)
-            )
-        }
-        return (AppText.value("Transfer failed", "传输失败", language: language), cleanReason)
+    private func structuredFailureText(
+        _ failure: FfiTransferFailure
+    ) -> TransferFailurePresentationCopy {
+        TransferFailurePresentationCopy(
+            title: TransferStatusText.failureTitle(failure.code, language: language),
+            detail: friendlyFailure(failure, language: language)
+        )
     }
 
     /// Reveal the received file. iOS hides the raw container path unless

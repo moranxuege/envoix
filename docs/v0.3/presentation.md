@@ -174,7 +174,9 @@ visibility, availability, invitation trust, and discovery-source combinations
 are also tested projections; `ConnectionHubView` now has no inline bilingual
 values. Typed transfer failures resolve semantic catalog keys for every FFI
 failure code; raw diagnostic messages remain diagnostic data rather than
-localized presentation policy.
+localized presentation policy. The transfer status card's lifecycle titles,
+guidance, last-step format, and structured/fallback failure titles are pure,
+catalog-backed `TransferStatusText` projections rather than View-owned switches.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

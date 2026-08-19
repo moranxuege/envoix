@@ -197,6 +197,178 @@ final class TransferPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(friendlyError("磁盘", language: "zh-Hans"), "传输失败：磁盘")
     }
 
+    func testTransferStatusTitlesCoverEveryLifecycleState() {
+        let cases: [(TransferActivityState?, FfiTransferDirection?, String, String)] = [
+            (nil, nil, "", "Selection status"),
+            (.preparing, .send, "", "Preparing locally"),
+            (.waitingForPeer, .send, "", "Waiting for the other device"),
+            (.pairing, .send, "", "Pairing devices"),
+            (.connecting, .send, "", "Connecting"),
+            (.awaitingDecision, .receive, "", "Review incoming transfer"),
+            (.transferring, .send, "", "Sending"),
+            (.transferring, .receive, "", "Receiving"),
+            (.transferring, .send, "report.pdf", "report.pdf"),
+            (.verifying, .receive, "", "Verifying"),
+            (.saving, .receive, "", "Saving"),
+            (.waitingForReceiverSave, .send, "", "Waiting for receiver to save"),
+            (.finalizingDelivery, .send, "", "Finalizing delivery"),
+            (.paused, .send, "", "Transfer paused"),
+            (.delivered, .send, "", "Delivered"),
+            (.delivered, .receive, "", "Received"),
+            (.delivered, nil, "", "Delivered"),
+            (.canceled, .send, "", "Transfer canceled"),
+            (.failed, .send, "", "Custom failure"),
+        ]
+        for (state, direction, fileName, expected) in cases {
+            XCTAssertEqual(
+                TransferStatusText.title(
+                    state: state,
+                    direction: direction,
+                    fileName: fileName,
+                    failureTitle: state == .failed ? "Custom failure" : nil,
+                    language: "en"
+                ),
+                expected
+            )
+        }
+        XCTAssertEqual(
+            TransferStatusText.title(
+                state: .paused,
+                direction: .send,
+                fileName: "",
+                language: "zh-Hans"
+            ),
+            "传输已暂停"
+        )
+    }
+
+    func testTransferStatusDetailsCoverEveryLifecycleState() {
+        let cases: [(TransferActivityState?, FfiTransferDirection?, String, String?)] = [
+            (nil, nil, "", nil),
+            (nil, nil, "Selecting", "Selecting"),
+            (.preparing, .send, "", "Reading and validating the selected items."),
+            (.waitingForPeer, .send, "", "Keep this window open until the peer connects."),
+            (.pairing, .send, "", "Keep both devices awake while the connection is established."),
+            (.connecting, .send, "", "Keep both devices awake while the connection is established."),
+            (.awaitingDecision, .receive, "", "Review the authenticated inventory before accepting."),
+            (.awaitingDecision, .receive, "Custom", "Custom"),
+            (.transferring, .send, "", "Keep both devices awake until payload transfer finishes."),
+            (.verifying, .receive, "", "Checking received content before publication."),
+            (.saving, .receive, "", "Payload is complete; delivery is still being finalized."),
+            (.waitingForReceiverSave, .send, "", "Payload is complete; delivery is still being finalized."),
+            (.finalizingDelivery, .send, "", "Payload is complete; delivery is still being finalized."),
+            (.paused, .send, "", "Resume or remove this transfer from Activity."),
+            (.delivered, .receive, "", "The received content is ready."),
+            (.delivered, .send, "", "The receiver confirmed the saved content."),
+            (.canceled, .send, "", "Ready to start another transfer."),
+        ]
+        for (state, direction, status, expected) in cases {
+            XCTAssertEqual(
+                TransferStatusText.detail(
+                    state: state,
+                    direction: direction,
+                    statusText: status,
+                    language: "en"
+                ),
+                expected
+            )
+        }
+        XCTAssertEqual(
+            TransferStatusText.detail(
+                state: .failed,
+                direction: .send,
+                statusText: "raw",
+                failureDetail: "Friendly",
+                language: "en"
+            ),
+            "Friendly"
+        )
+        XCTAssertEqual(
+            TransferStatusText.detail(
+                state: .failed,
+                direction: .send,
+                statusText: "raw",
+                language: "en"
+            ),
+            "raw"
+        )
+    }
+
+    func testTransferStatusLastStepOnlySurfacesTrimmedFailureState() {
+        XCTAssertNil(TransferStatusText.lastStep(
+            state: .connecting,
+            statusText: "dialing",
+            language: "en"
+        ))
+        XCTAssertNil(TransferStatusText.lastStep(
+            state: .failed,
+            statusText: "  ",
+            language: "en"
+        ))
+        XCTAssertEqual(
+            TransferStatusText.lastStep(
+                state: .failed,
+                statusText: "  authenticating  ",
+                language: "en"
+            ),
+            "Last step: authenticating"
+        )
+        XCTAssertEqual(
+            TransferStatusText.lastStep(
+                state: .failed,
+                statusText: "认证",
+                language: "zh-Hans"
+            ),
+            "上一步：认证"
+        )
+    }
+
+    func testTransferFailureTitlesAndFallbacksUsePresentationCatalog() {
+        let cases: [(FfiFailureCode, String)] = [
+            (.userCanceled, "Transfer canceled"),
+            (.networkLost, "Connection failed"),
+            (.authenticationFailed, "Pairing failed"),
+            (.roomNotFound, "Room unavailable"),
+            (.roomExpired, "Room expired"),
+            (.roomFull, "Room in use"),
+            (.endpointRateLimited, "Try again later"),
+            (.roomUnderAttack, "New Room required"),
+            (.serverBusy, "Service busy"),
+            (.malformedJoin, "Update required"),
+            (.unsupportedFeature, "Update required"),
+            (.internalError, "Transfer failed"),
+            (.senderPermissionLost, "Source unavailable"),
+            (.protocolOrIntegrityFailure, "Verification failed"),
+            (.receiverSpaceInsufficient, "Not enough space"),
+            (.receiverFinalizationOutcomeUnknown, "Could not save"),
+        ]
+        for (code, expected) in cases {
+            XCTAssertEqual(TransferStatusText.failureTitle(code, language: "en"), expected)
+        }
+
+        XCTAssertEqual(
+            TransferStatusText.fallbackFailure(
+                reason: "mDNS: 0 peers discovered",
+                language: "en"
+            ),
+            TransferFailurePresentationCopy(
+                title: "No device found on the local network",
+                detail: "Make sure the other device is receiving with the same token and both devices are on the same network."
+            )
+        )
+        XCTAssertEqual(
+            TransferStatusText.fallbackFailure(reason: "  ", language: "zh-Hans"),
+            TransferFailurePresentationCopy(
+                title: "传输失败",
+                detail: "请重试；如果一直无法发现设备，请切换配对方式。"
+            )
+        )
+        XCTAssertEqual(
+            TransferStatusText.fallbackFailure(reason: "  raw detail  ", language: "en"),
+            TransferFailurePresentationCopy(title: "Transfer failed", detail: "raw detail")
+        )
+    }
+
     @MainActor
     func testNativeObserverHopsBackgroundCallbacksToMainActor() async {
         let model = TransferViewModel()

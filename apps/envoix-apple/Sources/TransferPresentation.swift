@@ -161,6 +161,183 @@ enum TransferActivityText {
     }
 }
 
+struct TransferFailurePresentationCopy: Equatable {
+    let title: String
+    let detail: String
+}
+
+enum TransferStatusText {
+    static func title(
+        state: TransferActivityState?,
+        direction: FfiTransferDirection?,
+        fileName: String,
+        failureTitle: String? = nil,
+        language: String
+    ) -> String {
+        switch state {
+        case nil:
+            return AppText.localized("transfer.status.title.selection", language: language)
+        case .waitingForPeer?:
+            return AppText.localized("transfer.status.title.waiting_for_peer", language: language)
+        case .pairing?:
+            return AppText.localized("transfer.status.title.pairing", language: language)
+        case .awaitingDecision?:
+            return AppText.localized("transfer.status.title.review_incoming", language: language)
+        case .transferring?:
+            if !fileName.isEmpty { return fileName }
+            return TransferActivityText.state(
+                .transferring,
+                direction: direction ?? .receive,
+                language: language
+            )
+        case .saving?:
+            return AppText.localized("transfer.status.title.saving", language: language)
+        case .finalizingDelivery?:
+            return AppText.localized("transfer.status.title.finalizing", language: language)
+        case .paused?:
+            return AppText.localized("transfer.status.title.paused", language: language)
+        case .delivered?:
+            return TransferActivityText.state(
+                .delivered,
+                direction: direction ?? .send,
+                language: language
+            )
+        case .canceled?:
+            return AppText.localized("transfer.status.title.canceled", language: language)
+        case .failed?:
+            return failureTitle
+                ?? AppText.localized("transfer.failure.title.generic", language: language)
+        case let state?:
+            return TransferActivityText.state(
+                state,
+                direction: direction ?? .receive,
+                language: language
+            )
+        }
+    }
+
+    static func detail(
+        state: TransferActivityState?,
+        direction: FfiTransferDirection?,
+        statusText: String,
+        failureDetail: String? = nil,
+        language: String
+    ) -> String? {
+        switch state {
+        case nil:
+            return statusText.isEmpty ? nil : statusText
+        case .preparing?:
+            return AppText.localized("transfer.status.detail.preparing", language: language)
+        case .waitingForPeer?:
+            return AppText.localized("transfer.status.detail.waiting_for_peer", language: language)
+        case .pairing?, .connecting?:
+            return AppText.localized("transfer.status.detail.connecting", language: language)
+        case .awaitingDecision?:
+            return statusText.isEmpty
+                ? AppText.localized("transfer.status.detail.review_incoming", language: language)
+                : statusText
+        case .transferring?:
+            return AppText.localized("transfer.status.detail.transferring", language: language)
+        case .verifying?:
+            return AppText.localized("transfer.status.detail.verifying", language: language)
+        case .saving?, .waitingForReceiverSave?, .finalizingDelivery?:
+            return AppText.localized("transfer.status.detail.finalizing", language: language)
+        case .paused?:
+            return AppText.localized("transfer.status.detail.paused", language: language)
+        case .delivered?:
+            return AppText.localized(
+                direction == .receive
+                    ? "transfer.status.detail.received"
+                    : "transfer.status.detail.delivered",
+                language: language
+            )
+        case .canceled?:
+            return AppText.localized("transfer.status.detail.canceled", language: language)
+        case .failed?:
+            return failureDetail ?? (statusText.isEmpty ? nil : statusText)
+        }
+    }
+
+    static func lastStep(
+        state: TransferActivityState?,
+        statusText: String,
+        language: String
+    ) -> String? {
+        let text = statusText.trimmed
+        guard state == .failed, !text.isEmpty else { return nil }
+        return AppText.localized(
+            "transfer.status.last_step",
+            defaultValue: "Last step: \(text)",
+            language: language
+        )
+    }
+
+    static func failureTitle(_ code: FfiFailureCode, language: String) -> String {
+        let key: String
+        switch code {
+        case .userCanceled, .senderCanceled:
+            key = "transfer.status.title.canceled"
+        case .networkLost:
+            key = "transfer.failure.title.connection"
+        case .authenticationFailed:
+            key = "transfer.failure.title.pairing"
+        case .roomNotFound:
+            key = "transfer.failure.title.room_unavailable"
+        case .roomExpired:
+            key = "transfer.failure.title.room_expired"
+        case .roomFull:
+            key = "transfer.failure.title.room_in_use"
+        case .roomRateLimited, .endpointRateLimited, .ipRateLimited:
+            key = "transfer.failure.title.try_later"
+        case .roomUnderAttack:
+            key = "transfer.failure.title.new_room"
+        case .serverBusy:
+            key = "transfer.failure.title.service_busy"
+        case .malformedJoin, .unsupportedRendezvousVersion, .unsupportedFeature:
+            key = "transfer.failure.title.update_required"
+        case .internalError:
+            key = "transfer.failure.title.generic"
+        case .senderSourceUnavailable, .senderPermissionLost, .senderSourceChanged,
+             .senderItemRemoved:
+            key = "transfer.failure.title.source_unavailable"
+        case .protocolOrIntegrityFailure:
+            key = "transfer.failure.title.verification"
+        case .receiverSpaceInsufficient:
+            key = "transfer.failure.title.space"
+        case .receiverDestinationDecisionRequired, .receiverDestinationUnavailable,
+             .receiverSaveFailed, .receiverReusedObjectLost,
+             .receiverFinalizationOutcomeUnknown:
+            key = "transfer.failure.title.save"
+        }
+        return AppText.localized(key, language: language)
+    }
+
+    static func fallbackFailure(reason: String, language: String) -> TransferFailurePresentationCopy {
+        let cleanReason = reason.trimmed
+        let lower = cleanReason.lowercased()
+        if lower.contains("mdns") && lower.contains("peers discovered") {
+            return TransferFailurePresentationCopy(
+                title: AppText.localized(
+                    "transfer.failure.title.local_network",
+                    language: language
+                ),
+                detail: AppText.localized(
+                    "transfer.failure.local_network.detail",
+                    language: language
+                )
+            )
+        }
+        let title = AppText.localized("transfer.failure.title.generic", language: language)
+        if cleanReason.isEmpty {
+            return TransferFailurePresentationCopy(
+                title: title,
+                detail: AppText.localized("transfer.failure.retry.detail", language: language)
+            )
+        }
+        return TransferFailurePresentationCopy(title: title, detail: cleanReason)
+    }
+}
+
 enum ActivityStageTimingPresentationPolicy {
     private static let microsecondsPerMillisecond: UInt64 = 1_000
     private static let microsecondsPerSecond: UInt64 = 1_000_000
