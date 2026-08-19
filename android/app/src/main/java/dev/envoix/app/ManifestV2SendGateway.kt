@@ -52,7 +52,7 @@ internal data class ManifestV2SendCompletion(
     val totalBytes: Long,
 )
 
-internal data class ManifestV2SendFailure(
+internal data class ManifestV2SessionFailure(
     val cause: String,
     val retryable: Boolean,
     val recoveryAction: RecoveryAction,
@@ -61,7 +61,7 @@ internal data class ManifestV2SendFailure(
     val diagnosticMessage: String,
 )
 
-internal interface ManifestV2SendObserver {
+internal interface ManifestV2SessionObserver {
     fun onStarted(
         itemCount: Long,
         totalBytes: Long,
@@ -74,7 +74,7 @@ internal interface ManifestV2SendObserver {
         total: Long,
     )
 
-    fun onFailure(failure: ManifestV2SendFailure)
+    fun onFailure(failure: ManifestV2SessionFailure)
 
     fun onConnectionPath(path: ConnectionPathKind)
 
@@ -88,7 +88,7 @@ internal interface ManifestV2SendObserver {
     ): Boolean
 }
 
-internal interface ManifestV2SendCancellation : AutoCloseable {
+internal interface ManifestV2SessionCancellation : AutoCloseable {
     fun cancel()
 }
 
@@ -97,7 +97,7 @@ internal interface ManifestV2SendNativeJob : AutoCloseable {
 }
 
 internal interface ManifestV2SendNativeCore {
-    fun newCancellation(): ManifestV2SendCancellation
+    fun newCancellation(): ManifestV2SessionCancellation
 
     suspend fun restoreJob(
         storeDirectory: String,
@@ -109,7 +109,7 @@ internal interface ManifestV2SendNativeCore {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         stateDirectory: String,
-        cancellation: ManifestV2SendCancellation,
+        cancellation: ManifestV2SessionCancellation,
         observer: TransferObserver,
     ): FfiManifestV2Completion
 }
@@ -117,19 +117,19 @@ internal interface ManifestV2SendNativeCore {
 internal class ManifestV2SendGateway(
     private val native: ManifestV2SendNativeCore = UniFfiManifestV2SendNativeCore,
 ) {
-    fun newCancellation(): ManifestV2SendCancellation = native.newCancellation()
+    fun newCancellation(): ManifestV2SessionCancellation = native.newCancellation()
 
     suspend fun sendRemembered(
         request: RememberedManifestV2SendRequest,
-        cancellation: ManifestV2SendCancellation,
-        observer: ManifestV2SendObserver,
+        cancellation: ManifestV2SessionCancellation,
+        observer: ManifestV2SessionObserver,
     ): ManifestV2SendCompletion {
         request.validate()
         return send(
             jobStoreDirectory = request.jobStoreDirectory,
             jobId = request.jobId,
             stateDirectory = request.stateDirectory,
-            settings = runtimeSettings(request.language, request.broker, request.relay),
+            settings = manifestV2RuntimeSettings(request.language, request.broker, request.relay),
             transferRequest = request.transferRequest(),
             cancellation = cancellation,
             observer = observer,
@@ -138,15 +138,15 @@ internal class ManifestV2SendGateway(
 
     suspend fun sendInvitation(
         request: InvitationManifestV2SendRequest,
-        cancellation: ManifestV2SendCancellation,
-        observer: ManifestV2SendObserver,
+        cancellation: ManifestV2SessionCancellation,
+        observer: ManifestV2SessionObserver,
     ): ManifestV2SendCompletion {
         request.validate()
         return send(
             jobStoreDirectory = request.jobStoreDirectory,
             jobId = request.jobId,
             stateDirectory = request.stateDirectory,
-            settings = runtimeSettings(request.language, request.broker, request.relay),
+            settings = manifestV2RuntimeSettings(request.language, request.broker, request.relay),
             transferRequest = request.transferRequest(),
             cancellation = cancellation,
             observer = observer,
@@ -159,8 +159,8 @@ internal class ManifestV2SendGateway(
         stateDirectory: String,
         settings: EnvoixRuntimeSettings,
         transferRequest: FfiTransferRequest,
-        cancellation: ManifestV2SendCancellation,
-        observer: ManifestV2SendObserver,
+        cancellation: ManifestV2SessionCancellation,
+        observer: ManifestV2SessionObserver,
     ): ManifestV2SendCompletion {
         val job = native.restoreJob(jobStoreDirectory, jobId)
         return try {
@@ -172,7 +172,7 @@ internal class ManifestV2SendGateway(
                     request = transferRequest,
                     stateDirectory = stateDirectory,
                     cancellation = cancellation,
-                    observer = UniFfiManifestV2SendObserver(observer),
+                    observer = UniFfiManifestV2Observer(observer),
                 )
             check(completion.jobId == jobId) {
                 "Manifest v2 completion job does not match the requested job"
@@ -203,9 +203,9 @@ private object UniFfiManifestV2SendNativeCore : ManifestV2SendNativeCore {
         true
     }
 
-    override fun newCancellation(): ManifestV2SendCancellation {
+    override fun newCancellation(): ManifestV2SessionCancellation {
         requireCompatibleBinding()
-        return UniFfiManifestV2SendCancellation(FfiManifestV2Cancellation())
+        return UniFfiManifestV2SessionCancellation(FfiManifestV2Cancellation())
     }
 
     override suspend fun restoreJob(
@@ -221,12 +221,12 @@ private object UniFfiManifestV2SendNativeCore : ManifestV2SendNativeCore {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         stateDirectory: String,
-        cancellation: ManifestV2SendCancellation,
+        cancellation: ManifestV2SessionCancellation,
         observer: TransferObserver,
     ): FfiManifestV2Completion {
         requireCompatibleBinding()
         check(job is UniFfiManifestV2SendNativeJob) { "Manifest v2 job belongs to another native core" }
-        check(cancellation is UniFfiManifestV2SendCancellation) {
+        check(cancellation is UniFfiManifestV2SessionCancellation) {
             "Manifest v2 cancellation belongs to another native core"
         }
         return sendTransferJobV2(
@@ -261,16 +261,16 @@ private class UniFfiManifestV2SendNativeJob(
     override fun close() = value.close()
 }
 
-private class UniFfiManifestV2SendCancellation(
+internal class UniFfiManifestV2SessionCancellation(
     val value: FfiManifestV2Cancellation,
-) : ManifestV2SendCancellation {
+) : ManifestV2SessionCancellation {
     override fun cancel() = value.cancel()
 
     override fun close() = value.close()
 }
 
-private class UniFfiManifestV2SendObserver(
-    private val target: ManifestV2SendObserver,
+internal class UniFfiManifestV2Observer(
+    private val target: ManifestV2SessionObserver,
 ) : TransferObserver {
     override fun onInviteReady(invite: String) = Unit
 
@@ -350,7 +350,7 @@ private fun InvitationManifestV2SendRequest.validate() {
     require(invitationReference.isNotBlank()) { "Manifest v2 invitation reference is required" }
 }
 
-private fun runtimeSettings(
+internal fun manifestV2RuntimeSettings(
     language: String,
     broker: String,
     relay: String,
@@ -429,7 +429,7 @@ private fun FfiManifestV2Phase.toStatus(): Status? =
     }
 
 private fun FfiTransferFailure.project() =
-    ManifestV2SendFailure(
+    ManifestV2SessionFailure(
         cause = code.wireName(),
         retryable = retryable,
         recoveryAction = recoveryAction.toRecoveryAction(),

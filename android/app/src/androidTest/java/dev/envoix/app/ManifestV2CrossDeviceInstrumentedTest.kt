@@ -150,13 +150,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 assertEquals(fixture.totalBytes, prepared.inventory.totalBytes)
                 assertEquals(0, prepared.inventory.warningCount)
 
-                val invitation =
-                    checkedResponse(
-                        Native.parseInviteForRole(
-                            scenarioInvitation(),
-                            "send",
-                        ),
-                    )
+                val invitation = requireNotNull(InviteCodec.parseForRole(scenarioInvitation(), "send"))
                 val callback =
                     RecordingCallback(
                         evidence = evidence,
@@ -172,7 +166,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                             stateDirectory = stateDirectory,
                             jobStore = jobStore,
                             jobId = createdJobId,
-                            invitationReference = invitation.getString("reference"),
+                            invitationReference = requireNotNull(invitation.reference),
                         ).toString(),
                         callback,
                     )
@@ -216,14 +210,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
             var callback: RecordingCallback? = null
             try {
                 val invitation =
-                    checkedResponse(
-                        Native.generateInvite(
-                            "receive",
-                            Endpoints.BROKER,
-                            Endpoints.RELAY,
-                        ),
-                    )
-                marker("invitation=${invitation.getString("payload")}")
+                    requireNotNull(InviteCodec.generate("receive", Endpoints.BROKER, Endpoints.RELAY))
+                marker("invitation=${invitation.payload}")
 
                 if (fixture.scenario == Scenario.Collision) {
                     val sentinel = File(testRoot, "collision-sentinel").apply { writeBytes(COLLISION_SENTINEL) }
@@ -277,7 +265,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
                         stateDirectory = stateDirectory,
                         jobStore = jobStore,
                         jobId = null,
-                        invitationReference = invitation.getString("reference"),
+                        invitationReference = invitation.reference,
                     ).toString(),
                     endpointCallback,
                 )
@@ -442,23 +430,17 @@ class ManifestV2CrossDeviceInstrumentedTest {
             try {
                 SettingsStore.update { it.copy(saveTreeUri = "", saveFolder = publicFolder) }
                 val invitation =
-                    checkedResponse(
-                        Native.generateInvite(
-                            "receive",
-                            Endpoints.BROKER,
-                            Endpoints.RELAY,
-                        ),
-                    )
-                marker("invitation=${invitation.getString("payload")}")
+                    requireNotNull(InviteCodec.generate("receive", Endpoints.BROKER, Endpoints.RELAY))
+                marker("invitation=${invitation.payload}")
                 val productModel =
                     TransferViewModel(context.applicationContext as Application).also { model = it }
                 val id =
                     productModel
                         .startReceive(
-                            invitation.getString("reference"),
+                            invitation.reference,
                             Endpoints.BROKER,
                             Endpoints.RELAY,
-                            qrPayload = invitation.getString("payload"),
+                            qrPayload = invitation.payload,
                             destinationCopyApproved = true,
                         ).also { transferId = it }
                 var readyPublished = false

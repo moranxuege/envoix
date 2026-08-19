@@ -98,6 +98,17 @@ closed on success, failure, and service shutdown; Kotlin contract tests cover
 request projection, failure policy fields, terminal-event deferral, and both
 handle lifetimes.
 
+All production Android Manifest v2 receives now open an authenticated typed
+offer, project its bounded inventory directly from UniFFI, and wait on a typed
+destination decision. The Android destination adapter freezes public names,
+copies verified roots through SAF or MediaStore, and returns committed names
+and URIs before Rust can publish receiver results or delivery proof. Pending
+offer, cancellation, and destination-decision lifetimes are explicit and are
+closed on success, failure, cancellation, service shutdown, and the race where
+an offer arrives after its Activity attempt was removed. Kotlin contract tests
+cover request roles and remembered generations, bounded offer projection,
+integer overflow, deferred completion, and handle ownership.
+
 The persistent Room outbox deliberately negotiates a fresh one-time InviteV2
 for each accepted data-plane Transfer, so that main product path still uses the
 invitation session rather than a remembered credential. Its sender-side invite
@@ -111,13 +122,11 @@ authenticated command leaves the current Room usable, while network loss,
 cancellation, and native failure follow terminal paths without inspecting the
 diagnostic message.
 
-Transfer-invitation deep-link routing is typed and no longer crosses the legacy
-JSON JNI parser. Sender-side transfer-invitation generation and role-bound
-parsing now use the same typed registry as the UniFFI send session. Receiver
-generation and parsing temporarily remain on JNI with the receiver session;
-they must move together with the typed platform destination/result gate so the
-core cannot acknowledge delivery before SAF or MediaStore has durably saved
-the payload.
+Transfer-invitation generation, deep-link routing, and role-bound parsing are
+typed for both sender and receiver and no longer cross the legacy JSON JNI
+parser. Both directions use Rust's secret-free six-digit transfer locator for
+Activity identity; complete InviteV2 material remains only in the immediate
+connection flow.
 
 All Android native entry points are compiled into `libenvoix_ffi.so`; the
 `android-jni` Cargo feature adds the exceptional JNI symbols to the same
@@ -125,8 +134,10 @@ library that owns UniFFI handles and process-local credentials. The former
 `libenvoix_jni.so` and its second runtime/state registry no longer exist.
 
 The remaining hand-written JNI surface is not an accepted final M5 exception.
-It currently contains live Transfer-session orchestration, discovery callbacks,
-Android context initialization, log routing, and synchronous platform content
-callbacks. At M5 exit, only Android-runtime integration that cannot be
-expressed as a UniFFI port may remain, and every such entry must have an
-explicit rationale here.
+Production Room and ordinary Transfer orchestration no longer depend on it,
+but the direct physical-test driver, Wi-Fi Aware diagnostic stream, Nearby
+discovery callbacks, Android context initialization, and log routing still do.
+The direct test driver must move to the same typed gateways before its legacy
+session/list/continue/cancel symbols are deleted. At M5 exit, only Android
+runtime integration that cannot be expressed as a UniFFI port may remain, and
+every such entry must have an explicit rationale here.

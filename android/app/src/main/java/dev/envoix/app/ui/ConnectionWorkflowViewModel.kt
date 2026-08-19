@@ -402,16 +402,12 @@ internal class ConnectionWorkflowViewModel(
         if (!transferDraft.preparation.ownershipWasTransferred()) return
         val usedPending = transferDraft.usesPendingAction
         val activityReference =
-            if (transferDraft.roleAdapter == "send") {
-                invitationActivityReference(
-                    code,
-                    "send",
-                    transferDraft.preparation.generatedInvite.value
-                        ?.reference == code,
-                )
-            } else {
-                code
-            }
+            invitationActivityReference(
+                code,
+                transferDraft.roleAdapter,
+                transferDraft.preparation.generatedInvite.value
+                    ?.reference == code,
+            )
         TransferRepository.assignActivityGroupByRoom(
             roomReference = activityReference,
             groupId = TransferActivityGroup.oneTime(room.id),

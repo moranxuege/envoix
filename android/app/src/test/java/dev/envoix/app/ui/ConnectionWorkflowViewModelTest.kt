@@ -1,5 +1,6 @@
 package dev.envoix.app.ui
 
+import dev.envoix.app.CreatedInvite
 import dev.envoix.app.ParsedInvite
 import dev.envoix.app.Settings
 import dev.envoix.app.discovery.DiscoverySource
@@ -131,6 +132,48 @@ class ConnectionWorkflowViewModelTest {
         viewModel.openRoom(DeviceRoomDraft(displayName = "Second"))
         assertEquals(
             emptySet<String>(),
+            viewModel.uiState.value.room
+                ?.transferCodes,
+        )
+    }
+
+    @Test
+    fun `completed receive uses the same secret-free activity identity`() {
+        var activityRequest: Triple<String, String, Boolean>? = null
+        val viewModel =
+            ConnectionWorkflowViewModel(
+                invitationActivityReference = { reference, role, creator ->
+                    activityRequest = Triple(reference, role, creator)
+                    "654321"
+                },
+            )
+        viewModel.openRoom(DeviceRoomDraft(displayName = "Phone"))
+        viewModel.beginTransfer("receive", usesPendingAction = false)
+        viewModel.uiState.value.transferDraft
+            ?.preparation
+            ?.generatedInvite
+            ?.value =
+            CreatedInvite(
+                roomCode = "123456-a1b2-c3d4",
+                payload = "envoix://invite/v2/secret",
+                reference = "123456-a1b2-c3d4",
+                broker = "broker.example",
+                relay = null,
+                creatorRole = "receive",
+                joinerRole = "send",
+                expiresAt = 1,
+            )
+        assertTrue(
+            viewModel.uiState.value.transferDraft
+                ?.preparation
+                ?.transferOwnership() == true,
+        )
+
+        viewModel.completeTransferDraft("123456-a1b2-c3d4", consumePendingShares = false)
+
+        assertEquals(Triple("123456-a1b2-c3d4", "receive", true), activityRequest)
+        assertEquals(
+            setOf("654321"),
             viewModel.uiState.value.room
                 ?.transferCodes,
         )

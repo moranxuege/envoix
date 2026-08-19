@@ -11,6 +11,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import dev.envoix.app.ffi.registerProtectedRememberedCredential
 import dev.envoix.app.ui.AppText
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,7 +26,6 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /** Android projection of the canonical Manifest-v2 session. This service owns
@@ -38,6 +38,7 @@ class TransferService : Service() {
     private val progressTrackers = ConcurrentHashMap<Long, TransferProgressTracker>()
     private val destinationWriter by lazy { ManifestV2DestinationWriter(this) }
     private val sendGateway = ManifestV2SendGateway.shared
+    private val receiveGateway = ManifestV2ReceiveGateway.shared
     private val clock =
         DateTimeFormatter
             .ofPattern("HH:mm:ss")
@@ -198,8 +199,12 @@ class TransferService : Service() {
         val sessionRelationshipId =
             rememberedRelationshipId ?: pendingRemember?.relationshipId
         val activityReference =
-            if (direction == Direction.Send && remembered == null) {
-                InviteCodec.activityReference(room, "send", invitationCreator)
+            if (remembered == null) {
+                InviteCodec.activityReference(
+                    room,
+                    if (direction == Direction.Send) "send" else "receive",
+                    invitationCreator,
+                )
             } else {
                 room
             }
@@ -314,14 +319,21 @@ class TransferService : Service() {
                 .firstOrNull { it.id == spec.id }
                 ?.bytes ?: 0
         progressTrackers[spec.id] = TransferProgressTracker(initialBytes)
-        val callback = ManifestCallback(spec, nextNativeAttemptIds.getAndIncrement())
+        val callback = ManifestCallback(spec)
         callbacks[spec.id] = callback
-        if (spec.direction == Direction.Send) {
-            val cancellation = sendGateway.newCancellation()
-            callback.bindTypedCancellation(cancellation)
-            scope.launch { runTypedSend(spec, callback, cancellation) }
-        } else {
-            Native.startManifestV2Session(callback.nativeId, spec.paramsJson(this), callback)
+        val cancellation =
+            if (spec.direction == Direction.Send) {
+                sendGateway.newCancellation()
+            } else {
+                receiveGateway.newCancellation()
+            }
+        callback.bindTypedCancellation(cancellation)
+        scope.launch {
+            if (spec.direction == Direction.Send) {
+                runTypedSend(spec, callback, cancellation)
+            } else {
+                runTypedReceive(spec, callback, cancellation)
+            }
         }
         updateNotification()
     }
@@ -329,7 +341,7 @@ class TransferService : Service() {
     private suspend fun runTypedSend(
         spec: ManifestSpec,
         callback: ManifestCallback,
-        cancellation: ManifestV2SendCancellation,
+        cancellation: ManifestV2SessionCancellation,
     ) {
         try {
             val jobStorePath = jobStoreDirectory(this).absolutePath
@@ -397,72 +409,142 @@ class TransferService : Service() {
         }
     }
 
+    private suspend fun runTypedReceive(
+        spec: ManifestSpec,
+        callback: ManifestCallback,
+        cancellation: ManifestV2SessionCancellation,
+    ) {
+        var pending: ManifestV2PendingReceive? = null
+        try {
+            val statePath = stateDirectory(spec.id).apply { mkdirs() }.absolutePath
+            val language = SettingsStore.settings.value.language
+            pending =
+                if (spec.mode == "remembered") {
+                    receiveGateway.receiveRememberedOffer(
+                        request =
+                            RememberedManifestV2ReceiveRequest(
+                                stateDirectory = statePath,
+                                language = language,
+                                broker = spec.broker,
+                                relay = spec.relay,
+                                credentialReference = requireNotNull(spec.rememberedCredentialReference),
+                                generation = spec.rememberedGeneration,
+                                previousGeneration = spec.rememberedPreviousGeneration,
+                            ),
+                        cancellation = cancellation,
+                        observer = callback,
+                    )
+                } else {
+                    receiveGateway.receiveInvitationOffer(
+                        request =
+                            InvitationManifestV2ReceiveRequest(
+                                stateDirectory = statePath,
+                                language = language,
+                                broker = spec.broker,
+                                relay = spec.relay,
+                                invitationReference = spec.room,
+                                creator = spec.invitationCreator,
+                                rememberConsent = spec.rememberConsent,
+                            ),
+                        cancellation = cancellation,
+                        observer = callback,
+                    )
+                }
+            callback.bindPendingReceive(pending)
+            if (callbacks[spec.id] !== callback) {
+                pending.cancel()
+                return
+            }
+            onOffer(spec.id, pending.offer, callback)
+            val destination = callback.awaitReceiveDestination()
+            if (callbacks[spec.id] !== callback) {
+                pending.cancel()
+                return
+            }
+            val completion =
+                pending.receive(
+                    destination = destination,
+                    platformDestination =
+                        AndroidManifestV2PlatformDestination(
+                            writer = destinationWriter,
+                            isActive = { callbacks[spec.id] === callback },
+                            onCommitted = { label ->
+                                if (callbacks[spec.id] === callback) {
+                                    TransferRepository.update(spec.id) {
+                                        it.copy(savedDestinationLabel = label)
+                                    }
+                                }
+                            },
+                        ),
+                    observer = callback,
+                )
+            if (callbacks[spec.id] === callback) {
+                finishCompleted(
+                    id = spec.id,
+                    callback = callback,
+                    uris = completion.savedRoots.map(ManifestV2SavedRoot::uri),
+                    names = completion.savedRoots.map(ManifestV2SavedRoot::finalName),
+                    totalBytes = completion.totalBytes,
+                )
+            }
+        } catch (error: Throwable) {
+            if (callbacks[spec.id] === callback) {
+                finishFailed(
+                    id = spec.id,
+                    callback = callback,
+                    cause = "start_failed",
+                    detail = error.message ?: error::class.java.simpleName,
+                    retryable = true,
+                    recoveryAction = RecoveryAction.Retry,
+                    outcome = FailureOutcome.Failed,
+                    disposition = FailureSessionDisposition.Release,
+                )
+            }
+        } finally {
+            pending?.let(callback::closePendingReceive)
+            callback.closeTypedCancellation(cancellation)
+        }
+    }
+
     private inner class ManifestCallback(
         private val spec: ManifestSpec,
-        val nativeId: Long,
-    ) : ManifestV2Callback,
-        ManifestV2SendObserver {
+    ) : ManifestV2SessionObserver {
         private val id = spec.id
-        private val typedCancellation = AtomicReference<ManifestV2SendCancellation?>()
+        private val typedCancellation = AtomicReference<ManifestV2SessionCancellation?>()
+        private val pendingReceive = AtomicReference<ManifestV2PendingReceive?>()
+        private val receiveDestination = CompletableDeferred<ManifestV2ReceiveDestination>()
         private val rememberedPersistence =
             RememberedPersistenceState(spec.pendingRemember, spec.rememberedRelationshipId)
 
-        fun bindTypedCancellation(cancellation: ManifestV2SendCancellation) {
+        fun bindTypedCancellation(cancellation: ManifestV2SessionCancellation) {
             check(typedCancellation.compareAndSet(null, cancellation)) {
                 "Manifest v2 cancellation is already bound"
             }
         }
 
-        fun cancelAttempt() {
-            typedCancellation.get()?.cancel() ?: Native.cancelManifestV2Session(nativeId)
+        fun bindPendingReceive(pending: ManifestV2PendingReceive) {
+            check(pendingReceive.compareAndSet(null, pending)) {
+                "Manifest v2 pending receive is already bound"
+            }
         }
 
-        fun closeTypedCancellation(cancellation: ManifestV2SendCancellation) {
+        fun cancelAttempt() {
+            typedCancellation.get()?.cancel()
+            pendingReceive.get()?.cancel()
+            receiveDestination.cancel()
+        }
+
+        fun closeTypedCancellation(cancellation: ManifestV2SessionCancellation) {
             if (typedCancellation.compareAndSet(cancellation, null)) cancellation.close()
         }
 
-        override fun onEvent(json: String) {
-            val event = runCatching { JSONObject(json) }.getOrNull() ?: return
-            if (event.optString("notice") != "manifest_v2") return
-            val kind = event.optString("kind")
-            if (kind == "stage_timing") {
-                onStageTiming(id, spec.direction, event)
-                return
-            }
-            if (callbacks[id] !== this) return
-            when (kind) {
-                "progress" -> {
-                    updateProgress(id, event.optLong("bytes"), event.optLong("total"))
-                    return
-                }
-                "diagnostic" -> {
-                    appendDiagnostic(id, event.optString("message"))
-                    return
-                }
-                "path" -> {
-                    val kind =
-                        ConnectionPathKind.fromWireOrLegacy(
-                            event.optString("path_kind").ifBlank { event.optString("path") },
-                        )
-                    kind?.let { updateConnectionPath(id, it) }
-                    return
-                }
-            }
-            when (event.optString("state")) {
-                "waiting_for_peer" -> setState(id, Status.WaitingForPeer, "waiting for peer")
-                "pairing" -> setState(id, Status.Pairing, "pairing with peer")
-                "connecting" -> setState(id, Status.Connecting, "connecting to peer")
-                "offer" -> onOffer(id, event, this)
-                "transferring" -> setState(id, Status.Transferring, "transferring files")
-                "verifying" -> setState(id, Status.Verifying, "verifying received content")
-                "saving" -> setState(id, Status.Saving, "saving to selected destination")
-                "waiting_for_receiver_save" ->
-                    setState(id, Status.WaitingForReceiverSave, "waiting for receiver to save files")
-                "finalizing_delivery" -> setState(id, Status.FinalizingDelivery, "saved; finalizing delivery proof")
-                "completed" -> onCompleted(id, event, this)
-                "failed" -> onFailed(id, event, this)
-            }
+        fun closePendingReceive(pending: ManifestV2PendingReceive) {
+            if (pendingReceive.compareAndSet(pending, null)) pending.close()
         }
+
+        suspend fun awaitReceiveDestination(): ManifestV2ReceiveDestination = receiveDestination.await()
+
+        fun commitReceiveDestination(destination: ManifestV2ReceiveDestination): Boolean = receiveDestination.complete(destination)
 
         override fun onStarted(
             itemCount: Long,
@@ -490,7 +572,7 @@ class TransferService : Service() {
             updateProgress(id, transferred, total)
         }
 
-        override fun onFailure(failure: ManifestV2SendFailure) {
+        override fun onFailure(failure: ManifestV2SessionFailure) {
             if (callbacks[id] !== this) return
             finishFailed(
                 id = id,
@@ -516,20 +598,6 @@ class TransferService : Service() {
         override fun onDiagnostic(message: String) {
             if (callbacks[id] !== this) return
             appendDiagnostic(id, message)
-        }
-
-        override fun onSaveRequired(requestJson: String): String {
-            check(callbacks[id] === this) { "Manifest v2 attempt is no longer active" }
-            val result = destinationWriter.saveWithDestination(requestJson)
-            TransferRepository.update(id) {
-                it.copy(savedDestinationLabel = result.destinationLabel)
-            }
-            return result.responseJson
-        }
-
-        override fun onPlanRequired(requestJson: String): String {
-            check(callbacks[id] === this) { "Manifest v2 attempt is no longer active" }
-            return destinationWriter.plan(requestJson)
         }
 
         override fun onRememberedCredential(
@@ -568,34 +636,12 @@ class TransferService : Service() {
 
     private fun onOffer(
         id: Long,
-        offer: JSONObject,
+        offer: ManifestV2ReceiveOffer,
         callback: ManifestCallback,
     ) {
+        if (callbacks[id] !== callback) return
         val spec = specs[id] ?: return
-        val inventoryPage =
-            runCatching {
-                JSONObject(Native.listManifestV2OfferEntries(callback.nativeId, 0, 128))
-            }.getOrNull()
-        val projectedEntries =
-            inventoryPage
-                ?.optJSONArray("entries")
-                ?.let { entries ->
-                    (0 until entries.length()).map { index ->
-                        val entry = entries.getJSONObject(index)
-                        TransferInventoryEntry(
-                            entryId = entry.getInt("entry_id"),
-                            parentEntryId =
-                                entry
-                                    .takeIf { it.has("parent_entry_id") && !it.isNull("parent_entry_id") }
-                                    ?.getInt("parent_entry_id"),
-                            name = entry.getString("name"),
-                            directory = entry.getString("kind") == "directory",
-                            size = entry.getLong("plaintext_size"),
-                        )
-                    }
-                }.orEmpty()
-        val exceptional = offer.optBoolean("exceptional")
-        val hasDirectories = offer.optInt("directory_count") > 0
+        val hasDirectories = offer.directoryCount > 0
         val needsFolder =
             hasDirectories &&
                 SettingsStore.settings.value.saveTreeUri
@@ -603,21 +649,19 @@ class TransferService : Service() {
         TransferRepository.update(id) {
             it.copy(
                 status =
-                    if (exceptional || needsFolder || !spec.destinationCopyApproved) {
+                    if (offer.exceptional || needsFolder || !spec.destinationCopyApproved) {
                         Status.AwaitingDecision
                     } else {
                         Status.Transferring
                     },
-                jobId = offer.optString("job_id"),
-                rootCount = offer.optInt("root_count"),
-                fileCount = offer.optInt("file_count"),
-                directoryCount = offer.optInt("directory_count"),
-                total = offer.optLong("total"),
-                exceptionalOffer = exceptional,
-                inventoryPreview = projectedEntries,
-                inventoryHasMore =
-                    inventoryPage?.has("next_offset") == true &&
-                        !inventoryPage.isNull("next_offset"),
+                jobId = offer.jobId,
+                rootCount = offer.rootCount,
+                fileCount = offer.fileCount,
+                directoryCount = offer.directoryCount,
+                total = offer.totalBytes,
+                exceptionalOffer = offer.exceptional,
+                inventoryPreview = offer.inventoryPreview,
+                inventoryHasMore = offer.inventoryHasMore,
                 error =
                     when {
                         needsFolder ->
@@ -630,7 +674,7 @@ class TransferService : Service() {
                                 "This Android destination requires private verification followed by an extra copy.",
                                 "此 Android 目标位置需要先在私有目录验证，再额外复制一次。",
                             )
-                        exceptional ->
+                        offer.exceptional ->
                             uiText(
                                 "Review this unusually large transfer before continuing.",
                                 "此传输体积异常大，请确认后继续。",
@@ -640,7 +684,7 @@ class TransferService : Service() {
                 log = addLog(it.log, "authenticated inventory received"),
             )
         }
-        if (!exceptional && !needsFolder && spec.destinationCopyApproved) {
+        if (!offer.exceptional && !needsFolder && spec.destinationCopyApproved) {
             continueReceive(id, exceptionalApproved = false)
         }
         updateNotification()
@@ -668,42 +712,25 @@ class TransferService : Service() {
             return
         }
         val target = receiveTarget(id).apply { mkdirs() }
-        val response =
-            Native.continueManifestV2Receive(
-                callbacks[id]?.nativeId ?: return,
-                JSONObject()
-                    .put("target_directory", target.absolutePath)
-                    .put("target_allocatable_bytes", target.usableSpace)
-                    .put(
-                        "exceptional_transfer_approved",
-                        exceptionalApproved || !transfer.exceptionalOffer,
-                    ).toString(),
+        val callback = callbacks[id] ?: return
+        val committed =
+            callback.commitReceiveDestination(
+                ManifestV2ReceiveDestination(
+                    verifiedStagingDirectory = target.absolutePath,
+                    verifiedStagingAllocatableBytes = target.usableSpace,
+                    exceptionalTransferApproved = exceptionalApproved || !transfer.exceptionalOffer,
+                ),
             )
-        val error = runCatching { JSONObject(response).optString("error") }.getOrDefault("")
-        if (error.isNotEmpty()) {
-            TransferRepository.update(id) { it.copy(status = Status.AwaitingDecision, error = error) }
-        } else {
-            specs[id] = spec.copy(destinationCopyApproved = true)
-            persistSpecs()
-            setState(id, Status.Transferring, "destination decision committed")
-        }
+        if (!committed) return
+        specs[id] = spec.copy(destinationCopyApproved = true)
+        persistSpecs()
+        setState(id, Status.Transferring, "destination decision committed")
     }
 
     private fun approveReceive(id: Long) {
         val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
         if (!TransferPresentationPolicy.actions(transfer).canApprove) return
         continueReceive(id, exceptionalApproved = true)
-    }
-
-    private fun onCompleted(
-        id: Long,
-        event: JSONObject,
-        callback: ManifestCallback,
-    ) {
-        val roots = event.optJSONArray("roots") ?: JSONArray()
-        val uris = (0 until roots.length()).map { roots.getJSONObject(it).getString("uri") }
-        val names = (0 until roots.length()).map { roots.getJSONObject(it).getString("final_name") }
-        finishCompleted(id, callback, uris, names)
     }
 
     private fun finishCompleted(
@@ -731,32 +758,6 @@ class TransferService : Service() {
         releaseRememberedSession(specs.remove(id))
         persistSpecs()
         leaveForegroundIfIdle()
-    }
-
-    private fun onFailed(
-        id: Long,
-        event: JSONObject,
-        callback: ManifestCallback,
-    ) {
-        val cause = event.optString("cause", "transfer")
-        val detail = event.optString("detail", "Transfer failed")
-        val outcome =
-            FailureOutcome.fromWire(event.optString("outcome")) ?: FailureOutcome.Failed
-        val disposition =
-            FailureSessionDisposition.fromWire(event.optString("session_disposition"))
-                ?: FailureSessionDisposition.Release
-        val retryable = event.optBoolean("retryable", false)
-        val recoveryAction = RecoveryAction.fromWire(event.optString("recovery_action"))
-        finishFailed(
-            id = id,
-            callback = callback,
-            cause = cause,
-            detail = detail,
-            retryable = retryable,
-            recoveryAction = recoveryAction,
-            outcome = outcome,
-            disposition = disposition,
-        )
     }
 
     private fun finishFailed(
@@ -992,15 +993,6 @@ class TransferService : Service() {
     private fun onStageTiming(
         id: Long,
         expectedDirection: Direction,
-        event: JSONObject,
-    ) {
-        val timing = parseStageTiming(event) ?: return
-        onStageTiming(id, expectedDirection, timing)
-    }
-
-    private fun onStageTiming(
-        id: Long,
-        expectedDirection: Direction,
         timing: TransferStageTiming,
     ) {
         if (timing.direction != expectedDirection) return
@@ -1015,40 +1007,6 @@ class TransferService : Service() {
                 )
             }
         }
-    }
-
-    private fun parseStageTiming(event: JSONObject): TransferStageTiming? {
-        val transferId =
-            when {
-                !event.has("transfer_id") || event.isNull("transfer_id") -> null
-                else -> event.opt("transfer_id") as? String ?: return null
-            }
-        return TransferStageTimingParser.parse(
-            stageWire = event.strictString("stage"),
-            directionWire = event.strictString("direction"),
-            attemptId = event.strictNonNegativeLong("attempt_id"),
-            transferId = transferId,
-            elapsedUs = event.strictNonNegativeLong("elapsed_us"),
-            deltaUs = event.strictNonNegativeLong("delta_us"),
-        )
-    }
-
-    private fun JSONObject.strictString(name: String): String? {
-        if (!has(name) || isNull(name)) return null
-        return opt(name) as? String
-    }
-
-    private fun JSONObject.strictNonNegativeLong(name: String): Long? {
-        if (!has(name) || isNull(name)) return null
-        val value =
-            when (val raw = opt(name)) {
-                is Byte -> raw.toLong()
-                is Short -> raw.toLong()
-                is Int -> raw.toLong()
-                is Long -> raw
-                else -> return null
-            }
-        return value.takeIf { it >= 0L }
     }
 
     private fun TransferStageTiming.logLine(): String =
@@ -1198,28 +1156,6 @@ class TransferService : Service() {
 
     private fun stateDirectory(id: Long) = File(receiveBase(id), "state")
 
-    private fun ManifestSpec.paramsJson(context: Context): String =
-        JSONObject()
-            .put("direction", if (direction == Direction.Send) "send" else "receive")
-            .put("mode", mode)
-            .put("room", room)
-            .apply {
-                if (mode == "invitation" && useRoom) put("invitation_ref", room)
-                if (mode == "remembered") {
-                    put("remembered_credential_ref", rememberedCredentialReference)
-                    put("remembered_generation", rememberedGeneration)
-                    put("remembered_previous_generation", rememberedPreviousGeneration)
-                }
-            }.put("remember_consent", rememberConsent)
-            .put("broker", broker)
-            .put("relay", relay)
-            .put("use_room", useRoom)
-            .put("use_mdns", useMdns)
-            .put("state_directory", stateDirectory(id).apply { mkdirs() }.absolutePath)
-            .put("job_store_directory", jobStoreDirectory(context).absolutePath)
-            .apply { jobId?.let { put("job_id", it) } }
-            .toString()
-
     @Synchronized
     private fun persistSpecs() {
         writeSpecs(specs.values.sortedBy(ManifestSpec::id))
@@ -1321,7 +1257,6 @@ class TransferService : Service() {
         }
 
     companion object {
-        private val nextNativeAttemptIds = AtomicLong(1)
         private const val CHANNEL = "transfers"
         private const val NOTIFICATION_ID = 1001
         private const val ACTION_START_SEND = "dev.envoix.app.manifest_v2.START_SEND"
@@ -1416,11 +1351,18 @@ class TransferService : Service() {
             destinationCopyApproved: Boolean,
             rememberLabel: String?,
             rememberedRelationshipId: String?,
+            invitationCreator: Boolean = qrPayload != null,
         ): Long {
             // Reserve the card synchronously. The caller can then wait for the
             // service to move it out of Connecting before accepting a room
             // offer, and can cancel this exact attempt if acceptance fails.
-            val id = TransferRepository.create(Direction.Receive, room)
+            val activityReference =
+                if (rememberedRelationshipId == null) {
+                    InviteCodec.activityReference(room, "receive", invitationCreator)
+                } else {
+                    room
+                }
+            val id = TransferRepository.create(Direction.Receive, activityReference)
             launch(
                 context,
                 ACTION_START_RECEIVE,
@@ -1432,6 +1374,7 @@ class TransferService : Service() {
                 copyApproved = destinationCopyApproved,
                 rememberLabel = rememberLabel,
                 rememberedRelationshipId = rememberedRelationshipId,
+                invitationCreator = invitationCreator,
                 reservedId = id,
             )
             return id

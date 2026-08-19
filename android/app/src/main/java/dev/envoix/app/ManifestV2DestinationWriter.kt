@@ -5,6 +5,13 @@ import android.net.Uri
 import android.system.Os
 import android.system.OsConstants
 import androidx.documentfile.provider.DocumentFile
+import dev.envoix.app.ffi.FfiDestinationCommitReplyV2
+import dev.envoix.app.ffi.FfiDestinationCommitRequestV2
+import dev.envoix.app.ffi.FfiDestinationPlanReplyV2
+import dev.envoix.app.ffi.FfiDestinationPlanRequestV2
+import dev.envoix.app.ffi.FfiDestinationPlannedRootV2
+import dev.envoix.app.ffi.FfiDestinationSavedRootV2
+import dev.envoix.app.ffi.FfiManifestEntryKindV2
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -24,10 +31,25 @@ import java.util.Locale
 class ManifestV2DestinationWriter(
     private val context: Context,
 ) {
+    internal fun plan(request: FfiDestinationPlanRequestV2): FfiDestinationPlanReplyV2 {
+        val response = JSONObject(plan(request.toJson().toString()))
+        val roots = response.getJSONArray("roots")
+        return FfiDestinationPlanReplyV2(
+            roots =
+                (0 until roots.length()).map { index ->
+                    val root = roots.getJSONObject(index)
+                    FfiDestinationPlannedRootV2(
+                        rootId = root.getLong("root_id").checkedUInt("root ID"),
+                        plannedName = root.getString("planned_name"),
+                    )
+                },
+        )
+    }
+
     fun plan(requestJson: String): String {
         val request = JSONObject(requestJson)
         val jobId = request.getString("job_id")
-        val generation = request.getInt("generation")
+        val generation = request.getLong("generation")
         val requestedRoots = request.getJSONArray("roots")
         val journal = journalFile(jobId, generation)
         journal.parentFile?.mkdirs()
@@ -89,7 +111,7 @@ class ManifestV2DestinationWriter(
     internal fun saveWithDestination(requestJson: String): ManifestV2SaveResult {
         val request = JSONObject(requestJson)
         val jobId = request.getString("job_id")
-        val generation = request.getInt("generation")
+        val generation = request.getLong("generation")
         val requestedRoots = request.getJSONArray("roots")
         val journal = journalFile(jobId, generation)
         val value = loadJournal(journal) ?: error("Public destination plan is missing")
@@ -165,6 +187,26 @@ class ManifestV2DestinationWriter(
         return ManifestV2SaveResult(
             responseJson = committedReply(roots).toString(),
             destinationLabel = destinationLabel(settings, tree),
+        )
+    }
+
+    internal fun saveWithDestination(request: FfiDestinationCommitRequestV2): ManifestV2TypedSaveResult {
+        val result = saveWithDestination(request.toJson().toString())
+        val response = JSONObject(result.responseJson).getJSONArray("roots")
+        return ManifestV2TypedSaveResult(
+            reply =
+                FfiDestinationCommitReplyV2(
+                    roots =
+                        (0 until response.length()).map { index ->
+                            val root = response.getJSONObject(index)
+                            FfiDestinationSavedRootV2(
+                                rootId = root.getLong("root_id").checkedUInt("root ID"),
+                                finalName = root.getString("final_name"),
+                                uri = root.getString("uri"),
+                            )
+                        },
+                ),
+            destinationLabel = result.destinationLabel,
         )
     }
 
@@ -385,12 +427,12 @@ class ManifestV2DestinationWriter(
     private fun validateJournalIdentity(
         journal: JSONObject,
         jobId: String,
-        generation: Int,
+        generation: Long,
         destinationId: String,
         requestedRoots: JSONArray,
     ) {
         check(journal.getInt("schema_version") == JOURNAL_SCHEMA_VERSION)
-        check(journal.getString("job_id") == jobId && journal.getInt("generation") == generation)
+        check(journal.getString("job_id") == jobId && journal.getLong("generation") == generation)
         check(journal.getString("destination_id") == destinationId) {
             "The selected Android destination changed after this transfer was accepted"
         }
@@ -427,7 +469,7 @@ class ManifestV2DestinationWriter(
 
     private fun journalFile(
         jobId: String,
-        generation: Int,
+        generation: Long,
     ): File = File(context.filesDir, "manifest-v2/destination-save/$jobId-$generation.json")
 
     private fun loadJournal(file: File): JSONObject? {
@@ -470,7 +512,7 @@ class ManifestV2DestinationWriter(
 
     private fun newJournal(
         jobId: String,
-        generation: Int,
+        generation: Long,
         destinationId: String,
         state: String,
         roots: JSONArray,
@@ -544,6 +586,50 @@ class ManifestV2DestinationWriter(
             ?.takeIf(String::isNotEmpty)
             ?: "Downloads / ${settings.saveFolder}"
 
+    private fun FfiDestinationPlanRequestV2.toJson(): JSONObject =
+        JSONObject()
+            .put("job_id", jobId)
+            .put("generation", generation.toLong())
+            .put("reserved_names", JSONArray(reservedNames))
+            .put(
+                "roots",
+                JSONArray().apply {
+                    roots.forEach { root ->
+                        put(
+                            JSONObject()
+                                .put("root_id", root.rootId.toLong())
+                                .put("requested_name", root.requestedName)
+                                .put("kind", root.kind.wireName()),
+                        )
+                    }
+                },
+            )
+
+    private fun FfiDestinationCommitRequestV2.toJson(): JSONObject =
+        JSONObject()
+            .put("job_id", jobId)
+            .put("generation", generation.toLong())
+            .put(
+                "roots",
+                JSONArray().apply {
+                    roots.forEach { root ->
+                        put(
+                            JSONObject()
+                                .put("root_id", root.rootId.toLong())
+                                .put("local_path", root.localPath)
+                                .put("planned_name", root.plannedName)
+                                .put("kind", root.kind.wireName()),
+                        )
+                    }
+                },
+            )
+
+    private fun FfiManifestEntryKindV2.wireName(): String =
+        when (this) {
+            FfiManifestEntryKindV2.FILE -> KIND_FILE
+            FfiManifestEntryKindV2.DIRECTORY -> "directory"
+        }
+
     private companion object {
         const val JOURNAL_SCHEMA_VERSION = 2
         const val MAX_NAME_ATTEMPTS = 10_000
@@ -560,6 +646,16 @@ internal data class ManifestV2SaveResult(
     val responseJson: String,
     val destinationLabel: String,
 )
+
+internal data class ManifestV2TypedSaveResult(
+    val reply: FfiDestinationCommitReplyV2,
+    val destinationLabel: String,
+)
+
+private fun Long.checkedUInt(name: String): UInt {
+    require(this in 0..UInt.MAX_VALUE.toLong()) { "$name exceeded the Android range" }
+    return toUInt()
+}
 
 internal fun manifestV2KeepBothName(
     name: String,

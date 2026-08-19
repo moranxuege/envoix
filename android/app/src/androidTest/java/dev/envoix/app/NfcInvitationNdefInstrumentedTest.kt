@@ -31,7 +31,7 @@ class NfcInvitationNdefInstrumentedTest {
     }
 
     @Test
-    fun senderInvitationLifecycleUsesTypedPrivateStateAndSecretFreeActivityIdentity() {
+    fun transferInvitationLifecyclesUseTypedPrivateStateAndSecretFreeActivityIdentity() {
         val creator = requireNotNull(InviteCodec.generate("send", TEST_BROKER, ""))
 
         assertEquals(creator.roomCode, creator.reference)
@@ -50,6 +50,27 @@ class NfcInvitationNdefInstrumentedTest {
             )
         assertEquals(6, joinerActivity.length)
         assertTrue(joinerActivity.all(Char::isDigit))
+
+        val receiverCreator = requireNotNull(InviteCodec.generate("receive", TEST_BROKER, ""))
+        val receiverCreatorActivity =
+            InviteCodec.activityReference(
+                receiverCreator.reference,
+                "receive",
+                creator = true,
+            )
+        assertEquals(6, receiverCreatorActivity.length)
+        assertTrue(receiverCreatorActivity.all(Char::isDigit))
+
+        val senderInvite = makePairingInvite(FfiInviteRole.SEND, TEST_BROKER, "")
+        val receiverJoiner = requireNotNull(InviteCodec.parseForRole(senderInvite.payload, "receive"))
+        val receiverJoinerActivity =
+            InviteCodec.activityReference(
+                requireNotNull(receiverJoiner.reference),
+                "receive",
+                creator = false,
+            )
+        assertEquals(6, receiverJoinerActivity.length)
+        assertTrue(receiverJoinerActivity.all(Char::isDigit))
     }
 
     @Test

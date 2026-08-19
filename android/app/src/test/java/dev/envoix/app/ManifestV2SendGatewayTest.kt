@@ -253,10 +253,10 @@ private class FakeManifestV2SendNativeCore : ManifestV2SendNativeCore {
     var restoredJobId: String? = null
     var sentSettings: EnvoixRuntimeSettings? = null
     var sentRequest: FfiTransferRequest? = null
-    var sentCancellation: ManifestV2SendCancellation? = null
+    var sentCancellation: ManifestV2SessionCancellation? = null
     var sendResult: suspend (TransferObserver) -> FfiManifestV2Completion = { completion() }
 
-    override fun newCancellation(): ManifestV2SendCancellation = cancellation
+    override fun newCancellation(): ManifestV2SessionCancellation = cancellation
 
     override suspend fun restoreJob(
         storeDirectory: String,
@@ -272,7 +272,7 @@ private class FakeManifestV2SendNativeCore : ManifestV2SendNativeCore {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         stateDirectory: String,
-        cancellation: ManifestV2SendCancellation,
+        cancellation: ManifestV2SessionCancellation,
         observer: TransferObserver,
     ): FfiManifestV2Completion {
         assertSame(this.job, job)
@@ -297,7 +297,7 @@ private class FakeManifestV2SendNativeJob : ManifestV2SendNativeJob {
     }
 }
 
-private class FakeManifestV2SendCancellation : ManifestV2SendCancellation {
+private class FakeManifestV2SendCancellation : ManifestV2SessionCancellation {
     var cancelCount = 0
     var closeCount = 0
 
@@ -310,11 +310,11 @@ private class FakeManifestV2SendCancellation : ManifestV2SendCancellation {
     }
 }
 
-private class RecordingManifestV2SendObserver : ManifestV2SendObserver {
+private class RecordingManifestV2SendObserver : ManifestV2SessionObserver {
     val started = mutableListOf<Pair<Long, Long>>()
     val phases = mutableListOf<Status>()
     val progress = mutableListOf<Pair<Long, Long>>()
-    val failures = mutableListOf<ManifestV2SendFailure>()
+    val failures = mutableListOf<ManifestV2SessionFailure>()
     val paths = mutableListOf<ConnectionPathKind>()
     val timings = mutableListOf<TransferStageTiming>()
     val diagnostics = mutableListOf<String>()
@@ -339,7 +339,7 @@ private class RecordingManifestV2SendObserver : ManifestV2SendObserver {
         progress += transferred to total
     }
 
-    override fun onFailure(failure: ManifestV2SendFailure) {
+    override fun onFailure(failure: ManifestV2SessionFailure) {
         failures += failure
     }
 

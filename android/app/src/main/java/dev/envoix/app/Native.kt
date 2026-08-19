@@ -1,8 +1,7 @@
 package dev.envoix.app
 
-/** Canonical Manifest-v2 callbacks. [onSaveRequired] is synchronous because
- * the core must not emit receiver results or delivery proof until the actual
- * SAF/MediaStore save has durably completed. It runs on a native worker. */
+/** Legacy callback retained by the direct-JNI physical harness and Wi-Fi Aware
+ * diagnostic. Product transfers use typed UniFFI observers and destinations. */
 interface ManifestV2Callback {
     fun onEvent(json: String)
 
@@ -66,13 +65,6 @@ object Native {
     /** Wire the Android VM + app context into the Rust network stack. Call once. */
     external fun initContext(context: android.content.Context)
 
-    /** Receiver-only production bridge until its destination/result gate is typed. */
-    external fun generateInvite(
-        role: String,
-        broker: String,
-        relay: String,
-    ): String
-
     external fun startNearbyInviteInbox(
         id: Long,
         paramsJson: String,
@@ -88,13 +80,7 @@ object Native {
 
     external fun stopNearbyInviteInbox(id: Long)
 
-    /** Receiver-only production parser paired with the JNI receiver session. */
-    external fun parseInviteForRole(
-        input: String,
-        role: String,
-    ): String
-
-    /** Receiver session retained until SAF/MediaStore is a typed result-gate port. */
+    /** Legacy direct-JNI physical-test driver pending typed harness migration. */
     external fun startManifestV2Session(
         id: Long,
         paramsJson: String,

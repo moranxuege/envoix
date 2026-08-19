@@ -12,7 +12,6 @@ import dev.envoix.app.ffi.makePairingInvite
 import dev.envoix.app.ffi.parsePairingInvite
 import dev.envoix.app.ffi.parsePairingInviteForRole
 import dev.envoix.app.ffi.transferInvitationRoomId
-import org.json.JSONObject
 
 class CreatedInvite(
     val roomCode: String,
@@ -45,25 +44,12 @@ object InviteCodec {
         broker: String,
         relay: String,
     ): CreatedInvite? {
-        if (creatorRole == "send") {
-            return try {
-                makePairingInvite(FfiInviteRole.SEND, broker, relay).toCreatedInvite()
-            } catch (_: EnvoixException) {
-                null
-            }
+        val role = creatorRole.inviteRole() ?: return null
+        return try {
+            makePairingInvite(role, broker, relay).toCreatedInvite()
+        } catch (_: EnvoixException) {
+            null
         }
-        val value = json(Native.generateInvite(creatorRole, broker, relay)) ?: return null
-        if (value.has("error")) return null
-        return CreatedInvite(
-            roomCode = value.getString("code"),
-            payload = value.getString("payload"),
-            reference = value.getString("reference"),
-            broker = value.getString("broker"),
-            relay = value.strOrNull("relay"),
-            creatorRole = value.getString("creatorRole"),
-            joinerRole = value.getString("joinerRole"),
-            expiresAt = value.getLong("expiresAt"),
-        )
     }
 
     /** Parse for deep-link routing. The credential itself is not returned. */
@@ -79,14 +65,12 @@ object InviteCodec {
         input: String,
         localRole: String,
     ): ParsedInvite? {
-        if (localRole == "send") {
-            return try {
-                parsePairingInviteForRole(input, FfiInviteRole.SEND).toParsedInvite(input)
-            } catch (_: EnvoixException) {
-                null
-            }
+        val role = localRole.inviteRole() ?: return null
+        return try {
+            parsePairingInviteForRole(input, role).toParsedInvite(input)
+        } catch (_: EnvoixException) {
+            null
         }
-        return parsed(Native.parseInviteForRole(input, localRole))
     }
 
     /** Secret-free activity identity shared by both sides of one typed InviteV2 send. */
@@ -130,19 +114,6 @@ object InviteCodec {
             if (compact.length == 6 && separatorAfterSix) append('-')
             if (compact.length == 10 && separatorAfterTen) append('-')
         }
-    }
-
-    private fun parsed(raw: String): ParsedInvite? {
-        val value = json(raw) ?: return null
-        if (value.has("error")) return null
-        return ParsedInvite(
-            reference = value.strOrNull("reference"),
-            broker = value.getString("broker"),
-            relay = value.strOrNull("relay"),
-            creatorRole = value.getString("creatorRole"),
-            joinerRole = value.getString("joinerRole"),
-            expiresAt = value.getLong("expiresAt"),
-        )
     }
 
     private fun FfiPairingInvite.toCreatedInvite(): CreatedInvite? {
@@ -211,7 +182,10 @@ object InviteCodec {
             FfiInviteRole.RECEIVE -> "receive"
         }
 
-    private fun json(value: String) = runCatching { JSONObject(value) }.getOrNull()
-
-    private fun JSONObject.strOrNull(key: String) = if (isNull(key)) null else optString(key).ifEmpty { null }
+    private fun String.inviteRole(): FfiInviteRole? =
+        when (this) {
+            "send" -> FfiInviteRole.SEND
+            "receive" -> FfiInviteRole.RECEIVE
+            else -> null
+        }
 }

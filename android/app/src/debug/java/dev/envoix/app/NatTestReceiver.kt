@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.runBlocking
-import org.json.JSONObject
 import java.io.File
 
 /**
@@ -42,22 +41,24 @@ class NatTestReceiver : BroadcastReceiver() {
     ) {
         val broker = intent.getStringExtra(EXTRA_BROKER).orEmpty()
         val relay = intent.getStringExtra(EXTRA_RELAY).orEmpty()
-        val invitation = JSONObject(Native.generateInvite("receive", broker, relay))
-        invitation.throwNativeError()
+        val invitation =
+            requireNotNull(InviteCodec.generate("receive", broker, relay)) {
+                "Could not create receiver invitation"
+            }
 
-        val invitePayload = invitation.getString("payload")
         TransferService.startReceive(
             context = context,
-            room = invitation.getString("reference"),
+            room = invitation.reference,
             broker = broker,
             relay = relay,
             qrPayload = null,
             destinationCopyApproved = true,
             rememberLabel = intent.getStringExtra(EXTRA_REMEMBER_LABEL),
             rememberedRelationshipId = null,
+            invitationCreator = true,
         )
         resultCode = Activity.RESULT_OK
-        resultData = invitePayload
+        resultData = invitation.payload
     }
 
     private fun startSender(
@@ -75,8 +76,8 @@ class NatTestReceiver : BroadcastReceiver() {
             if (remembered == null) {
                 val invite = intent.getStringExtra(EXTRA_INVITATION).orEmpty()
                 require(invite.isNotBlank()) { "Complete InviteV2 URI is missing" }
-                JSONObject(Native.parseInviteForRole(invite, "send")).also {
-                    it.throwNativeError()
+                requireNotNull(InviteCodec.parseForRole(invite, "send")) {
+                    "Complete InviteV2 URI is invalid for a sender"
                 }
             } else {
                 null
@@ -101,9 +102,10 @@ class NatTestReceiver : BroadcastReceiver() {
                 created.jobId
             }
         if (remembered == null) {
+            val invitationReference = requireNotNull(invitation?.reference)
             TransferService.startSend(
                 context = context,
-                room = requireNotNull(invitation).getString("reference"),
+                room = invitationReference,
                 broker = intent.getStringExtra(EXTRA_BROKER).orEmpty(),
                 relay = intent.getStringExtra(EXTRA_RELAY).orEmpty(),
                 jobId = jobId,
@@ -186,10 +188,6 @@ class NatTestReceiver : BroadcastReceiver() {
                 else -> error("field must be state, peer, or error")
             }
         resultCode = Activity.RESULT_OK
-    }
-
-    private fun JSONObject.throwNativeError() {
-        optString("error").takeIf(String::isNotEmpty)?.let(::error)
     }
 
     private companion object {
