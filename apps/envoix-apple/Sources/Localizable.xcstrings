@@ -25,6 +25,132 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "移除记录" } }
       }
     },
+    "accessibility.collapsed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Collapsed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已收起" } }
+      }
+    },
+    "accessibility.expanded" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Expanded" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已展开" } }
+      }
+    },
+    "activity.accessibility.collapse_hint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Double-tap to collapse transfer details." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "轻点两下以收起传输详情。" } }
+      }
+    },
+    "activity.accessibility.expand_hint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Double-tap to expand transfer details." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "轻点两下以展开传输详情。" } }
+      }
+    },
+    "activity.diagnostics.copied" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Diagnostics copied" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "诊断信息已复制" } }
+      }
+    },
+    "activity.diagnostics.copy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy diagnostics" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制诊断信息" } }
+      }
+    },
+    "activity.diagnostics.copy_app" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy app diagnostics" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制应用诊断信息" } }
+      }
+    },
+    "activity.diagnostics.upload" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Upload diagnostics" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "上传诊断信息" } }
+      }
+    },
+    "activity.empty.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Prepared and active transfers will appear here." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "准备中和活动中的传输会显示在这里。" } }
+      }
+    },
+    "activity.empty.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No transfers yet" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无传输" } }
+      }
+    },
+    "activity.group.one_time_room" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "One-time Room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "一次性房间" } }
+      }
+    },
+    "activity.group.standalone" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Standalone transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "独立传输" } }
+      }
+    },
+    "activity.incoming" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Incoming transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "待接收内容" } }
+      }
+    },
+    "activity.outgoing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Outgoing transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "待发送内容" } }
+      }
+    },
+    "activity.saved.view_items" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "View received items" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "查看已接收项目" } }
+      }
+    },
+    "activity.timeline" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer timeline" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输时间线" } }
+      }
+    },
+    "common.cancel" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
+      }
+    },
+    "common.pause" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pause" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂停" } }
+      }
+    },
+    "common.receive" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收" } }
+      }
+    },
+    "common.resume" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Resume" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "恢复" } }
+      }
+    },
+    "common.share" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Share" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分享" } }
+      }
+    },
     "home.choose_action" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose what this device will do." } },

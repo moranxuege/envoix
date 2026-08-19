@@ -4,6 +4,36 @@ import EnvoixCore
 @testable import Envoix_iOS
 
 final class TransferPresentationPolicyTests: XCTestCase {
+    func testActivityCatalogProvidesStaticScreenCopy() {
+        let cases: [(String, String, String)] = [
+            ("accessibility.collapsed", "Collapsed", "已收起"),
+            ("accessibility.expanded", "Expanded", "已展开"),
+            ("activity.accessibility.collapse_hint", "Double-tap to collapse transfer details.", "轻点两下以收起传输详情。"),
+            ("activity.accessibility.expand_hint", "Double-tap to expand transfer details.", "轻点两下以展开传输详情。"),
+            ("activity.diagnostics.copied", "Diagnostics copied", "诊断信息已复制"),
+            ("activity.diagnostics.copy", "Copy diagnostics", "复制诊断信息"),
+            ("activity.diagnostics.copy_app", "Copy app diagnostics", "复制应用诊断信息"),
+            ("activity.diagnostics.upload", "Upload diagnostics", "上传诊断信息"),
+            ("activity.empty.detail", "Prepared and active transfers will appear here.", "准备中和活动中的传输会显示在这里。"),
+            ("activity.empty.title", "No transfers yet", "暂无传输"),
+            ("activity.group.one_time_room", "One-time Room", "一次性房间"),
+            ("activity.group.standalone", "Standalone transfer", "独立传输"),
+            ("activity.incoming", "Incoming transfer", "待接收内容"),
+            ("activity.outgoing", "Outgoing transfer", "待发送内容"),
+            ("activity.saved.view_items", "View received items", "查看已接收项目"),
+            ("activity.timeline", "Transfer timeline", "传输时间线"),
+            ("common.cancel", "Cancel", "取消"),
+            ("common.pause", "Pause", "暂停"),
+            ("common.receive", "Receive", "接收"),
+            ("common.resume", "Resume", "恢复"),
+            ("common.share", "Share", "分享"),
+        ]
+        for (key, english, chinese) in cases {
+            XCTAssertEqual(AppText.localized(key, language: "en"), english)
+            XCTAssertEqual(AppText.localized(key, language: "zh-Hans"), chinese)
+        }
+    }
+
     func testActivityTextProjectsEveryStateAndStageFromSemanticCatalog() {
         let stateCases: [(
             TransferActivityState,
