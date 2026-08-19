@@ -149,6 +149,12 @@ on a primary flow.
 Formatting, pluralization, and accessibility phrases belong to the native
 catalog. Error codes and Engine state remain locale-independent.
 
+Android migration is incremental and M6 remains open until the primary flows
+are complete. The NFC invitation overlay, QR scanner, and the existing shared
+transfer-setup labels use `values` / `values-b+zh+Hans` resources; Room,
+Connection Hub, Activity, and Settings still contain inline bilingual text to
+be migrated.
+
 ## 8. M6 verification
 
 A migrated feature supplies evidence for:

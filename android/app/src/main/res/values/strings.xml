@@ -27,4 +27,20 @@
     <string name="save_to">SAVE TO</string>
     <string name="nfc_invitation_service_description">Share the current Envoix room invitation over NFC</string>
     <string name="nfc_invitation_aid_description">Envoix NFC invitation</string>
+
+    <string name="common_continue">Continue</string>
+    <string name="common_cancel">Cancel</string>
+    <string name="common_ok">OK</string>
+    <string name="nfc_open_invitation_title">Open NFC invitation?</string>
+    <string name="nfc_untrusted_invitation_explanation">This untrusted tag only carries an invitation. Continue to validate it and use the normal room flow; NFC does not authenticate the other device.</string>
+    <string name="nfc_invitation_failed_title">NFC could not continue</string>
+    <string name="nfc_invalid_tag_message">The tag must contain exactly one valid Envoix NFC invitation.</string>
+
+    <string name="scanner_close">Close scanner</string>
+    <string name="scanner_title">Scan room QR</string>
+    <string name="scanner_no_qr_in_image">No QR code found in that image</string>
+    <string name="scanner_point_at_qr">Point at an Envoix QR code</string>
+    <string name="scanner_camera_access_off">Camera access is off</string>
+    <string name="scanner_camera_access_off_choose_image">Camera access is off —\nchoose a QR image below</string>
+    <string name="scanner_choose_from_photos">Choose from photos</string>
 </resources>

@@ -62,6 +62,7 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import dev.envoix.app.R
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -122,7 +123,7 @@ internal fun FullScreenScanner(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     Icons.Default.Close,
-                    contentDescription = appText("Close scanner", "关闭扫描"),
+                    contentDescription = appString(R.string.scanner_close),
                     tint = Color.White,
                     modifier =
                         Modifier
@@ -134,7 +135,7 @@ internal fun FullScreenScanner(
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    appText("Scan room QR", "扫描房间二维码"),
+                    appString(R.string.scanner_title),
                     color = Color.White,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
@@ -154,9 +155,9 @@ internal fun FullScreenScanner(
             Spacer(Modifier.height(18.dp))
             Text(
                 when {
-                    pickError -> appText("No QR code found in that image", "图片中未找到二维码")
-                    hasCamera -> appText("Point at an Envoix QR code", "请对准 Envoix 二维码")
-                    else -> appText("Camera access is off", "相机权限未开启")
+                    pickError -> appString(R.string.scanner_no_qr_in_image)
+                    hasCamera -> appString(R.string.scanner_point_at_qr)
+                    else -> appString(R.string.scanner_camera_access_off)
                 },
                 color = if (pickError) colors.danger else Color.White.copy(alpha = 0.82f),
                 fontSize = 13.sp,
@@ -176,7 +177,7 @@ internal fun FullScreenScanner(
                 Icon(Icons.Default.Image, null, tint = Color.White, modifier = Modifier.size(19.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    appText("Choose from photos", "从相册选择"),
+                    appString(R.string.scanner_choose_from_photos),
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
                     fontSize = 14.sp,
@@ -239,10 +240,7 @@ fun InlineScanner(
                 CornerBrackets(colors.accent, Modifier.fillMaxSize())
             } else {
                 Text(
-                    appText(
-                        "Camera access is off —\nchoose a QR image below",
-                        "相机权限未开启—\n请从下方选择二维码图片",
-                    ),
+                    appString(R.string.scanner_camera_access_off_choose_image),
                     color = Color.White.copy(alpha = 0.75f),
                     fontSize = 13.sp,
                     modifier = Modifier.padding(16.dp),
@@ -252,9 +250,9 @@ fun InlineScanner(
         Spacer(Modifier.height(10.dp))
         Text(
             if (pickError) {
-                appText("No QR code found in that image", "图片中未找到二维码")
+                appString(R.string.scanner_no_qr_in_image)
             } else {
-                appText("Point at an Envoix QR code", "请对准 Envoix 二维码")
+                appString(R.string.scanner_point_at_qr)
             },
             color = if (pickError) Color(0xFFE05B5B) else colors.muted,
             fontSize = 12.sp,
@@ -273,7 +271,7 @@ fun InlineScanner(
             Icon(Icons.Default.Image, null, tint = colors.accent, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(7.dp))
             Text(
-                appText("Choose from photos", "从相册选择"),
+                appString(R.string.scanner_choose_from_photos),
                 color = colors.accent,
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp,

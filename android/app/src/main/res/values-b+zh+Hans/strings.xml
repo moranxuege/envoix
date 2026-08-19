@@ -27,4 +27,20 @@
     <string name="save_to">保存到</string>
     <string name="nfc_invitation_service_description">通过 NFC 分享当前 Envoix 房间邀请</string>
     <string name="nfc_invitation_aid_description">Envoix NFC 邀请</string>
+
+    <string name="common_continue">继续</string>
+    <string name="common_cancel">取消</string>
+    <string name="common_ok">确定</string>
+    <string name="nfc_open_invitation_title">打开 NFC 邀请？</string>
+    <string name="nfc_untrusted_invitation_explanation">此未受信任的标签仅携带邀请。继续后仍会验证并使用常规房间流程；NFC 不会认证另一台设备。</string>
+    <string name="nfc_invitation_failed_title">NFC 无法继续</string>
+    <string name="nfc_invalid_tag_message">标签必须仅包含一个有效的 Envoix NFC 邀请。</string>
+
+    <string name="scanner_close">关闭扫描</string>
+    <string name="scanner_title">扫描房间二维码</string>
+    <string name="scanner_no_qr_in_image">图片中未找到二维码</string>
+    <string name="scanner_point_at_qr">请对准 Envoix 二维码</string>
+    <string name="scanner_camera_access_off">相机权限未开启</string>
+    <string name="scanner_camera_access_off_choose_image">相机权限未开启—\n请从下方选择二维码图片</string>
+    <string name="scanner_choose_from_photos">从相册选择</string>
 </resources>
