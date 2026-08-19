@@ -315,6 +315,9 @@ struct MobileConnectionFlowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #if os(iOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
@@ -324,12 +327,13 @@ struct MobileConnectionFlowView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @AppStorage("envoix.outputDirDisplayName") private var outputDirDisplayName = ""
 
-    @StateObject private var nearbyCoordinator = NearbyDiscoveryCoordinator()
-    @StateObject private var presence = NearbyPresencePreferences()
-    @StateObject private var workflow = ConnectionWorkflowState(
-        gateway: RoomControlGatewayFactory.make()
-    )
-    @StateObject private var rememberedOutbox = RememberedRoomOutboxController()
+    @ObservedObject private var runtime = AppleApplicationRuntime.shared
+    @ObservedObject private var nearbyCoordinator =
+        AppleApplicationRuntime.shared.nearbyCoordinator
+    @ObservedObject private var presence = AppleApplicationRuntime.shared.presence
+    @ObservedObject private var workflow = AppleApplicationRuntime.shared.workflow
+    @ObservedObject private var rememberedOutbox =
+        AppleApplicationRuntime.shared.rememberedOutbox
     @StateObject private var navigation = MobileSceneNavigationState(
         initialPage: {
             #if DEBUG
@@ -349,6 +353,7 @@ struct MobileConnectionFlowView: View {
     @State private var nfcReadinessGate = NFCInvitationReadinessGate()
     #endif
     @State private var connectionHubModalIsPresented = false
+    @State private var sceneID = UUID()
     #if os(iOS)
     @State private var splitViewVisibility = NavigationSplitViewVisibility.all
     #endif
@@ -363,9 +368,6 @@ struct MobileConnectionFlowView: View {
     @State private var transferHasStarted = false
     @State private var transferSheetDismissalBlocked = false
     @State private var transferExternalActivityActive = false
-    @State private var systemNearbyPairingIsActive = false
-    @State private var systemNearbyPairingLease:
-        AppleWifiAwareServiceCoordinator.Lease?
     @State private var roomOwnsSendDraft = false
     @State private var presentedSharedSelectionID: UUID?
     @State private var scannerIsPresented = false
@@ -531,9 +533,14 @@ struct MobileConnectionFlowView: View {
         .alert(
             AppText.value("Verify this device", "验证此设备", language: language),
             isPresented: Binding(
-                get: { workflow.verificationRequested },
+                get: {
+                    runtime.isPresentationOwner(sceneID)
+                        && workflow.verificationRequested
+                },
                 set: { presented in
-                    if !presented, workflow.verificationRequested {
+                    if runtime.isPresentationOwner(sceneID),
+                       !presented,
+                       workflow.verificationRequested {
                         workflow.cancelDeviceVerification()
                         roomVerificationInput = ""
                     }
@@ -641,24 +648,18 @@ struct MobileConnectionFlowView: View {
         }
         .onAppear {
             prepareUITestFixtures()
-            presentPendingSendSelection()
             workflow.refreshRememberedRooms()
             rememberedOutbox.start()
-            updateDiscoveryLease()
-            updateRememberedReconnect()
+            updateRuntimeRequest()
+            presentPendingSendSelection()
             synchronizeRememberedOutbox()
             beginOfferGatedNFCReadIfNeeded()
         }
         .onDisappear {
-            nearbyCoordinator.stop()
+            runtime.removeScene(id: sceneID)
             #if os(iOS) && canImport(CoreNFC)
             nfcInvitationExchange.cancelReading()
             #endif
-            workflow.setRememberedReconnectEnabled(
-                false,
-                displayName: presence.displayName,
-                identityPath: roomIdentityPath ?? ""
-            )
         }
         .onOpenURL(perform: handleIncomingURL)
         #if os(macOS)
@@ -675,7 +676,7 @@ struct MobileConnectionFlowView: View {
         }
         #endif
         .onChange(of: navigation.page) { newPage in
-            updateDiscoveryLease()
+            updateRuntimeRequest()
             #if os(iOS) && canImport(CoreNFC)
             if newPage == .connect {
                 beginOfferGatedNFCReadIfNeeded()
@@ -684,6 +685,12 @@ struct MobileConnectionFlowView: View {
                 nfcInvitationExchange.cancelReading()
             }
             #endif
+        }
+        .onChange(of: runtime.presentationOwnerSceneID) { ownerSceneID in
+            guard ownerSceneID == sceneID else { return }
+            presentPendingSendSelection()
+            captureIncomingNearbyOffer()
+            beginOfferGatedNFCReadIfNeeded()
         }
         .onChange(of: scenePhase) { phase in
             let effects = MobileSceneLifecyclePolicy.effects(
@@ -703,8 +710,7 @@ struct MobileConnectionFlowView: View {
             // A live control room survives scene backgrounding. Its explicit
             // end action, negotiated idle lifetime, or connection loss owns
             // termination; the scene transition only withdraws discovery UI.
-            updateDiscoveryLease()
-            updateRememberedReconnect()
+            updateRuntimeRequest()
             synchronizeRememberedOutbox()
             #if os(iOS) && canImport(CoreNFC)
             if phase == .active {
@@ -717,7 +723,7 @@ struct MobileConnectionFlowView: View {
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { date in
             now = date
             if presence.expireIfNeeded(now: date) {
-                updateDiscoveryLease()
+                updateRuntimeRequest()
             }
             workflow.tick(now: date, hasActiveTransfer: roomHasActiveTransfers)
         }
@@ -740,7 +746,7 @@ struct MobileConnectionFlowView: View {
             )
             if state == .delivered || state == .failed || state == .canceled {
                 workflow.refreshRememberedRooms()
-                updateRememberedReconnect()
+                updateRuntimeRequest()
                 presentPendingSendSelection()
             }
             synchronizeRememberedOutbox()
@@ -753,19 +759,20 @@ struct MobileConnectionFlowView: View {
         .onChange(of: model.receive.presentationState) { state in
             if state == .delivered || state == .failed || state == .canceled {
                 workflow.refreshRememberedRooms()
-                updateRememberedReconnect()
+                updateRuntimeRequest()
             }
         }
         .onChange(of: presence.displayName) { _ in
-            updateDiscoveryLease()
-            updateRememberedReconnect()
+            updateRuntimeRequest()
         }
-        .onChange(of: presence.visibility) { _ in updateDiscoveryLease() }
+        .onChange(of: presence.visibility) { _ in updateRuntimeRequest() }
         .onChange(of: workflow.controlPhase) { phase in
             if phase == .connected,
                workflow.room != nil {
                 roomInvitationIsRevealed = false
-                navigation.page = .room
+                if runtime.isPresentationOwner(sceneID) {
+                    navigation.page = .room
+                }
                 workflow.setLocalTransferActive(roomHasActiveTransfers)
             } else if phase == .connected,
                       workflow.rememberedRoom != nil {
@@ -779,7 +786,8 @@ struct MobileConnectionFlowView: View {
                 pendingBleVerificationOffer = nil
                 presentPendingSendSelection()
             }
-            if case .failed(let message) = phase {
+            if runtime.isPresentationOwner(sceneID),
+               case .failed(let message) = phase {
                 ToastCenter.shared.show(message)
             }
             if isEndedOrFailed(phase),
@@ -878,6 +886,20 @@ struct MobileConnectionFlowView: View {
             sidebarRow(.settings, systemImage: "gearshape")
         }
         .navigationTitle("Envoix")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    openWindow(id: "main")
+                } label: {
+                    Label(
+                        AppText.value("New Window", "新建窗口", language: language),
+                        systemImage: "plus.rectangle.on.rectangle"
+                    )
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                .accessibilityIdentifier("ipad_new_window")
+            }
+        }
         .accessibilityIdentifier("ipad_sidebar")
     }
 
@@ -940,31 +962,11 @@ struct MobileConnectionFlowView: View {
                 onSendToRememberedRoom: offerFilesToRememberedRoom,
                 onSendDroppedItems: offerDroppedItemsToRememberedRoom,
                 onPrepareNearbyPairing: {
-                    systemNearbyPairingIsActive = true
-                    await nearbyCoordinator.suspendForSystemPairing()
-                    do {
-                        systemNearbyPairingLease = try await
-                            AppleWifiAwareServiceCoordinator.shared.acquire(
-                                .systemPairing
-                            )
-                        return true
-                    } catch {
-                        systemNearbyPairingIsActive = false
-                        updateDiscoveryLease()
-                        return false
-                    }
+                    await runtime.beginSystemPairing(for: sceneID)
                 },
                 onFinishNearbyPairing: {
-                    let lease = systemNearbyPairingLease
-                    systemNearbyPairingLease = nil
                     Task { @MainActor in
-                        if let lease {
-                            await AppleWifiAwareServiceCoordinator.shared.release(
-                                lease
-                            )
-                        }
-                        systemNearbyPairingIsActive = false
-                        updateDiscoveryLease()
+                        await runtime.finishSystemPairing(for: sceneID)
                     }
                 },
                 onModalPresentationChanged: {
@@ -1219,13 +1221,16 @@ struct MobileConnectionFlowView: View {
     private var pendingOfferBinding: Binding<PendingNearbyInvitation?> {
         Binding(
             get: {
+                guard runtime.isPresentationOwner(sceneID) else { return nil }
                 #if os(iOS)
                 guard pendingExternalInvitation == nil else { return nil }
                 #endif
                 return workflow.nextPendingOffer
             },
             set: { value in
-                if value == nil, let pending = workflow.nextPendingOffer {
+                if runtime.isPresentationOwner(sceneID),
+                   value == nil,
+                   let pending = workflow.nextPendingOffer {
                     workflow.discardPendingOffer(id: pending.id)
                 }
             }
@@ -1700,7 +1705,7 @@ struct MobileConnectionFlowView: View {
         }
     }
 
-    private func updateDiscoveryLease() {
+    private func updateRuntimeRequest() {
         let effects = MobileSceneLifecyclePolicy.effects(
             for: MobileSceneLifecycleEvent(scenePhase: scenePhase)
         )
@@ -1710,33 +1715,23 @@ struct MobileConnectionFlowView: View {
         // tests exercise deterministic discovery instead of scene timing.
         let sceneAllowsDiscovery = effects.allowsNearbyDiscovery
             || ProcessInfo.processInfo.arguments.contains("--ui-testing")
+        let sceneAllowsPresentation = scenePhase == .active
+            || ProcessInfo.processInfo.arguments.contains("--ui-testing")
         #else
         let sceneAllowsDiscovery = effects.allowsNearbyDiscovery
+        let sceneAllowsPresentation = scenePhase == .active
         #endif
-        let advertisingEnabled = presence.isAdvertising(
-            sceneIsActive: sceneAllowsDiscovery
-        )
         let shouldRun = NearbyDiscoveryLeasePolicy.shouldRun(
             sceneAllowsDiscovery: sceneAllowsDiscovery,
             isConnectionPage: navigation.page == .connect,
             discoveryIsEnabled: presence.visibility != .hidden,
-            systemPairingIsActive: systemNearbyPairingIsActive
+            systemPairingIsActive: false
         )
-        if !shouldRun {
-            nearbyCoordinator.stop()
-        }
-        nearbyCoordinator.configure(
-            displayName: presence.displayName,
-            advertisingEnabled: advertisingEnabled
-        )
-        if shouldRun {
-            nearbyCoordinator.start()
-        }
-    }
-
-    private func updateRememberedReconnect() {
-        workflow.setRememberedReconnectEnabled(
-            RememberedRoomLifecyclePolicy.shouldKeepConnected(
+        runtime.updateScene(
+            id: sceneID,
+            isActive: sceneAllowsPresentation,
+            requestsDiscovery: shouldRun,
+            keepsRememberedConnected: RememberedRoomLifecyclePolicy.shouldKeepConnected(
                 sceneIsActive: scenePhase == .active,
                 externalActivityActive: transferExternalActivityActive
             ),
@@ -1748,7 +1743,7 @@ struct MobileConnectionFlowView: View {
     private func setTransferExternalActivityActive(_ active: Bool) {
         guard transferExternalActivityActive != active else { return }
         transferExternalActivityActive = active
-        updateRememberedReconnect()
+        updateRuntimeRequest()
     }
 
     private func synchronizeRememberedOutbox() {
@@ -1775,6 +1770,7 @@ struct MobileConnectionFlowView: View {
     }
 
     private func captureIncomingNearbyOffer() {
+        guard runtime.isPresentationOwner(sceneID) else { return }
         guard let offer = nearbyCoordinator.state.incomingRendezvousOffer else { return }
         defer { nearbyCoordinator.consumeRendezvousOffer(id: offer.id) }
         if navigation.page == .room,
@@ -2020,7 +2016,7 @@ struct MobileConnectionFlowView: View {
             replaceRoomAlertIsPresented: isRoomReplacementPresented,
             roomVerificationIsPresented: workflow.verificationRequested,
             externalConfirmationIsPresented: pendingExternalInvitation != nil,
-            systemPairingIsPresented: systemNearbyPairingIsActive,
+            systemPairingIsPresented: runtime.isSystemPairingActive,
             connectionHubModalIsPresented: connectionHubModalIsPresented
         )
     }
@@ -2028,6 +2024,7 @@ struct MobileConnectionFlowView: View {
 
     private func beginOfferGatedNFCReadIfNeeded() {
         #if os(iOS) && canImport(CoreNFC)
+        guard runtime.isPresentationOwner(sceneID) else { return }
         guard let offer =
                   nearbyCoordinator.state.incomingNFCReadinessOffer else {
             return
@@ -2153,6 +2150,7 @@ struct MobileConnectionFlowView: View {
     #endif
 
     private func presentPendingSendSelection() {
+        guard runtime.isPresentationOwner(sceneID) else { return }
         #if os(iOS)
         guard pendingExternalInvitation == nil else { return }
         presentSharedDraft(preferredID: nil)
@@ -2338,7 +2336,7 @@ struct MobileConnectionFlowView: View {
 
     private func updateDisplayName(_ value: String) -> Bool {
         guard presence.updateDisplayName(value) else { return false }
-        updateDiscoveryLease()
+        updateRuntimeRequest()
         return true
     }
 

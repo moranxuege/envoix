@@ -33,7 +33,7 @@ struct EnvoixApp: App {
         }
         .menuBarExtraStyle(.window)
         #else
-        WindowGroup {
+        WindowGroup(id: "main") {
             rootView
         }
         #endif

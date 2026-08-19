@@ -99,6 +99,7 @@ final class ManifestV2AppUITests: XCTestCase {
         )
 
         element("ipad_sidebar").assertExists()
+        button("ipad_new_window").assertExists()
         element("ipad_sidebar_activity").tap()
         element("activity_page").assertExists()
         element("ipad_sidebar_settings").tap()

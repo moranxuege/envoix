@@ -50,6 +50,11 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <true/>
+    </dict>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
     <key>NSCameraUsageDescription</key>

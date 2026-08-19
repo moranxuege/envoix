@@ -234,6 +234,14 @@ hardware model. A narrow iPad window therefore uses the compact stack, while a
 regular-width iPad window uses persistent split navigation. Page selection and
 its return context are scene-local; durable transfers remain process-owned.
 
+`AppleApplicationRuntime` is the process owner for Nearby discovery, Room
+control, remembered reconnect, and the durable outbox. Each window contributes
+an explicit lifecycle lease. Closing or backgrounding one window cannot stop a
+platform effect still requested by another, and only one active window owns
+global invitation and verification prompts at a time. System pairing is also a
+process lease, so a second window cannot restart discovery while Apple pairing
+has temporarily quiesced it.
+
 ### macOS
 
 The target topology is a signed application bundle containing a
