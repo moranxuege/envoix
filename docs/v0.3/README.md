@@ -47,6 +47,7 @@ as typed capabilities, not inferred by a frontend.
 - [Milestone plan](milestones.md)
 - [Compatibility and migration policy](compatibility.md)
 - [Engineering standard](engineering.md)
+- [Native presentation contract](presentation.md)
 - [Typed binding contract](bindings.md)
 - [Dependency security baseline](dependency-security.md)
 - [ADR 0001: Engine storage](adr/0001-engine-storage.md)
