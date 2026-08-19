@@ -1,8 +1,6 @@
 package dev.envoix.app.ui
 
-import android.Manifest
 import android.net.Uri
-import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -43,9 +41,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -58,7 +54,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -67,17 +62,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.envoix.app.AndroidWifiAwareCapabilityProbe
-import dev.envoix.app.AndroidWifiAwareDiagnosticController
 import dev.envoix.app.Settings
-import dev.envoix.app.WifiAwareAvailability
-import dev.envoix.app.WifiAwareCapabilitySnapshot
 import dev.envoix.app.WifiAwareProbeRole
-import dev.envoix.app.isRunning
 import kotlin.math.roundToInt
 
 @Composable
-fun SettingsScreen(
+internal fun SettingsScreen(
     settings: Settings,
     saveLocationLabel: String,
     savePickerInitialUri: Uri,
@@ -87,6 +77,10 @@ fun SettingsScreen(
     onResetSaveTree: () -> Unit,
     onAvoidTailscaleChanged: (Boolean) -> Unit,
     onLoggingSettingsChanged: ((Settings) -> Settings) -> Unit,
+    diagnostics: SettingsDiagnosticsUiState,
+    onRequestNearbyWifiPermission: () -> Unit,
+    onStartWifiAwareProbe: (WifiAwareProbeRole) -> Unit,
+    onStopWifiAwareProbe: () -> Unit,
     onBack: () -> Unit,
 ) {
     val colors = Envoix.colors
@@ -95,7 +89,6 @@ fun SettingsScreen(
     var broker by remember { mutableStateOf(settings.broker) }
     var relay by remember { mutableStateOf(settings.relay) }
     var dataStreamWindow by remember { mutableStateOf(settings.dataStreamWindow) }
-    val context = LocalContext.current
     val folderPicker =
         rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocumentTree(),
@@ -105,19 +98,6 @@ fun SettingsScreen(
     var logServer by remember { mutableStateOf(settings.logServer) }
     var showAdvanced by remember { mutableStateOf(false) }
     var showCompressionInfo by remember { mutableStateOf(false) }
-    var wifiAwareCapability by remember { mutableStateOf<WifiAwareCapabilitySnapshot?>(null) }
-    var wifiAwareRefreshKey by remember { mutableStateOf(0) }
-    val wifiAwareController = remember(context) { AndroidWifiAwareDiagnosticController(context) }
-    val wifiAwareProbe by wifiAwareController.snapshot.collectAsState()
-    val wifiAwarePermissionLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-            wifiAwareRefreshKey += 1
-            wifiAwareController.refresh()
-        }
-
-    DisposableEffect(wifiAwareController) {
-        onDispose { wifiAwareController.close() }
-    }
 
     // Reflect external edits to the candidate lists (e.g. the Avoid-Tailscale
     // toggle mutating `deny`) back into the raw editors, without clobbering
@@ -132,16 +112,6 @@ fun SettingsScreen(
             allowText = settings.candidatesAllow.joinToString("\n")
         }
     }
-    LaunchedEffect(settings.devMode, wifiAwareRefreshKey) {
-        wifiAwareCapability =
-            if (settings.devMode) AndroidWifiAwareCapabilityProbe.read(context) else null
-        if (settings.devMode) {
-            wifiAwareController.refresh()
-        } else {
-            wifiAwareController.stop()
-        }
-    }
-
     Box(
         Modifier
             .fillMaxSize()
@@ -294,16 +264,16 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(16.dp))
                     Text(
-                        "Wi-Fi Aware · ${wifiAwareCapability?.diagnosticSummary ?: "checking"}",
+                        "Wi-Fi Aware · ${diagnostics.capability?.diagnosticSummary ?: "checking"}",
                         color = colors.muted,
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "Probe · ${wifiAwareProbe.diagnosticSummary}",
+                        "Probe · ${diagnostics.probe.diagnosticSummary}",
                         color =
-                            if (wifiAwareProbe.phase == dev.envoix.app.WifiAwareProbePhase.FAILED) {
+                            if (diagnostics.probe.phase == dev.envoix.app.WifiAwareProbePhase.FAILED) {
                                 colors.danger
                             } else {
                                 colors.muted
@@ -313,13 +283,10 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(10.dp))
                     if (
-                        wifiAwareCapability?.availability == WifiAwareAvailability.PERMISSION_REQUIRED &&
-                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                        diagnostics.canRequestNearbyPermission
                     ) {
                         OutlinedButton(
-                            onClick = {
-                                wifiAwarePermissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
-                            },
+                            onClick = onRequestNearbyWifiPermission,
                         ) {
                             Text(
                                 appText(
@@ -330,33 +297,29 @@ fun SettingsScreen(
                         }
                         Spacer(Modifier.height(8.dp))
                     }
-                    val probeEnabled =
-                        wifiAwareCapability?.availability == WifiAwareAvailability.READY ||
-                            wifiAwareCapability?.availability == WifiAwareAvailability.PAIRING_REQUIRED
-                    val probeRunning = wifiAwareProbe.phase.isRunning
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Button(
-                            onClick = { wifiAwareController.start(WifiAwareProbeRole.PUBLISHER) },
-                            enabled = probeEnabled && !probeRunning,
+                            onClick = { onStartWifiAwareProbe(WifiAwareProbeRole.PUBLISHER) },
+                            enabled = diagnostics.canStartProbe,
                             modifier = Modifier.weight(1f),
                         ) {
                             Text(appText("Receive probe", "接收探测"))
                         }
                         OutlinedButton(
-                            onClick = { wifiAwareController.start(WifiAwareProbeRole.SUBSCRIBER) },
-                            enabled = probeEnabled && !probeRunning,
+                            onClick = { onStartWifiAwareProbe(WifiAwareProbeRole.SUBSCRIBER) },
+                            enabled = diagnostics.canStartProbe,
                             modifier = Modifier.weight(1f),
                         ) {
                             Text(appText("Send probe", "发送探测"))
                         }
                     }
-                    if (probeRunning) {
+                    if (diagnostics.probeRunning) {
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(
-                            onClick = wifiAwareController::stop,
+                            onClick = onStopWifiAwareProbe,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text(appText("Stop probe", "停止探测"))

@@ -45,6 +45,7 @@ import dev.envoix.app.ui.RememberedRoomsScreen
 import dev.envoix.app.ui.RememberedRoomsViewModel
 import dev.envoix.app.ui.RoomControlInviteFormat
 import dev.envoix.app.ui.RoomControlPhase
+import dev.envoix.app.ui.SettingsDiagnosticsViewModel
 import dev.envoix.app.ui.SettingsScreen
 import dev.envoix.app.ui.TransferActivityPresentationEnvironment
 import dev.envoix.app.ui.TransferActivityScreen
@@ -59,6 +60,7 @@ class MainActivity : ComponentActivity() {
     private val discoveryVm: DiscoveryViewModel by viewModels()
     private val workflowVm: ConnectionWorkflowViewModel by viewModels()
     private val rememberedRoomsVm: RememberedRoomsViewModel by viewModels()
+    private val settingsDiagnosticsVm: SettingsDiagnosticsViewModel by viewModels()
     private val rememberedRoomConnections by lazy {
         RememberedRoomConnectionManager.get(this)
     }
@@ -89,6 +91,10 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             discoveryVm.start()
         }
+    private val requestNearbyWifiPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            settingsDiagnosticsVm.refresh()
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -108,9 +114,15 @@ class MainActivity : ComponentActivity() {
                     val workflow by workflowVm.uiState.collectAsState()
                     val discovery by discoveryVm.uiState.collectAsState()
                     val rememberedRooms by rememberedRoomsVm.uiState.collectAsState()
+                    val settingsDiagnostics by settingsDiagnosticsVm.uiState.collectAsState()
                     val nfcInvitation by nfcInvitationController.state.collectAsState()
                     val nfcPhoneHosting by nfcInvitationHostController.state.collectAsState()
                     val nfcPhoneReader by nfcInvitationReaderController.state.collectAsState()
+                    LaunchedEffect(settings.devMode, workflow.screen) {
+                        settingsDiagnosticsVm.setEnabled(
+                            settings.devMode && workflow.screen == WorkflowScreen.Settings,
+                        )
+                    }
                     val selectedPeerKey = workflow.room?.nearbySelection?.discoveryPeerKey
                     val controlRoom = workflow.room?.controlSession == true
                     val activeRoomTransferCount =
@@ -424,6 +436,14 @@ class MainActivity : ComponentActivity() {
                                     SettingsStore.update(transform)
                                     SettingsStore.applyLogLevel()
                                 },
+                                diagnostics = settingsDiagnostics,
+                                onRequestNearbyWifiPermission = {
+                                    requestNearbyWifiPermission.launch(
+                                        Manifest.permission.NEARBY_WIFI_DEVICES,
+                                    )
+                                },
+                                onStartWifiAwareProbe = settingsDiagnosticsVm::startProbe,
+                                onStopWifiAwareProbe = settingsDiagnosticsVm::stopProbe,
                                 onBack = workflowVm::navigateBack,
                             )
                     }

@@ -266,6 +266,11 @@ to invoke platform effects. The Connection Hub is the sole nearby-discovery
 entry point; the retired standalone discovery and mode-first send/receive home
 screens are not part of the v0.3 application topology.
 
+The Settings screen renders a settings snapshot and
+`SettingsDiagnosticsUiState`. The Activity applies persistence and launches
+runtime permission requests, while `SettingsDiagnosticsViewModel` owns and
+stops the Wi-Fi Aware diagnostic probe outside the Composable lifetime.
+
 The default typed control binding is UniFFI after the application surface has
 been reduced. Hand-written JNI remains only for proven platform or performance
 boundaries and must not expose a parallel product state machine.
