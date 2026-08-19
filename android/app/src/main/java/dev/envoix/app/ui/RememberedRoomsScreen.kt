@@ -138,7 +138,7 @@ internal fun RememberedRoomDetailScreen(
     connection: RememberedRoomConnectionState?,
     transferState: RememberedRoomTransferState?,
     error: String?,
-    connectionManager: RememberedRoomConnectionManager,
+    onRoomOpenChanged: (relationshipId: String, open: Boolean) -> Unit,
     onBack: () -> Unit,
     onRetry: (String) -> Unit,
     onRename: (String, String, () -> Unit) -> Unit,
@@ -168,9 +168,9 @@ internal fun RememberedRoomDetailScreen(
     val colors = Envoix.colors
     val relationshipId = peer?.relationshipId
     DisposableEffect(relationshipId) {
-        relationshipId?.let { connectionManager.setRoomOpen(it, true) }
+        relationshipId?.let { onRoomOpenChanged(it, true) }
         onDispose {
-            relationshipId?.let { connectionManager.setRoomOpen(it, false) }
+            relationshipId?.let { onRoomOpenChanged(it, false) }
         }
     }
     if (peer == null) {

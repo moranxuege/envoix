@@ -408,7 +408,7 @@ class MainActivity : ComponentActivity() {
                                 connection = rememberedRooms.connections[relationshipId],
                                 transferState = rememberedRooms.transfers[relationshipId],
                                 error = rememberedRooms.error,
-                                connectionManager = rememberedRoomConnections,
+                                onRoomOpenChanged = rememberedRoomConnections::setRoomOpen,
                                 onBack = workflowVm::navigateBack,
                                 onRetry = rememberedRoomsVm::retry,
                                 onRename = rememberedRoomsVm::rename,
