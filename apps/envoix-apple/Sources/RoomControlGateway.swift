@@ -89,6 +89,39 @@ enum RoomControlCloseReason: Equatable {
     case protocolFailure
 }
 
+enum RoomControlOperationError: LocalizedError, Equatable {
+    case rejected(String)
+    case networkLost(String)
+    case canceled(String)
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .rejected(let reason),
+             .networkLost(let reason),
+             .canceled(let reason),
+             .failed(let reason):
+            return reason
+        }
+    }
+
+    var roomRemainsUsable: Bool {
+        if case .rejected = self { return true }
+        return false
+    }
+}
+
+func roomControlOperationError(
+    from error: FfiRoomControlError
+) -> RoomControlOperationError {
+    switch error {
+    case .Rejected(let reason): return .rejected(reason)
+    case .NetworkLost(let reason): return .networkLost(reason)
+    case .Canceled(let reason): return .canceled(reason)
+    case .Failed(let reason): return .failed(reason)
+    }
+}
+
 enum RoomControlEvent: Equatable {
     case connected(
         peerDisplayName: String,
@@ -103,6 +136,7 @@ enum RoomControlEvent: Equatable {
     case offerRejected(id: String)
     case lifetimeChanged(RoomControlLifetimeState)
     case closed(RoomControlCloseReason)
+    case failed(String)
 }
 
 /// Native boundary for the shared room-control implementation. A room may be
@@ -424,7 +458,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
                 }
                 token.cancel()
                 clearIfCurrent(token)
-                onEvent(.closed(.networkLost))
+                onEvent(.failed(error.localizedDescription))
             }
         } catch {
             token.cancel()
@@ -437,44 +471,61 @@ final class LiveRoomControlGateway: RoomControlGateway {
         _ offer: RoomControlTransferOffer
     ) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.offerTransfer(offer: FfiRoomTransferOffer(
-            offerId: offer.id,
-            transferInvite: offer.transferInvite,
-            rootNames: Array(offer.rootNames.prefix(3)),
-            itemCount: offer.itemCount,
-            directoryCount: offer.directoryCount,
-            totalBytes: offer.totalBytes
-        )).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.offerTransfer(offer: FfiRoomTransferOffer(
+                offerId: offer.id,
+                transferInvite: offer.transferInvite,
+                rootNames: Array(offer.rootNames.prefix(3)),
+                itemCount: offer.itemCount,
+                directoryCount: offer.directoryCount,
+                totalBytes: offer.totalBytes
+            ))
+        }
+        return lifetime.map(project)
     }
 
     func submitVerificationCode(_ code: String) async throws {
         guard let session else { throw RoomControlUnavailableError() }
-        try await session.submitVerificationCode(code: code)
+        try await performRoomControlOperation {
+            try await session.submitVerificationCode(code: code)
+        }
     }
 
     func acceptOffer(id: String) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.acceptOffer(offerId: id).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.acceptOffer(offerId: id)
+        }
+        return lifetime.map(project)
     }
 
     func rejectOffer(id: String) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.rejectOffer(
-            offerId: id,
-            reason: .declined
-        ).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.rejectOffer(
+                offerId: id,
+                reason: .declined
+            )
+        }
+        return lifetime.map(project)
     }
 
     func setLifetimePolicy(
         _ policy: RoomControlLifetimePolicy
     ) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.setPolicy(policy: ffiPolicy(policy)).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.setPolicy(policy: ffiPolicy(policy))
+        }
+        return lifetime.map(project)
     }
 
     func setLocalTransferActive(_ active: Bool) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.setLocalTransferActive(active: active).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.setLocalTransferActive(active: active)
+        }
+        return lifetime.map(project)
     }
 
     func lifetimeSnapshot() -> RoomControlLifetimeState? {
@@ -484,7 +535,9 @@ final class LiveRoomControlGateway: RoomControlGateway {
     func expireIdleDeadline() async throws {
         guard let activeSession = session else { throw RoomControlUnavailableError() }
         let activeCancellation = cancellation
-        try await activeSession.close(reason: .idleExpired)
+        try await performRoomControlOperation {
+            try await activeSession.close(reason: .idleExpired)
+        }
         activeCancellation?.cancel()
         if let activeCancellation {
             clearIfCurrent(activeCancellation)
@@ -576,7 +629,30 @@ final class LiveRoomControlGateway: RoomControlGateway {
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws {
         while cancellation === token, !Task.isCancelled {
-            let event = try await connectedSession.nextEvent()
+            let event: FfiRoomControlEvent
+            do {
+                event = try await connectedSession.nextEvent()
+            } catch let error as FfiRoomControlError {
+                if Task.isCancelled {
+                    token.cancel()
+                    clearIfCurrent(token)
+                    throw CancellationError()
+                }
+                guard cancellation === token else { return }
+                let operationError = roomControlOperationError(from: error)
+                switch operationError {
+                case .rejected:
+                    continue
+                case .networkLost:
+                    onEvent(.closed(.networkLost))
+                case .canceled:
+                    onEvent(.closed(.userEnded))
+                case .failed(let reason):
+                    onEvent(.failed(reason))
+                }
+                clearIfCurrent(token)
+                return
+            }
             if event.kind == .verificationSucceeded {
                 guard let pending = verificationPersistence else {
                     throw RuntimeSettingsError(
@@ -602,6 +678,19 @@ final class LiveRoomControlGateway: RoomControlGateway {
         token.cancel()
         try? await connectedSession.close(reason: .userEnded)
         clearIfCurrent(token)
+    }
+
+    private func performRoomControlOperation<T>(
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await operation()
+        } catch let error as FfiRoomControlError {
+            if case .Canceled = error, Task.isCancelled {
+                throw CancellationError()
+            }
+            throw roomControlOperationError(from: error)
+        }
     }
 
     private func clearIfCurrent(_ token: FfiRoomControlCancellation) {

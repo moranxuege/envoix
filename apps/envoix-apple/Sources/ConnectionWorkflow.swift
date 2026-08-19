@@ -1174,7 +1174,7 @@ final class ConnectionWorkflowState: ObservableObject {
             } catch {
                 guard let self, controlGeneration == generation else { return }
                 outgoingDecisions.removeValue(forKey: offer.id)?(false)
-                handleControlFailure(error.localizedDescription, generation: generation)
+                handleControlFailure(error, generation: generation)
             }
         }
     }
@@ -1206,10 +1206,7 @@ final class ConnectionWorkflowState: ObservableObject {
             do {
                 try await gateway.submitVerificationCode(code)
             } catch {
-                self?.handleControlFailure(
-                    error.localizedDescription,
-                    generation: generation
-                )
+                self?.handleControlFailure(error, generation: generation)
             }
         }
         return nil
@@ -1237,7 +1234,7 @@ final class ConnectionWorkflowState: ObservableObject {
             guard controlGeneration == generation else { return nil }
             return offer
         } catch {
-            handleControlFailure(error.localizedDescription, generation: generation)
+            handleControlFailure(error, generation: generation)
             return nil
         }
     }
@@ -1268,7 +1265,7 @@ final class ConnectionWorkflowState: ObservableObject {
                 }
                 self?.schedulePassiveRememberedDwellIfNeeded()
             } catch {
-                self?.handleControlFailure(error.localizedDescription, generation: generation)
+                self?.handleControlFailure(error, generation: generation)
             }
         }
     }
@@ -1286,7 +1283,7 @@ final class ConnectionWorkflowState: ObservableObject {
                     self?.applyLifetime(lifetime)
                 }
             } catch {
-                self?.handleControlFailure(error.localizedDescription, generation: generation)
+                self?.handleControlFailure(error, generation: generation)
             }
         }
     }
@@ -1451,6 +1448,8 @@ final class ConnectionWorkflowState: ObservableObject {
             reportedLocalTransferActive = nil
             controlPhase = .ended(reason)
             scheduleRememberedReconnect()
+        case .failed(let message):
+            failControl(message)
         }
     }
 
@@ -1531,6 +1530,8 @@ final class ConnectionWorkflowState: ObservableObject {
                 rememberedRoom = nil
             }
             controlPhase = .ended(reason)
+        case .failed(let message):
+            failControl(message)
         }
     }
 
@@ -1568,7 +1569,7 @@ final class ConnectionWorkflowState: ObservableObject {
                 } catch {
                     guard self.controlGeneration == generation else { return }
                     self.localTransferSyncTask = nil
-                    self.failControl(error.localizedDescription)
+                    self.handleControlFailure(error, generation: generation)
                     return
                 }
             }
@@ -1597,6 +1598,13 @@ final class ConnectionWorkflowState: ObservableObject {
                       self.idleExpiryRevision == revision else {
                     return
                 }
+                if let operationError = error as? RoomControlOperationError,
+                   !operationError.roomRemainsUsable {
+                    self.idleExpiryTask = nil
+                    self.idleExpiryRevision = nil
+                    self.handleControlFailure(error, generation: generation)
+                    return
+                }
                 // A transfer-active update may win the race after the UI's
                 // transmitted deadline expires. Rust then rejects the close;
                 // retain the channel and reduce its newer authoritative state.
@@ -1623,6 +1631,27 @@ final class ConnectionWorkflowState: ObservableObject {
             return
         }
         failControl(message)
+    }
+
+    private func handleControlFailure(_ error: Error, generation: Int) {
+        guard controlGeneration == generation else { return }
+        guard let operationError = error as? RoomControlOperationError else {
+            handleControlFailure(error.localizedDescription, generation: generation)
+            return
+        }
+        switch operationError {
+        case .rejected:
+            #if DEBUG
+            NSLog("Envoix room command rejected: %@", operationError.localizedDescription)
+            #endif
+        case .networkLost:
+            finishControl(reason: .networkLost, notifyGateway: true)
+        case .canceled, .failed:
+            handleControlFailure(
+                operationError.localizedDescription,
+                generation: generation
+            )
+        }
     }
 
     private func failControl(_ message: String) {

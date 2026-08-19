@@ -68,6 +68,11 @@ and cancellation use typed UniFFI records and errors; the former Room JSON JNI
 bridge has been removed. Command calls remain serialized by the Android
 adapter, and an offer response returns only after Rust has written it.
 
+The Swift concurrency adapter projects the same Room error variants. A rejected
+authenticated command leaves the current Room usable, while network loss,
+cancellation, and native failure follow terminal paths without inspecting the
+diagnostic message.
+
 Transfer-invitation deep-link routing is typed and no longer crosses the legacy
 JSON JNI parser. Transfer-invitation generation and role-bound parsing remain
 temporarily on the legacy bridge because their opaque references still use its

@@ -751,6 +751,26 @@ final class ConnectionWorkflowTests: XCTestCase {
         )
     }
 
+    func testTypedRoomControlErrorsDoNotUseDiagnosticTextForDisposition() {
+        let rejected = roomControlOperationError(from: .Rejected(
+            reason: "network lost appears only in this diagnostic"
+        ))
+        let networkLost = roomControlOperationError(from: .NetworkLost(
+            reason: "request rejected appears only in this diagnostic"
+        ))
+
+        XCTAssertEqual(
+            rejected,
+            .rejected("network lost appears only in this diagnostic")
+        )
+        XCTAssertTrue(rejected.roomRemainsUsable)
+        XCTAssertEqual(
+            networkLost,
+            .networkLost("request rejected appears only in this diagnostic")
+        )
+        XCTAssertFalse(networkLost.roomRemainsUsable)
+    }
+
     func testBackgroundScenePreservesRoomWhileHidingInvitationAndDiscovery() {
         let effects = MobileSceneLifecyclePolicy.effects(for: .background)
 
@@ -1377,6 +1397,64 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertNil(workflow.idleDeadline)
     }
 
+    func testRejectedLifetimeCommandKeepsConnectedRoomUsable() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        _ = workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        )
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Peer",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        let closeCount = gateway.closeReasons.count
+        gateway.lifetimePolicyError = RoomControlOperationError.rejected(
+            "the authoritative deadline changed"
+        )
+
+        workflow.setKeepOpen(true)
+        await Task.yield()
+
+        XCTAssertEqual(workflow.controlPhase, .connected)
+        XCTAssertNotNil(workflow.room)
+        XCTAssertEqual(gateway.closeReasons.count, closeCount)
+    }
+
+    func testNetworkLossDuringLifetimeCommandClosesConnectedRoom() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        _ = workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        )
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Peer",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        gateway.lifetimePolicyError = RoomControlOperationError.networkLost(
+            "request rejected appears only in this diagnostic"
+        )
+
+        workflow.setKeepOpen(true)
+        await Task.yield()
+
+        XCTAssertEqual(workflow.controlPhase, .ended(.networkLost))
+        XCTAssertEqual(gateway.closeReasons.last, .networkLost)
+    }
+
     func testLocalTransferEdgesApplyTheCreatorsReturnedLifetime() async {
         let initialDeadline = Date(timeIntervalSince1970: 4_500)
         let resumedDeadline = initialDeadline.addingTimeInterval(900)
@@ -1716,6 +1794,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     var suspendAcceptance = false
     var rejectIdleExpiry = false
     var invitationError: Error?
+    var lifetimePolicyError: Error?
     var localTransferLifetime: ((Bool) -> RoomControlLifetimeState?)?
     var rememberedConnectHandler: RememberedConnectHandler?
     var currentLifetime = RoomControlLifetimeState(
@@ -1828,6 +1907,9 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     func setLifetimePolicy(
         _ policy: RoomControlLifetimePolicy
     ) async throws -> RoomControlLifetimeState? {
+        if let lifetimePolicyError {
+            throw lifetimePolicyError
+        }
         currentLifetime = RoomControlLifetimeState(
             revision: currentLifetime.revision + 1,
             policy: policy,
@@ -1848,7 +1930,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     func expireIdleDeadline() async throws {
         idleExpiryAttempts += 1
         if rejectIdleExpiry {
-            throw RuntimeSettingsError("authoritative deadline changed")
+            throw RoomControlOperationError.rejected("authoritative deadline changed")
         }
     }
 
