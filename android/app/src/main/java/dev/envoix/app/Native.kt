@@ -1,9 +1,5 @@
 package dev.envoix.app
 
-interface NearbyInviteCallback {
-    fun onEvent(json: String)
-}
-
 /** Sink for the core's `tracing` log lines. */
 interface LogCallback {
     fun log(
@@ -37,19 +33,4 @@ object Native {
 
     /** Wire the Android VM + app context into the Rust network stack. Call once. */
     external fun initContext(context: android.content.Context)
-
-    external fun startNearbyInviteInbox(
-        id: Long,
-        paramsJson: String,
-        callback: NearbyInviteCallback,
-    )
-
-    external fun sendNearbyInvite(
-        id: Long,
-        requestId: String,
-        routeJson: String,
-        invite: String,
-    ): String
-
-    external fun stopNearbyInviteInbox(id: Long)
 }

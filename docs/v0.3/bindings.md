@@ -142,8 +142,17 @@ capability probe remains Android-owned, and later product integration must use
 the typed native-transport session functions rather than restore a second
 orchestration surface.
 
-The remaining hand-written JNI surface is not an accepted final M5 exception.
-It is limited to Nearby invitation discovery callbacks, Android context
-initialization, and log routing. Nearby discovery must move to a typed UniFFI
-port before M5 exits. Android runtime integration may remain only when it
-cannot be expressed as a UniFFI port, with an explicit rationale recorded here.
+Android and Apple Nearby invitation discovery now share
+`FfiNearbyInviteInbox`, including typed endpoint routes, incoming offers,
+delivery completion, shutdown, and UniFFI handle ownership. Android retains
+mDNS/TXT advertising and lifecycle coordination in Kotlin, but the duplicate
+JNI session registry, request correlation, and JSON callbacks have been
+deleted.
+
+The remaining hand-written JNI surface is limited to Android context
+initialization and log routing. Context initialization is a required platform
+bootstrap: `ndk-context` must receive the process `JavaVM` and application
+object before Rust networking touches Android DNS, interfaces, or trust-store
+services. Log routing is still under M5 audit because its sink and runtime
+filter can be represented as typed callbacks. No retained JNI entry point may
+expose application orchestration or a parallel product state machine.
