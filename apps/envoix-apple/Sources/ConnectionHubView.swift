@@ -473,7 +473,7 @@ struct ConnectionHubView: View {
         VStack(alignment: .leading, spacing: RoomInvitationLayout.cardSpacing) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(AppText.value("Room", "房间", language: language))
+                    Text(AppText.localized("connection.room.title", language: language))
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(Theme.text)
 
@@ -501,9 +501,8 @@ struct ConnectionHubView: View {
                         Button {
                             copyWithToast(
                                 roomInvitation.code,
-                                AppText.value(
-                                    "Room code copied",
-                                    "房间码已复制",
+                                AppText.localized(
+                                    "connection.room.code_copied",
                                     language: language
                                 ),
                                 language: language
@@ -514,9 +513,8 @@ struct ConnectionHubView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(AppText.value(
-                            "Copy room code",
-                            "复制房间码",
+                        .accessibilityLabel(AppText.localized(
+                            "connection.room.copy_code",
                             language: language
                         ))
                         .accessibilityIdentifier("room_code_copy")
@@ -530,9 +528,8 @@ struct ConnectionHubView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(roomInvitationIsStarting)
-                        .accessibilityLabel(AppText.value(
-                            "Renew room invitation",
-                            "更新房间邀请",
+                        .accessibilityLabel(AppText.localized(
+                            "connection.room.renew_invitation",
                             language: language
                         ))
                         .accessibilityIdentifier("room_invitation_renew")
@@ -546,7 +543,10 @@ struct ConnectionHubView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(AppText.value("Close room", "关闭房间", language: language))
+                        .accessibilityLabel(AppText.localized(
+                            "connection.room.close",
+                            language: language
+                        ))
                         .accessibilityIdentifier("room_end")
                     }
                 }
@@ -605,28 +605,26 @@ struct ConnectionHubView: View {
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .accessibilityLabel(AppText.value(
-            "Hide room QR",
-            "隐藏房间二维码",
+        .accessibilityLabel(AppText.localized(
+            "connection.room.hide_qr",
             language: language
         ))
-        .accessibilityHint(AppText.value(
-            "Hides the invitation without ending the room.",
-            "隐藏邀请，但不会结束房间。",
+        .accessibilityHint(AppText.localized(
+            "connection.room.hide_qr_hint",
             language: language
         ))
-        .accessibilityValue(AppText.value("Revealed", "已显示", language: language))
+        .accessibilityValue(AppText.localized("accessibility.revealed", language: language))
         .accessibilityIdentifier("room_qr_toggle")
     }
 
     private var roomConnectionMethods: some View {
         VStack(spacing: 10) {
             methodButton(
-                roomInvitationIsStarting
-                    ? AppText.value("Creating invitation…", "正在创建邀请…", language: language)
-                    : roomInvitation == nil
-                        ? AppText.value("Create room", "创建房间", language: language)
-                        : AppText.value("Reveal QR", "显示二维码", language: language),
+                ConnectionHubPresentationText.roomAction(
+                    isStarting: roomInvitationIsStarting,
+                    hasInvitation: roomInvitation != nil,
+                    language: language
+                ),
                 systemImage: roomInvitation == nil ? "plus.viewfinder" : "qrcode",
                 identifier: "room_qr_toggle",
                 isBusy: roomInvitationIsStarting,
@@ -637,13 +635,13 @@ struct ConnectionHubView: View {
             #if os(iOS)
             HStack(spacing: 10) {
                 methodButton(
-                    AppText.value("Scan QR", "扫描二维码", language: language),
+                    AppText.localized("connection.room.action.scan_qr", language: language),
                     systemImage: "qrcode.viewfinder",
                     identifier: "connect_scan_qr",
                     action: onScanQRCode
                 )
                 methodButton(
-                    AppText.value("Enter code", "输入房间码", language: language),
+                    AppText.localized("connection.room.action.enter_code", language: language),
                     systemImage: "keyboard",
                     identifier: "connect_enter_code",
                     action: onEnterCode
@@ -651,7 +649,7 @@ struct ConnectionHubView: View {
             }
             #else
             methodButton(
-                AppText.value("Enter code", "输入房间码", language: language),
+                AppText.localized("connection.room.action.enter_code", language: language),
                 systemImage: "keyboard",
                 identifier: "connect_enter_code",
                 action: onEnterCode
@@ -661,17 +659,11 @@ struct ConnectionHubView: View {
     }
 
     private var roomStatusText: String {
-        if roomInvitationIsStarting {
-            return AppText.value("Creating invitation…", "正在创建邀请…", language: language)
-        }
-        if roomInvitation != nil {
-            return AppText.value(
-                "Ready · Waiting for another device",
-                "已就绪 · 正在等待另一台设备",
-                language: language
-            )
-        }
-        return AppText.value("No active room", "没有活动房间", language: language)
+        ConnectionHubPresentationText.roomStatus(
+            isStarting: roomInvitationIsStarting,
+            hasInvitation: roomInvitation != nil,
+            language: language
+        )
     }
 
     private func methodButton(

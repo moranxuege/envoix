@@ -164,7 +164,10 @@ dedicated Room catalog contract. Control-phase/origin status, trust, and close
 reason text live in the tested `RoomPresentationText` projection rather than in
 `OneTimeRoomView`. Lifetime countdowns, offer summaries, and file/folder counts
 use explicit-locale catalog formats and native plural variations, leaving the
-one-time Room screen without inline bilingual values.
+one-time Room screen without inline bilingual values. Connection Hub migration
+has started with its Room invitation card: static labels are catalog-backed,
+while invitation action and availability status come from the tested
+`ConnectionHubPresentationText` projection.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,
