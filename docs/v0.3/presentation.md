@@ -185,6 +185,9 @@ Shared send/receive pairing controls use one catalog contract, while
 direction-specific guidance, scan targets, QR accessibility labels, desktop
 instructions, and join-other-role titles come from tested
 `TransferPairingText` projections without merging the platform layouts.
+Receive destination modes, folder-availability guidance, address disclosure,
+and primary-action priority are isolated in `ReceivePresentationText`; the View
+continues to own platform bookmark and file-system effects, not their copy.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

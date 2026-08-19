@@ -271,7 +271,10 @@ struct ReceiveView: View {
 
     @ViewBuilder private var footerMessage: some View {
         if concurrencyBlocked {
-            Text(AppText.value("Finish sending before starting a receive.", "请先完成发送任务，再开始接收。", language: uiLanguage))
+            Text(AppText.localized(
+                "receive.concurrent.finish_send",
+                language: uiLanguage
+            ))
                 .font(.callout)
                 .foregroundStyle(Theme.muted)
                 .padding(.bottom, 8)
@@ -319,7 +322,7 @@ struct ReceiveView: View {
 
     private var outputSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(AppText.value("Save to", "保存到", language: uiLanguage))
+            Text(AppText.localized("receive.destination.title", language: uiLanguage))
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.text)
             #if os(iOS)
@@ -357,7 +360,10 @@ struct ReceiveView: View {
                     Button {
                         resetOutputFolder()
                     } label: {
-                        Label(AppText.value("Reset", "重置", language: uiLanguage), systemImage: "arrow.uturn.backward")
+                        Label(
+                            AppText.localized("receive.destination.reset", language: uiLanguage),
+                            systemImage: "arrow.uturn.backward"
+                        )
                             .labelStyle(.iconOnly)
                             .frame(width: 30, height: 30)
                             .contentShape(Rectangle())
@@ -378,7 +384,10 @@ struct ReceiveView: View {
                 Button {
                     selectMacOutputFolder(startAfterSelection: false)
                 } label: {
-                    Label(AppText.value("Select", "选择", language: uiLanguage), systemImage: "folder")
+                    Label(
+                        AppText.localized("receive.destination.select", language: uiLanguage),
+                        systemImage: "folder"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -387,27 +396,32 @@ struct ReceiveView: View {
             #endif
 
             Divider().overlay(Theme.line.opacity(0.5))
-            Text(AppText.value("Save method", "保存方式", language: uiLanguage))
+            Text(AppText.localized(
+                "receive.destination.method_title",
+                language: uiLanguage
+            ))
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Theme.text)
-            Picker("Save method", selection: $destinationSaveMode) {
-                Text(AppText.value("Save directly", "直接保存", language: uiLanguage)).tag("direct")
-                Text(AppText.value("Verify, then copy", "校验后复制", language: uiLanguage)).tag("copy")
+            Picker(
+                AppText.localized("receive.destination.method_title", language: uiLanguage),
+                selection: $destinationSaveMode
+            ) {
+                Text(AppText.localized(
+                    "receive.destination.method_direct",
+                    language: uiLanguage
+                )).tag("direct")
+                Text(AppText.localized(
+                    "receive.destination.method_copy",
+                    language: uiLanguage
+                )).tag("copy")
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .disabled(viewModel.isBusy)
-            Text(destinationSaveMode == "copy"
-                 ? AppText.value(
-                    "Uses additional temporary space and saving time for destinations that cannot safely finalize the same object.",
-                    "适用于无法安全原地完成保存的目标；会额外占用临时空间和保存时间。",
-                    language: uiLanguage
-                 )
-                 : AppText.value(
-                    "Writes once on the selected storage and reveals the verified object when ready.",
-                    "在所选存储上只写入一次，校验完成后直接显示文件。",
-                    language: uiLanguage
-                 ))
+            Text(ReceivePresentationText.saveMethodDetail(
+                usesCopy: destinationSaveMode == "copy",
+                language: uiLanguage
+            ))
                 .font(.footnote)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -422,67 +436,51 @@ struct ReceiveView: View {
                 return outputDirDisplayName
             }
             guard let outputDir else {
-                return AppText.value("Selected Files folder unavailable", "已选 Files 文件夹不可用", language: uiLanguage)
+                return AppText.localized(
+                    "receive.destination.ios_unavailable",
+                    language: uiLanguage
+                )
             }
             return outputDir.lastPathComponent.isEmpty ? outputDir.path : outputDir.lastPathComponent
         }
-        return AppText.value("On My iPhone / Envoix / Downloads", "我的 iPhone / Envoix / Downloads", language: uiLanguage)
+        return AppText.localized("receive.destination.ios_default", language: uiLanguage)
         #else
         if UserDefaults.standard.data(forKey: outputDirBookmarkKey) != nil,
            outputDir == nil {
-            return AppText.value(
-                "Selected folder unavailable — choose again",
-                "已选文件夹不可用——请重新选择",
+            return AppText.localized(
+                "receive.destination.macos_unavailable",
                 language: uiLanguage
             )
         }
         return outputDir?.path
-            ?? AppText.value("Choose a save folder", "请选择保存文件夹", language: uiLanguage)
+            ?? AppText.localized("receive.destination.macos_choose", language: uiLanguage)
         #endif
     }
 
     #if os(iOS)
     private var outputFolderChooseLabel: String {
-        hasUnavailableCustomOutputDir
-            ? AppText.value("Choose Again", "重新选择", language: uiLanguage)
-            : AppText.value("Choose", "选择", language: uiLanguage)
+        ReceivePresentationText.folderAction(
+            isUnavailable: hasUnavailableCustomOutputDir,
+            language: uiLanguage
+        )
     }
 
     private var outputFolderHelperText: String {
-        if hasUnavailableCustomOutputDir {
-            return AppText.value(
-                "The selected Files folder permission expired. Choose it again or reset to the default folder.",
-                "已选择的 Files 文件夹权限已失效。请重新选择，或重置为默认文件夹。",
-                language: uiLanguage
-            )
-        }
-        return AppText.value(
-            "Default saves to Files > On My iPhone > Envoix > Downloads. Choose a Files folder to save elsewhere.",
-            "默认保存到 Files > On My iPhone > Envoix > Downloads。也可以选择其他 Files 文件夹。",
+        ReceivePresentationText.folderHelper(
+            isUnavailable: hasUnavailableCustomOutputDir,
             language: uiLanguage
         )
     }
     #endif
 
     private var primaryLabel: String {
-        if isAcceptingRoomOffer {
-            return AppText.value("Accepting offer…", "正在接受邀请…", language: uiLanguage)
-        }
-        if nearbyInviteDelivery.isDelivering {
-            return AppText.value("Delivering Invitation…", "正在发送邀请码…", language: uiLanguage)
-        }
-        if canStartAnotherReceive {
-            return AppText.value("Start Another Receive", "再开启一个接收", language: uiLanguage)
-        }
-        if viewModel.isBusy {
-            return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage)
-        }
-        switch mode {
-        case .invite:
-            return AppText.value("Start Receiving", "开始接收", language: uiLanguage)
-        default:
-            return AppText.value("Start Receiving", "开始接收", language: uiLanguage)
-        }
+        ReceivePresentationText.primaryAction(
+            isAcceptingOffer: isAcceptingRoomOffer,
+            isDeliveringInvitation: nearbyInviteDelivery.isDelivering,
+            canStartAnother: canStartAnotherReceive,
+            isBusy: viewModel.isBusy,
+            language: uiLanguage
+        )
     }
 
     @ViewBuilder private var inviteSection: some View {
@@ -490,14 +488,10 @@ struct ReceiveView: View {
             Image(systemName: "checkmark.shield.fill")
                 .font(.system(size: 42))
                 .foregroundStyle(Theme.success)
-            Text(AppText.value("InviteV2 verified", "InviteV2 已验证", language: uiLanguage))
+            Text(AppText.localized("receive.invite.verified", language: uiLanguage))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.text)
-            Text(AppText.value(
-                "This invitation assigns this device the Receive role.",
-                "此邀请已将本设备指定为接收端。",
-                language: uiLanguage
-            ))
+            Text(AppText.localized("receive.invite.role", language: uiLanguage))
             .font(.body)
             .foregroundStyle(Theme.muted)
             .multilineTextAlignment(.center)
@@ -771,10 +765,13 @@ struct ReceiveView: View {
             Button {
                 revealAddress.toggle()
             } label: {
-                Label(revealAddress
-                      ? AppText.value("Hide address", "隐藏地址", language: uiLanguage)
-                      : AppText.value("Show address", "显示地址", language: uiLanguage),
-                      systemImage: revealAddress ? "eye.slash" : "eye")
+                Label(
+                    ReceivePresentationText.addressAction(
+                        isRevealed: revealAddress,
+                        language: uiLanguage
+                    ),
+                    systemImage: revealAddress ? "eye.slash" : "eye"
+                )
                     .contentShape(Rectangle())
             }
             .controlSize(.small)

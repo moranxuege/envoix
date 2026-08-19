@@ -653,6 +653,162 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输文件" } }
       }
     },
+    "receive.action.accepting_offer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Accepting offer…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在接受邀请…" } }
+      }
+    },
+    "receive.action.start" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Start Receiving" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开始接收" } }
+      }
+    },
+    "receive.action.start_another" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Start Another Receive" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "再开启一个接收" } }
+      }
+    },
+    "receive.address.hide" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Hide address" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "隐藏地址" } }
+      }
+    },
+    "receive.address.show" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Show address" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示地址" } }
+      }
+    },
+    "receive.concurrent.finish_send" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finish sending before starting a receive." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先完成发送任务，再开始接收。" } }
+      }
+    },
+    "receive.destination.choose" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择" } }
+      }
+    },
+    "receive.destination.choose_again" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose Again" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重新选择" } }
+      }
+    },
+    "receive.destination.copy_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Uses additional temporary space and saving time for destinations that cannot safely finalize the same object." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "适用于无法安全原地完成保存的目标；会额外占用临时空间和保存时间。" } }
+      }
+    },
+    "receive.destination.default_helper" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Default saves to Files > On My iPhone > Envoix > Downloads. Choose a Files folder to save elsewhere." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "默认保存到 Files > On My iPhone > Envoix > Downloads。也可以选择其他 Files 文件夹。" } }
+      }
+    },
+    "receive.destination.direct_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Writes once on the selected storage and reveals the verified object when ready." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "在所选存储上只写入一次，校验完成后直接显示文件。" } }
+      }
+    },
+    "receive.destination.ios_default" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "On My iPhone / Envoix / Downloads" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "我的 iPhone / Envoix / Downloads" } }
+      }
+    },
+    "receive.destination.ios_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Selected Files folder unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已选 Files 文件夹不可用" } }
+      }
+    },
+    "receive.destination.macos_choose" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose a save folder" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请选择保存文件夹" } }
+      }
+    },
+    "receive.destination.macos_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Selected folder unavailable — choose again" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已选文件夹不可用——请重新选择" } }
+      }
+    },
+    "receive.destination.method_copy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verify, then copy" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "校验后复制" } }
+      }
+    },
+    "receive.destination.method_direct" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save directly" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "直接保存" } }
+      }
+    },
+    "receive.destination.method_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save method" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存方式" } }
+      }
+    },
+    "receive.destination.reset" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reset" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重置" } }
+      }
+    },
+    "receive.destination.select" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Select" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择" } }
+      }
+    },
+    "receive.destination.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save to" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存到" } }
+      }
+    },
+    "receive.destination.unavailable_helper" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The selected Files folder permission expired. Choose it again or reset to the default folder." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已选择的 Files 文件夹权限已失效。请重新选择，或重置为默认文件夹。" } }
+      }
+    },
+    "receive.invite.role" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This invitation assigns this device the Receive role." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此邀请已将本设备指定为接收端。" } }
+      }
+    },
+    "receive.invite.verified" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "InviteV2 verified" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "InviteV2 已验证" } }
+      }
+    },
+    "transfer.action.delivering_invitation" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Delivering Invitation…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在发送邀请码…" } }
+      }
+    },
+    "transfer.action.managed_in_activity" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Managed in Activity" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请在活动中管理" } }
+      }
+    },
     "room.action.add_files" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Add files" } },
