@@ -184,9 +184,8 @@ struct OneTimeRoomView: View {
             }
 
             if additionalItemCount(offer) > 0 {
-                Text(AppText.value(
-                    "+\(additionalItemCount(offer)) more",
-                    "另有 \(additionalItemCount(offer)) 项",
+                Text(RoomPresentationText.additionalItems(
+                    additionalItemCount(offer),
                     language: language
                 ))
                 .font(.caption.weight(.semibold))
@@ -463,29 +462,12 @@ struct OneTimeRoomView: View {
     }
 
     private var roomLifetimeText: String {
-        guard room.origin == .roomControl else {
-            return AppText.value("One-time transfer", "一次性传输", language: language)
-        }
-        switch controlPhase {
-        case .ended, .failed:
-            return AppText.value("Room closed", "房间已关闭", language: language)
-        case .idle, .hosting, .joining, .connectingRemembered, .waitingRemembered, .connected:
-            break
-        }
-        if lifetimePolicy == .untilForegroundEnds {
-            return AppText.value("Kept open while Envoix is open", "Envoix 打开时保持房间", language: language)
-        }
-        guard let idleDeadline else {
-            return AppText.value(
-                "Idle timer paused during transfer",
-                "传输期间空闲计时暂停",
-                language: language
-            )
-        }
-        let seconds = max(0, Int(ceil(idleDeadline.timeIntervalSince(now))))
-        return AppText.value(
-            "Ends in \(seconds / 60):\(String(format: "%02d", seconds % 60)) if idle",
-            "空闲时将在 \(seconds / 60):\(String(format: "%02d", seconds % 60)) 后结束",
+        RoomPresentationText.lifetime(
+            origin: room.origin,
+            phase: controlPhase,
+            policy: lifetimePolicy,
+            idleDeadline: idleDeadline,
+            now: now,
             language: language
         )
     }
@@ -494,17 +476,9 @@ struct OneTimeRoomView: View {
         let urls = record.savedPaths.map { URL(fileURLWithPath: $0) }
         let parentPaths = Set(urls.map { $0.deletingLastPathComponent().path })
         if parentPaths.count == 1, let parent = urls.first?.deletingLastPathComponent() {
-            return AppText.value(
-                "Saved in \(parent.lastPathComponent)",
-                "已保存到 \(parent.lastPathComponent)",
-                language: language
-            )
+            return TransferActivityText.savedIn(parent.lastPathComponent, language: language)
         }
-        return AppText.value(
-            "Saved \(urls.count) items",
-            "已保存 \(urls.count) 个项目",
-            language: language
-        )
+        return TransferActivityText.savedItems(urls.count, language: language)
     }
 
     private var endedMessage: String? {
@@ -515,17 +489,12 @@ struct OneTimeRoomView: View {
         let fileCount = offer.itemCount >= offer.directoryCount
             ? offer.itemCount - offer.directoryCount
             : 0
-        let fileText = AppText.value(
-            fileCount == 1 ? "1 file" : "\(fileCount) files",
-            "\(fileCount) 个文件",
+        return RoomPresentationText.offerSummary(
+            fileCount: fileCount,
+            folderCount: offer.directoryCount,
+            byteDescription: byteString(offer.totalBytes),
             language: language
         )
-        let folderText = AppText.value(
-            offer.directoryCount == 1 ? "1 folder" : "\(offer.directoryCount) folders",
-            "\(offer.directoryCount) 个文件夹",
-            language: language
-        )
-        return "\(fileText) · \(folderText) · \(byteString(offer.totalBytes))"
     }
 
     private func additionalItemCount(_ offer: RoomControlTransferOffer) -> UInt32 {
@@ -537,7 +506,7 @@ struct OneTimeRoomView: View {
 
     private var incomingDestinationName: String {
         outputDirDisplayName.trimmed.isEmpty
-            ? AppText.value("Envoix / Downloads", "Envoix / Downloads", language: language)
+            ? AppText.localized("room.destination.default", language: language)
             : outputDirDisplayName
     }
 

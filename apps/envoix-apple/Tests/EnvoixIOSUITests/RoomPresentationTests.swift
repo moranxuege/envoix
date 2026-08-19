@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import Envoix_iOS
 
@@ -13,6 +14,7 @@ final class RoomPresentationTests: XCTestCase {
             ("room.activity.all", "All Activity", "全部活动"),
             ("room.activity.empty", "Transfers started here will appear in this timeline.", "从这里开始的传输会显示在此时间线中。"),
             ("room.activity.title", "Room activity", "房间活动"),
+            ("room.destination.default", "Envoix / Downloads", "Envoix / Downloads"),
             ("room.offer.contents", "Contents", "内容"),
             ("room.offer.destination", "Destination", "保存位置"),
             ("room.offer.incoming", "Incoming transfer", "收到传输邀请"),
@@ -102,6 +104,65 @@ final class RoomPresentationTests: XCTestCase {
         XCTAssertNil(RoomPresentationText.endedMessage(phase: .connected, language: "en"))
     }
 
+    func testRoomLifetimeAndOfferFormatsUseExplicitLocale() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(
+            lifetime(origin: .pairingCode, phase: .idle, deadline: nil, now: now),
+            "One-time transfer"
+        )
+        XCTAssertEqual(
+            lifetime(origin: .roomControl, phase: .ended(.userEnded), deadline: nil, now: now),
+            "Room closed"
+        )
+        XCTAssertEqual(
+            lifetime(
+                origin: .roomControl,
+                phase: .connected,
+                policy: .untilForegroundEnds,
+                deadline: nil,
+                now: now
+            ),
+            "Kept open while Envoix is open"
+        )
+        XCTAssertEqual(
+            lifetime(origin: .roomControl, phase: .connected, deadline: nil, now: now),
+            "Idle timer paused during transfer"
+        )
+        XCTAssertEqual(
+            lifetime(
+                origin: .roomControl,
+                phase: .connected,
+                deadline: now.addingTimeInterval(61.2),
+                now: now
+            ),
+            "Ends in 1:02 if idle"
+        )
+        XCTAssertEqual(
+            lifetime(
+                origin: .roomControl,
+                phase: .connected,
+                deadline: now.addingTimeInterval(-1),
+                now: now
+            ),
+            "Ends in 0:00 if idle"
+        )
+
+        XCTAssertEqual(RoomPresentationText.additionalItems(3, language: "en"), "+3 more")
+        XCTAssertEqual(RoomPresentationText.additionalItems(3, language: "zh-Hans"), "另有 3 项")
+        XCTAssertEqual(RoomPresentationText.fileCount(1, language: "en"), "1 file")
+        XCTAssertEqual(RoomPresentationText.fileCount(2, language: "en"), "2 files")
+        XCTAssertEqual(RoomPresentationText.folderCount(2, language: "zh-Hans"), "2 个文件夹")
+        XCTAssertEqual(
+            RoomPresentationText.offerSummary(
+                fileCount: 1,
+                folderCount: 2,
+                byteDescription: "3 MB",
+                language: "en"
+            ),
+            "1 file · 2 folders · 3 MB"
+        )
+    }
+
     private func idleStatus(
         origin: OneTimeRoomOrigin,
         visible: Bool,
@@ -112,6 +173,23 @@ final class RoomPresentationTests: XCTestCase {
             origin: origin,
             selectedPeerIsVisible: visible,
             discoveryIsActive: discovery,
+            language: "en"
+        )
+    }
+
+    private func lifetime(
+        origin: OneTimeRoomOrigin,
+        phase: RoomControlPhase,
+        policy: RoomControlLifetimePolicy = .idleFifteenMinutes,
+        deadline: Date?,
+        now: Date
+    ) -> String {
+        RoomPresentationText.lifetime(
+            origin: origin,
+            phase: phase,
+            policy: policy,
+            idleDeadline: deadline,
+            now: now,
             language: "en"
         )
     }

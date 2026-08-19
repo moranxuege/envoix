@@ -162,7 +162,9 @@ lifecycle-state projections instead of defining conflicting labels in its View.
 Its static sections, actions, and accessibility labels are covered by a
 dedicated Room catalog contract. Control-phase/origin status, trust, and close
 reason text live in the tested `RoomPresentationText` projection rather than in
-`OneTimeRoomView`; dynamic lifetime and offer formats remain.
+`OneTimeRoomView`. Lifetime countdowns, offer summaries, and file/folder counts
+use explicit-locale catalog formats and native plural variations, leaving the
+one-time Room screen without inline bilingual values.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

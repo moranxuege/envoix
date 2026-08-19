@@ -364,6 +364,48 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间已结束。" } }
       }
     },
+    "room.destination.default" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix / Downloads" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix / Downloads" } }
+      }
+    },
+    "room.lifetime.closed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Room closed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间已关闭" } }
+      }
+    },
+    "room.lifetime.ends_if_idle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ends in %@ if idle" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "空闲时将在 %@ 后结束" } }
+      }
+    },
+    "room.lifetime.kept_open" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Kept open while Envoix is open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 打开时保持房间" } }
+      }
+    },
+    "room.lifetime.one_time_transfer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "One-time transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "一次性传输" } }
+      }
+    },
+    "room.lifetime.timer_paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Idle timer paused during transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输期间空闲计时暂停" } }
+      }
+    },
+    "room.offer.additional_count" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "+%lld more" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "另有 %lld 项" } }
+      }
+    },
     "room.offer.contents" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Contents" } },
@@ -374,6 +416,44 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Destination" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存位置" } }
+      }
+    },
+    "room.offer.file_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld file" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld files" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 个文件" } }
+            }
+          }
+        }
+      }
+    },
+    "room.offer.folder_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld folder" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld folders" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 个文件夹" } }
+            }
+          }
+        }
       }
     },
     "room.offer.incoming" : {
@@ -392,6 +472,12 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Offer summary" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内容摘要" } }
+      }
+    },
+    "room.offer.summary_format" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%1$@ · %2$@ · %3$@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%1$@ · %2$@ · %3$@" } }
       }
     },
     "room.status.connected" : {
