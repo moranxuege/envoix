@@ -867,9 +867,9 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v5_ffi_v18() {
+    fn core_info_advertises_room_control_v5_ffi_v19() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 18);
+        assert_eq!(info.ffi_api_version, 19);
         assert!(
             info.capabilities
                 .iter()

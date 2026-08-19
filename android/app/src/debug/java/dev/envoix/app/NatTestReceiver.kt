@@ -4,7 +4,7 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import org.json.JSONArray
+import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import java.io.File
 
@@ -85,19 +85,21 @@ class NatTestReceiver : BroadcastReceiver() {
         val store = TransferService.jobStoreDirectory(context).absolutePath
         // Keep the NAT path active long enough to observe relay-to-direct
         // migration even when the supplied test fixture is highly compressible.
-        val job = JSONObject(Native.createManifestV2Job(store, "never"))
-        job.throwNativeError()
-        val jobId = job.getString("job_id")
-        val roots =
-            JSONArray()
-                .put(
-                    JSONObject()
-                        .put("path", source.absolutePath)
-                        .put("requested_name", source.name)
-                        .put("origin", "file_provider")
-                        .put("issues", JSONArray()),
+        val jobId =
+            runBlocking {
+                val created = ManifestV2JobGateway.shared.create(store, "never")
+                ManifestV2JobGateway.shared.addStagedProviderRoot(
+                    store,
+                    created.jobId,
+                    ManifestV2StagedProviderRoot(
+                        path = source.absolutePath,
+                        requestedName = source.name,
+                        origin = ManifestV2SourceOrigin.FileProvider,
+                        issues = emptyList(),
+                    ),
                 )
-        JSONObject(Native.prepareManifestV2Job(store, jobId, roots.toString())).throwNativeError()
+                created.jobId
+            }
         if (remembered == null) {
             TransferService.startSend(
                 context = context,

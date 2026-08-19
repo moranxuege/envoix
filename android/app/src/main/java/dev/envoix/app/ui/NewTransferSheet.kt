@@ -58,21 +58,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.InviteCodec
+import dev.envoix.app.ManifestV2JobGateway
 import dev.envoix.app.ManifestV2Source
+import dev.envoix.app.ManifestV2SourceDecision
 import dev.envoix.app.ManifestV2SourceStager
 import dev.envoix.app.ManifestV2StageResult
-import dev.envoix.app.Native
 import dev.envoix.app.PreparedManifestV2Source
 import dev.envoix.app.R
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.TransferService
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyPairingSelection
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.util.UUID
 
 internal typealias PrepareReceiveBeforeDecision = (
@@ -187,6 +185,7 @@ internal fun NewTransferSheet(
 
     val preparationScope = rememberCoroutineScope()
     val preparationMutex = preparation.mutex
+    val jobGateway = ManifestV2JobGateway.shared
 
     DisposableEffect(preparation, preparationState) {
         onDispose {
@@ -210,14 +209,7 @@ internal fun NewTransferSheet(
                     val store = TransferService.jobStoreDirectory(context).absolutePath
                     jobStoreDirectory = store
                     val jobId =
-                        preparedJobId ?: withContext(Dispatchers.IO) {
-                            val response =
-                                JSONObject(
-                                    Native.createManifestV2Job(store, settings.compressionPolicy),
-                                )
-                            response.optString("error").takeIf(String::isNotEmpty)?.let(::error)
-                            response.getString("job_id")
-                        }.also {
+                        preparedJobId ?: jobGateway.create(store, settings.compressionPolicy).jobId.also {
                             preparedJobId = it
                             stagingRootDirectory =
                                 java.io.File(context.filesDir, "manifest-v2/source-staging/$it").absolutePath
@@ -226,20 +218,20 @@ internal fun NewTransferSheet(
                         val staged = ManifestV2SourceStager.stage(context, jobId, source)
                         var attached = false
                         try {
-                            val response =
-                                withContext(Dispatchers.IO) {
-                                    Native.prepareManifestV2Job(
-                                        store,
-                                        jobId,
-                                        ManifestV2SourceStager.rootsJson(source, staged),
-                                    )
-                                }
-                            val parsed = JSONObject(response)
-                            parsed.optString("error").takeIf(String::isNotEmpty)?.let(::error)
+                            val snapshot =
+                                jobGateway.addStagedProviderRoot(
+                                    store,
+                                    jobId,
+                                    ManifestV2SourceStager.stagedProviderRoot(source, staged),
+                                )
                             attached = true
-                            preparationSummary = parsed
+                            preparationSummary = snapshot
                             preparedSources +=
-                                ManifestV2SourceStager.parsePreparedSnapshot(source, staged.root, response)
+                                ManifestV2SourceStager.parsePreparedSnapshot(
+                                    source,
+                                    staged.root,
+                                    snapshot,
+                                )
                         } catch (error: Throwable) {
                             if (!attached) staged.root.parentFile?.deleteRecursively()
                             throw error
@@ -266,24 +258,16 @@ internal fun NewTransferSheet(
                 preparingCount += 1
                 try {
                     val store = TransferService.jobStoreDirectory(context).absolutePath
-                    val response =
-                        withContext(Dispatchers.IO) {
-                            Native.resolveManifestV2Source(
-                                store,
-                                jobId,
-                                source.rootItemId,
-                                "remove_selection",
-                                "",
-                            )
-                        }
-                    val error = JSONObject(response).optString("error")
-                    if (error.isEmpty()) {
-                        preparedSources.remove(source)
-                        source.localRoot.parentFile?.deleteRecursively()
-                        preparationSummary = JSONObject(response)
-                    } else {
-                        preparationError = error
-                    }
+                    val snapshot =
+                        jobGateway.resolveSourceIssue(
+                            store,
+                            jobId,
+                            source.rootItemId,
+                            ManifestV2SourceDecision.RemoveSelection,
+                        )
+                    preparedSources.remove(source)
+                    source.localRoot.parentFile?.deleteRecursively()
+                    preparationSummary = snapshot
                 } catch (error: Throwable) {
                     preparationError =
                         error.message ?: text(
@@ -302,26 +286,17 @@ internal fun NewTransferSheet(
         preparationScope.launch {
             preparationMutex.withLock {
                 if (!preparation.acceptsPreparationChanges()) return@withLock
-                val response =
-                    withContext(Dispatchers.IO) {
-                        Native.resolveManifestV2Source(
-                            TransferService.jobStoreDirectory(context).absolutePath,
-                            jobId,
-                            source.rootItemId,
-                            "approve_partial",
-                            "",
-                        )
-                    }
-                val parsed = JSONObject(response)
-                val error = parsed.optString("error")
-                if (error.isEmpty()) {
-                    val index = preparedSources.indexOf(source)
-                    if (index >= 0) preparedSources[index] = source.copy(partialApproved = true)
-                    preparationSummary = parsed
-                    preparationError = null
-                } else {
-                    preparationError = error
-                }
+                val snapshot =
+                    jobGateway.resolveSourceIssue(
+                        TransferService.jobStoreDirectory(context).absolutePath,
+                        jobId,
+                        source.rootItemId,
+                        ManifestV2SourceDecision.ApprovePartial,
+                    )
+                val index = preparedSources.indexOf(source)
+                if (index >= 0) preparedSources[index] = source.copy(partialApproved = true)
+                preparationSummary = snapshot
+                preparationError = null
             }
         }
     }
@@ -342,23 +317,22 @@ internal fun NewTransferSheet(
                 try {
                     val stagedResult = ManifestV2SourceStager.stage(context, jobId, source)
                     staged = stagedResult
-                    val response =
-                        withContext(Dispatchers.IO) {
-                            Native.reauthorizeManifestV2ProviderSource(
-                                TransferService.jobStoreDirectory(context).absolutePath,
-                                jobId,
-                                previous.rootItemId,
-                                ManifestV2SourceStager.rootsJson(source, stagedResult),
-                            )
-                        }
-                    val parsed = JSONObject(response)
-                    parsed.optString("error").takeIf(String::isNotEmpty)?.let(::error)
+                    val snapshot =
+                        jobGateway.reauthorizeStagedProviderSource(
+                            TransferService.jobStoreDirectory(context).absolutePath,
+                            jobId,
+                            previous.rootItemId,
+                            ManifestV2SourceStager.stagedProviderRoot(
+                                source,
+                                stagedResult,
+                            ),
+                        )
                     committed = true
                     val replacement =
                         ManifestV2SourceStager.parsePreparedSnapshot(
                             source,
                             stagedResult.root,
-                            response,
+                            snapshot,
                             previous.rootItemId,
                         )
                     val index = preparedSources.indexOf(previous)
@@ -367,7 +341,7 @@ internal fun NewTransferSheet(
                     }
                     preparedSources[index] = replacement
                     previous.localRoot.parentFile?.deleteRecursively()
-                    preparationSummary = parsed
+                    preparationSummary = snapshot
                 } catch (error: Throwable) {
                     if (!committed) staged?.root?.parentFile?.deleteRecursively()
                     preparationError =
@@ -703,9 +677,9 @@ internal fun NewTransferSheet(
                     )
                 }
                 preparationSummary?.takeIf { preparedSources.isNotEmpty() }?.let { summary ->
-                    val files = summary.optInt("file_count")
-                    val directories = summary.optInt("directory_count")
-                    val size = dev.envoix.app.humanBytes(summary.optLong("total"))
+                    val files = summary.inventory.fileCount
+                    val directories = summary.inventory.directoryCount
+                    val size = dev.envoix.app.humanBytes(summary.inventory.totalBytes)
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -940,10 +914,9 @@ internal fun NewTransferSheet(
                         onQueuePreparedSend(
                             jobId,
                             preparedSources.map { it.source.displayName }.take(3),
-                            summary.optInt("file_count") +
-                                summary.optInt("directory_count"),
-                            summary.optInt("directory_count"),
-                            summary.optLong("total"),
+                            summary.inventory.fileCount + summary.inventory.directoryCount,
+                            summary.inventory.directoryCount,
+                            summary.inventory.totalBytes,
                         ) { error ->
                             rendezvousBusy = false
                             if (error != null) {
@@ -1023,11 +996,11 @@ internal fun NewTransferSheet(
                                                 .map { it.source.displayName }
                                                 .take(3),
                                         itemCount =
-                                            (summary?.optInt("file_count") ?: 0) +
-                                                (summary?.optInt("directory_count") ?: 0),
+                                            (summary?.inventory?.fileCount ?: 0) +
+                                                (summary?.inventory?.directoryCount ?: 0),
                                         directoryCount =
-                                            summary?.optInt("directory_count") ?: 0,
-                                        totalBytes = summary?.optLong("total") ?: 0L,
+                                            summary?.inventory?.directoryCount ?: 0,
+                                        totalBytes = summary?.inventory?.totalBytes ?: 0L,
                                     ),
                                 ) { error ->
                                     rendezvousBusy = false

@@ -7,8 +7,6 @@ import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -28,27 +26,16 @@ data class PreparedManifestV2Source(
     val partialApproved: Boolean,
 )
 
-data class ManifestV2ProviderIssue(
-    val relativeComponents: List<String>,
-    val kind: String,
-)
-
-data class ManifestV2StageResult(
+internal data class ManifestV2StageResult(
     val root: File,
     val issues: List<ManifestV2ProviderIssue>,
-)
-
-data class RestoredManifestV2Preparation(
-    val jobId: String,
-    val summary: JSONObject,
-    val sources: List<PreparedManifestV2Source>,
 )
 
 /** Android provider adapter. Every content/Photos/Share source is stabilized
  * into a job-owned private root before it enters the canonical Rust job. The
  * source UUID parent lets two same-named roots remain distinct without changing
  * either requested root name. */
-object ManifestV2SourceStager {
+internal object ManifestV2SourceStager {
     suspend fun stage(
         context: Context,
         jobId: String,
@@ -67,7 +54,11 @@ object ManifestV2SourceStager {
                     check(root.mkdir()) { "Could not create directory staging" }
                     val document = DocumentFile.fromTreeUri(context, source.uri)
                     if (document == null) {
-                        issues += ManifestV2ProviderIssue(emptyList(), "unavailable")
+                        issues +=
+                            ManifestV2ProviderIssue(
+                                emptyList(),
+                                ManifestV2ProviderIssueKind.Unavailable,
+                            )
                     } else {
                         copyDirectory(context, document, root, emptyList(), issues)
                     }
@@ -103,101 +94,38 @@ object ManifestV2SourceStager {
     fun parsePreparedSnapshot(
         source: ManifestV2Source,
         localRoot: File,
-        response: String,
+        snapshot: ManifestV2JobSnapshot,
         expectedRootItemId: Long? = null,
     ): PreparedManifestV2Source {
-        val json = JSONObject(response)
-        json.optString("error").takeIf(String::isNotEmpty)?.let(::error)
-        val selections = json.getJSONArray("selections")
-        check(selections.length() > 0) { "Native job did not retain the prepared source" }
+        check(snapshot.selections.isNotEmpty()) { "Native job did not retain the prepared source" }
         val selection =
             expectedRootItemId?.let { expected ->
-                (0 until selections.length())
-                    .map(selections::getJSONObject)
-                    .firstOrNull { it.getLong("root_item_id") == expected }
-            } ?: selections.getJSONObject(selections.length() - 1)
-        check(expectedRootItemId == null || selection.getLong("root_item_id") == expectedRootItemId) {
+                snapshot.selections.firstOrNull { it.rootItemId == expected }
+            } ?: snapshot.selections.last()
+        check(expectedRootItemId == null || selection.rootItemId == expectedRootItemId) {
             "Native job did not retain the reauthorized source"
         }
-        val issues = selection.getJSONArray("issues")
         return PreparedManifestV2Source(
-            source = source.copy(displayName = selection.getString("name")),
+            source = source.copy(displayName = selection.requestedName),
             localRoot = localRoot,
-            rootItemId = selection.getLong("root_item_id"),
-            issueCount = issues.length(),
-            canApprovePartial = canApprovePartial(issues),
-            partialApproved = selection.optBoolean("partial_approved"),
+            rootItemId = selection.rootItemId,
+            issueCount = selection.issues.size,
+            canApprovePartial = canApprovePartial(selection.issues),
+            partialApproved = selection.partialApproved,
         )
     }
 
-    /** Returns the most recently updated unsent job. The Rust job store owns
-     * lifecycle/selection truth; this adapter only reconstructs the bounded
-     * native projection from job-owned local roots. */
-    fun restoreLatestPreparation(response: String): RestoredManifestV2Preparation? {
-        val envelope = JSONObject(response)
-        envelope.optString("error").takeIf(String::isNotEmpty)?.let(::error)
-        val jobs = envelope.getJSONArray("jobs")
-        val job =
-            (0 until jobs.length())
-                .map(jobs::getJSONObject)
-                .maxByOrNull { it.optLong("updated_unix_ms") }
-                ?: return null
-        val selections = job.getJSONArray("selections")
-        val sources =
-            (0 until selections.length()).mapNotNull { index ->
-                val selection = selections.getJSONObject(index)
-                val localPath =
-                    selection.optString("local_path").takeIf(String::isNotBlank)
-                        ?: return@mapNotNull null
-                val root = File(localPath)
-                if (!root.exists()) return@mapNotNull null
-                val source =
-                    ManifestV2Source(
-                        uri = Uri.fromFile(root),
-                        directory = selection.optBoolean("directory"),
-                        displayName = selection.getString("name"),
-                    )
-                PreparedManifestV2Source(
-                    source = source,
-                    localRoot = root,
-                    rootItemId = selection.getLong("root_item_id"),
-                    issueCount = selection.getJSONArray("issues").length(),
-                    canApprovePartial = canApprovePartial(selection.getJSONArray("issues")),
-                    partialApproved = selection.optBoolean("partial_approved"),
-                )
-            }
-        if (sources.isEmpty()) return null
-        return RestoredManifestV2Preparation(
-            jobId = job.getString("job_id"),
-            summary = job,
-            sources = sources,
-        )
-    }
-
-    fun rootsJson(
+    fun stagedProviderRoot(
         source: ManifestV2Source,
         staged: ManifestV2StageResult,
-        origin: String = "content_uri",
-    ): String =
-        JSONArray()
-            .put(
-                JSONObject()
-                    .put("path", staged.root.absolutePath)
-                    .put("requested_name", source.displayName)
-                    .put("origin", origin)
-                    .put(
-                        "issues",
-                        JSONArray().apply {
-                            staged.issues.forEach { issue ->
-                                put(
-                                    JSONObject()
-                                        .put("relative_components", JSONArray(issue.relativeComponents))
-                                        .put("kind", issue.kind),
-                                )
-                            }
-                        },
-                    ),
-            ).toString()
+        origin: ManifestV2SourceOrigin = ManifestV2SourceOrigin.ContentUri,
+    ): ManifestV2StagedProviderRoot =
+        ManifestV2StagedProviderRoot(
+            path = staged.root.absolutePath,
+            requestedName = source.displayName,
+            origin = origin,
+            issues = staged.issues,
+        )
 
     private fun copyDirectory(
         context: Context,
@@ -210,16 +138,28 @@ object ManifestV2SourceStager {
             try {
                 source.listFiles()
             } catch (_: SecurityException) {
-                issues += ManifestV2ProviderIssue(relative, "permission_denied")
+                issues +=
+                    ManifestV2ProviderIssue(
+                        relative,
+                        ManifestV2ProviderIssueKind.PermissionDenied,
+                    )
                 return
             } catch (_: Throwable) {
-                issues += ManifestV2ProviderIssue(relative, "unavailable")
+                issues +=
+                    ManifestV2ProviderIssue(
+                        relative,
+                        ManifestV2ProviderIssueKind.Unavailable,
+                    )
                 return
             }
         for (child in children) {
             val name = child.name?.takeIf(::validComponent)
             if (name == null) {
-                issues += ManifestV2ProviderIssue(relative, "invalid_name")
+                issues +=
+                    ManifestV2ProviderIssue(
+                        relative,
+                        ManifestV2ProviderIssueKind.InvalidName,
+                    )
                 continue
             }
             val target = File(destination, name)
@@ -231,14 +171,27 @@ object ManifestV2SourceStager {
                         copyDirectory(context, child, target, childPath, issues)
                     }
                     child.isFile -> copyFile(context, child.uri, target)
-                    else -> issues += ManifestV2ProviderIssue(childPath, "special_file")
+                    else ->
+                        issues +=
+                            ManifestV2ProviderIssue(
+                                childPath,
+                                ManifestV2ProviderIssueKind.SpecialFile,
+                            )
                 }
             } catch (_: SecurityException) {
                 target.deleteRecursively()
-                issues += ManifestV2ProviderIssue(childPath, "permission_denied")
+                issues +=
+                    ManifestV2ProviderIssue(
+                        childPath,
+                        ManifestV2ProviderIssueKind.PermissionDenied,
+                    )
             } catch (_: Throwable) {
                 target.deleteRecursively()
-                issues += ManifestV2ProviderIssue(childPath, "unavailable")
+                issues +=
+                    ManifestV2ProviderIssue(
+                        childPath,
+                        ManifestV2ProviderIssueKind.Unavailable,
+                    )
             }
         }
     }
@@ -280,9 +233,8 @@ object ManifestV2SourceStager {
             '\\' !in value &&
             '\u0000' !in value
 
-    private fun canApprovePartial(issues: JSONArray): Boolean =
-        (0 until issues.length()).none { index ->
-            val issue = issues.getJSONObject(index)
-            issue.getJSONArray("path").length() == 0 || issue.optString("kind") == "entry_limit"
+    private fun canApprovePartial(issues: List<ManifestV2JobIssue>): Boolean =
+        issues.none { issue ->
+            issue.relativeComponents.isEmpty() || issue.kind == ManifestV2JobIssueKind.EntryLimit
         }
 }

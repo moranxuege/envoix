@@ -6,16 +6,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use async_trait::async_trait;
 use envoix_client::api::{
     AuthenticationHandler, AuthenticationOutcome, CanonicalTransferJob, Client,
-    CompressionPolicyV2, DestinationDecisionV2, DestinationRequestV2, EventSink,
-    InvitationBootstrap, InvitationConsumption, InviteSecretRef, JobIdV2, JobLifecycle,
-    LocalSourceOrigin, ManifestV2DataError, ManifestV2ProgressPhase, ManifestV2ResultGate,
-    NativeTransportRead, PairingConfig, PendingManifestV2Receive, PendingNativeManifestV2Receive,
-    PlatformDuplexTransport, ProviderSourceIssue, RememberedCredentialRef, RootPlanV2,
-    SavedEntryV2, SenderManifestV2SessionSummary, SessionError, SourceDecision, SourceIssueKind,
-    SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent, TransferJobStore,
-    TransferOptions, TransferStage, acquire_invitation, acquire_remembered_credential,
-    local_allocatable_bytes, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
-    receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
+    DestinationDecisionV2, DestinationRequestV2, EventSink, InvitationBootstrap,
+    InvitationConsumption, InviteSecretRef, JobIdV2, ManifestV2DataError, ManifestV2ProgressPhase,
+    ManifestV2ResultGate, NativeTransportRead, PairingConfig, PendingManifestV2Receive,
+    PendingNativeManifestV2Receive, PlatformDuplexTransport, RememberedCredentialRef, RootPlanV2,
+    SavedEntryV2, SenderManifestV2SessionSummary, SessionError, TransferCancelToken, TransferEvent,
+    TransferJobStore, TransferOptions, TransferStage, acquire_invitation,
+    acquire_remembered_credential, local_allocatable_bytes, parse_broker_addr,
+    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_over_native_transport,
+    receive_manifest_v2_offer_via_remembered,
     receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_enable_mdns,
     send_manifest_v2_over_native_transport, send_manifest_v2_via_remembered,
     send_manifest_v2_via_room_with_authentication,
@@ -72,24 +71,6 @@ fn register_manifest_cancel(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum CompressionChoice {
-    Never,
-    Always,
-    Smart,
-}
-
-impl From<CompressionChoice> for CompressionPolicyV2 {
-    fn from(value: CompressionChoice) -> Self {
-        match value {
-            CompressionChoice::Never => Self::Never,
-            CompressionChoice::Always => Self::Always,
-            CompressionChoice::Smart => Self::Smart,
-        }
-    }
-}
-
-#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartParams {
     direction: String,
@@ -126,40 +107,6 @@ struct ReceiveDecision {
     target_directory: String,
     target_allocatable_bytes: u64,
     exceptional_transfer_approved: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreparedProviderRoot {
-    path: String,
-    requested_name: String,
-    origin: ProviderOrigin,
-    issues: Vec<PreparedProviderIssue>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ProviderOrigin {
-    Photos,
-    Share,
-    ContentUri,
-    FileProvider,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreparedProviderIssue {
-    relative_components: Vec<String>,
-    kind: ProviderIssueKind,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ProviderIssueKind {
-    PermissionDenied,
-    Unavailable,
-    InvalidName,
-    SpecialFile,
 }
 
 #[derive(Clone, Serialize)]
@@ -657,232 +604,6 @@ impl ManifestV2ResultGate for AndroidResultGate {
         })? = Some(reply.roots);
         Ok(())
     }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_createManifestV2Job(
-    mut env: JNIEnv,
-    _class: JClass,
-    store_directory: JString,
-    compression: JString,
-) -> jstring {
-    let store_directory = jstr(&mut env, &store_directory);
-    let compression = jstr(&mut env, &compression);
-    let result = runtime().block_on(async {
-        let policy: CompressionChoice = serde_json::from_str(&format!("\"{compression}\""))
-            .map_err(|_| "compression must be never, always, or smart".to_string())?;
-        require_directory(&store_directory, "job store")?;
-        let store = TransferJobStore::new(&store_directory);
-        let job = CanonicalTransferJob::new(policy.into()).map_err(|error| error.to_string())?;
-        store.save(&job).await.map_err(|error| error.to_string())?;
-        Ok::<_, String>(job_snapshot(&job))
-    });
-    json_result(&mut env, result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_listManifestV2PreparingJobs(
-    mut env: JNIEnv,
-    _class: JClass,
-    store_directory: JString,
-) -> jstring {
-    let store_directory = jstr(&mut env, &store_directory);
-    let result = runtime().block_on(async {
-        require_directory(&store_directory, "job store")?;
-        let jobs = TransferJobStore::new(&store_directory)
-            .load_all()
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok::<_, String>(json!({
-            "jobs": jobs
-                .iter()
-                .filter(|job| {
-                    !job.source_selections().is_empty()
-                        && matches!(
-                            job.lifecycle(),
-                            JobLifecycle::Preparing
-                                | JobLifecycle::NeedsSourceDecision
-                                | JobLifecycle::ReadyToSend
-                        )
-                })
-                .map(job_snapshot)
-                .collect::<Vec<_>>()
-        }))
-    });
-    json_result(&mut env, result)
-}
-
-/// Freezes one prepared job before durable ownership moves to a room outbox.
-///
-/// Repeating the call after a lost response is safe: an already-sealed job is
-/// validated and persisted again without changing its job/generation identity.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_sealManifestV2Job(
-    mut env: JNIEnv,
-    _class: JClass,
-    store_directory: JString,
-    job_id: JString,
-) -> jstring {
-    let store_directory = jstr(&mut env, &store_directory);
-    let job_id = jstr(&mut env, &job_id);
-    let result = runtime().block_on(async {
-        require_directory(&store_directory, "job store")?;
-        let store = TransferJobStore::new(&store_directory);
-        let job = seal_job_for_send(&store, &job_id).await?;
-        Ok::<_, String>(job_snapshot(&job))
-    });
-    json_result(&mut env, result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_prepareManifestV2Job(
-    mut env: JNIEnv,
-    _class: JClass,
-    store_directory: JString,
-    job_id: JString,
-    paths_json: JString,
-) -> jstring {
-    let store_directory = jstr(&mut env, &store_directory);
-    let job_id = jstr(&mut env, &job_id);
-    let paths_json = jstr(&mut env, &paths_json);
-    let result = runtime().block_on(async {
-        let roots: Vec<PreparedProviderRoot> = serde_json::from_str(&paths_json)
-            .map_err(|error| format!("prepared roots JSON is invalid: {error}"))?;
-        if roots.is_empty()
-            || roots
-                .iter()
-                .any(|root| root.path.trim().is_empty() || root.requested_name.trim().is_empty())
-        {
-            return Err("prepared roots must contain a path and requested name".into());
-        }
-        let store = TransferJobStore::new(&store_directory);
-        let mut job = load_job(&store, &job_id).await?;
-        for root in roots {
-            let origin = match root.origin {
-                ProviderOrigin::Photos => LocalSourceOrigin::PhotosStaging,
-                ProviderOrigin::Share => LocalSourceOrigin::ShareStaging,
-                ProviderOrigin::ContentUri => LocalSourceOrigin::ContentUriStaging,
-                ProviderOrigin::FileProvider => LocalSourceOrigin::FileProviderStaging,
-            };
-            let issues = core_provider_issues(root.issues);
-            job.add_provider_path(
-                PathBuf::from(root.path),
-                root.requested_name,
-                origin,
-                issues,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            store.save(&job).await.map_err(|error| error.to_string())?;
-        }
-        Ok::<_, String>(job_snapshot(&job))
-    });
-    json_result(&mut env, result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_cancelManifestV2Job(
-    mut env: JNIEnv,
-    _class: JClass,
-    store_directory: JString,
-    job_id: JString,
-) -> jstring {
-    let store_directory = jstr(&mut env, &store_directory);
-    let job_id = jstr(&mut env, &job_id);
-    let result = runtime().block_on(async {
-        let store = TransferJobStore::new(&store_directory);
-        let mut job = load_job(&store, &job_id).await?;
-        job.cancel().map_err(|error| error.to_string())?;
-        store.save(&job).await.map_err(|error| error.to_string())?;
-        Ok::<_, String>(job_snapshot(&job))
-    });
-    json_result(&mut env, result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_reauthorizeManifestV2ProviderSource(
-    mut env: JNIEnv,
-    _class: JClass,
-    store_directory: JString,
-    job_id: JString,
-    root_item_id: jlong,
-    root_json: JString,
-) -> jstring {
-    let store_directory = jstr(&mut env, &store_directory);
-    let job_id = jstr(&mut env, &job_id);
-    let root_json = jstr(&mut env, &root_json);
-    let result = runtime().block_on(async {
-        let mut roots: Vec<PreparedProviderRoot> = serde_json::from_str(&root_json)
-            .map_err(|error| format!("prepared provider root JSON is invalid: {error}"))?;
-        if roots.len() != 1 {
-            return Err("reauthorization requires exactly one stabilized root".into());
-        }
-        let root = roots.remove(0);
-        if root.path.trim().is_empty() {
-            return Err("reauthorized provider path must not be empty".into());
-        }
-        let root_item_id = u64::try_from(root_item_id)
-            .map(SourceItemId)
-            .map_err(|_| "root_item_id must be non-negative".to_string())?;
-        let store = TransferJobStore::new(&store_directory);
-        let mut job = load_job(&store, &job_id).await?;
-        job.reauthorize_provider_source(
-            root_item_id,
-            PathBuf::from(root.path),
-            core_provider_issues(root.issues),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        store.save(&job).await.map_err(|error| error.to_string())?;
-        Ok::<_, String>(job_snapshot(&job))
-    });
-    json_result(&mut env, result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_resolveManifestV2Source(
-    mut env: JNIEnv,
-    _class: JClass,
-    store_directory: JString,
-    job_id: JString,
-    root_item_id: jlong,
-    decision: JString,
-    reauthorized_path: JString,
-) -> jstring {
-    let store_directory = jstr(&mut env, &store_directory);
-    let job_id = jstr(&mut env, &job_id);
-    let decision = jstr(&mut env, &decision);
-    let reauthorized_path = jstr(&mut env, &reauthorized_path);
-    let result = runtime().block_on(async {
-        let store = TransferJobStore::new(&store_directory);
-        let mut job = load_job(&store, &job_id).await?;
-        let source_decision = match decision.as_str() {
-            "approve_partial" => SourceDecision::ApprovePartial,
-            "remove_selection" => SourceDecision::RemoveSelection,
-            "cancel_job" => SourceDecision::CancelJob,
-            "reauthorize" if !reauthorized_path.trim().is_empty() => SourceDecision::Reauthorize {
-                local_path: PathBuf::from(&reauthorized_path),
-            },
-            "reauthorize" => return Err("reauthorized path is required".into()),
-            _ => return Err("unknown source decision".into()),
-        };
-        let reprepare = matches!(&source_decision, SourceDecision::Reauthorize { .. });
-        let root_item_id = u64::try_from(root_item_id)
-            .map(SourceItemId)
-            .map_err(|_| "root_item_id must be non-negative".to_string())?;
-        store
-            .apply_source_decision(&mut job, root_item_id, source_decision)
-            .await
-            .map_err(|error| error.to_string())?;
-        if reprepare {
-            job.prepare_selection(root_item_id)
-                .await
-                .map_err(|error| error.to_string())?;
-            store.save(&job).await.map_err(|error| error.to_string())?;
-        }
-        Ok::<_, String>(job_snapshot(&job))
-    });
-    json_result(&mut env, result)
 }
 
 #[unsafe(no_mangle)]
@@ -2019,20 +1740,6 @@ async fn load_job(store: &TransferJobStore, encoded: &str) -> Result<CanonicalTr
         .ok_or_else(|| "Manifest v2 job was not found".into())
 }
 
-async fn seal_job_for_send(
-    store: &TransferJobStore,
-    encoded: &str,
-) -> Result<CanonicalTransferJob, String> {
-    let mut job = load_job(store, encoded).await?;
-    if job.lifecycle() != JobLifecycle::Sealed {
-        job.seal_for_send().map_err(|error| error.to_string())?;
-    }
-    // TransferJobStore::save validates the complete durable record before the
-    // outbox is allowed to take ownership of this identity.
-    store.save(&job).await.map_err(|error| error.to_string())?;
-    Ok(job)
-}
-
 fn decode_job_id(encoded: &str) -> Result<JobIdV2, String> {
     if encoded.len() != 32 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("job_id must contain exactly 32 hexadecimal characters".into());
@@ -2047,75 +1754,6 @@ fn decode_job_id(encoded: &str) -> Result<JobIdV2, String> {
 
 fn encode_job_id(job_id: JobIdV2) -> String {
     job_id.0.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn job_snapshot(job: &CanonicalTransferJob) -> Value {
-    let inventory = job.inventory_summary();
-    json!({
-        "job_id":encode_job_id(job.job_id()),
-        "state":match job.lifecycle() {
-            JobLifecycle::Preparing => "preparing",
-            JobLifecycle::NeedsSourceDecision => "needs_source_decision",
-            JobLifecycle::ReadyToSend => "ready_to_send",
-            JobLifecycle::Sealed => "sealed",
-            JobLifecycle::Canceled => "canceled",
-        },
-        "selection_revision":job.selection_revision(),
-        "updated_unix_ms":job.updated_unix_ms(),
-        "root_count":inventory.root_count,
-        "file_count":inventory.file_count,
-        "directory_count":inventory.directory_count,
-        "total":inventory.total_plaintext_bytes,
-        "warning_count":inventory.warning_count,
-        "selections":job.source_selections().into_iter().map(|selection| {
-            let local_path = job.local_path_for_item(selection.root_item_id);
-            json!({
-            "root_item_id":selection.root_item_id.0,
-            "name":selection.requested_name,
-            "local_path":local_path.map(|path| path.to_string_lossy().into_owned()),
-            "directory":local_path.is_some_and(Path::is_dir),
-            "state":match selection.state {
-                SourceSelectionState::Pending => "pending",
-                SourceSelectionState::Enumerating => "enumerating",
-                SourceSelectionState::NeedsDecision => "needs_decision",
-                SourceSelectionState::Ready => "ready",
-            },
-            "partial_approved":selection.partial_approved,
-            "issues":selection.issues.into_iter().map(|issue| json!({
-                "issue_id":issue.issue_id,
-                "path":issue.relative_components,
-                "kind":source_issue_kind(issue.kind),
-            })).collect::<Vec<_>>(),
-        })}).collect::<Vec<_>>(),
-    })
-}
-
-fn source_issue_kind(kind: SourceIssueKind) -> &'static str {
-    match kind {
-        SourceIssueKind::PermissionDenied => "permission_denied",
-        SourceIssueKind::Unavailable => "unavailable",
-        SourceIssueKind::InvalidName => "invalid_name",
-        SourceIssueKind::SymbolicLink => "symbolic_link",
-        SourceIssueKind::SpecialFile => "special_file",
-        SourceIssueKind::SourceChanged => "source_changed",
-        SourceIssueKind::DepthLimit => "depth_limit",
-        SourceIssueKind::EntryLimit => "entry_limit",
-    }
-}
-
-fn core_provider_issues(issues: Vec<PreparedProviderIssue>) -> Vec<ProviderSourceIssue> {
-    issues
-        .into_iter()
-        .map(|issue| ProviderSourceIssue {
-            relative_components: issue.relative_components,
-            kind: match issue.kind {
-                ProviderIssueKind::PermissionDenied => SourceIssueKind::PermissionDenied,
-                ProviderIssueKind::Unavailable => SourceIssueKind::Unavailable,
-                ProviderIssueKind::InvalidName => SourceIssueKind::InvalidName,
-                ProviderIssueKind::SpecialFile => SourceIssueKind::SpecialFile,
-            },
-        })
-        .collect()
 }
 
 fn json_result(env: &mut JNIEnv, result: Result<Value, String>) -> jstring {
@@ -2209,48 +1847,6 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use super::*;
-
-    #[test]
-    fn seal_job_for_send_is_durable_and_idempotent() {
-        let temporary = tempfile::tempdir().expect("temporary manifest job store");
-        let source = temporary.path().join("source.txt");
-        std::fs::write(&source, b"remembered room payload").expect("write source");
-        let store = TransferJobStore::new(temporary.path().join("jobs"));
-
-        runtime().block_on(async {
-            let mut job =
-                CanonicalTransferJob::new(CompressionPolicyV2::Smart).expect("create job");
-            job.add_provider_path(
-                source,
-                "source.txt".into(),
-                LocalSourceOrigin::ContentUriStaging,
-                Vec::new(),
-            )
-            .await
-            .expect("prepare source");
-            assert_eq!(job.lifecycle(), JobLifecycle::ReadyToSend);
-            store.save(&job).await.expect("save prepared job");
-            let encoded = encode_job_id(job.job_id());
-
-            let sealed = seal_job_for_send(&store, &encoded)
-                .await
-                .expect("seal prepared job");
-            assert_eq!(sealed.lifecycle(), JobLifecycle::Sealed);
-
-            let repeated = seal_job_for_send(&store, &encoded)
-                .await
-                .expect("repeat lost-response seal");
-            assert_eq!(repeated.lifecycle(), JobLifecycle::Sealed);
-            assert_eq!(repeated.job_id(), sealed.job_id());
-            assert_eq!(repeated.generation(), sealed.generation());
-
-            let restored = load_job(&store, &encoded)
-                .await
-                .expect("restore sealed job");
-            assert_eq!(restored.lifecycle(), JobLifecycle::Sealed);
-            assert!(restored.manifest().is_some());
-        });
-    }
 
     #[test]
     fn duplicate_native_id_does_not_replace_the_live_cancel_token() {

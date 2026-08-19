@@ -97,52 +97,6 @@ object Native {
     /** Validate protected bytes and return a process-only core reference. */
     external fun registerRememberedCredential(opaqueCredential: ByteArray): String
 
-    /** Create the durable canonical job as soon as the first source is chosen. */
-    external fun createManifestV2Job(
-        storeDirectory: String,
-        compression: String,
-    ): String
-
-    /** Restore durable jobs that have local preparation but have not crossed
-     * the explicit Send/Seal boundary. */
-    external fun listManifestV2PreparingJobs(storeDirectory: String): String
-
-    /** Add already stabilized local roots and run local-only preparation. */
-    external fun prepareManifestV2Job(
-        storeDirectory: String,
-        jobId: String,
-        rootsJson: String,
-    ): String
-
-    /** Idempotently seal and persist a prepared job before an outbox assumes
-     * ownership. The returned snapshot is the same canonical job projection
-     * used by preparation. */
-    external fun sealManifestV2Job(
-        storeDirectory: String,
-        jobId: String,
-    ): String
-
-    /** Cancel an unstarted job before its room-scoped staging is discarded. */
-    external fun cancelManifestV2Job(
-        storeDirectory: String,
-        jobId: String,
-    ): String
-
-    external fun resolveManifestV2Source(
-        storeDirectory: String,
-        jobId: String,
-        rootItemId: Long,
-        decision: String,
-        reauthorizedPath: String,
-    ): String
-
-    external fun reauthorizeManifestV2ProviderSource(
-        storeDirectory: String,
-        jobId: String,
-        rootItemId: Long,
-        rootJson: String,
-    ): String
-
     /** Start the only Android transfer engine. A send seals its existing job;
      * a receive first emits an authenticated offer and waits for a decision. */
     external fun startManifestV2Session(

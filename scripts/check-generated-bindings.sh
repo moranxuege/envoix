@@ -48,6 +48,10 @@ rg -q 'class Rejected' "$kotlin_binding"
 rg -q 'class NetworkLost' "$kotlin_binding"
 rg -q 'class Canceled' "$kotlin_binding"
 rg -q 'class Failed' "$kotlin_binding"
+rg -q 'data class FfiStagedProviderRootV2' "$kotlin_binding"
+rg -q 'enum class FfiProviderSourceIssueKindV2' "$kotlin_binding"
+rg -q 'suspend fun `addStagedProviderRoots`' "$kotlin_binding"
+rg -q 'suspend fun `reauthorizeStagedProviderSource`' "$kotlin_binding"
 if rg -q 'suspend fun `close`\(\)' "$kotlin_binding"; then
   echo "error: async close() conflicts with UniFFI AutoCloseable.close() in Kotlin" >&2
   exit 1
@@ -60,5 +64,9 @@ rg -q 'case Rejected' "$swift_binding"
 rg -q 'case NetworkLost' "$swift_binding"
 rg -q 'case Canceled' "$swift_binding"
 rg -q 'case Failed' "$swift_binding"
+rg -q 'public struct FfiStagedProviderRootV2' "$swift_binding"
+rg -q 'public enum FfiProviderSourceIssueKindV2' "$swift_binding"
+rg -q 'func addStagedProviderRoots' "$swift_binding"
+rg -q 'func reauthorizeStagedProviderSource' "$swift_binding"
 
 echo "Swift and Kotlin typed application bindings generated successfully."

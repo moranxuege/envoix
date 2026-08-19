@@ -6,7 +6,7 @@ Status: normative for M5 and later platform migrations.
 
 The native library exposes two independent versions:
 
-- UniFFI API `18` identifies the complete native symbol/type surface;
+- UniFFI API `19` identifies the complete native symbol/type surface;
 - application binding `1` projects application contract `6`.
 
 Callers must check both `envoixCoreInfo()` and
@@ -68,6 +68,14 @@ and cancellation use typed UniFFI records and errors; the former Room JSON JNI
 bridge has been removed. Command calls remain serialized by the Android
 adapter, and an offer response returns only after Rust has written it.
 
+Manifest v2 job creation, provider-source preparation, source decisions,
+reauthorization, cancellation, and sealing also use typed UniFFI objects. The
+platform adapter retains ContentResolver access and reports structured provider
+issues without rebuilding a Rust snapshot from JSON. Each short-lived job
+handle is closed after the operation, including failure paths, and sealing is
+idempotent so a caller can safely retry after losing the first response. The
+seven superseded job-preparation JNI calls have been removed.
+
 The Swift concurrency adapter projects the same Room error variants. A rejected
 authenticated command leaves the current Room usable, while network loss,
 cancellation, and native failure follow terminal paths without inspecting the
@@ -86,7 +94,7 @@ library that owns UniFFI handles and process-local credentials. The former
 `libenvoix_jni.so` and its second runtime/state registry no longer exist.
 
 The remaining hand-written JNI surface is not an accepted final M5 exception.
-It currently contains Transfer JSON orchestration, discovery callbacks,
+It currently contains live Transfer-session orchestration, discovery callbacks,
 Android context initialization, log routing, and synchronous platform content
 callbacks. At M5 exit, only Android-runtime integration that cannot be
 expressed as a UniFFI port may remain, and every such entry must have an

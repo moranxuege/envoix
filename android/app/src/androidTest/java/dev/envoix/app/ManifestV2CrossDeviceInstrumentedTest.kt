@@ -30,8 +30,8 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/** Scenario-driven physical coverage for the JNI Manifest-v2 surface used by
- * the Android app, including its synchronous final-save gate. */
+/** Scenario-driven physical coverage for the Android Manifest-v2 surface,
+ * including its synchronous final-save JNI platform gate. */
 @RunWith(AndroidJUnit4::class)
 class ManifestV2CrossDeviceInstrumentedTest {
     @Test
@@ -40,8 +40,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val testRoot = testRoot(context, "share-recovery")
         val jobStore = File(testRoot, "jobs").apply { check(mkdirs()) }
-        val created = checkedResponse(Native.createManifestV2Job(jobStore.path, "never"))
-        val jobId = created.getString("job_id")
+        val created = runBlocking { ManifestV2JobGateway.shared.create(jobStore.path, "never") }
+        val jobId = created.jobId
         var validUri: Uri? = null
 
         try {
@@ -62,17 +62,21 @@ class ManifestV2CrossDeviceInstrumentedTest {
             val validSource = ManifestV2Source(validUri, directory = false, displayName = validFile.name)
             val staged = runBlocking { ManifestV2SourceStager.stage(context, jobId, validSource) }
             val prepared =
-                checkedResponse(
-                    Native.prepareManifestV2Job(
+                runBlocking {
+                    ManifestV2JobGateway.shared.addStagedProviderRoot(
                         jobStore.path,
                         jobId,
-                        ManifestV2SourceStager.rootsJson(validSource, staged, origin = "share"),
-                    ),
-                )
-            assertEquals("ready_to_send", prepared.getString("state"))
-            assertEquals(1, prepared.getInt("root_count"))
-            assertEquals(1, prepared.getInt("file_count"))
-            assertEquals(SHARE_RECOVERY_BYTES.size.toLong(), prepared.getLong("total"))
+                        ManifestV2SourceStager.stagedProviderRoot(
+                            validSource,
+                            staged,
+                            origin = ManifestV2SourceOrigin.Share,
+                        ),
+                    )
+                }
+            assertEquals(ManifestV2JobState.ReadyToSend, prepared.state)
+            assertEquals(1, prepared.inventory.rootCount)
+            assertEquals(1, prepared.inventory.fileCount)
+            assertEquals(SHARE_RECOVERY_BYTES.size.toLong(), prepared.inventory.totalBytes)
             marker("Android unreadable Share source recovered with a valid selection")
         } finally {
             validUri?.let { MediaStoreSaver.delete(context, it) }
@@ -97,8 +101,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
             try {
                 val materialized = fixture.materialize(sourceDirectory)
                 evidence.recordSource(materialized.rootFiles)
-                val created = checkedResponse(Native.createManifestV2Job(jobStore.path, "never"))
-                val createdJobId = created.getString("job_id")
+                val created = runBlocking { ManifestV2JobGateway.shared.create(jobStore.path, "never") }
+                val createdJobId = created.jobId
                 jobId = createdJobId
                 evidence.jobId = createdJobId
                 val prepared =
@@ -111,31 +115,40 @@ class ManifestV2CrossDeviceInstrumentedTest {
                             val source = ManifestV2Source(uri, directory = false, displayName = root.name)
                             val staged = runBlocking { ManifestV2SourceStager.stage(context, createdJobId, source) }
                             snapshot =
-                                checkedResponse(
-                                    Native.prepareManifestV2Job(
+                                runBlocking {
+                                    ManifestV2JobGateway.shared.addStagedProviderRoot(
                                         jobStore.path,
                                         createdJobId,
-                                        ManifestV2SourceStager.rootsJson(source, staged, origin = "share"),
-                                    ),
-                                )
+                                        ManifestV2SourceStager.stagedProviderRoot(
+                                            source,
+                                            staged,
+                                            origin = ManifestV2SourceOrigin.Share,
+                                        ),
+                                    )
+                                }
                         }
                         snapshot
                     } else {
-                        checkedResponse(
-                            Native.prepareManifestV2Job(
-                                jobStore.path,
-                                createdJobId,
-                                fixture.rootsJson(materialized.selectedFiles),
-                            ),
-                        )
+                        var snapshot = created
+                        fixture.stagedProviderRoots(materialized.selectedFiles).forEach { root ->
+                            snapshot =
+                                runBlocking {
+                                    ManifestV2JobGateway.shared.addStagedProviderRoot(
+                                        jobStore.path,
+                                        createdJobId,
+                                        root,
+                                    )
+                                }
+                        }
+                        snapshot
                     }
 
-                assertEquals("ready_to_send", prepared.getString("state"))
-                assertEquals(fixture.roots.size, prepared.getInt("root_count"))
-                assertEquals(fixture.fileCount, prepared.getInt("file_count"))
-                assertEquals(fixture.directoryCount, prepared.getInt("directory_count"))
-                assertEquals(fixture.totalBytes, prepared.getLong("total"))
-                assertEquals(0, prepared.getInt("warning_count"))
+                assertEquals(ManifestV2JobState.ReadyToSend, prepared.state)
+                assertEquals(fixture.roots.size, prepared.inventory.rootCount)
+                assertEquals(fixture.fileCount, prepared.inventory.fileCount)
+                assertEquals(fixture.directoryCount, prepared.inventory.directoryCount)
+                assertEquals(fixture.totalBytes, prepared.inventory.totalBytes)
+                assertEquals(0, prepared.inventory.warningCount)
 
                 val invitation =
                     checkedResponse(
@@ -351,8 +364,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 val materialized = fixture.materialize(sourceDirectory)
                 evidence.recordSource(materialized.rootFiles)
                 val jobStore = TransferService.jobStoreDirectory(context)
-                val created = checkedResponse(Native.createManifestV2Job(jobStore.path, "never"))
-                val createdJobId = created.getString("job_id")
+                val created = runBlocking { ManifestV2JobGateway.shared.create(jobStore.path, "never") }
+                val createdJobId = created.jobId
                 jobId = createdJobId
                 evidence.jobId = createdJobId
                 var prepared = created
@@ -363,18 +376,18 @@ class ManifestV2CrossDeviceInstrumentedTest {
                     val source = ManifestV2Source(uri, directory = false, displayName = root.name)
                     val staged = runBlocking { ManifestV2SourceStager.stage(context, createdJobId, source) }
                     prepared =
-                        checkedResponse(
-                            Native.prepareManifestV2Job(
+                        runBlocking {
+                            ManifestV2JobGateway.shared.addStagedProviderRoot(
                                 jobStore.path,
                                 createdJobId,
-                                ManifestV2SourceStager.rootsJson(source, staged),
-                            ),
-                        )
+                                ManifestV2SourceStager.stagedProviderRoot(source, staged),
+                            )
+                        }
                 }
-                assertEquals("ready_to_send", prepared.getString("state"))
-                assertEquals(fixture.roots.size, prepared.getInt("root_count"))
-                assertEquals(fixture.fileCount, prepared.getInt("file_count"))
-                assertEquals(fixture.totalBytes, prepared.getLong("total"))
+                assertEquals(ManifestV2JobState.ReadyToSend, prepared.state)
+                assertEquals(fixture.roots.size, prepared.inventory.rootCount)
+                assertEquals(fixture.fileCount, prepared.inventory.fileCount)
+                assertEquals(fixture.totalBytes, prepared.inventory.totalBytes)
 
                 val invitation = checkedResponse(Native.parseInviteForRole(scenarioInvitation(), "send"))
                 val productModel =
@@ -1472,19 +1485,15 @@ private data class Fixture(
         return MaterializedFixture(roots, selected)
     }
 
-    fun rootsJson(selected: List<File>): String =
-        JSONArray()
-            .apply {
-                selected.forEach { file ->
-                    put(
-                        JSONObject()
-                            .put("path", file.path)
-                            .put("requested_name", file.name)
-                            .put("origin", "file_provider")
-                            .put("issues", JSONArray()),
-                    )
-                }
-            }.toString()
+    fun stagedProviderRoots(selected: List<File>): List<ManifestV2StagedProviderRoot> =
+        selected.map { file ->
+            ManifestV2StagedProviderRoot(
+                path = file.path,
+                requestedName = file.name,
+                origin = ManifestV2SourceOrigin.FileProvider,
+                issues = emptyList(),
+            )
+        }
 
     companion object {
         fun make(
