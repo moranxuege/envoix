@@ -161,12 +161,93 @@ enum TransferActivityText {
     }
 }
 
+enum TransferContentText {
+    static func rootCount(_ count: UInt32, language: String) -> String {
+        let displayCount = Int64(count)
+        return AppText.localized(
+            "transfer.content.root_count",
+            defaultValue: "\(displayCount) roots",
+            language: language
+        )
+    }
+
+    static func fileCount(_ count: UInt32, language: String) -> String {
+        let displayCount = Int64(count)
+        return AppText.localized(
+            "transfer.content.file_count",
+            defaultValue: "\(displayCount) files",
+            language: language
+        )
+    }
+
+    static func folderCount(_ count: UInt32, language: String) -> String {
+        let displayCount = Int64(count)
+        return AppText.localized(
+            "transfer.content.folder_count",
+            defaultValue: "\(displayCount) folders",
+            language: language
+        )
+    }
+}
+
 struct TransferFailurePresentationCopy: Equatable {
     let title: String
     let detail: String
 }
 
 enum TransferStatusText {
+    static func additionalManifestItems(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "transfer.status.inventory.additional_count",
+            defaultValue: "\(displayCount) more items are included in the authenticated manifest.",
+            language: language
+        )
+    }
+
+    static func inventorySummary(
+        rootCount: UInt32,
+        fileCount: UInt32,
+        folderCount: UInt32,
+        byteDescription: String,
+        language: String
+    ) -> String {
+        let roots = TransferContentText.rootCount(rootCount, language: language)
+        let files = TransferContentText.fileCount(fileCount, language: language)
+        let folders = TransferContentText.folderCount(folderCount, language: language)
+        return AppText.localized(
+            "transfer.status.inventory.summary",
+            defaultValue: "\(roots) · \(files) · \(folders) · \(byteDescription)",
+            language: language
+        )
+    }
+
+    static func viewItems(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "transfer.status.completed.view_item_count",
+            defaultValue: "View \(displayCount) Items",
+            language: language
+        )
+    }
+
+    static func receivedItems(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "transfer.status.completed.received_item_count",
+            defaultValue: "\(displayCount) received items",
+            language: language
+        )
+    }
+
+    static func savedAs(_ fileName: String, language: String) -> String {
+        AppText.localized(
+            "transfer.status.completed.saved_as",
+            defaultValue: "Saved as \(fileName)",
+            language: language
+        )
+    }
+
     static func title(
         state: TransferActivityState?,
         direction: FfiTransferDirection?,

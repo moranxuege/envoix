@@ -149,9 +149,9 @@ final class RoomPresentationTests: XCTestCase {
 
         XCTAssertEqual(RoomPresentationText.additionalItems(3, language: "en"), "+3 more")
         XCTAssertEqual(RoomPresentationText.additionalItems(3, language: "zh-Hans"), "另有 3 项")
-        XCTAssertEqual(RoomPresentationText.fileCount(1, language: "en"), "1 file")
-        XCTAssertEqual(RoomPresentationText.fileCount(2, language: "en"), "2 files")
-        XCTAssertEqual(RoomPresentationText.folderCount(2, language: "zh-Hans"), "2 个文件夹")
+        XCTAssertEqual(TransferContentText.fileCount(1, language: "en"), "1 file")
+        XCTAssertEqual(TransferContentText.fileCount(2, language: "en"), "2 files")
+        XCTAssertEqual(TransferContentText.folderCount(2, language: "zh-Hans"), "2 个文件夹")
         XCTAssertEqual(
             RoomPresentationText.offerSummary(
                 fileCount: 1,

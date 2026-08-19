@@ -105,32 +105,14 @@ enum RoomPresentationText {
         )
     }
 
-    static func fileCount(_ count: UInt32, language: String) -> String {
-        let displayCount = Int64(count)
-        return AppText.localized(
-            "room.offer.file_count",
-            defaultValue: "\(displayCount) files",
-            language: language
-        )
-    }
-
-    static func folderCount(_ count: UInt32, language: String) -> String {
-        let displayCount = Int64(count)
-        return AppText.localized(
-            "room.offer.folder_count",
-            defaultValue: "\(displayCount) folders",
-            language: language
-        )
-    }
-
     static func offerSummary(
         fileCount: UInt32,
         folderCount: UInt32,
         byteDescription: String,
         language: String
     ) -> String {
-        let files = self.fileCount(fileCount, language: language)
-        let folders = self.folderCount(folderCount, language: language)
+        let files = TransferContentText.fileCount(fileCount, language: language)
+        let folders = TransferContentText.folderCount(folderCount, language: language)
         return AppText.localized(
             "room.offer.summary_format",
             defaultValue: "\(files) · \(folders) · \(byteDescription)",

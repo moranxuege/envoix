@@ -196,6 +196,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
       }
     },
+    "common.copy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制" } }
+      }
+    },
     "common.decline" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Decline" } },
@@ -767,7 +773,7 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存位置" } }
       }
     },
-    "room.offer.file_count" : {
+    "transfer.content.file_count" : {
       "localizations" : {
         "en" : {
           "variations" : {
@@ -786,7 +792,7 @@
         }
       }
     },
-    "room.offer.folder_count" : {
+    "transfer.content.folder_count" : {
       "localizations" : {
         "en" : {
           "variations" : {
@@ -800,6 +806,25 @@
           "variations" : {
             "plural" : {
               "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 个文件夹" } }
+            }
+          }
+        }
+      }
+    },
+    "transfer.content.root_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld root" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld roots" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 个根项目" } }
             }
           }
         }
@@ -1139,6 +1164,129 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Verification failed" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "校验失败" } }
+      }
+    },
+    "transfer.status.completed.copy_path" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy Path" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制路径" } }
+      }
+    },
+    "transfer.status.completed.path_copied" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Path copied" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "路径已复制" } }
+      }
+    },
+    "transfer.status.completed.received_item_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld received item" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld received items" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "已接收 %lld 个项目" } }
+            }
+          }
+        }
+      }
+    },
+    "transfer.status.completed.saved_as" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saved as %@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已保存为 %@" } }
+      }
+    },
+    "transfer.status.completed.view_item_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "View %lld Item" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "View %lld Items" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "查看 %lld 个项目" } }
+            }
+          }
+        }
+      }
+    },
+    "transfer.status.inventory.additional_count" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld more item is included in the authenticated manifest." } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld more items are included in the authenticated manifest." } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "已认证清单中还包含 %lld 个项目。" } }
+            }
+          }
+        }
+      }
+    },
+    "transfer.status.inventory.approve_large" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive this large transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收此大文件传输" } }
+      }
+    },
+    "transfer.status.inventory.summary" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%1$@ · %2$@ · %3$@ · %4$@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%1$@ · %2$@ · %3$@ · %4$@" } }
+      }
+    },
+    "transfer.status.inventory.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Incoming items" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "即将接收" } }
+      }
+    },
+    "transfer.status.log.copied" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Log copied" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "日志已复制" } }
+      }
+    },
+    "transfer.status.log.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Activity log" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "活动日志" } }
+      }
+    },
+    "transfer.status.log.verbose" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verbose" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "详细" } }
+      }
+    },
+    "transfer.status.metric.average" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Average" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "平均" } }
+      }
+    },
+    "transfer.status.metric.now" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Now" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前" } }
       }
     },
     "transfer.status.detail.canceled" : {

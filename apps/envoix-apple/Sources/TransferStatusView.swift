@@ -83,7 +83,10 @@ struct TransferStatusView: View {
             if !viewModel.pendingOfferEntries.isEmpty {
                 Divider().overlay(Theme.line)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(AppText.value("Incoming items", "即将接收", language: language))
+                    Text(AppText.localized(
+                        "transfer.status.inventory.title",
+                        language: language
+                    ))
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(Theme.text)
                     if let summary = viewModel.pendingOfferSummary {
@@ -112,9 +115,8 @@ struct TransferStatusView: View {
                         .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 9))
                     }
                     if viewModel.pendingOfferEntries.count > 6 {
-                        Text(AppText.value(
-                            "\(viewModel.pendingOfferEntries.count - 6) more items are included in the authenticated manifest.",
-                            "已认证清单中还包含 \(viewModel.pendingOfferEntries.count - 6) 个项目。",
+                        Text(TransferStatusText.additionalManifestItems(
+                            viewModel.pendingOfferEntries.count - 6,
                             language: language
                         ))
                             .font(.footnote)
@@ -129,7 +131,10 @@ struct TransferStatusView: View {
                     _ = viewModel.approveExceptionalTransfer()
                 } label: {
                     Label(
-                        AppText.value("Receive this large transfer", "接收此大文件传输", language: language),
+                        AppText.localized(
+                            "transfer.status.inventory.approve_large",
+                            language: language
+                        ),
                         systemImage: "arrow.down.circle"
                     )
                     .frame(maxWidth: .infinity, minHeight: 38)
@@ -168,9 +173,11 @@ struct TransferStatusView: View {
     }
 
     private func incomingInventorySummaryText(_ summary: FfiManifestOfferSummaryV2) -> String {
-        AppText.value(
-            "\(summary.rootCount) roots · \(summary.fileCount) files · \(summary.directoryCount) folders · \(byteString(summary.totalPlaintextBytes))",
-            "\(summary.rootCount) 个根项目 · \(summary.fileCount) 个文件 · \(summary.directoryCount) 个文件夹 · \(byteString(summary.totalPlaintextBytes))",
+        TransferStatusText.inventorySummary(
+            rootCount: summary.rootCount,
+            fileCount: summary.fileCount,
+            folderCount: summary.directoryCount,
+            byteDescription: byteString(summary.totalPlaintextBytes),
             language: language
         )
     }
@@ -217,23 +224,26 @@ struct TransferStatusView: View {
     @ViewBuilder private var logsCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(AppText.value("Activity log", "活动日志", language: language))
+                Text(AppText.localized("transfer.status.log.title", language: language))
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(Theme.text)
                 Spacer(minLength: 8)
                 if verboseLog {
-                    Text(AppText.value("Verbose", "详细", language: language))
+                    Text(AppText.localized("transfer.status.log.verbose", language: language))
                         .font(.caption.monospaced())
                         .foregroundStyle(Theme.muted)
                 }
                 Button {
                     copyWithToast(
                         viewModel.eventLog.joined(separator: "\n"),
-                        AppText.value("Log copied", "日志已复制", language: language),
+                        AppText.localized("transfer.status.log.copied", language: language),
                         language: language
                     )
                 } label: {
-                    Label(AppText.value("Copy", "复制", language: language), systemImage: "doc.on.doc")
+                    Label(
+                        AppText.localized("common.copy", language: language),
+                        systemImage: "doc.on.doc"
+                    )
                         .labelStyle(.iconOnly)
                         .frame(width: 30, height: 30)
                         .contentShape(Rectangle())
@@ -362,18 +372,17 @@ struct TransferStatusView: View {
             if urls.count == 1, isRegularFileURL(firstURL) {
                 Button(platformRevealTitle(language: language)) { previewFileURL = firstURL }
                 ShareLink(item: firstURL) {
-                    Label(AppText.value("Share", "分享", language: language), systemImage: "square.and.arrow.up")
+                    Label(
+                        AppText.localized("common.share", language: language),
+                        systemImage: "square.and.arrow.up"
+                    )
                 }
             } else {
                 Button {
                     receivedItemsPresentation = ReceivedItemsPresentation(urls: urls)
                 } label: {
                     Label(
-                        AppText.value(
-                            "View \(urls.count) Items",
-                            "查看 \(urls.count) 个项目",
-                            language: language
-                        ),
+                        TransferStatusText.viewItems(urls.count, language: language),
                         systemImage: "square.stack"
                     )
                 }
@@ -392,26 +401,14 @@ struct TransferStatusView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         } else {
-            Text(AppText.value(
-                "\(urls.count) received items",
-                "已接收 \(urls.count) 个项目",
-                language: language
-            ))
+            Text(TransferStatusText.receivedItems(urls.count, language: language))
             .font(.body)
             .foregroundStyle(Theme.muted)
         }
         #elseif os(iOS)
         Text(urls.count == 1
-             ? AppText.value(
-                "Saved as \(firstURL.lastPathComponent)",
-                "已保存为 \(firstURL.lastPathComponent)",
-                language: language
-             )
-             : AppText.value(
-                "Saved \(urls.count) items",
-                "已保存 \(urls.count) 个项目",
-                language: language
-             ))
+             ? TransferStatusText.savedAs(firstURL.lastPathComponent, language: language)
+             : TransferActivityText.savedItems(urls.count, language: language))
             .font(.body)
             .foregroundStyle(Theme.muted)
             .lineLimit(1)
@@ -431,8 +428,12 @@ struct TransferStatusView: View {
     }
 
     private func copyPathButton(_ url: URL) -> some View {
-        Button(AppText.value("Copy Path", "复制路径", language: language)) {
-            copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language), language: language)
+        Button(AppText.localized("transfer.status.completed.copy_path", language: language)) {
+            copyWithToast(
+                url.path,
+                AppText.localized("transfer.status.completed.path_copied", language: language),
+                language: language
+            )
         }
     }
 }
@@ -492,7 +493,7 @@ struct TransferPerformanceLine: View {
     private func metrics(showCurrentMetrics: Bool) -> some View {
         if showCurrentMetrics, let current = bounded(currentBytesPerSecond) {
             metric(
-                AppText.value("Now", "当前", language: language),
+                AppText.localized("transfer.status.metric.now", language: language),
                 value: rateString(current),
                 systemImage: "speedometer",
                 identifier: "\(accessibilityPrefix)_speed_current"
@@ -500,7 +501,7 @@ struct TransferPerformanceLine: View {
         }
         if let average = bounded(averageBytesPerSecond) {
             metric(
-                AppText.value("Average", "平均", language: language),
+                AppText.localized("transfer.status.metric.average", language: language),
                 value: rateString(average),
                 systemImage: "chart.line.uptrend.xyaxis",
                 identifier: "\(accessibilityPrefix)_speed_average"

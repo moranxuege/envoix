@@ -369,6 +369,67 @@ final class TransferPresentationPolicyTests: XCTestCase {
         )
     }
 
+    func testTransferStatusCatalogProvidesStaticCopy() {
+        let cases: [(String, String, String)] = [
+            ("common.copy", "Copy", "复制"),
+            ("transfer.status.completed.copy_path", "Copy Path", "复制路径"),
+            ("transfer.status.completed.path_copied", "Path copied", "路径已复制"),
+            (
+                "transfer.status.inventory.approve_large",
+                "Receive this large transfer",
+                "接收此大文件传输"
+            ),
+            ("transfer.status.inventory.title", "Incoming items", "即将接收"),
+            ("transfer.status.log.copied", "Log copied", "日志已复制"),
+            ("transfer.status.log.title", "Activity log", "活动日志"),
+            ("transfer.status.log.verbose", "Verbose", "详细"),
+            ("transfer.status.metric.average", "Average", "平均"),
+            ("transfer.status.metric.now", "Now", "当前"),
+        ]
+        for (key, english, chinese) in cases {
+            XCTAssertEqual(AppText.localized(key, language: "en"), english, key)
+            XCTAssertEqual(AppText.localized(key, language: "zh-Hans"), chinese, key)
+        }
+    }
+
+    func testTransferContentAndCompletedItemFormatsUseNativePluralRules() {
+        XCTAssertEqual(TransferContentText.rootCount(1, language: "en"), "1 root")
+        XCTAssertEqual(TransferContentText.rootCount(2, language: "en"), "2 roots")
+        XCTAssertEqual(TransferContentText.rootCount(2, language: "zh-Hans"), "2 个根项目")
+        XCTAssertEqual(TransferContentText.fileCount(1, language: "en"), "1 file")
+        XCTAssertEqual(TransferContentText.folderCount(2, language: "en"), "2 folders")
+
+        XCTAssertEqual(
+            TransferStatusText.additionalManifestItems(1, language: "en"),
+            "1 more item is included in the authenticated manifest."
+        )
+        XCTAssertEqual(
+            TransferStatusText.additionalManifestItems(2, language: "zh-Hans"),
+            "已认证清单中还包含 2 个项目。"
+        )
+        XCTAssertEqual(
+            TransferStatusText.additionalManifestItems(-1, language: "en"),
+            "0 more items are included in the authenticated manifest."
+        )
+        XCTAssertEqual(
+            TransferStatusText.inventorySummary(
+                rootCount: 1,
+                fileCount: 2,
+                folderCount: 3,
+                byteDescription: "4 MB",
+                language: "en"
+            ),
+            "1 root · 2 files · 3 folders · 4 MB"
+        )
+
+        XCTAssertEqual(TransferStatusText.viewItems(1, language: "en"), "View 1 Item")
+        XCTAssertEqual(TransferStatusText.viewItems(2, language: "en"), "View 2 Items")
+        XCTAssertEqual(TransferStatusText.viewItems(-1, language: "en"), "View 0 Items")
+        XCTAssertEqual(TransferStatusText.receivedItems(1, language: "en"), "1 received item")
+        XCTAssertEqual(TransferStatusText.receivedItems(2, language: "zh-Hans"), "已接收 2 个项目")
+        XCTAssertEqual(TransferStatusText.savedAs("报告.pdf", language: "zh-Hans"), "已保存为 报告.pdf")
+    }
+
     @MainActor
     func testNativeObserverHopsBackgroundCallbacksToMainActor() async {
         let model = TransferViewModel()

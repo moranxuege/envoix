@@ -177,6 +177,10 @@ failure code; raw diagnostic messages remain diagnostic data rather than
 localized presentation policy. The transfer status card's lifecycle titles,
 guidance, last-step format, and structured/fallback failure titles are pure,
 catalog-backed `TransferStatusText` projections rather than View-owned switches.
+Incoming inventory, completed-item actions, logs, and performance labels use
+the same boundary. Shared root/file/folder pluralization lives in
+`TransferContentText`, leaving `TransferStatusView` without inline bilingual
+values and avoiding a Room-specific dependency for transfer content counts.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,
