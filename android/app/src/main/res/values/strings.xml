@@ -44,6 +44,8 @@
     <string name="common_paste">Paste</string>
     <string name="common_reject">Reject</string>
     <string name="common_save">Save</string>
+    <string name="common_retry">Retry</string>
+    <string name="common_remove">Remove</string>
     <string name="nfc_open_invitation_title">Open NFC invitation?</string>
     <string name="nfc_untrusted_invitation_explanation">This untrusted tag only carries an invitation. Continue to validate it and use the normal room flow; NFC does not authenticate the other device.</string>
     <string name="nfc_invitation_failed_title">NFC could not continue</string>
@@ -281,4 +283,38 @@
     <string name="hub_peer_wants_room">%1$s wants to open a room with you.</string>
     <string name="hub_peer_wants_transfer">%1$s wants to transfer files.</string>
     <string name="hub_verify">Verify</string>
+
+    <string name="remembered_rooms_reconnect_explanation">Saved devices can reconnect while Envoix is open.</string>
+    <string name="remembered_room_title">Room</string>
+    <string name="remembered_room_missing">This saved room is no longer available.</string>
+    <string name="remembered_latest_received_section">LATEST RECEIVED</string>
+    <string name="remembered_outbox_section">OUTBOX</string>
+    <string name="remembered_room_controls_section">ROOM CONTROLS</string>
+    <string name="remembered_rename_room">Rename room</string>
+    <string name="remembered_forget_room">Forget this room</string>
+    <string name="remembered_forget_room_title">Forget this room?</string>
+    <string name="remembered_forget_room_explanation">This removes the protected relationship and its waiting or failed file jobs from this device. Active transfers must finish first.</string>
+    <string name="remembered_forget_action">Forget</string>
+    <string name="remembered_incoming_files">Incoming files</string>
+    <string name="remembered_prepared_items">Prepared items</string>
+    <string name="remembered_preparing">Preparing…</string>
+    <string name="remembered_outbox_queueing">Queueing</string>
+    <string name="remembered_outbox_waiting_peer">Waiting for peer</string>
+    <string name="remembered_outbox_offering">Offering</string>
+    <string name="remembered_rooms_empty_title">No saved rooms</string>
+    <string name="remembered_rooms_empty_explanation">Remember a device after a successful transfer.</string>
+    <string name="remembered_incoming_files_summary">Incoming files · %1$d · %2$s</string>
+    <string name="remembered_item_size_summary">%1$d · %2$s</string>
+    <string name="remembered_outbox_summary">%1$s · %2$d · %3$s</string>
+    <string name="remembered_room_name">Room name</string>
+    <string name="remembered_rooms_unavailable">Rooms unavailable</string>
+    <string name="remembered_connection_offline">Offline</string>
+    <string name="remembered_connection_waiting">Waiting for device</string>
+    <string name="remembered_connection_connecting">Connecting…</string>
+    <string name="remembered_connection_connected">Connected</string>
+    <string name="remembered_connection_offline_description">Open Envoix on both devices to reconnect.</string>
+    <string name="remembered_connection_waiting_description">Envoix is ready. Open this room on the other device.</string>
+    <string name="remembered_connection_connecting_description">Authenticating the protected relationship.</string>
+    <string name="remembered_connection_connected_description">The protected control connection is active.</string>
+    <string name="remembered_connection_attention_description">The relationship was preserved. Retry when both devices are available.</string>
 </resources>

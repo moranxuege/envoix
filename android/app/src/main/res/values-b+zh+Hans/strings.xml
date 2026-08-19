@@ -42,6 +42,8 @@
     <string name="common_paste">粘贴</string>
     <string name="common_reject">拒绝</string>
     <string name="common_save">保存</string>
+    <string name="common_retry">重试</string>
+    <string name="common_remove">移除</string>
     <string name="nfc_open_invitation_title">打开 NFC 邀请？</string>
     <string name="nfc_untrusted_invitation_explanation">此未受信任的标签仅携带邀请。继续后仍会验证并使用常规房间流程；NFC 不会认证另一台设备。</string>
     <string name="nfc_invitation_failed_title">NFC 无法继续</string>
@@ -264,4 +266,38 @@
     <string name="hub_peer_wants_room">%1$s 想与你建立房间。</string>
     <string name="hub_peer_wants_transfer">%1$s 想要传输文件。</string>
     <string name="hub_verify">验证</string>
+
+    <string name="remembered_rooms_reconnect_explanation">已保存的设备可在 Envoix 打开时重新连接。</string>
+    <string name="remembered_room_title">房间</string>
+    <string name="remembered_room_missing">此已保存房间已不可用。</string>
+    <string name="remembered_latest_received_section">最近接收</string>
+    <string name="remembered_outbox_section">发送队列</string>
+    <string name="remembered_room_controls_section">房间控制</string>
+    <string name="remembered_rename_room">重命名房间</string>
+    <string name="remembered_forget_room">忘记此房间</string>
+    <string name="remembered_forget_room_title">忘记此房间？</string>
+    <string name="remembered_forget_room_explanation">这会从此设备移除受保护的配对关系，以及等待中或失败的文件任务；进行中的传输必须先结束。</string>
+    <string name="remembered_forget_action">忘记</string>
+    <string name="remembered_incoming_files">收到文件邀请</string>
+    <string name="remembered_prepared_items">已准备的项目</string>
+    <string name="remembered_preparing">正在准备…</string>
+    <string name="remembered_outbox_queueing">正在加入队列</string>
+    <string name="remembered_outbox_waiting_peer">等待对端上线</string>
+    <string name="remembered_outbox_offering">正在发送邀请</string>
+    <string name="remembered_rooms_empty_title">暂无已保存房间</string>
+    <string name="remembered_rooms_empty_explanation">成功传输后可保存设备。</string>
+    <string name="remembered_incoming_files_summary">收到文件 · %1$d 项 · %2$s</string>
+    <string name="remembered_item_size_summary">%1$d 项 · %2$s</string>
+    <string name="remembered_outbox_summary">%1$s · %2$d 项 · %3$s</string>
+    <string name="remembered_room_name">房间名称</string>
+    <string name="remembered_rooms_unavailable">房间不可用</string>
+    <string name="remembered_connection_offline">离线</string>
+    <string name="remembered_connection_waiting">正在等待设备</string>
+    <string name="remembered_connection_connecting">正在连接…</string>
+    <string name="remembered_connection_connected">已连接</string>
+    <string name="remembered_connection_offline_description">请在两台设备上打开 Envoix 以重新连接。</string>
+    <string name="remembered_connection_waiting_description">Envoix 已就绪；请在另一台设备上打开此房间。</string>
+    <string name="remembered_connection_connecting_description">正在验证受保护的配对关系。</string>
+    <string name="remembered_connection_connected_description">受保护的控制连接已建立。</string>
+    <string name="remembered_connection_attention_description">配对关系仍已保留；请在两台设备都可用时重试。</string>
 </resources>
