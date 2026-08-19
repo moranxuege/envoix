@@ -3,7 +3,7 @@ package dev.envoix.app
 import dev.envoix.app.ui.TransferStageTimelineEntry
 import dev.envoix.app.ui.formatTransferStageElapsed
 import dev.envoix.app.ui.latestTransferStageTimeline
-import dev.envoix.app.ui.transferStageTimelineTitle
+import dev.envoix.app.ui.transferStageTimelineTitleResource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -208,13 +208,12 @@ class TransferStageTimingTest {
     }
 
     @Test
-    fun `timeline titles are concise and user facing`() {
-        assertEquals("Connected", transferStageTimelineTitle(TransferStage.ConnectionReady, "en"))
-        assertEquals("Authenticated", transferStageTimelineTitle(TransferStage.AuthenticationComplete, "en"))
-        assertEquals("First byte", transferStageTimelineTitle(TransferStage.FirstPayload, "en"))
-        assertEquals("Payload complete", transferStageTimelineTitle(TransferStage.PayloadComplete, "en"))
-        assertEquals("Delivered", transferStageTimelineTitle(TransferStage.DeliveryComplete, "en"))
-        assertEquals("已送达", transferStageTimelineTitle(TransferStage.DeliveryComplete, "zh-Hans"))
+    fun `timeline stages map to stable presentation resources`() {
+        assertEquals(R.string.remembered_connection_connected, transferStageTimelineTitleResource(TransferStage.ConnectionReady))
+        assertEquals(R.string.activity_stage_authenticated, transferStageTimelineTitleResource(TransferStage.AuthenticationComplete))
+        assertEquals(R.string.activity_stage_first_byte, transferStageTimelineTitleResource(TransferStage.FirstPayload))
+        assertEquals(R.string.activity_stage_payload_complete, transferStageTimelineTitleResource(TransferStage.PayloadComplete))
+        assertEquals(R.string.transfer_status_delivered, transferStageTimelineTitleResource(TransferStage.DeliveryComplete))
     }
 
     private fun sample(

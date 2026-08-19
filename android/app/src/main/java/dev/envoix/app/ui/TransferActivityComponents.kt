@@ -62,12 +62,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.ConnectionPathKind
 import dev.envoix.app.Direction
+import dev.envoix.app.R
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.TransferPresentationPolicy
 import dev.envoix.app.TransferProgressPresentation
-import dev.envoix.app.connectionPathLabel
 import dev.envoix.app.humanBytes
 import dev.envoix.app.isTerminal
 import dev.envoix.app.smoothedBps
@@ -92,7 +93,6 @@ internal fun TransferCard(
     diagnosticsForCopy: (Transfer) -> String?,
 ) {
     val colors = Envoix.colors
-    val language = LocalAppLanguage.current
     val saveLocation =
         resolvedSavedDestinationLabel(
             recordedDestinationLabel = t.savedDestinationLabel,
@@ -128,12 +128,17 @@ internal fun TransferCard(
             ) {
                 Icon(
                     Icons.Default.Delete,
-                    appText("Remove transfer", "移除传输"),
+                    appString(R.string.activity_remove_transfer),
                     tint = Color.White,
                     modifier = Modifier.size(18.dp),
                 )
                 Spacer(Modifier.width(8.dp))
-                Text(appText("Remove", "移除"), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(
+                    appString(R.string.common_remove),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                )
             }
         },
     ) {
@@ -157,7 +162,7 @@ internal fun TransferCard(
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                title(t, language),
+                                title(t),
                                 color = if (canceled) colors.muted else colors.text,
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
@@ -169,7 +174,7 @@ internal fun TransferCard(
                             PathBadge(t)
                         }
                         Text(
-                            subtitle(t, language, saveLocation),
+                            subtitle(t, saveLocation),
                             color = colors.muted,
                             fontSize = 13.sp,
                             fontFamily = FontFamily.Monospace,
@@ -193,7 +198,7 @@ internal fun TransferCard(
                             Spacer(Modifier.height(10.dp))
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 if (progressPresentation == TransferProgressPresentation.Active) {
-                                    Stat(speedText(t, language))
+                                    Stat(speedText(t))
                                     Stat(etaText(t))
                                 }
                                 Stat(progressText(t))
@@ -236,9 +241,11 @@ private fun IncomingInventoryPreview(t: Transfer) {
         verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         Text(
-            appText(
-                "${t.fileCount} files · ${t.directoryCount} folders · ${humanBytes(t.total)}",
-                "${t.fileCount} 个文件 · ${t.directoryCount} 个文件夹 · ${humanBytes(t.total)}",
+            appString(
+                R.string.room_offer_summary_format,
+                appQuantityString(R.plurals.room_file_count, t.fileCount, t.fileCount),
+                appQuantityString(R.plurals.room_folder_count, t.directoryCount, t.directoryCount),
+                humanBytes(t.total),
             ),
             color = colors.accentStrong,
             fontSize = 12.sp,
@@ -247,12 +254,9 @@ private fun IncomingInventoryPreview(t: Transfer) {
         t.inventoryPreview.take(3).forEach { entry ->
             Text(
                 if (entry.directory) {
-                    appText("Folder · ${entry.name}", "文件夹 · ${entry.name}")
+                    appString(R.string.activity_folder_entry, entry.name)
                 } else {
-                    appText(
-                        "File · ${entry.name} · ${humanBytes(entry.size)}",
-                        "文件 · ${entry.name} · ${humanBytes(entry.size)}",
-                    )
+                    appString(R.string.activity_file_entry, entry.name, humanBytes(entry.size))
                 },
                 color = colors.muted,
                 fontSize = 11.sp,
@@ -261,7 +265,11 @@ private fun IncomingInventoryPreview(t: Transfer) {
             )
         }
         if (t.inventoryPreview.size > 3 || t.inventoryHasMore) {
-            Text(appText("Tap for the complete preview", "点击查看完整预览"), color = colors.muted, fontSize = 11.sp)
+            Text(
+                appString(R.string.activity_tap_for_complete_preview),
+                color = colors.muted,
+                fontSize = 11.sp,
+            )
         }
     }
 }
@@ -281,22 +289,22 @@ private fun CardControls(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (actions.canApprove) {
-            CircleBtn(Icons.Default.PlayArrow, appText("Receive transfer", "接收传输"), filled = true) {
+            CircleBtn(Icons.Default.PlayArrow, appString(R.string.activity_receive_transfer), filled = true) {
                 onApproveReceive(t.id)
             }
         }
         if (actions.canPause) {
-            CircleBtn(Icons.Default.Pause, appText("Pause transfer", "暂停传输"), filled = true) {
+            CircleBtn(Icons.Default.Pause, appString(R.string.activity_pause_transfer), filled = true) {
                 onPauseResume(t.id)
             }
         }
         if (actions.canResume) {
-            CircleBtn(Icons.Default.Refresh, appText("Resume transfer", "继续传输"), filled = true) {
+            CircleBtn(Icons.Default.Refresh, appString(R.string.activity_resume_transfer), filled = true) {
                 onPauseResume(t.id)
             }
         }
         if (actions.canCancel) {
-            CircleBtn(Icons.Default.Close, appText("Cancel transfer", "取消传输"), filled = false) {
+            CircleBtn(Icons.Default.Close, appString(R.string.activity_cancel_transfer), filled = false) {
                 onCancel(t.id)
             }
         }
@@ -304,12 +312,16 @@ private fun CardControls(
             if (t.savedUri != null) {
                 CircleBtn(
                     Icons.AutoMirrored.Filled.OpenInNew,
-                    appText("Open received item", "打开接收项目"),
+                    appString(R.string.activity_open_received_item),
                     filled = false,
                 ) { onOpen(t) }
             }
             if (t.savedUris.isNotEmpty()) {
-                CircleBtn(Icons.Default.Share, appText("Share received items", "分享接收项目"), filled = false) {
+                CircleBtn(
+                    Icons.Default.Share,
+                    appString(R.string.activity_share_received_items),
+                    filled = false,
+                ) {
                     onShare(t)
                 }
             }
@@ -356,26 +368,30 @@ private fun WaitingBody(
     onCancel: (Long) -> Unit,
 ) {
     val colors = Envoix.colors
-    val language = LocalAppLanguage.current
+    val destination =
+        destinationLabel.trim().takeIf(String::isNotEmpty)
+            ?: appString(R.string.activity_downloads_folder)
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
                 Text(
                     if (t.direction == Direction.Send) {
-                        appText("Waiting to send", "等待发送")
+                        appString(R.string.activity_waiting_to_send)
                     } else {
-                        appText("Waiting to receive", "等待接收")
+                        appString(R.string.activity_waiting_to_receive)
                     },
                     color = colors.text,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    waitingTransferSubtitle(
-                        direction = t.direction,
-                        itemTitle = itemTitle(t, language),
-                        destinationLabel = destinationLabel,
-                        language = language,
+                    appString(
+                        waitingTransferSubtitleResource(t.direction),
+                        if (t.direction == Direction.Send) {
+                            itemTitle(t)
+                        } else {
+                            destination
+                        },
                     ),
                     color = colors.muted,
                     fontSize = 13.sp,
@@ -384,10 +400,10 @@ private fun WaitingBody(
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                CircleBtn(Icons.Default.Pause, appText("Pause transfer", "暂停传输"), filled = true) {
+                CircleBtn(Icons.Default.Pause, appString(R.string.activity_pause_transfer), filled = true) {
                     onPauseResume(t.id)
                 }
-                CircleBtn(Icons.Default.Close, appText("Cancel transfer", "取消传输"), filled = false) {
+                CircleBtn(Icons.Default.Close, appString(R.string.activity_cancel_transfer), filled = false) {
                     onCancel(t.id)
                 }
             }
@@ -408,7 +424,7 @@ private fun WaitingBody(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                appText("Copy invite link", "复制邀请链接"),
+                appString(R.string.activity_copy_invite_link),
                 color = colors.muted,
                 fontSize = 13.sp,
             )
@@ -422,7 +438,7 @@ private fun WaitingBody(
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            appText("Scan this QR or paste the invite link", "扫描此二维码或粘贴邀请链接"),
+            appString(R.string.activity_scan_or_paste_invite),
             color = colors.muted,
             fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth(),
@@ -451,17 +467,14 @@ private fun DetailDrawer(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    appText("SPEED", "速度"),
+                    appString(R.string.activity_speed_section),
                     color = colors.muted,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp,
                 )
                 Text(
-                    appText(
-                        "avg ${humanBps(avg)} · peak ${humanBps(peak)}",
-                        "平均 ${humanBps(avg)} · 峰值 ${humanBps(peak)}",
-                    ),
+                    appString(R.string.activity_speed_summary, humanBps(avg), humanBps(peak)),
                     color = colors.muted,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -470,33 +483,46 @@ private fun DetailDrawer(
             SpeedChart(t.speedHistory, t.avgBps)
         }
         Spacer(Modifier.height(4.dp))
-        DetailRow(appText("Transfer", "传输"), "#${t.id}")
-        connectionPathLabel(t.pathAddr, LocalAppLanguage.current)?.let { path ->
-            DetailRow(appText("Data path", "数据路径"), path)
+        DetailRow(appString(R.string.activity_transfer_label), "#${t.id}")
+        ConnectionPathKind.fromWireOrLegacy(t.pathAddr)?.let { kind ->
+            DetailRow(
+                appString(R.string.activity_data_path_label),
+                appString(connectionPathLabelResource(kind)),
+            )
         }
-        DetailRow(appText("Transferred", "已传输"), "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
+        DetailRow(
+            appString(R.string.activity_transferred_label),
+            appString(R.string.transfer_progress_bytes, humanBytes(t.bytes), humanBytes(t.total)),
+        )
         TransferStageTimeline(t)
         if (t.rootCount > 0) {
             DetailRow(
-                appText("Inventory", "清单"),
-                appText(
-                    "${t.rootCount} roots · ${t.fileCount} files · ${t.directoryCount} folders",
-                    "${t.rootCount} 个根项目 · ${t.fileCount} 个文件 · ${t.directoryCount} 个文件夹",
+                appString(R.string.activity_inventory_label),
+                appString(
+                    R.string.room_offer_summary_format,
+                    appQuantityString(R.plurals.activity_root_count, t.rootCount, t.rootCount),
+                    appQuantityString(R.plurals.room_file_count, t.fileCount, t.fileCount),
+                    appQuantityString(R.plurals.room_folder_count, t.directoryCount, t.directoryCount),
                 ),
             )
-            DrawerLabel(appText("Authenticated items", "已认证项目"))
+            DrawerLabel(appString(R.string.activity_authenticated_items))
             t.inventoryPreview.take(20).forEach { entry ->
                 DetailRow(
-                    if (entry.directory) appText("Folder", "文件夹") else appText("File", "文件"),
-                    if (entry.directory) entry.name else "${entry.name} · ${humanBytes(entry.size)}",
+                    if (entry.directory) {
+                        appString(R.string.activity_folder_label)
+                    } else {
+                        appString(R.string.activity_file_label)
+                    },
+                    if (entry.directory) {
+                        entry.name
+                    } else {
+                        appString(R.string.activity_name_size, entry.name, humanBytes(entry.size))
+                    },
                 )
             }
             if (t.inventoryPreview.size > 20 || t.inventoryHasMore) {
                 Text(
-                    appText(
-                        "More items are available in bounded pages; only the first 20 are shown here.",
-                        "还有更多项目可分页查看；此处仅显示前 20 项。",
-                    ),
+                    appString(R.string.activity_more_items_available),
                     color = colors.muted,
                     fontSize = 11.sp,
                 )
@@ -507,16 +533,16 @@ private fun DetailDrawer(
             var copied by remember(t.id) { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
             var upload by remember(t.id) { mutableStateOf("") }
-            val uploadLabel = appText("Upload", "上传")
-            val uploadingLabel = appText("Uploading…", "正在上传…")
-            val uploadedLabel = appText("Uploaded ✓", "已上传 ✓")
-            val uploadFailedLabel = appText("Failed", "失败")
+            val uploadLabel = appString(R.string.activity_upload)
+            val uploadingLabel = appString(R.string.activity_uploading)
+            val uploadedLabel = appString(R.string.activity_uploaded)
+            val uploadFailedLabel = appString(R.string.transfer_status_failed)
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                DrawerLabel(appText("This transfer's log", "本次传输日志"))
+                DrawerLabel(appString(R.string.activity_transfer_log))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -530,7 +556,13 @@ private fun DetailDrawer(
                             }
                         }
                     }
-                    PillButton(if (copied) appText("Copied ✓", "已复制 ✓") else appText("Copy", "复制")) {
+                    PillButton(
+                        if (copied) {
+                            appString(R.string.activity_copied)
+                        } else {
+                            appString(R.string.activity_copy)
+                        },
+                    ) {
                         diagnosticsForCopy(t)?.let { text ->
                             clip.setText(
                                 AnnotatedString(text),
@@ -551,8 +583,7 @@ private fun TransferStageTimeline(t: Transfer) {
     val entries = latestTransferStageTimeline(t.stageTimings)
     if (entries.isEmpty()) return
     val colors = Envoix.colors
-    val language = LocalAppLanguage.current
-    DrawerLabel(appText("Timeline · from start", "时间线 · 从开始计时"))
+    DrawerLabel(appString(R.string.activity_timeline_from_start))
     Column(
         Modifier
             .fillMaxWidth()
@@ -572,7 +603,7 @@ private fun TransferStageTimeline(t: Transfer) {
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    transferStageTimelineTitle(entry.stage, language),
+                    appString(transferStageTimelineTitleResource(entry.stage)),
                     color = colors.text,
                     fontSize = 12.sp,
                     modifier = Modifier.weight(1f),
@@ -710,27 +741,31 @@ private fun PathBadge(t: Transfer) {
     val colors = Envoix.colors
     val (label, fg, bg) =
         when (t.status) {
-            Status.Delivered -> Triple(appText("Delivered", "已送达"), colors.success, colors.successSoft)
-            Status.Failed -> Triple(appText("Failed", "失败"), colors.danger, colors.danger.copy(alpha = 0.12f))
-            Status.Canceled -> Triple(appText("Canceled", "已取消"), colors.muted, colors.line.copy(alpha = 0.5f))
-            Status.Paused -> Triple(appText("Paused", "已暂停"), colors.warning, colors.warning.copy(alpha = 0.14f))
-            Status.Preparing -> Triple(appText("Preparing", "正在准备"), colors.accent, colors.accentSoft)
-            Status.WaitingForPeer -> Triple(appText("Waiting", "等待中"), colors.accent, colors.accentSoft)
-            Status.Pairing -> Triple(appText("Pairing", "正在配对"), colors.accent, colors.accentSoft)
-            Status.Connecting -> Triple(appText("Connecting", "正在连接"), colors.accent, colors.accentSoft)
-            Status.AwaitingDecision -> Triple(appText("Review", "待确认"), colors.warning, colors.warning.copy(alpha = 0.14f))
+            Status.Delivered -> Triple(appString(R.string.transfer_status_delivered), colors.success, colors.successSoft)
+            Status.Failed ->
+                Triple(appString(R.string.transfer_status_failed), colors.danger, colors.danger.copy(alpha = 0.12f))
+            Status.Canceled ->
+                Triple(appString(R.string.transfer_status_canceled), colors.muted, colors.line.copy(alpha = 0.5f))
+            Status.Paused ->
+                Triple(appString(R.string.transfer_status_paused), colors.warning, colors.warning.copy(alpha = 0.14f))
+            Status.Preparing -> Triple(appString(R.string.transfer_status_preparing), colors.accent, colors.accentSoft)
+            Status.WaitingForPeer -> Triple(appString(R.string.activity_status_waiting), colors.accent, colors.accentSoft)
+            Status.Pairing -> Triple(appString(R.string.activity_status_pairing), colors.accent, colors.accentSoft)
+            Status.Connecting -> Triple(appString(R.string.transfer_status_connecting), colors.accent, colors.accentSoft)
+            Status.AwaitingDecision ->
+                Triple(appString(R.string.activity_status_review), colors.warning, colors.warning.copy(alpha = 0.14f))
             Status.Transferring ->
                 if (t.direction == Direction.Send) {
-                    Triple(appText("Sending", "正在发送"), colors.accent, colors.accentSoft)
+                    Triple(appString(R.string.activity_status_sending), colors.accent, colors.accentSoft)
                 } else {
-                    Triple(appText("Receiving", "正在接收"), colors.accent, colors.accentSoft)
+                    Triple(appString(R.string.activity_status_receiving), colors.accent, colors.accentSoft)
                 }
-            Status.Verifying -> Triple(appText("Verifying", "正在验证"), colors.accent, colors.accentSoft)
-            Status.Saving -> Triple(appText("Saving", "正在保存"), colors.accent, colors.accentSoft)
+            Status.Verifying -> Triple(appString(R.string.transfer_status_verifying), colors.accent, colors.accentSoft)
+            Status.Saving -> Triple(appString(R.string.activity_status_saving), colors.accent, colors.accentSoft)
             Status.WaitingForReceiverSave ->
-                Triple(appText("Saving remotely", "接收端正在保存"), colors.accent, colors.accentSoft)
+                Triple(appString(R.string.activity_status_saving_remotely), colors.accent, colors.accentSoft)
             Status.FinalizingDelivery ->
-                Triple(appText("Finalizing delivery", "正在确认送达"), colors.accent, colors.accentSoft)
+                Triple(appString(R.string.activity_status_finalizing_delivery), colors.accent, colors.accentSoft)
         }
     Pill(label, fg, bg)
 }
@@ -761,42 +796,39 @@ private fun Stat(text: String) {
 
 // ---- formatting helpers ----
 
-private fun title(
-    t: Transfer,
-    language: String,
-): String {
+@Composable
+private fun title(t: Transfer): String {
     val arrow = if (t.direction == Direction.Send) "↑" else "↓"
-    return "$arrow ${itemTitle(t, language)}"
+    return appString(R.string.activity_transfer_title, arrow, itemTitle(t))
 }
 
-private fun itemTitle(
-    t: Transfer,
-    language: String,
-): String {
+@Composable
+private fun itemTitle(t: Transfer): String {
     val itemCount = t.fileCount + t.directoryCount
     return when {
         t.savedUris.size == 1 && !t.savedName.isNullOrBlank() -> t.savedName
         !t.fileName.isNullOrBlank() -> t.fileName
-        itemCount == 1 -> AppText.value("1 item", "1 个项目", language)
-        itemCount > 1 -> AppText.value("$itemCount items", "$itemCount 个项目", language)
-        t.direction == Direction.Send -> AppText.value("Outgoing transfer", "待发送内容", language)
-        else -> AppText.value("Incoming transfer", "待接收内容", language)
+        itemCount > 0 -> appQuantityString(R.plurals.room_item_count, itemCount, itemCount)
+        t.direction == Direction.Send -> appString(R.string.room_outgoing_transfer)
+        else -> appString(R.string.room_incoming_transfer)
     }
 }
 
+@Composable
 private fun subtitle(
     t: Transfer,
-    language: String,
     saveLocation: String,
-): String =
-    when {
-        t.status == Status.Delivered && t.savedUri != null ->
-            savedDestinationSubtitle(saveLocation, language)
-        t.pathAddr != null ->
-            connectionPathLabel(t.pathAddr, language)
-                ?: AppText.value("One-time transfer", "一次性传输", language)
-        else -> AppText.value("One-time transfer", "一次性传输", language)
+): String {
+    if (t.status == Status.Delivered && t.savedUri != null) {
+        return appString(R.string.activity_saved_destination, saveLocation)
     }
+    val pathKind = ConnectionPathKind.fromWireOrLegacy(t.pathAddr)
+    return if (pathKind == null) {
+        appString(R.string.activity_one_time_transfer)
+    } else {
+        appString(connectionPathLabelResource(pathKind))
+    }
+}
 
 private fun fraction(t: Transfer): Float {
     if (TransferPresentationPolicy.progress(t.status) == TransferProgressPresentation.Complete) return 1f
@@ -804,37 +836,36 @@ private fun fraction(t: Transfer): Float {
     return (t.bytes.toFloat() / t.total.toFloat()).coerceIn(0f, 1f)
 }
 
-private fun speedText(
-    t: Transfer,
-    language: String,
-): String {
+@Composable
+private fun speedText(t: Transfer): String {
     if (t.status != Status.Transferring || t.speedBps <= 0) {
         return when (t.status) {
-            Status.Preparing -> AppText.value("preparing", "正在准备", language)
-            Status.WaitingForPeer -> AppText.value("waiting", "正在等待", language)
-            Status.Pairing -> AppText.value("pairing", "正在配对", language)
-            Status.Connecting -> AppText.value("connecting", "正在连接", language)
-            Status.AwaitingDecision -> AppText.value("review required", "需要确认", language)
+            Status.Preparing -> appString(R.string.transfer_status_preparing)
+            Status.WaitingForPeer -> appString(R.string.activity_status_waiting)
+            Status.Pairing -> appString(R.string.activity_status_pairing)
+            Status.Connecting -> appString(R.string.transfer_status_connecting)
+            Status.AwaitingDecision -> appString(R.string.activity_status_review_required)
             Status.Transferring ->
                 if (t.direction == Direction.Send) {
-                    AppText.value("sending", "正在发送", language)
+                    appString(R.string.activity_status_sending)
                 } else {
-                    AppText.value("receiving", "正在接收", language)
+                    appString(R.string.activity_status_receiving)
                 }
-            Status.Verifying -> AppText.value("verifying", "正在验证", language)
-            Status.Saving -> AppText.value("saving", "正在保存", language)
-            Status.WaitingForReceiverSave -> AppText.value("receiver saving", "接收端正在保存", language)
-            Status.FinalizingDelivery -> AppText.value("finalizing delivery", "正在确认送达", language)
-            Status.Delivered -> AppText.value("delivered", "已送达", language)
-            Status.Paused -> AppText.value("paused", "已暂停", language)
-            Status.Failed -> AppText.value("failed", "失败", language)
-            Status.Canceled -> AppText.value("canceled", "已取消", language)
+            Status.Verifying -> appString(R.string.transfer_status_verifying)
+            Status.Saving -> appString(R.string.activity_status_saving)
+            Status.WaitingForReceiverSave -> appString(R.string.activity_status_receiver_saving)
+            Status.FinalizingDelivery -> appString(R.string.activity_status_finalizing_delivery)
+            Status.Delivered -> appString(R.string.transfer_status_delivered)
+            Status.Paused -> appString(R.string.transfer_status_paused)
+            Status.Failed -> appString(R.string.transfer_status_failed)
+            Status.Canceled -> appString(R.string.transfer_status_canceled)
         }
     }
     val bps = smoothedBps(t)
     return transferRateString(bps)
 }
 
+@Composable
 private fun etaText(t: Transfer): String {
     val bps = smoothedBps(t)
     if (t.status != Status.Transferring || bps <= 0 || t.total <= 0) return "—"
@@ -842,10 +873,16 @@ private fun etaText(t: Transfer): String {
     val secs = (remain / bps).roundToInt()
     val m = secs / 60
     val s = secs % 60
-    return "%02d:%02d ETA".format(m, s)
+    return appString(R.string.activity_eta_clock, m, s)
 }
 
-private fun progressText(t: Transfer): String = "${humanBytes(t.bytes)} / ${humanBytes(t.total)}"
+@Composable
+private fun progressText(t: Transfer): String =
+    appString(
+        R.string.transfer_progress_bytes,
+        humanBytes(t.bytes),
+        humanBytes(t.total),
+    )
 
 private fun humanBps(bps: Double): String {
     if (bps <= 0) return "—"

@@ -49,7 +49,6 @@ import dev.envoix.app.ConnectionPathKind
 import dev.envoix.app.R
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
-import dev.envoix.app.connectionPathLabel
 import dev.envoix.app.humanBytes
 import dev.envoix.app.isTerminal
 import dev.envoix.app.smoothedBps
@@ -168,16 +167,17 @@ internal fun activityRoomStatusKind(metrics: ActivityRoomMetrics): ActivityRoomS
 
 internal fun activityRoomDisplayName(
     label: String?,
-    language: String,
+    oneTimeRoomLabel: String,
+    directTransferLabel: String,
     isDirect: Boolean = false,
 ): String =
     label
         ?.trim()
         ?.takeIf(String::isNotEmpty)
         ?: if (isDirect) {
-            AppText.value("Direct transfer", "直接传输", language)
+            directTransferLabel
         } else {
-            AppText.value("One-time room", "一次性房间", language)
+            oneTimeRoomLabel
         }
 
 private fun Iterable<Long>.saturatedNonNegativeLongSum(): Long =
@@ -356,12 +356,9 @@ private fun ActivityRoomCard(
     onToggleRoom: () -> Unit,
 ) {
     val colors = Envoix.colors
-    val language = LocalAppLanguage.current
     val metrics = remember(group.transfers) { activityRoomMetrics(group.transfers) }
-    val dataPaths =
-        remember(group.transfers, language) {
-            activityRoomDataPaths(group.transfers, language)
-        }
+    val dataPathKinds = remember(group.transfers) { activityRoomDataPathKinds(group.transfers) }
+    val dataPaths = dataPathKinds.map { appString(connectionPathLabelResource(it)) }
     val status = activityRoomStatusKind(metrics)
     val progress =
         if (metrics.total <= 0L) {
@@ -415,7 +412,12 @@ private fun ActivityRoomCard(
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    activityRoomDisplayName(group.label, language, group.isDirect),
+                    activityRoomDisplayName(
+                        label = group.label,
+                        oneTimeRoomLabel = appString(R.string.activity_one_time_room),
+                        directTransferLabel = appString(R.string.activity_direct_transfer),
+                        isDirect = group.isDirect,
+                    ),
                     color = colors.text,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.ExtraBold,
@@ -423,7 +425,7 @@ private fun ActivityRoomCard(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    activityRoomInventorySummary(metrics, language),
+                    activityRoomInventorySummary(metrics),
                     color = colors.muted,
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -469,7 +471,7 @@ private fun ActivityRoomCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                val performance = activityRoomPerformanceSummary(metrics, language)
+                val performance = activityRoomPerformanceSummary(metrics)
                 if (performance.isNotEmpty()) {
                     Spacer(Modifier.width(8.dp))
                     Text(
@@ -484,7 +486,7 @@ private fun ActivityRoomCard(
                 }
             }
         } else {
-            val performance = activityRoomPerformanceSummary(metrics, language)
+            val performance = activityRoomPerformanceSummary(metrics)
             if (performance.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -499,9 +501,7 @@ private fun ActivityRoomCard(
         if (dataPaths.isNotEmpty()) {
             Spacer(Modifier.height(7.dp))
             Text(
-                AppText.value("Data path", "数据路径", language) +
-                    " · " +
-                    dataPaths.joinToString(" · "),
+                appString(R.string.activity_data_paths, dataPaths.joinToString(" · ")),
                 color = colors.muted,
                 fontSize = 12.sp,
                 maxLines = 1,
@@ -511,16 +511,13 @@ private fun ActivityRoomCard(
     }
 }
 
-internal fun activityRoomDataPaths(
-    transfers: List<Transfer>,
-    language: String,
-): List<String> {
+internal fun activityRoomDataPathKinds(transfers: List<Transfer>): List<ConnectionPathKind> {
     val observed =
         transfers
             .mapNotNull { transfer -> ConnectionPathKind.fromWireOrLegacy(transfer.pathAddr) }
             .toSet()
     return ConnectionPathKind.entries.mapNotNull { kind ->
-        if (kind in observed) connectionPathLabel(kind.wire, language) else null
+        kind.takeIf { it in observed }
     }
 }
 
@@ -584,65 +581,49 @@ private fun ActivityRoomStatus(
     )
 }
 
-private fun activityRoomInventorySummary(
-    metrics: ActivityRoomMetrics,
-    language: String,
-): String {
+@Composable
+private fun activityRoomInventorySummary(metrics: ActivityRoomMetrics): String {
     val parts =
         mutableListOf(
-            AppText.value(
-                "${metrics.transferCount} ${if (metrics.transferCount == 1) "transfer" else "transfers"}",
-                "${metrics.transferCount} 次传输",
-                language,
+            appQuantityString(
+                R.plurals.activity_transfer_count,
+                metrics.transferCount,
+                metrics.transferCount,
             ),
         )
     if (metrics.fileCount > 0) {
         parts +=
-            AppText.value(
-                "${metrics.fileCount} ${if (metrics.fileCount == 1) "file" else "files"}",
-                "${metrics.fileCount} 个文件",
-                language,
+            appQuantityString(
+                R.plurals.room_file_count,
+                metrics.fileCount,
+                metrics.fileCount,
             )
     }
     if (metrics.directoryCount > 0) {
         parts +=
-            AppText.value(
-                "${metrics.directoryCount} ${if (metrics.directoryCount == 1) "folder" else "folders"}",
-                "${metrics.directoryCount} 个文件夹",
-                language,
+            appQuantityString(
+                R.plurals.room_folder_count,
+                metrics.directoryCount,
+                metrics.directoryCount,
             )
     }
     return parts.joinToString(" · ")
 }
 
-internal fun activityRoomPerformanceSummary(
-    metrics: ActivityRoomMetrics,
-    language: String,
-): String {
+@Composable
+internal fun activityRoomPerformanceSummary(metrics: ActivityRoomMetrics): String {
     val speed =
         when {
             metrics.currentBps > 0.0 ->
-                AppText.value(
-                    "Now ${transferRateString(metrics.currentBps)}",
-                    "当前 ${transferRateString(metrics.currentBps)}",
-                    language,
-                )
+                appString(R.string.activity_speed_now, transferRateString(metrics.currentBps))
             metrics.averageBps > 0.0 ->
-                AppText.value(
-                    "Avg ${transferRateString(metrics.averageBps)}",
-                    "平均 ${transferRateString(metrics.averageBps)}",
-                    language,
-                )
+                appString(R.string.activity_speed_average, transferRateString(metrics.averageBps))
             else -> ""
         }
     val eta =
         metrics.etaSeconds
             ?.let {
-                AppText.value(
-                    "ETA ${activityEta(it)}",
-                    "预计 ${activityEta(it)}",
-                    language,
-                )
+                appString(R.string.activity_eta, activityEta(it))
             }.orEmpty()
     return listOf(speed, eta).filter(String::isNotEmpty).joinToString(" · ")
 }

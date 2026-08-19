@@ -1,7 +1,5 @@
 package dev.envoix.app
 
-import dev.envoix.app.ui.AppText
-
 internal enum class ConnectionPathKind(
     val wire: String,
 ) {
@@ -38,17 +36,3 @@ internal enum class ConnectionPathKind(
         }
     }
 }
-
-internal fun connectionPathLabel(
-    value: String?,
-    language: String,
-): String? =
-    when (ConnectionPathKind.fromWireOrLegacy(value)) {
-        ConnectionPathKind.Direct -> AppText.value("Direct", "直连", language)
-        ConnectionPathKind.DirectIpv4 -> AppText.value("Direct · IPv4", "直连 · IPv4", language)
-        ConnectionPathKind.DirectIpv6 -> AppText.value("Direct · IPv6", "直连 · IPv6", language)
-        ConnectionPathKind.Relay -> AppText.value("Relay", "中继", language)
-        ConnectionPathKind.WifiAware -> AppText.value("Wi-Fi Aware", "Wi-Fi Aware", language)
-        ConnectionPathKind.Other -> AppText.value("Other", "其他", language)
-        null -> null
-    }

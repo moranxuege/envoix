@@ -1,6 +1,9 @@
 package dev.envoix.app.ui
 
+import androidx.annotation.StringRes
+import dev.envoix.app.ConnectionPathKind
 import dev.envoix.app.Direction
+import dev.envoix.app.R
 import dev.envoix.app.TransferStage
 import dev.envoix.app.TransferStageTiming
 
@@ -10,25 +13,12 @@ internal data class TransferActivityPresentationEnvironment(
     val canUploadDiagnostics: Boolean,
 )
 
-internal fun waitingTransferSubtitle(
-    direction: Direction,
-    itemTitle: String,
-    destinationLabel: String,
-    language: String,
-): String =
+@StringRes
+internal fun waitingTransferSubtitleResource(direction: Direction): Int =
     if (direction == Direction.Send) {
-        AppText.value(
-            "Sending $itemTitle",
-            "准备发送 $itemTitle",
-            language,
-        )
+        R.string.activity_sending_item
     } else {
-        val destination = destinationLabel.trim().ifEmpty { "Downloads" }
-        AppText.value(
-            "Saving to $destination",
-            "将保存到 $destination",
-            language,
-        )
+        R.string.activity_saving_to
     }
 
 internal data class TransferStageTimelineEntry(
@@ -79,35 +69,32 @@ private fun formatTenths(value: Long): String =
         "${value / 10L}.${value % 10L}"
     }
 
-internal fun transferStageTimelineTitle(
-    stage: TransferStage,
-    language: String,
-): String =
+@StringRes
+internal fun transferStageTimelineTitleResource(stage: TransferStage): Int =
     when (stage) {
-        TransferStage.SessionStarted -> AppText.value("Started", "已开始", language)
-        TransferStage.ConnectionReady -> AppText.value("Connected", "已连接", language)
-        TransferStage.AuthenticationStarted -> AppText.value("Authenticating", "正在认证", language)
-        TransferStage.AuthenticationComplete -> AppText.value("Authenticated", "已认证", language)
-        TransferStage.ManifestOffer -> AppText.value("File list ready", "文件清单已就绪", language)
-        TransferStage.ManifestAccepted -> AppText.value("File list accepted", "文件清单已接受", language)
-        TransferStage.FirstPayload -> AppText.value("First byte", "首字节", language)
-        TransferStage.PayloadComplete -> AppText.value("Payload complete", "数据传输完成", language)
-        TransferStage.DeliveryComplete -> AppText.value("Delivered", "已送达", language)
-        TransferStage.Canceled -> AppText.value("Canceled", "已取消", language)
-        TransferStage.Failed -> AppText.value("Failed", "失败", language)
+        TransferStage.SessionStarted -> R.string.activity_stage_started
+        TransferStage.ConnectionReady -> R.string.remembered_connection_connected
+        TransferStage.AuthenticationStarted -> R.string.activity_stage_authenticating
+        TransferStage.AuthenticationComplete -> R.string.activity_stage_authenticated
+        TransferStage.ManifestOffer -> R.string.activity_stage_file_list_ready
+        TransferStage.ManifestAccepted -> R.string.activity_stage_file_list_accepted
+        TransferStage.FirstPayload -> R.string.activity_stage_first_byte
+        TransferStage.PayloadComplete -> R.string.activity_stage_payload_complete
+        TransferStage.DeliveryComplete -> R.string.transfer_status_delivered
+        TransferStage.Canceled -> R.string.transfer_status_canceled
+        TransferStage.Failed -> R.string.transfer_status_failed
     }
 
-internal fun savedDestinationSubtitle(
-    destinationLabel: String,
-    language: String,
-): String {
-    val destination = destinationLabel.trim().ifEmpty { "Downloads" }
-    return AppText.value(
-        "Saved to $destination · tap for details",
-        "已保存到 $destination · 点击查看详情",
-        language,
-    )
-}
+@StringRes
+internal fun connectionPathLabelResource(kind: ConnectionPathKind): Int =
+    when (kind) {
+        ConnectionPathKind.Direct -> R.string.connection_path_direct
+        ConnectionPathKind.DirectIpv4 -> R.string.connection_path_direct_ipv4
+        ConnectionPathKind.DirectIpv6 -> R.string.connection_path_direct_ipv6
+        ConnectionPathKind.Relay -> R.string.connection_path_relay
+        ConnectionPathKind.WifiAware -> R.string.hub_wifi_aware
+        ConnectionPathKind.Other -> R.string.connection_path_other
+    }
 
 internal fun resolvedSavedDestinationLabel(
     recordedDestinationLabel: String?,

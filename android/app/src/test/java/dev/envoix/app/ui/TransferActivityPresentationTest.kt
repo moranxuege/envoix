@@ -1,6 +1,8 @@
 package dev.envoix.app.ui
 
+import dev.envoix.app.ConnectionPathKind
 import dev.envoix.app.Direction
+import dev.envoix.app.R
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.TransferActivityGroup
@@ -116,37 +118,41 @@ class TransferActivityPresentationTest {
     fun `room title uses only explicit label and never the transport reference`() {
         assertEquals(
             "Family room",
-            activityRoomDisplayName(" Family room ", AppText.ENGLISH),
+            activityRoomDisplayName(" Family room ", "One-time room", "Direct transfer"),
         )
         assertEquals(
             "一次性房间",
-            activityRoomDisplayName(null, AppText.SIMPLIFIED_CHINESE),
+            activityRoomDisplayName(null, "一次性房间", "直接传输"),
         )
         assertEquals(
             "One-time room",
-            activityRoomDisplayName(" ", AppText.ENGLISH),
+            activityRoomDisplayName(" ", "One-time room", "Direct transfer"),
         )
         assertEquals(
             "Direct transfer",
-            activityRoomDisplayName(null, AppText.ENGLISH, isDirect = true),
+            activityRoomDisplayName(null, "One-time room", "Direct transfer", isDirect = true),
         )
-        assertFalse(activityRoomDisplayName(null, AppText.ENGLISH).contains("opaque"))
+        assertFalse(
+            activityRoomDisplayName(null, "One-time room", "Direct transfer").contains("opaque"),
+        )
     }
 
     @Test
     fun `room card reports only observed data paths in stable order`() {
         val paths =
-            activityRoomDataPaths(
+            activityRoomDataPathKinds(
                 listOf(
                     transfer(id = 1, room = "one", pathAddr = "relay (hidden endpoint)"),
                     transfer(id = 2, room = "two", pathAddr = "direct"),
                     transfer(id = 3, room = "three", pathAddr = "wifi_aware"),
                     transfer(id = 4, room = "four", pathAddr = null),
                 ),
-                AppText.ENGLISH,
             )
 
-        assertEquals(listOf("Direct", "Relay", "Wi-Fi Aware"), paths)
+        assertEquals(
+            listOf(ConnectionPathKind.Direct, ConnectionPathKind.Relay, ConnectionPathKind.WifiAware),
+            paths,
+        )
     }
 
     @Test
@@ -187,10 +193,6 @@ class TransferActivityPresentationTest {
         assertEquals(400.0, metrics.currentBps, 0.001)
         assertEquals(400.0, metrics.averageBps, 0.001)
         assertEquals(5.0, requireNotNull(metrics.etaSeconds), 0.001)
-        assertEquals(
-            "Now 400 B/s · ETA 5s",
-            activityRoomPerformanceSummary(metrics, AppText.ENGLISH),
-        )
         assertEquals(ActivityRoomStatusKind.Active, activityRoomStatusKind(metrics))
     }
 
@@ -379,23 +381,7 @@ class TransferActivityPresentationTest {
     }
 
     @Test
-    fun `delivered activity uses configured destination in both languages`() {
-        assertEquals(
-            "Saved to Family archive · tap for details",
-            savedDestinationSubtitle("Family archive", AppText.ENGLISH),
-        )
-        assertEquals(
-            "已保存到 家庭归档 · 点击查看详情",
-            savedDestinationSubtitle("家庭归档", AppText.SIMPLIFIED_CHINESE),
-        )
-    }
-
-    @Test
     fun `delivered activity falls back to Downloads for an empty destination`() {
-        assertEquals(
-            "Saved to Downloads · tap for details",
-            savedDestinationSubtitle("  ", AppText.ENGLISH),
-        )
         assertEquals(
             "Downloads",
             resolvedSavedDestinationLabel(
@@ -406,46 +392,14 @@ class TransferActivityPresentationTest {
     }
 
     @Test
-    fun `waiting receive uses the configured destination`() {
+    fun `waiting subtitle selects a resource from the transfer direction`() {
         assertEquals(
-            "Saving to Family archive",
-            waitingTransferSubtitle(
-                direction = Direction.Receive,
-                itemTitle = "ignored",
-                destinationLabel = "Family archive",
-                language = AppText.ENGLISH,
-            ),
+            R.string.activity_saving_to,
+            waitingTransferSubtitleResource(Direction.Receive),
         )
         assertEquals(
-            "将保存到 家庭归档",
-            waitingTransferSubtitle(
-                direction = Direction.Receive,
-                itemTitle = "ignored",
-                destinationLabel = "家庭归档",
-                language = AppText.SIMPLIFIED_CHINESE,
-            ),
-        )
-    }
-
-    @Test
-    fun `waiting subtitle handles send and empty destination`() {
-        assertEquals(
-            "Sending 2 items",
-            waitingTransferSubtitle(
-                direction = Direction.Send,
-                itemTitle = "2 items",
-                destinationLabel = "ignored",
-                language = AppText.ENGLISH,
-            ),
-        )
-        assertEquals(
-            "Saving to Downloads",
-            waitingTransferSubtitle(
-                direction = Direction.Receive,
-                itemTitle = "ignored",
-                destinationLabel = " ",
-                language = AppText.ENGLISH,
-            ),
+            R.string.activity_sending_item,
+            waitingTransferSubtitleResource(Direction.Send),
         )
     }
 

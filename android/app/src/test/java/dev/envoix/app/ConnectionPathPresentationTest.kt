@@ -1,6 +1,5 @@
 package dev.envoix.app
 
-import dev.envoix.app.ui.AppText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -11,27 +10,24 @@ class ConnectionPathPresentationTest {
     fun `classifies structured and legacy paths without presenting endpoints`() {
         val cases =
             mapOf(
-                "direct" to (ConnectionPathKind.Direct to "Direct"),
-                "direct (198.51.100.42:4242)" to (ConnectionPathKind.Direct to "Direct"),
-                "direct_ipv4" to (ConnectionPathKind.DirectIpv4 to "Direct · IPv4"),
-                "direct_ipv6" to (ConnectionPathKind.DirectIpv6 to "Direct · IPv6"),
-                "relay" to (ConnectionPathKind.Relay to "Relay"),
-                "relay (https://private-relay.example)" to (ConnectionPathKind.Relay to "Relay"),
-                "wifi_aware" to (ConnectionPathKind.WifiAware to "Wi-Fi Aware"),
-                "mdns" to (ConnectionPathKind.Other to "Other"),
-                "custom transport details" to (ConnectionPathKind.Other to "Other"),
+                "direct" to ConnectionPathKind.Direct,
+                "direct (198.51.100.42:4242)" to ConnectionPathKind.Direct,
+                "direct_ipv4" to ConnectionPathKind.DirectIpv4,
+                "direct_ipv6" to ConnectionPathKind.DirectIpv6,
+                "relay" to ConnectionPathKind.Relay,
+                "relay (https://private-relay.example)" to ConnectionPathKind.Relay,
+                "wifi_aware" to ConnectionPathKind.WifiAware,
+                "mdns" to ConnectionPathKind.Other,
+                "custom transport details" to ConnectionPathKind.Other,
             )
 
-        cases.forEach { (raw, expected) ->
-            val (kind, expectedLabel) = expected
+        cases.forEach { (raw, kind) ->
             assertEquals(kind, ConnectionPathKind.fromWireOrLegacy(raw))
-            val label = connectionPathLabel(raw, AppText.ENGLISH).orEmpty()
-            assertEquals(expectedLabel, label)
-            assertFalse(label.contains("198.51.100.42"))
-            assertFalse(label.contains("private-relay.example"))
-            assertFalse(label.contains("custom transport details"))
+            assertFalse(kind.wire.contains("198.51.100.42"))
+            assertFalse(kind.wire.contains("private-relay.example"))
+            assertFalse(kind.wire.contains("custom transport details"))
         }
         assertNull(ConnectionPathKind.fromWireOrLegacy(null))
-        assertNull(connectionPathLabel("", AppText.ENGLISH))
+        assertNull(ConnectionPathKind.fromWireOrLegacy(""))
     }
 }
