@@ -72,8 +72,6 @@
     <true/>
     <key>UILaunchStoryboardName</key>
     <string>LaunchScreen</string>
-    <key>UIRequiresFullScreen</key>
-    <true/>
     <key>WiFiAwareServices</key>
     <dict>
         <key>_envoix._udp</key>
@@ -94,6 +92,13 @@
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
 </dict>
 </plist>

@@ -229,6 +229,11 @@ different root presentation shells:
 - iPad: adaptive split navigation, dynamic window sizing, multiple scenes,
   drag/drop, keyboard, pointer, and context-menu behavior.
 
+Shell selection follows the scene's horizontal size class rather than the
+hardware model. A narrow iPad window therefore uses the compact stack, while a
+regular-width iPad window uses persistent split navigation. Page selection and
+its return context are scene-local; durable transfers remain process-owned.
+
 ### macOS
 
 The target topology is a signed application bundle containing a

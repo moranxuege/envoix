@@ -7,13 +7,6 @@ import UniformTypeIdentifiers
 import UIKit
 #endif
 
-private enum MobilePage {
-    case connect
-    case room
-    case activity
-    case settings
-}
-
 private enum MobileTransferRoute: String, Identifiable {
     case send
     case receive
@@ -321,6 +314,7 @@ struct MobileConnectionFlowView: View {
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
@@ -336,6 +330,16 @@ struct MobileConnectionFlowView: View {
         gateway: RoomControlGatewayFactory.make()
     )
     @StateObject private var rememberedOutbox = RememberedRoomOutboxController()
+    @StateObject private var navigation = MobileSceneNavigationState(
+        initialPage: {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity") {
+                return .activity
+            }
+            #endif
+            return .connect
+        }()
+    )
     #if os(iOS) && canImport(CoreNFC)
     @StateObject private var nfcInvitationExchange = NFCInvitationExchange()
     #endif
@@ -345,15 +349,9 @@ struct MobileConnectionFlowView: View {
     @State private var nfcReadinessGate = NFCInvitationReadinessGate()
     #endif
     @State private var connectionHubModalIsPresented = false
-    @State private var page: MobilePage = {
-        #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity") {
-            return .activity
-        }
-        #endif
-        return .connect
-    }()
-    @State private var returnPage: MobilePage = .connect
+    #if os(iOS)
+    @State private var splitViewVisibility = NavigationSplitViewVisibility.all
+    #endif
     @State private var transferRoute: MobileTransferRoute?
     @State private var preservedSendSelection = SendSelectionSnapshot()
     @State private var pendingSendPairingInput: String?
@@ -391,15 +389,7 @@ struct MobileConnectionFlowView: View {
 
     var body: some View {
         ZStack {
-            NavigationStack {
-                pageContent
-                    .background(Theme.bg)
-                    .navigationTitle(pageTitle)
-                    #if os(iOS)
-                    .navigationBarTitleDisplayMode(.inline)
-                    #endif
-                    .toolbar { toolbarContent }
-            }
+            navigationShell
             #if os(iOS)
             .allowsHitTesting(pendingExternalInvitation == nil)
             .accessibilityHidden(pendingExternalInvitation != nil)
@@ -630,7 +620,7 @@ struct MobileConnectionFlowView: View {
             Button(AppText.value("Return to room", "返回房间", language: language)) {
                 pendingRoomReplacement = nil
                 if workflow.activeRoomID != nil {
-                    page = .room
+                    navigation.page = .room
                 }
             }
             Button(AppText.value("End and replace", "结束并替换", language: language), role: .destructive) {
@@ -684,7 +674,7 @@ struct MobileConnectionFlowView: View {
             handleIncomingURL(url)
         }
         #endif
-        .onChange(of: page) { newPage in
+        .onChange(of: navigation.page) { newPage in
             updateDiscoveryLease()
             #if os(iOS) && canImport(CoreNFC)
             if newPage == .connect {
@@ -775,7 +765,7 @@ struct MobileConnectionFlowView: View {
             if phase == .connected,
                workflow.room != nil {
                 roomInvitationIsRevealed = false
-                page = .room
+                navigation.page = .room
                 workflow.setLocalTransferActive(roomHasActiveTransfers)
             } else if phase == .connected,
                       workflow.rememberedRoom != nil {
@@ -848,8 +838,70 @@ struct MobileConnectionFlowView: View {
     }
 
     @ViewBuilder
+    private var navigationShell: some View {
+        #if os(iOS)
+        if horizontalSizeClass == .regular {
+            NavigationSplitView(columnVisibility: $splitViewVisibility) {
+                sidebar
+            } detail: {
+                pageNavigationStack
+            }
+            .navigationSplitViewStyle(.balanced)
+        } else {
+            pageNavigationStack
+        }
+        #else
+        pageNavigationStack
+        #endif
+    }
+
+    private var pageNavigationStack: some View {
+        NavigationStack {
+            pageContent
+                .background(Theme.bg)
+                .navigationTitle(pageTitle)
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                #endif
+                .toolbar { toolbarContent }
+        }
+    }
+
+    #if os(iOS)
+    private var sidebar: some View {
+        List(selection: sidebarSelection) {
+            sidebarRow(.connect, systemImage: "sparkles")
+            if workflow.activeRoomID != nil {
+                sidebarRow(.room, systemImage: "person.2.fill")
+            }
+            sidebarRow(.activity, systemImage: "clock.arrow.circlepath")
+            sidebarRow(.settings, systemImage: "gearshape")
+        }
+        .navigationTitle("Envoix")
+        .accessibilityIdentifier("ipad_sidebar")
+    }
+
+    private var sidebarSelection: Binding<MobilePage?> {
+        Binding(
+            get: { navigation.page },
+            set: { destination in
+                if let destination {
+                    showPage(destination)
+                }
+            }
+        )
+    }
+
+    private func sidebarRow(_ destination: MobilePage, systemImage: String) -> some View {
+        Label(pageTitle(destination), systemImage: systemImage)
+            .tag(destination)
+            .accessibilityIdentifier("ipad_sidebar_\(destination.rawValue)")
+    }
+    #endif
+
+    @ViewBuilder
     private var pageContent: some View {
-        switch page {
+        switch navigation.page {
         case .connect:
             ConnectionHubView(
                 coordinator: nearbyCoordinator,
@@ -971,7 +1023,7 @@ struct MobileConnectionFlowView: View {
                 )
             } else {
                 Color.clear
-                    .onAppear { page = .connect }
+                    .onAppear { navigation.page = .connect }
             }
         case .activity:
             activityPage
@@ -1008,7 +1060,7 @@ struct MobileConnectionFlowView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if page == .connect {
+        if navigation.page == .connect {
             ToolbarItem(placement: leadingToolbarPlacement) {
                 Button {
                     showPage(.activity)
@@ -1032,9 +1084,9 @@ struct MobileConnectionFlowView: View {
             }
         }
 
-        if page != .connect {
+        if navigation.page != .connect {
             ToolbarItem(placement: trailingToolbarPlacement) {
-                if page != .activity {
+                if navigation.page != .activity {
                 Button {
                     showPage(.activity)
                 } label: {
@@ -1048,7 +1100,7 @@ struct MobileConnectionFlowView: View {
         }
 
         ToolbarItem(placement: trailingToolbarPlacement) {
-            if page != .settings {
+            if navigation.page != .settings {
                 Button {
                     showPage(.settings)
                 } label: {
@@ -1145,6 +1197,10 @@ struct MobileConnectionFlowView: View {
     }
 
     private var pageTitle: String {
+        pageTitle(navigation.page)
+    }
+
+    private func pageTitle(_ page: MobilePage) -> String {
         switch page {
         case .connect: return "Envoix"
         case .room: return AppText.value("Room", "房间", language: language)
@@ -1324,7 +1380,7 @@ struct MobileConnectionFlowView: View {
             existingActivityIDs: Set(model.activities.map(\.activityId))
         )
         resetRoomTransferHandoff()
-        page = .room
+        navigation.page = .room
         DispatchQueue.main.async {
             switch action {
             case .offerFiles: offerFiles()
@@ -1434,7 +1490,7 @@ struct MobileConnectionFlowView: View {
             return
         }
         resetRoomTransferHandoff()
-        page = .room
+        navigation.page = .room
         DispatchQueue.main.async {
             onOpened()
         }
@@ -1462,7 +1518,7 @@ struct MobileConnectionFlowView: View {
                 return
             }
             resetRoomTransferHandoff()
-            page = .connect
+            navigation.page = .connect
             if let cleanupWarning {
                 ToastCenter.shared.show(cleanupWarning)
             }
@@ -1575,7 +1631,7 @@ struct MobileConnectionFlowView: View {
         } else {
             workflow.closeRoom()
         }
-        page = .connect
+        navigation.page = .connect
     }
 
     private func resetRoomTransferHandoff() {
@@ -1625,25 +1681,20 @@ struct MobileConnectionFlowView: View {
     }
 
     private func showPage(_ destination: MobilePage) {
-        if page == .connect || page == .room {
-            returnPage = page
-        }
-        page = destination
+        navigation.show(destination)
     }
 
     private func navigateBack() {
-        switch page {
+        switch navigation.page {
         case .room:
             if workflow.rememberedRoom != nil {
                 workflow.unpinRememberedRoom()
-                page = .connect
+                navigation.page = .connect
             } else {
                 requestCloseRoom()
             }
         case .activity, .settings:
-            page = returnPage == .room && workflow.activeRoomID == nil
-                ? .connect
-                : returnPage
+            navigation.returnToContext(hasActiveRoom: workflow.activeRoomID != nil)
         case .connect:
             break
         }
@@ -1667,7 +1718,7 @@ struct MobileConnectionFlowView: View {
         )
         let shouldRun = NearbyDiscoveryLeasePolicy.shouldRun(
             sceneAllowsDiscovery: sceneAllowsDiscovery,
-            isConnectionPage: page == .connect,
+            isConnectionPage: navigation.page == .connect,
             discoveryIsEnabled: presence.visibility != .hidden,
             systemPairingIsActive: systemNearbyPairingIsActive
         )
@@ -1726,7 +1777,7 @@ struct MobileConnectionFlowView: View {
     private func captureIncomingNearbyOffer() {
         guard let offer = nearbyCoordinator.state.incomingRendezvousOffer else { return }
         defer { nearbyCoordinator.consumeRendezvousOffer(id: offer.id) }
-        if page == .room,
+        if navigation.page == .room,
            let selectedPeerKey = workflow.room?.nearbySelection?.discoveryPeerKey,
            offer.senderPeerKey != selectedPeerKey {
             return
@@ -1803,7 +1854,7 @@ struct MobileConnectionFlowView: View {
             existingActivityIDs: Set(model.activities.map(\.activityId))
         )
         resetRoomTransferHandoff()
-        page = .room
+        navigation.page = .room
         DispatchQueue.main.async {
             switch action {
             case .offerFiles: offerFiles()
@@ -2008,7 +2059,7 @@ struct MobileConnectionFlowView: View {
             offer: offer,
             nowMilliseconds: nowMilliseconds,
             applicationIsActive: applicationIsActive,
-            isConnectPage: page == .connect,
+            isConnectPage: navigation.page == .connect,
             eligibleBluetoothPeerKeys: eligibleBluetoothPeerKeys
         ) else {
             return
@@ -2149,7 +2200,7 @@ struct MobileConnectionFlowView: View {
         case .none:
             break
         case .connectionHub:
-            page = workflow.room == nil && !workflow.hasPinnedRememberedRoom
+            navigation.page = workflow.room == nil && !workflow.hasPinnedRememberedRoom
                 ? .connect
                 : .room
             if notifyWaiting {
@@ -2161,11 +2212,11 @@ struct MobileConnectionFlowView: View {
             }
         case .oneTimeRoom:
             presentedSharedSelectionID = selectionID
-            page = .room
+            navigation.page = .room
             offerFiles()
         case .rememberedRoom:
             presentedSharedSelectionID = selectionID
-            page = .room
+            navigation.page = .room
             offerRememberedRoomFiles()
         }
     }

@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 final class ManifestV2AppUITests: XCTestCase {
     private var app: XCUIApplication!
@@ -85,6 +86,25 @@ final class ManifestV2AppUITests: XCTestCase {
         element("settings_page").assertExists()
         button("mobile_page_back").tap()
         element("one_time_room").assertExists()
+    }
+
+    func testIPadRegularWidthUsesPersistentSidebarNavigation() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("iPad-only adaptive navigation evidence")
+        }
+        launch(
+            language: "en",
+            locale: "en_US",
+            extraArguments: ["--ui-testing-discovery-fixtures"]
+        )
+
+        element("ipad_sidebar").assertExists()
+        element("ipad_sidebar_activity").tap()
+        element("activity_page").assertExists()
+        element("ipad_sidebar_settings").tap()
+        element("settings_page").assertExists()
+        element("ipad_sidebar_connect").tap()
+        element("connection_hub").assertExists()
     }
 
     func testNearbyAvailabilityMenuStopsAndRestartsTheVisibleList() {
