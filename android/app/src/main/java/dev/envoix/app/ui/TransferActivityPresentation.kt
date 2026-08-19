@@ -1,7 +1,35 @@
 package dev.envoix.app.ui
 
+import dev.envoix.app.Direction
 import dev.envoix.app.TransferStage
 import dev.envoix.app.TransferStageTiming
+
+internal data class TransferActivityPresentationEnvironment(
+    val defaultDestinationLabel: String,
+    val developerMode: Boolean,
+    val canUploadDiagnostics: Boolean,
+)
+
+internal fun waitingTransferSubtitle(
+    direction: Direction,
+    itemTitle: String,
+    destinationLabel: String,
+    language: String,
+): String =
+    if (direction == Direction.Send) {
+        AppText.value(
+            "Sending $itemTitle",
+            "准备发送 $itemTitle",
+            language,
+        )
+    } else {
+        val destination = destinationLabel.trim().ifEmpty { "Downloads" }
+        AppText.value(
+            "Saving to $destination",
+            "将保存到 $destination",
+            language,
+        )
+    }
 
 internal data class TransferStageTimelineEntry(
     val stage: TransferStage,

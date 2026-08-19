@@ -405,6 +405,50 @@ class TransferActivityPresentationTest {
         )
     }
 
+    @Test
+    fun `waiting receive uses the configured destination`() {
+        assertEquals(
+            "Saving to Family archive",
+            waitingTransferSubtitle(
+                direction = Direction.Receive,
+                itemTitle = "ignored",
+                destinationLabel = "Family archive",
+                language = AppText.ENGLISH,
+            ),
+        )
+        assertEquals(
+            "将保存到 家庭归档",
+            waitingTransferSubtitle(
+                direction = Direction.Receive,
+                itemTitle = "ignored",
+                destinationLabel = "家庭归档",
+                language = AppText.SIMPLIFIED_CHINESE,
+            ),
+        )
+    }
+
+    @Test
+    fun `waiting subtitle handles send and empty destination`() {
+        assertEquals(
+            "Sending 2 items",
+            waitingTransferSubtitle(
+                direction = Direction.Send,
+                itemTitle = "2 items",
+                destinationLabel = "ignored",
+                language = AppText.ENGLISH,
+            ),
+        )
+        assertEquals(
+            "Saving to Downloads",
+            waitingTransferSubtitle(
+                direction = Direction.Receive,
+                itemTitle = "ignored",
+                destinationLabel = " ",
+                language = AppText.ENGLISH,
+            ),
+        )
+    }
+
     private fun transfer(
         id: Long,
         room: String,

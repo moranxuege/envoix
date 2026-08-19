@@ -38,7 +38,6 @@ import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,7 +55,6 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -64,11 +62,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
-import dev.envoix.app.LogUpload
-import dev.envoix.app.Room
-import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.TransferPresentationPolicy
@@ -85,6 +79,7 @@ import kotlin.math.roundToInt
 @Composable
 internal fun TransferCard(
     t: Transfer,
+    presentation: TransferActivityPresentationEnvironment,
     expanded: Boolean,
     onToggleDetail: (Long) -> Unit,
     onPauseResume: (Long) -> Unit,
@@ -93,13 +88,15 @@ internal fun TransferCard(
     onRemove: (Long) -> Unit,
     onOpen: (Transfer) -> Unit,
     onShare: (Transfer) -> Unit,
+    onUploadDiagnostics: suspend (Transfer) -> Boolean,
+    diagnosticsForCopy: (Transfer) -> String?,
 ) {
     val colors = Envoix.colors
     val language = LocalAppLanguage.current
     val saveLocation =
         resolvedSavedDestinationLabel(
             recordedDestinationLabel = t.savedDestinationLabel,
-            fallbackDestinationLabel = SettingsStore.saveLabel(LocalContext.current),
+            fallbackDestinationLabel = presentation.defaultDestinationLabel,
         )
     val failed = t.status == Status.Failed
     val canceled = t.status == Status.Canceled
@@ -149,7 +146,12 @@ internal fun TransferCard(
                 .clickable { onToggleDetail(t.id) },
         ) {
             if (t.status == Status.WaitingForPeer && t.qrPayload != null) {
-                WaitingBody(t, onPauseResume, onCancel)
+                WaitingBody(
+                    t = t,
+                    destinationLabel = presentation.defaultDestinationLabel,
+                    onPauseResume = onPauseResume,
+                    onCancel = onCancel,
+                )
             } else {
                 Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -210,7 +212,14 @@ internal fun TransferCard(
                     CardControls(t, onPauseResume, onApproveReceive, onCancel, onOpen, onShare)
                 }
             }
-            if (expanded) DetailDrawer(t)
+            if (expanded) {
+                DetailDrawer(
+                    t,
+                    presentation = presentation,
+                    onUploadDiagnostics = onUploadDiagnostics,
+                    diagnosticsForCopy = diagnosticsForCopy,
+                )
+            }
         }
     }
 }
@@ -342,12 +351,12 @@ private fun CircleBtn(
 @Composable
 private fun WaitingBody(
     t: Transfer,
+    destinationLabel: String,
     onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
 ) {
     val colors = Envoix.colors
     val language = LocalAppLanguage.current
-    val settings by SettingsStore.settings.collectAsState()
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
@@ -362,17 +371,12 @@ private fun WaitingBody(
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    if (t.direction == Direction.Send) {
-                        appText(
-                            "Sending ${itemTitle(t, language)}",
-                            "准备发送 ${itemTitle(t, language)}",
-                        )
-                    } else {
-                        appText(
-                            "Saving to Downloads/${settings.saveFolder}",
-                            "将保存到 Downloads/${settings.saveFolder}",
-                        )
-                    },
+                    waitingTransferSubtitle(
+                        direction = t.direction,
+                        itemTitle = itemTitle(t, language),
+                        destinationLabel = destinationLabel,
+                        language = language,
+                    ),
                     color = colors.muted,
                     fontSize = 13.sp,
                     maxLines = 1,
@@ -429,9 +433,13 @@ private fun WaitingBody(
 
 /** Expanded on tap: speed history, user-facing stage timing, details, and developer logs. */
 @Composable
-private fun DetailDrawer(t: Transfer) {
+private fun DetailDrawer(
+    t: Transfer,
+    presentation: TransferActivityPresentationEnvironment,
+    onUploadDiagnostics: suspend (Transfer) -> Boolean,
+    diagnosticsForCopy: (Transfer) -> String?,
+) {
     val colors = Envoix.colors
-    val settings by SettingsStore.settings.collectAsState()
     Column(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
         HorizontalDivider(color = colors.line)
         if (t.speedHistory.size >= 2) {
@@ -494,7 +502,7 @@ private fun DetailDrawer(t: Transfer) {
                 )
             }
         }
-        if (t.log.isNotEmpty() && settings.devMode) {
+        if (t.log.isNotEmpty() && presentation.developerMode) {
             val clip = LocalClipboardManager.current
             var copied by remember(t.id) { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
@@ -513,31 +521,22 @@ private fun DetailDrawer(t: Transfer) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (settings.devMode && settings.logServer.isNotBlank()) {
+                    if (presentation.canUploadDiagnostics) {
                         PillButton(upload.ifEmpty { uploadLabel }) {
                             upload = uploadingLabel
                             scope.launch {
-                                val ok =
-                                    LogUpload.upload(
-                                        settings.logServer,
-                                        Room(t.room).id,
-                                        if (t.direction == Direction.Send) "send" else "receive",
-                                        Diagnostics.build(Diagnostics.Kind.Transfer, t.id),
-                                    )
+                                val ok = onUploadDiagnostics(t)
                                 upload = if (ok) uploadedLabel else uploadFailedLabel
                             }
                         }
                     }
                     PillButton(if (copied) appText("Copied ✓", "已复制 ✓") else appText("Copy", "复制")) {
-                        // The full durable log via the one assembler (clip-capped).
-                        runCatching {
+                        diagnosticsForCopy(t)?.let { text ->
                             clip.setText(
-                                AnnotatedString(
-                                    Diagnostics.build(Diagnostics.Kind.Transfer, t.id, Diagnostics.CLIP_MAX),
-                                ),
+                                AnnotatedString(text),
                             )
+                            copied = true
                         }
-                        copied = true
                     }
                 }
             }

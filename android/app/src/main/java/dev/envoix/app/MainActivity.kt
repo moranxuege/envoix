@@ -46,6 +46,7 @@ import dev.envoix.app.ui.RememberedRoomsViewModel
 import dev.envoix.app.ui.RoomControlInviteFormat
 import dev.envoix.app.ui.RoomControlPhase
 import dev.envoix.app.ui.SettingsScreen
+import dev.envoix.app.ui.TransferActivityPresentationEnvironment
 import dev.envoix.app.ui.TransferActivityScreen
 import dev.envoix.app.ui.WorkflowScreen
 import kotlinx.coroutines.flow.collect
@@ -365,6 +366,14 @@ class MainActivity : ComponentActivity() {
                         WorkflowScreen.Activity ->
                             TransferActivityScreen(
                                 transfers = transfers,
+                                presentation =
+                                    TransferActivityPresentationEnvironment(
+                                        defaultDestinationLabel =
+                                            SettingsStore.saveLabel(this@MainActivity),
+                                        developerMode = settings.devMode,
+                                        canUploadDiagnostics =
+                                            settings.devMode && settings.logServer.isNotBlank(),
+                                    ),
                                 onBack = workflowVm::navigateBack,
                                 onPauseResume = { vm.pauseResume(it) },
                                 onApproveReceive = { vm.approveReceive(it) },
@@ -372,6 +381,30 @@ class MainActivity : ComponentActivity() {
                                 onRemove = { vm.remove(it) },
                                 onOpen = { openReceived(it) },
                                 onShare = { shareReceived(it) },
+                                onUploadDiagnostics = { transfer ->
+                                    LogUpload.upload(
+                                        settings.logServer,
+                                        Room(transfer.room).id,
+                                        if (transfer.direction == Direction.Send) {
+                                            "send"
+                                        } else {
+                                            "receive"
+                                        },
+                                        Diagnostics.build(
+                                            Diagnostics.Kind.Transfer,
+                                            transfer.id,
+                                        ),
+                                    )
+                                },
+                                diagnosticsForCopy = { transfer ->
+                                    runCatching {
+                                        Diagnostics.build(
+                                            Diagnostics.Kind.Transfer,
+                                            transfer.id,
+                                            Diagnostics.CLIP_MAX,
+                                        )
+                                    }.getOrNull()
+                                },
                             )
                         WorkflowScreen.Settings -> SettingsScreen(onBack = workflowVm::navigateBack)
                     }

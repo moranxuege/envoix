@@ -226,6 +226,7 @@ private fun Sequence<Pair<Long, Double>>.weightedAverageBps(): Double {
 @Composable
 internal fun TransferActivityScreen(
     transfers: List<Transfer>,
+    presentation: TransferActivityPresentationEnvironment,
     onBack: () -> Unit,
     onPauseResume: (Long) -> Unit,
     onApproveReceive: (Long) -> Unit,
@@ -233,6 +234,8 @@ internal fun TransferActivityScreen(
     onRemove: (Long) -> Unit,
     onOpen: (Transfer) -> Unit,
     onShare: (Transfer) -> Unit,
+    onUploadDiagnostics: suspend (Transfer) -> Boolean,
+    diagnosticsForCopy: (Transfer) -> String?,
 ) {
     val colors = Envoix.colors
     val expandedRooms = remember { mutableStateListOf<String>() }
@@ -321,6 +324,7 @@ internal fun TransferActivityScreen(
                             ) {
                                 TransferCard(
                                     t = transfer,
+                                    presentation = presentation,
                                     expanded = transfer.id in expandedTransfers,
                                     onToggleDetail = { id ->
                                         if (id in expandedTransfers) {
@@ -335,6 +339,8 @@ internal fun TransferActivityScreen(
                                     onRemove = onRemove,
                                     onOpen = onOpen,
                                     onShare = onShare,
+                                    onUploadDiagnostics = onUploadDiagnostics,
+                                    diagnosticsForCopy = diagnosticsForCopy,
                                 )
                             }
                         }
