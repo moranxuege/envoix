@@ -195,6 +195,8 @@ The Send selection card now resolves source actions, platform guidance,
 inventory counts, source-access decisions, and accessibility labels through
 `SendPresentationText` and the native catalog; file-system selection and
 security-scoped access remain View-owned effects.
+The macOS path controls and receiver-invite input now use the same catalog,
+including the shared paste and direction-specific QR scan contracts.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

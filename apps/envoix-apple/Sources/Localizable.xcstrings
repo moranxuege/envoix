@@ -1202,6 +1202,54 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先完成接收任务，再开始发送。" } }
       }
     },
+    "send.invite.receiver_link_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paste the link or QR result from the receiving device." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "粘贴接收端生成的链接或二维码内容。" } }
+      }
+    },
+    "send.invite.receiver_link_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receiver invite link" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收端邀请链接" } }
+      }
+    },
+    "send.path.copied" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Selected paths copied" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已复制所选路径" } }
+      }
+    },
+    "send.path.copy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy Selected Paths" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制已选路径" } }
+      }
+    },
+    "send.path.copy_help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy selected paths" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制所选路径" } }
+      }
+    },
+    "send.path.placeholder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paste an absolute file path here" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "在这里粘贴绝对文件路径" } }
+      }
+    },
+    "send.path.use" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Use Path" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "使用路径" } }
+      }
+    },
+    "send.path.use_help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Use pasted path" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "使用粘贴的路径" } }
+      }
+    },
     "send.selection.additional_root_count" : {
       "localizations" : {
         "en" : {

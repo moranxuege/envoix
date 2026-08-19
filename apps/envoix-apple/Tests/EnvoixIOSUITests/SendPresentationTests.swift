@@ -10,6 +10,18 @@ final class SendPresentationTests: XCTestCase {
                 "Finish receiving before starting a send.",
                 "请先完成接收任务，再开始发送。"
             ),
+            (
+                "send.invite.receiver_link_detail",
+                "Paste the link or QR result from the receiving device.",
+                "粘贴接收端生成的链接或二维码内容。"
+            ),
+            ("send.invite.receiver_link_title", "Receiver invite link", "接收端邀请链接"),
+            ("send.path.copied", "Selected paths copied", "已复制所选路径"),
+            ("send.path.copy", "Copy Selected Paths", "复制已选路径"),
+            ("send.path.copy_help", "Copy selected paths", "复制所选路径"),
+            ("send.path.placeholder", "Paste an absolute file path here", "在这里粘贴绝对文件路径"),
+            ("send.path.use", "Use Path", "使用路径"),
+            ("send.path.use_help", "Use pasted path", "使用粘贴的路径"),
             ("send.selection.clipboard_action", "Paste File or Image", "粘贴文件或图片"),
             ("send.selection.choose", "Choose files or folders", "选择文件或文件夹"),
             (

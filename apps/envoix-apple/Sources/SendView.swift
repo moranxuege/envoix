@@ -1043,7 +1043,10 @@ struct SendView: View {
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
-            TextField(AppText.value("Paste an absolute file path here", "在这里粘贴绝对文件路径", language: uiLanguage), text: $filePathInput)
+            TextField(
+                AppText.localized("send.path.placeholder", language: uiLanguage),
+                text: $filePathInput
+            )
                 .textFieldStyle(.plain)
                 .font(.callout.monospaced())
                 .foregroundStyle(Theme.text)
@@ -1051,7 +1054,10 @@ struct SendView: View {
                 .disabled(viewModel.isBusy)
 
             Button(action: applyPathInput) {
-                Label(AppText.value("Use Path", "使用路径", language: uiLanguage), systemImage: "checkmark")
+                Label(
+                    AppText.localized("send.path.use", language: uiLanguage),
+                    systemImage: "checkmark"
+                )
                     .labelStyle(.iconOnly)
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
@@ -1059,17 +1065,20 @@ struct SendView: View {
             .buttonStyle(.plain)
             .foregroundStyle(filePathInput.trimmed.isEmpty ? Theme.muted : Theme.accentStrong)
             .disabled(viewModel.isBusy || filePathInput.trimmed.isEmpty)
-            .help(AppText.value("Use pasted path", "使用粘贴的路径", language: uiLanguage))
+            .help(AppText.localized("send.path.use_help", language: uiLanguage))
 
             Button {
                 let paths = selectedItems.map(\.path).joined(separator: "\n")
                 copyWithToast(
                     paths,
-                    AppText.value("Selected paths copied", "已复制所选路径", language: uiLanguage),
+                    AppText.localized("send.path.copied", language: uiLanguage),
                     language: uiLanguage
                 )
             } label: {
-                Label(AppText.value("Copy Selected Paths", "复制已选路径", language: uiLanguage), systemImage: "doc.on.doc")
+                Label(
+                    AppText.localized("send.path.copy", language: uiLanguage),
+                    systemImage: "doc.on.doc"
+                )
                     .labelStyle(.iconOnly)
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
@@ -1077,7 +1086,7 @@ struct SendView: View {
             .buttonStyle(.plain)
             .foregroundStyle(selectedItems.isEmpty ? Theme.muted : Theme.accentStrong)
             .disabled(selectedItems.isEmpty)
-            .help(AppText.value("Copy selected paths", "复制所选路径", language: uiLanguage))
+            .help(AppText.localized("send.path.copy_help", language: uiLanguage))
         }
         .padding(.horizontal, 10)
         .frame(minHeight: 44)
@@ -1092,10 +1101,13 @@ struct SendView: View {
     private var inviteSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(AppText.value("Receiver invite link", "接收端邀请链接", language: uiLanguage))
+                Text(AppText.localized("send.invite.receiver_link_title", language: uiLanguage))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value("Paste the link or QR result from the receiving device.", "粘贴接收端生成的链接或二维码内容。", language: uiLanguage))
+                Text(AppText.localized(
+                    "send.invite.receiver_link_detail",
+                    language: uiLanguage
+                ))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
             }
@@ -1108,7 +1120,10 @@ struct SendView: View {
                 Button {
                     pastePairingInput()
                 } label: {
-                    Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
+                    Label(
+                        AppText.localized("common.paste", language: uiLanguage),
+                        systemImage: "doc.on.clipboard"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -1117,7 +1132,13 @@ struct SendView: View {
                 Button {
                     isQRScannerPresented = true
                 } label: {
-                    Label(AppText.value("Scan", "扫码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                    Label(
+                        TransferPairingText.scanAction(
+                            direction: .send,
+                            language: uiLanguage
+                        ),
+                        systemImage: "qrcode.viewfinder"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
