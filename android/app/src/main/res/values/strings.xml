@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_name" translatable="false">Envoix</string>
     <string name="transfer_files_title">Transfer files</string>
     <string name="choose_device_action">Choose what this device will do.</string>
     <string name="send_action_title">Send</string>
@@ -39,6 +40,10 @@
     <string name="common_share">Share</string>
     <string name="common_done">Done</string>
     <string name="common_decline">Decline</string>
+    <string name="common_accept">Accept</string>
+    <string name="common_paste">Paste</string>
+    <string name="common_reject">Reject</string>
+    <string name="common_save">Save</string>
     <string name="nfc_open_invitation_title">Open NFC invitation?</string>
     <string name="nfc_untrusted_invitation_explanation">This untrusted tag only carries an invitation. Continue to validate it and use the normal room flow; NFC does not authenticate the other device.</string>
     <string name="nfc_invitation_failed_title">NFC could not continue</string>
@@ -197,4 +202,83 @@
     <string name="hub_end_and_replace">End and replace</string>
     <string name="hub_return_to_room">Return to room</string>
     <string name="hub_keep_current_room">Keep current</string>
+    <string name="hub_rooms">Rooms</string>
+    <string name="hub_current_room_section">CURRENT ROOM</string>
+    <string name="hub_connected_device">Connected device</string>
+    <string name="hub_verify_nearby_device">Verify nearby device</string>
+    <string name="hub_creating_room">Creating room…</string>
+    <string name="hub_joining_room">Joining room…</string>
+    <string name="hub_room_ready_waiting">Ready · Waiting for another device</string>
+    <string name="hub_no_active_room">No active room</string>
+    <string name="hub_copy_room_code">Copy room code</string>
+    <string name="hub_renew_room_invitation">Renew room invitation</string>
+    <string name="hub_cancel_joining_room">Cancel joining room</string>
+    <string name="hub_close_room">Close room</string>
+    <string name="hub_ble_verification_instruction">Enter this code on the other device. It is never sent over Bluetooth.</string>
+    <string name="hub_hide_room_qr">Hide room QR</string>
+    <string name="hub_create_room">Create room</string>
+    <string name="hub_reveal_qr">Reveal QR</string>
+    <string name="hub_enter_code">Enter code</string>
+    <string name="hub_set_identity_section">SET IDENTITY</string>
+    <string name="hub_edit_nearby_name">Edit nearby name</string>
+    <string name="hub_visibility_hidden">Hidden</string>
+    <string name="hub_visibility_everyone_ten_minutes">Everyone · 10 min</string>
+    <string name="hub_visibility_foreground">While open</string>
+    <string name="hub_nearby_devices_section">NEARBY DEVICES</string>
+    <string name="hub_stop_discovery">Stop</string>
+    <string name="hub_start_discovery">Start</string>
+    <string name="hub_wifi_aware" translatable="false">Wi-Fi Aware</string>
+    <string name="hub_wifi_aware_short" translatable="false">Aware</string>
+    <string name="hub_nfc_nearby_room">NFC nearby room</string>
+    <string name="hub_nfc_short" translatable="false">NFC</string>
+    <string name="hub_hide_nearby_devices">Hide nearby devices</string>
+    <string name="hub_show_nearby_devices">Show nearby devices</string>
+    <string name="hub_nfc_explanation">NFC carries a short-lived room invitation. The room still authenticates the connection, and file data uses the selected network path.</string>
+    <string name="hub_stop_nfc_scan">Stop NFC scan</string>
+    <string name="hub_scan_another_phone">Scan another phone</string>
+    <string name="hub_stop_nfc_sharing">Stop sharing by NFC</string>
+    <string name="hub_create_or_share_room">Create or share this room</string>
+    <string name="hub_end_room_before_nfc">End or leave the current room before sharing a new NFC invitation.</string>
+    <string name="hub_nfc_sharing_off">Sharing: off</string>
+    <string name="hub_nfc_sharing_ready">Sharing: ready — hold the phones together</string>
+    <string name="hub_nfc_requires_android_15">Sharing requires Android 15 or later</string>
+    <string name="hub_nfc_unavailable">This phone does not provide NFC</string>
+    <string name="hub_nfc_enable_to_share">Turn on NFC to share</string>
+    <string name="hub_nfc_phone_sharing_unavailable">NFC phone sharing is unavailable</string>
+    <string name="hub_nfc_safe_sharing_unavailable">Safe NFC sharing mode is unavailable</string>
+    <string name="hub_nfc_sharing_start_failed">NFC sharing could not start</string>
+    <string name="hub_room_invitation_not_ready">The room invitation is not ready</string>
+    <string name="hub_nfc_scanning_off">Scanning: off</string>
+    <string name="hub_nfc_nearby_phone_detected">Scanning: nearby phone detected</string>
+    <string name="hub_nfc_scanning_ready">Scanning: hold the phones together</string>
+    <string name="hub_nfc_scanning_unavailable">This phone does not provide NFC scanning</string>
+    <string name="hub_nfc_enable_to_scan">Turn on NFC to scan</string>
+    <string name="hub_nfc_scanning_start_failed">NFC scanning could not start</string>
+    <string name="hub_wifi_aware_active">Wi-Fi Aware discovery is active. Envoix still chooses the data path automatically for each transfer.</string>
+    <string name="hub_wifi_aware_starting">Wi-Fi Aware discovery is starting.</string>
+    <string name="hub_wifi_aware_unavailable">Wi-Fi Aware discovery is not connected in this Android build yet. Nearby continues over Bluetooth and local-network discovery.</string>
+    <string name="hub_discovery_source_ble" translatable="false">BLE</string>
+    <string name="hub_discovery_source_local_network">Local network</string>
+    <string name="hub_discovery_source_nearby">Nearby</string>
+    <string name="hub_tap_to_verify">Tap to verify</string>
+    <string name="hub_unverified">Unverified</string>
+    <string name="hub_discovery_only">Discovery only</string>
+    <string name="hub_open_room">Open room</string>
+    <string name="hub_clipboard_empty">Clipboard is empty</string>
+    <string name="hub_room_code_or_link">Room code or invite link</string>
+    <string name="hub_room_code_placeholder" translatable="false">123456-a1b2-c3d4</string>
+    <string name="hub_nearby_name_dialog_title">Other devices can find you as</string>
+    <string name="hub_visible_as">Visible as</string>
+    <string name="hub_identity_temporary">This identity is temporary.</string>
+    <string name="hub_visibility_dialog_title">Who can find you?</string>
+    <string name="hub_visibility_hidden_description">You can still find and connect to other devices.</string>
+    <string name="hub_visibility_everyone_description">Nearby people can find you for ten minutes.</string>
+    <string name="hub_visibility_foreground_description">Nearby people can find you while Envoix is open.</string>
+    <string name="hub_room_invitation">Room invitation</string>
+    <string name="hub_file_invitation">File invitation</string>
+    <string name="hub_ask_verification_code">Ask %1$s for the six-digit code shown in Envoix.</string>
+    <string name="hub_verification_code">Verification code</string>
+    <string name="hub_peer_wants_room">%1$s wants to open a room with you.</string>
+    <string name="hub_peer_wants_transfer">%1$s wants to transfer files.</string>
+    <string name="hub_verify">Verify</string>
 </resources>

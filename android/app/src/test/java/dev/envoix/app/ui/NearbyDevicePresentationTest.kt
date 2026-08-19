@@ -39,20 +39,32 @@ class NearbyDevicePresentationTest {
         assertEquals(
             "BLE · Local network",
             nearbyDiscoverySourceLabel(
-                setOf(DiscoverySource.Mdns, DiscoverySource.Bluetooth),
-                AppText.ENGLISH,
+                sources = setOf(DiscoverySource.Mdns, DiscoverySource.Bluetooth),
+                bluetooth = "BLE",
+                localNetwork = "Local network",
+                wifiAware = "Wi-Fi Aware",
+                fallback = "Nearby",
             ),
         )
         assertEquals(
             "Wi-Fi Aware",
             nearbyDiscoverySourceLabel(
-                setOf(DiscoverySource.WifiAware),
-                AppText.ENGLISH,
+                sources = setOf(DiscoverySource.WifiAware),
+                bluetooth = "BLE",
+                localNetwork = "Local network",
+                wifiAware = "Wi-Fi Aware",
+                fallback = "Nearby",
             ),
         )
         assertEquals(
             "附近",
-            nearbyDiscoverySourceLabel(emptySet(), AppText.SIMPLIFIED_CHINESE),
+            nearbyDiscoverySourceLabel(
+                sources = emptySet(),
+                bluetooth = "BLE",
+                localNetwork = "局域网",
+                wifiAware = "Wi-Fi Aware",
+                fallback = "附近",
+            ),
         )
     }
 

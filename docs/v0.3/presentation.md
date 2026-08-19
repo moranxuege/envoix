@@ -150,11 +150,10 @@ Formatting, pluralization, and accessibility phrases belong to the native
 catalog. Error codes and Engine state remain locale-independent.
 
 Android migration is incremental and M6 remains open until the primary flows
-are complete. The NFC invitation overlay, QR scanner, Room container and shared
-Room components, Connection Hub container, Settings, and the existing shared
-transfer-setup labels use `values` / `values-b+zh+Hans` resources; Connection
-Hub components, Activity, remembered Rooms, and the remaining transfer-setup
-content still contain inline bilingual text to be migrated.
+are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,
+Settings, and the existing shared transfer-setup labels use `values` /
+`values-b+zh+Hans` resources; Activity, remembered Rooms, and the remaining
+transfer-setup content still contain inline bilingual text to be migrated.
 
 ## 8. M6 verification
 
