@@ -164,6 +164,9 @@ class TransferService : Service() {
                 }
         val broker = remembered?.summary?.broker ?: intent.getStringExtra(EXTRA_BROKER).orEmpty()
         val relay = remembered?.summary?.relay ?: intent.getStringExtra(EXTRA_RELAY).orEmpty()
+        val qrPayload = intent.getStringExtra(EXTRA_QR)
+        val invitationCreator =
+            intent.getBooleanExtra(EXTRA_INVITATION_CREATOR, qrPayload != null)
         val useRoom = intent.getBooleanExtra(EXTRA_USE_ROOM, true)
         val useMdns = intent.getBooleanExtra(EXTRA_USE_MDNS, true)
         val protectedReference =
@@ -194,6 +197,12 @@ class TransferService : Service() {
                 ?.let { RememberedPeerStore.get(this).prepare(it, broker, relay) }
         val sessionRelationshipId =
             rememberedRelationshipId ?: pendingRemember?.relationshipId
+        val activityReference =
+            if (direction == Direction.Send && remembered == null) {
+                InviteCodec.activityReference(room, "send", invitationCreator)
+            } else {
+                room
+            }
         val id =
             if (reservedId >= 0L &&
                 TransferRepository.transfers.value.any {
@@ -202,7 +211,7 @@ class TransferService : Service() {
             ) {
                 reservedId
             } else {
-                TransferRepository.create(direction, room)
+                TransferRepository.create(direction, activityReference)
             }
         sessionRelationshipId?.let { relationshipId ->
             TransferRepository.assignActivityGroup(
@@ -219,7 +228,8 @@ class TransferService : Service() {
                 broker = broker,
                 relay = relay,
                 jobId = intent.getStringExtra(EXTRA_JOB_ID),
-                qrPayload = intent.getStringExtra(EXTRA_QR),
+                qrPayload = qrPayload,
+                invitationCreator = invitationCreator,
                 destinationCopyApproved = intent.getBooleanExtra(EXTRA_COPY_APPROVED, false),
                 useRoom = useRoom,
                 useMdns = useMdns,
@@ -235,7 +245,7 @@ class TransferService : Service() {
             )
         TransferRepository.update(id) {
             it.copy(
-                room = room,
+                room = activityReference,
                 jobId = spec.jobId,
             )
         }
@@ -306,39 +316,62 @@ class TransferService : Service() {
         progressTrackers[spec.id] = TransferProgressTracker(initialBytes)
         val callback = ManifestCallback(spec, nextNativeAttemptIds.getAndIncrement())
         callbacks[spec.id] = callback
-        if (spec.direction == Direction.Send && spec.mode == "remembered") {
+        if (spec.direction == Direction.Send) {
             val cancellation = sendGateway.newCancellation()
             callback.bindTypedCancellation(cancellation)
-            scope.launch { runTypedRememberedSend(spec, callback, cancellation) }
+            scope.launch { runTypedSend(spec, callback, cancellation) }
         } else {
             Native.startManifestV2Session(callback.nativeId, spec.paramsJson(this), callback)
         }
         updateNotification()
     }
 
-    private suspend fun runTypedRememberedSend(
+    private suspend fun runTypedSend(
         spec: ManifestSpec,
         callback: ManifestCallback,
         cancellation: ManifestV2SendCancellation,
     ) {
         try {
+            val jobStorePath = jobStoreDirectory(this).absolutePath
+            val jobId = requireNotNull(spec.jobId)
+            val statePath = stateDirectory(spec.id).apply { mkdirs() }.absolutePath
+            val language = SettingsStore.settings.value.language
             val completion =
-                sendGateway.sendRemembered(
-                    request =
-                        RememberedManifestV2SendRequest(
-                            jobStoreDirectory = jobStoreDirectory(this).absolutePath,
-                            jobId = requireNotNull(spec.jobId),
-                            stateDirectory = stateDirectory(spec.id).apply { mkdirs() }.absolutePath,
-                            language = SettingsStore.settings.value.language,
-                            broker = spec.broker,
-                            relay = spec.relay,
-                            credentialReference = requireNotNull(spec.rememberedCredentialReference),
-                            generation = spec.rememberedGeneration,
-                            previousGeneration = spec.rememberedPreviousGeneration,
-                        ),
-                    cancellation = cancellation,
-                    observer = callback,
-                )
+                if (spec.mode == "remembered") {
+                    sendGateway.sendRemembered(
+                        request =
+                            RememberedManifestV2SendRequest(
+                                jobStoreDirectory = jobStorePath,
+                                jobId = jobId,
+                                stateDirectory = statePath,
+                                language = language,
+                                broker = spec.broker,
+                                relay = spec.relay,
+                                credentialReference = requireNotNull(spec.rememberedCredentialReference),
+                                generation = spec.rememberedGeneration,
+                                previousGeneration = spec.rememberedPreviousGeneration,
+                            ),
+                        cancellation = cancellation,
+                        observer = callback,
+                    )
+                } else {
+                    sendGateway.sendInvitation(
+                        request =
+                            InvitationManifestV2SendRequest(
+                                jobStoreDirectory = jobStorePath,
+                                jobId = jobId,
+                                stateDirectory = statePath,
+                                language = language,
+                                broker = spec.broker,
+                                relay = spec.relay,
+                                invitationReference = spec.room,
+                                creator = spec.invitationCreator,
+                                rememberConsent = spec.rememberConsent,
+                            ),
+                        cancellation = cancellation,
+                        observer = callback,
+                    )
+                }
             if (callbacks[spec.id] === callback) {
                 finishCompleted(
                     id = spec.id,
@@ -1304,6 +1337,7 @@ class TransferService : Service() {
         private const val EXTRA_BROKER = "broker"
         private const val EXTRA_RELAY = "relay"
         private const val EXTRA_QR = "qr"
+        private const val EXTRA_INVITATION_CREATOR = "invitation_creator"
         private const val EXTRA_JOB_ID = "job_id"
         private const val EXTRA_COPY_APPROVED = "destination_copy_approved"
         private const val EXTRA_USE_ROOM = "use_room"
@@ -1320,12 +1354,19 @@ class TransferService : Service() {
             qrPayload: String?,
             rememberLabel: String?,
             rememberedRelationshipId: String?,
+            invitationCreator: Boolean = qrPayload != null,
         ): Long {
             // Own the prepared job with a visible card before crossing the
             // foreground-service boundary. Credential-store or service-launch
             // failures can then fail this exact attempt instead of orphaning
             // an unsent native job after the sheet hands ownership away.
-            val id = TransferRepository.create(Direction.Send, room)
+            val activityReference =
+                if (rememberedRelationshipId == null) {
+                    InviteCodec.activityReference(room, "send", invitationCreator)
+                } else {
+                    room
+                }
+            val id = TransferRepository.create(Direction.Send, activityReference)
             TransferRepository.update(id) { it.copy(jobId = jobId) }
             try {
                 launch(
@@ -1339,6 +1380,7 @@ class TransferService : Service() {
                     copyApproved = false,
                     rememberLabel = rememberLabel,
                     rememberedRelationshipId = rememberedRelationshipId,
+                    invitationCreator = invitationCreator,
                     reservedId = id,
                 )
             } catch (error: Throwable) {
@@ -1406,6 +1448,7 @@ class TransferService : Service() {
             copyApproved: Boolean,
             rememberLabel: String?,
             rememberedRelationshipId: String?,
+            invitationCreator: Boolean = qrPayload != null,
             reservedId: Long? = null,
         ) {
             context.startForegroundService(
@@ -1421,6 +1464,7 @@ class TransferService : Service() {
                     putExtra(EXTRA_USE_MDNS, false)
                     putExtra(EXTRA_REMEMBER_LABEL, rememberLabel)
                     putExtra(EXTRA_REMEMBERED_RELATIONSHIP_ID, rememberedRelationshipId)
+                    putExtra(EXTRA_INVITATION_CREATOR, invitationCreator)
                     reservedId?.let { putExtra(EXTRA_ID, it) }
                 },
             )
@@ -1561,6 +1605,7 @@ private data class ManifestSpec(
     val relay: String,
     val jobId: String?,
     val qrPayload: String?,
+    val invitationCreator: Boolean,
     val destinationCopyApproved: Boolean,
     val useRoom: Boolean,
     val useMdns: Boolean,
@@ -1586,6 +1631,7 @@ private data class ManifestSpec(
             .put("job_id", jobId)
             // InviteV2 credentials are process-memory-only pending state.
             .put("qr", JSONObject.NULL)
+            .put("invitation_creator", invitationCreator)
             .put("destination_copy_approved", destinationCopyApproved)
             .put("use_room", useRoom)
             .put("use_mdns", useMdns)
@@ -1604,6 +1650,7 @@ private data class ManifestSpec(
                 relay = value.optString("relay"),
                 jobId = value.optString("job_id").takeIf(String::isNotEmpty),
                 qrPayload = value.optString("qr").takeIf(String::isNotEmpty),
+                invitationCreator = value.optBoolean("invitation_creator"),
                 destinationCopyApproved = value.optBoolean("destination_copy_approved"),
                 useRoom = value.getBoolean("use_room"),
                 useMdns = value.getBoolean("use_mdns"),

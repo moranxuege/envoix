@@ -601,6 +601,7 @@ internal class RememberedRoomTransferCoordinator private constructor(
                     qrPayload = null,
                     rememberLabel = null,
                     rememberedRelationshipId = null,
+                    invitationCreator = true,
                 )
             }.getOrElse { error ->
                 outbox.markNeedsAttention(

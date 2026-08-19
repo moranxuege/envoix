@@ -389,13 +389,14 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 assertEquals(fixture.fileCount, prepared.inventory.fileCount)
                 assertEquals(fixture.totalBytes, prepared.inventory.totalBytes)
 
-                val invitation = checkedResponse(Native.parseInviteForRole(scenarioInvitation(), "send"))
+                val invitation =
+                    requireNotNull(InviteCodec.parseForRole(scenarioInvitation(), "send"))
                 val productModel =
                     TransferViewModel(context.applicationContext as Application).also { model = it }
                 val id =
                     productModel
                         .startSend(
-                            invitation.getString("reference"),
+                            requireNotNull(invitation.reference),
                             createdJobId,
                             Endpoints.BROKER,
                             Endpoints.RELAY,

@@ -28,6 +28,8 @@ internal class ConnectionWorkflowViewModel(
         SettingsStore.settings.value
     },
     clockEpochMs: () -> Long = System::currentTimeMillis,
+    private val invitationActivityReference: (String, String, Boolean) -> String =
+        InviteCodec::activityReference,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(ConnectionWorkflowUiState())
     val uiState: StateFlow<ConnectionWorkflowUiState> = _uiState.asStateFlow()
@@ -399,8 +401,19 @@ internal class ConnectionWorkflowViewModel(
         val transferDraft = _uiState.value.transferDraft ?: return
         if (!transferDraft.preparation.ownershipWasTransferred()) return
         val usedPending = transferDraft.usesPendingAction
+        val activityReference =
+            if (transferDraft.roleAdapter == "send") {
+                invitationActivityReference(
+                    code,
+                    "send",
+                    transferDraft.preparation.generatedInvite.value
+                        ?.reference == code,
+                )
+            } else {
+                code
+            }
         TransferRepository.assignActivityGroupByRoom(
-            roomReference = code,
+            roomReference = activityReference,
             groupId = TransferActivityGroup.oneTime(room.id),
             groupLabel = room.displayName,
             replaceExisting = true,
@@ -411,7 +424,7 @@ internal class ConnectionWorkflowViewModel(
                     room.copy(
                         pairingInput = if (usedPending) null else room.pairingInput,
                         pendingRoleAdapter = if (usedPending) null else room.pendingRoleAdapter,
-                        transferCodes = room.transferCodes + code,
+                        transferCodes = room.transferCodes + activityReference,
                     ),
                 transferDraft = null,
                 pendingShares =

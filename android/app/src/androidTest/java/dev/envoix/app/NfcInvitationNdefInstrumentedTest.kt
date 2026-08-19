@@ -31,6 +31,28 @@ class NfcInvitationNdefInstrumentedTest {
     }
 
     @Test
+    fun senderInvitationLifecycleUsesTypedPrivateStateAndSecretFreeActivityIdentity() {
+        val creator = requireNotNull(InviteCodec.generate("send", TEST_BROKER, ""))
+
+        assertEquals(creator.roomCode, creator.reference)
+        val creatorActivity = InviteCodec.activityReference(creator.reference, "send", creator = true)
+        assertEquals(6, creatorActivity.length)
+        assertTrue(creatorActivity.all(Char::isDigit))
+
+        val receiverInvite = makePairingInvite(FfiInviteRole.RECEIVE, TEST_BROKER, "")
+        val joiner = requireNotNull(InviteCodec.parseForRole(receiverInvite.payload, "send"))
+        assertEquals(receiverInvite.payload, joiner.reference)
+        val joinerActivity =
+            InviteCodec.activityReference(
+                requireNotNull(joiner.reference),
+                "send",
+                creator = false,
+            )
+        assertEquals(6, joinerActivity.length)
+        assertTrue(joinerActivity.all(Char::isDigit))
+    }
+
+    @Test
     fun uriRecordUsesTheExactHttpsCarrier() {
         val message = requireNotNull(NfcInvitationNdefCodec.messageFor(INVITE))
         val record = message.records.single()

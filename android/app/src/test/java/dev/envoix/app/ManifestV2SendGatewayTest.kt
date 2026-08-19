@@ -63,6 +63,35 @@ class ManifestV2SendGatewayTest {
         }
 
     @Test
+    fun `invitation send distinguishes creator Room state from a joiner invite`() =
+        runTest {
+            val creatorNative = FakeManifestV2SendNativeCore()
+            ManifestV2SendGateway(creatorNative).sendInvitation(
+                invitationRequest("123456-a1b2-c3d4", creator = true),
+                creatorNative.newCancellation(),
+                RecordingManifestV2SendObserver(),
+            )
+
+            assertEquals(FfiTransferMode.ROOM, creatorNative.sentRequest?.mode)
+            assertEquals("123456-a1b2-c3d4", creatorNative.sentRequest?.code)
+            assertEquals("", creatorNative.sentRequest?.invite)
+            assertTrue(creatorNative.sentRequest?.rememberConsent == true)
+            assertEquals(1, creatorNative.job.closeCount)
+
+            val joinerNative = FakeManifestV2SendNativeCore()
+            ManifestV2SendGateway(joinerNative).sendInvitation(
+                invitationRequest("envoix://invite/v2/secret", creator = false),
+                joinerNative.newCancellation(),
+                RecordingManifestV2SendObserver(),
+            )
+
+            assertEquals(FfiTransferMode.INVITE, joinerNative.sentRequest?.mode)
+            assertEquals("", joinerNative.sentRequest?.code)
+            assertEquals("envoix://invite/v2/secret", joinerNative.sentRequest?.invite)
+            assertEquals(1, joinerNative.job.closeCount)
+        }
+
+    @Test
     fun `send failure still closes the restored job`() =
         runTest {
             val native = FakeManifestV2SendNativeCore()
@@ -196,6 +225,21 @@ class ManifestV2SendGatewayTest {
             generation = 7,
             previousGeneration = 6,
         )
+
+    private fun invitationRequest(
+        reference: String,
+        creator: Boolean,
+    ) = InvitationManifestV2SendRequest(
+        jobStoreDirectory = "/tmp/jobs",
+        jobId = JOB_ID,
+        stateDirectory = "/tmp/state",
+        language = "en",
+        broker = "https://broker.example",
+        relay = "https://relay.example",
+        invitationReference = reference,
+        creator = creator,
+        rememberConsent = true,
+    )
 
     private companion object {
         const val JOB_ID = "00112233445566778899aabbccddeeff"

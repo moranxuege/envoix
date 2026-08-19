@@ -102,7 +102,14 @@ class ConnectionWorkflowViewModelTest {
 
     @Test
     fun `completed transfer attaches only to its current room`() {
-        val viewModel = ConnectionWorkflowViewModel()
+        var activityRequest: Triple<String, String, Boolean>? = null
+        val viewModel =
+            ConnectionWorkflowViewModel(
+                invitationActivityReference = { reference, role, creator ->
+                    activityRequest = Triple(reference, role, creator)
+                    "654321"
+                },
+            )
         viewModel.openRoom(DeviceRoomDraft(displayName = "First"))
         viewModel.beginTransfer("send", usesPendingAction = false)
         assertTrue(
@@ -112,8 +119,9 @@ class ConnectionWorkflowViewModelTest {
         )
         viewModel.completeTransferDraft("1234-alpha-beta", consumePendingShares = false)
 
+        assertEquals(Triple("1234-alpha-beta", "send", false), activityRequest)
         assertEquals(
-            setOf("1234-alpha-beta"),
+            setOf("654321"),
             viewModel.uiState.value.room
                 ?.transferCodes,
         )

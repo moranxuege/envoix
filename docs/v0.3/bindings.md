@@ -81,21 +81,23 @@ through the typed UniFFI function. Only the opaque process reference leaves
 that trusted call; the duplicate byte-array JNI registration entry has been
 removed.
 
-Remembered-credential Manifest v2 sends now restore and explicitly seal the
+All production Android Manifest v2 sends now restore and explicitly seal the
 canonical job, open the session, observe typed progress/failure/path/timing
-facts, and cancel through UniFFI. Android publishes delivery only after the
-native send future returns, rather than treating the earlier observer callback
-as proof of completion. Job and cancellation handles have explicit owners and
-are closed on success, failure, and service shutdown; Kotlin contract tests
-cover request projection, failure policy fields, terminal-event deferral, and
-both handle lifetimes.
+facts, and cancel through UniFFI. This covers remembered credentials and both
+sides of a one-time InviteV2. Android publishes delivery only after the native
+send future returns, rather than treating the earlier observer callback as
+proof of completion. Job and cancellation handles have explicit owners and are
+closed on success, failure, and service shutdown; Kotlin contract tests cover
+request projection, failure policy fields, terminal-event deferral, and both
+handle lifetimes.
 
 The persistent Room outbox deliberately negotiates a fresh one-time InviteV2
 for each accepted data-plane Transfer, so that main product path still uses the
-invitation session rather than a remembered credential. It remains on the
-legacy session entry point until invitation production and consumption move
-together; the typed remembered-send slice does not weaken that credential
-separation.
+invitation session rather than a remembered credential. Its sender-side invite
+production and consumption now share the typed UniFFI registry. Activity cards
+store only the shared six-digit transfer locator returned by Rust; a complete
+InviteV2 never becomes repository or diagnostic identity. This migration does
+not weaken the control-plane/data-plane credential separation.
 
 The Swift concurrency adapter projects the same Room error variants. A rejected
 authenticated command leaves the current Room usable, while network loss,
@@ -103,11 +105,12 @@ cancellation, and native failure follow terminal paths without inspecting the
 diagnostic message.
 
 Transfer-invitation deep-link routing is typed and no longer crosses the legacy
-JSON JNI parser. Transfer-invitation generation and role-bound parsing remain
-temporarily on the legacy bridge because their opaque references still use its
-session registry; moving only the producer would create references that the
-active transfer entry point cannot resolve. The producer and consumer now
-share one binary and can be migrated together in the next typed-session slice.
+JSON JNI parser. Sender-side transfer-invitation generation and role-bound
+parsing now use the same typed registry as the UniFFI send session. Receiver
+generation and parsing temporarily remain on JNI with the receiver session;
+they must move together with the typed platform destination/result gate so the
+core cannot acknowledge delivery before SAF or MediaStore has durably saved
+the payload.
 
 All Android native entry points are compiled into `libenvoix_ffi.so`; the
 `android-jni` Cargo feature adds the exceptional JNI symbols to the same

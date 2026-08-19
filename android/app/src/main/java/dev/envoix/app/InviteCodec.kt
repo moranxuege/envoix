@@ -3,7 +3,15 @@ package dev.envoix.app
 import dev.envoix.app.ffi.EnvoixException
 import dev.envoix.app.ffi.FfiInviteRole
 import dev.envoix.app.ffi.FfiPairingInvite
+import dev.envoix.app.ffi.FfiPathPolicy
+import dev.envoix.app.ffi.FfiRendezvousPlan
+import dev.envoix.app.ffi.FfiTransferDirection
+import dev.envoix.app.ffi.FfiTransferMode
+import dev.envoix.app.ffi.FfiTransferRequest
+import dev.envoix.app.ffi.makePairingInvite
 import dev.envoix.app.ffi.parsePairingInvite
+import dev.envoix.app.ffi.parsePairingInviteForRole
+import dev.envoix.app.ffi.transferInvitationRoomId
 import org.json.JSONObject
 
 class CreatedInvite(
@@ -30,11 +38,20 @@ data class ParsedInvite(
 
 /** Invitation parsing is delegated to Rust; only foreground Room Code typing is formatted locally. */
 object InviteCodec {
+    private const val INVALID_ACTIVITY_REFERENCE = "invalid-invitation"
+
     fun generate(
         creatorRole: String,
         broker: String,
         relay: String,
     ): CreatedInvite? {
+        if (creatorRole == "send") {
+            return try {
+                makePairingInvite(FfiInviteRole.SEND, broker, relay).toCreatedInvite()
+            } catch (_: EnvoixException) {
+                null
+            }
+        }
         val value = json(Native.generateInvite(creatorRole, broker, relay)) ?: return null
         if (value.has("error")) return null
         return CreatedInvite(
@@ -61,7 +78,30 @@ object InviteCodec {
     fun parseForRole(
         input: String,
         localRole: String,
-    ): ParsedInvite? = parsed(Native.parseInviteForRole(input, localRole))
+    ): ParsedInvite? {
+        if (localRole == "send") {
+            return try {
+                parsePairingInviteForRole(input, FfiInviteRole.SEND).toParsedInvite(input)
+            } catch (_: EnvoixException) {
+                null
+            }
+        }
+        return parsed(Native.parseInviteForRole(input, localRole))
+    }
+
+    /** Secret-free activity identity shared by both sides of one typed InviteV2 send. */
+    fun activityReference(
+        invitationReference: String,
+        localRole: String,
+        creator: Boolean,
+    ): String =
+        try {
+            transferInvitationRoomId(
+                invitationTransferRequest(invitationReference, localRole, creator),
+            )
+        } catch (_: EnvoixException) {
+            INVALID_ACTIVITY_REFERENCE
+        }
 
     /** UI-only formatter; Rust remains authoritative when the transfer starts. */
     fun formatRoomCode(input: String): String {
@@ -105,10 +145,12 @@ object InviteCodec {
         )
     }
 
-    private fun FfiPairingInvite.toParsedInvite(): ParsedInvite? {
-        val expiresAt = expiresAt.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong() ?: return null
-        return ParsedInvite(
-            reference = null,
+    private fun FfiPairingInvite.toCreatedInvite(): CreatedInvite? {
+        val expiresAt = expiresAt.checkedLong() ?: return null
+        return CreatedInvite(
+            roomCode = roomCode,
+            payload = payload,
+            reference = roomCode,
             broker = broker,
             relay = relayUrls.firstOrNull(),
             creatorRole = creatorRole.wireName(),
@@ -116,6 +158,52 @@ object InviteCodec {
             expiresAt = expiresAt,
         )
     }
+
+    private fun FfiPairingInvite.toParsedInvite(reference: String? = null): ParsedInvite? {
+        val expiresAt = expiresAt.checkedLong() ?: return null
+        return ParsedInvite(
+            reference = reference,
+            broker = broker,
+            relay = relayUrls.firstOrNull(),
+            creatorRole = creatorRole.wireName(),
+            joinerRole = joinerRole.wireName(),
+            expiresAt = expiresAt,
+        )
+    }
+
+    private fun ULong.checkedLong(): Long? = takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()
+
+    private fun invitationTransferRequest(
+        invitationReference: String,
+        localRole: String,
+        creator: Boolean,
+    ) = FfiTransferRequest(
+        direction =
+            when (localRole) {
+                "send" -> FfiTransferDirection.SEND
+                "receive" -> FfiTransferDirection.RECEIVE
+                else -> error("Transfer invitation role must be send or receive")
+            },
+        mode = if (creator) FfiTransferMode.ROOM else FfiTransferMode.INVITE,
+        peerDescriptor = "",
+        invite = if (creator) "" else invitationReference,
+        code = if (creator) invitationReference else "",
+        token = "",
+        rememberConsent = false,
+        rememberedCredentialRef = "",
+        rememberedGeneration = 0uL,
+        rememberedPreviousGeneration = null,
+        broker = "",
+        relay = "",
+        configPath = "",
+        pathPolicy = FfiPathPolicy.AUTO,
+        rendezvous =
+            FfiRendezvousPlan(
+                useRoom = true,
+                useMdns = false,
+                internetAvailable = true,
+            ),
+    )
 
     private fun FfiInviteRole.wireName() =
         when (this) {

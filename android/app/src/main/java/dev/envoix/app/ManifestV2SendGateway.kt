@@ -35,6 +35,18 @@ internal data class RememberedManifestV2SendRequest(
     val previousGeneration: Long?,
 )
 
+internal data class InvitationManifestV2SendRequest(
+    val jobStoreDirectory: String,
+    val jobId: String,
+    val stateDirectory: String,
+    val language: String,
+    val broker: String,
+    val relay: String,
+    val invitationReference: String,
+    val creator: Boolean,
+    val rememberConsent: Boolean,
+)
+
 internal data class ManifestV2SendCompletion(
     val jobId: String,
     val totalBytes: Long,
@@ -113,19 +125,56 @@ internal class ManifestV2SendGateway(
         observer: ManifestV2SendObserver,
     ): ManifestV2SendCompletion {
         request.validate()
-        val job = native.restoreJob(request.jobStoreDirectory, request.jobId)
+        return send(
+            jobStoreDirectory = request.jobStoreDirectory,
+            jobId = request.jobId,
+            stateDirectory = request.stateDirectory,
+            settings = runtimeSettings(request.language, request.broker, request.relay),
+            transferRequest = request.transferRequest(),
+            cancellation = cancellation,
+            observer = observer,
+        )
+    }
+
+    suspend fun sendInvitation(
+        request: InvitationManifestV2SendRequest,
+        cancellation: ManifestV2SendCancellation,
+        observer: ManifestV2SendObserver,
+    ): ManifestV2SendCompletion {
+        request.validate()
+        return send(
+            jobStoreDirectory = request.jobStoreDirectory,
+            jobId = request.jobId,
+            stateDirectory = request.stateDirectory,
+            settings = runtimeSettings(request.language, request.broker, request.relay),
+            transferRequest = request.transferRequest(),
+            cancellation = cancellation,
+            observer = observer,
+        )
+    }
+
+    private suspend fun send(
+        jobStoreDirectory: String,
+        jobId: String,
+        stateDirectory: String,
+        settings: EnvoixRuntimeSettings,
+        transferRequest: FfiTransferRequest,
+        cancellation: ManifestV2SendCancellation,
+        observer: ManifestV2SendObserver,
+    ): ManifestV2SendCompletion {
+        val job = native.restoreJob(jobStoreDirectory, jobId)
         return try {
             job.sealForSend()
             val completion =
                 native.send(
                     job = job,
-                    settings = request.runtimeSettings(),
-                    request = request.transferRequest(),
-                    stateDirectory = request.stateDirectory,
+                    settings = settings,
+                    request = transferRequest,
+                    stateDirectory = stateDirectory,
                     cancellation = cancellation,
                     observer = UniFfiManifestV2SendObserver(observer),
                 )
-            check(completion.jobId == request.jobId) {
+            check(completion.jobId == jobId) {
                 "Manifest v2 completion job does not match the requested job"
             }
             ManifestV2SendCompletion(
@@ -293,15 +342,26 @@ private fun RememberedManifestV2SendRequest.validate() {
     }
 }
 
-private fun RememberedManifestV2SendRequest.runtimeSettings() =
-    EnvoixRuntimeSettings(
-        concurrentTransfers = true,
-        language = language,
-        serverUrl = broker,
-        relayUrl = relay,
-        configPath = "",
-        speedLimitMbps = 0uL,
-    )
+private fun InvitationManifestV2SendRequest.validate() {
+    require(jobStoreDirectory.isNotBlank()) { "Manifest v2 job store directory is required" }
+    require(jobId.isNotBlank()) { "Manifest v2 job ID is required" }
+    require(stateDirectory.isNotBlank()) { "Manifest v2 state directory is required" }
+    require(broker.isNotBlank()) { "Invitation Manifest v2 send requires a broker" }
+    require(invitationReference.isNotBlank()) { "Manifest v2 invitation reference is required" }
+}
+
+private fun runtimeSettings(
+    language: String,
+    broker: String,
+    relay: String,
+) = EnvoixRuntimeSettings(
+    concurrentTransfers = true,
+    language = language,
+    serverUrl = broker,
+    relayUrl = relay,
+    configPath = "",
+    speedLimitMbps = 0uL,
+)
 
 private fun RememberedManifestV2SendRequest.transferRequest() =
     FfiTransferRequest(
@@ -315,6 +375,30 @@ private fun RememberedManifestV2SendRequest.transferRequest() =
         rememberedCredentialRef = credentialReference,
         rememberedGeneration = generation.toULong(),
         rememberedPreviousGeneration = previousGeneration?.toULong(),
+        broker = broker,
+        relay = relay,
+        configPath = "",
+        pathPolicy = FfiPathPolicy.AUTO,
+        rendezvous =
+            FfiRendezvousPlan(
+                useRoom = true,
+                useMdns = false,
+                internetAvailable = true,
+            ),
+    )
+
+private fun InvitationManifestV2SendRequest.transferRequest() =
+    FfiTransferRequest(
+        direction = FfiTransferDirection.SEND,
+        mode = if (creator) FfiTransferMode.ROOM else FfiTransferMode.INVITE,
+        peerDescriptor = "",
+        invite = if (creator) "" else invitationReference,
+        code = if (creator) invitationReference else "",
+        token = "",
+        rememberConsent = rememberConsent,
+        rememberedCredentialRef = "",
+        rememberedGeneration = 0uL,
+        rememberedPreviousGeneration = null,
         broker = broker,
         relay = relay,
         configPath = "",

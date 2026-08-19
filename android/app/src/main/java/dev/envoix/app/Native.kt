@@ -66,7 +66,7 @@ object Native {
     /** Wire the Android VM + app context into the Rust network stack. Call once. */
     external fun initContext(context: android.content.Context)
 
-    /** Generate a directional InviteV2 for [role] ("send"/"receive"). */
+    /** Receiver-only production bridge until its destination/result gate is typed. */
     external fun generateInvite(
         role: String,
         broker: String,
@@ -88,14 +88,13 @@ object Native {
 
     external fun stopNearbyInviteInbox(id: Long)
 
-    /** Validate a complete InviteV2 link for an active flow. */
+    /** Receiver-only production parser paired with the JNI receiver session. */
     external fun parseInviteForRole(
         input: String,
         role: String,
     ): String
 
-    /** Start the only Android transfer engine. A send seals its existing job;
-     * a receive first emits an authenticated offer and waits for a decision. */
+    /** Receiver session retained until SAF/MediaStore is a typed result-gate port. */
     external fun startManifestV2Session(
         id: Long,
         paramsJson: String,
