@@ -404,4 +404,46 @@
     <string name="activity_saved_destination">Saved to %1$s · tap for details</string>
     <string name="activity_one_time_transfer">One-time transfer</string>
     <string name="activity_eta_clock">%1$02d:%2$02d ETA</string>
+
+    <string name="transfer_setup_prepare_source_failed">Could not prepare the selected source</string>
+    <string name="transfer_setup_remove_source_failed">Could not remove the selected source</string>
+    <string name="transfer_setup_selection_changed">Source selection changed while authorizing</string>
+    <string name="transfer_setup_authorize_folder_failed">Could not authorize the selected folder</string>
+    <string name="transfer_setup_complete_invitation_required">Paste or scan a complete Envoix invitation link</string>
+    <string name="transfer_setup_invalid_invitation_flow">The invitation is invalid for this flow</string>
+    <string name="transfer_setup_receive_closed">The receive setup was already closed</string>
+    <string name="transfer_setup_offer_files">Offer files</string>
+    <string name="transfer_setup_receive_files">Receive files</string>
+    <string name="transfer_setup_offer_files_explanation">Choose what to share with this device.</string>
+    <string name="transfer_setup_receive_files_explanation">Confirm where incoming files will be saved.</string>
+    <string name="transfer_setup_folder_accessible_only">Folder · accessible content only</string>
+    <string name="transfer_setup_folder_decision_required">Folder · source decision required</string>
+    <string name="transfer_setup_authorize_again">Authorize again</string>
+    <string name="transfer_setup_send_accessible">Send accessible</string>
+    <string name="transfer_setup_remove_source">Remove %1$s</string>
+    <plurals name="transfer_setup_preparing_sources">
+        <item quantity="one">Preparing %1$d selected source…</item>
+        <item quantity="other">Preparing %1$d selected sources…</item>
+    </plurals>
+    <plurals name="transfer_setup_selected_roots">
+        <item quantity="one">%1$d selected root</item>
+        <item quantity="other">%1$d selected roots</item>
+    </plurals>
+    <string name="transfer_setup_joining_preview">You\'ll join</string>
+    <string name="transfer_setup_invitation_ready">Invitation ready</string>
+    <string name="transfer_setup_clear_invitation_hint">Clear the invitation link below to show your own</string>
+    <string name="transfer_setup_remember_device">Remember this device</string>
+    <string name="transfer_setup_device_label">Device label</string>
+    <string name="transfer_setup_queueing_files">Queueing files…</string>
+    <string name="transfer_setup_delivering_invite">Delivering invite…</string>
+    <string name="transfer_setup_queue_files">Queue files</string>
+    <string name="transfer_setup_ready_section">TRANSFER SETUP READY</string>
+    <string name="transfer_setup_nearby_invite_delivery">The invite will be delivered to the nearby device when you start.</string>
+    <string name="transfer_setup_shared_invite">The shared invite will be used for this transfer.</string>
+    <string name="transfer_setup_connection_ready">Connection details are ready.</string>
+    <string name="transfer_setup_found_over">Found over %1$s</string>
+    <string name="transfer_setup_nearby_not_visible">This device is not visible right now. Keep this sheet open; offering files becomes available after it reappears.</string>
+    <string name="transfer_setup_secure_local_delivery">The room invitation will be encrypted to the selected local-network endpoint. The public device name is still unverified.</string>
+    <string name="transfer_setup_insecure_ble_warning">Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device.</string>
+    <string name="transfer_setup_ble_unreachable">This device is not currently reachable over BLE. Use QR or paste a complete invitation link.</string>
 </resources>

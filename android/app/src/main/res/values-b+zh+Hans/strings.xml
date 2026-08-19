@@ -384,4 +384,44 @@
     <string name="activity_saved_destination">已保存到 %1$s · 点击查看详情</string>
     <string name="activity_one_time_transfer">一次性传输</string>
     <string name="activity_eta_clock">预计 %1$02d:%2$02d</string>
+
+    <string name="transfer_setup_prepare_source_failed">无法准备所选内容</string>
+    <string name="transfer_setup_remove_source_failed">无法移除所选来源</string>
+    <string name="transfer_setup_selection_changed">授权期间所选内容发生了变化</string>
+    <string name="transfer_setup_authorize_folder_failed">无法授权所选文件夹</string>
+    <string name="transfer_setup_complete_invitation_required">请粘贴或扫描完整的 Envoix 邀请链接</string>
+    <string name="transfer_setup_invalid_invitation_flow">邀请与当前传输方向不匹配</string>
+    <string name="transfer_setup_receive_closed">接收设置已关闭</string>
+    <string name="transfer_setup_offer_files">发送文件</string>
+    <string name="transfer_setup_receive_files">接收文件</string>
+    <string name="transfer_setup_offer_files_explanation">选择要发送给此设备的内容。</string>
+    <string name="transfer_setup_receive_files_explanation">确认接收文件的保存位置。</string>
+    <string name="transfer_setup_folder_accessible_only">文件夹 · 仅发送可访问内容</string>
+    <string name="transfer_setup_folder_decision_required">文件夹 · 需要处理来源访问问题</string>
+    <string name="transfer_setup_authorize_again">重新授权</string>
+    <string name="transfer_setup_send_accessible">发送可访问内容</string>
+    <string name="transfer_setup_remove_source">移除 %1$s</string>
+    <plurals name="transfer_setup_preparing_sources">
+        <item quantity="other">正在准备 %1$d 个所选来源…</item>
+    </plurals>
+    <plurals name="transfer_setup_selected_roots">
+        <item quantity="other">已选择 %1$d 个根项目</item>
+    </plurals>
+    <string name="transfer_setup_joining_preview">即将加入</string>
+    <string name="transfer_setup_invitation_ready">邀请已就绪</string>
+    <string name="transfer_setup_clear_invitation_hint">清空下方邀请链接即可显示自己的二维码</string>
+    <string name="transfer_setup_remember_device">记住此设备</string>
+    <string name="transfer_setup_device_label">设备名称</string>
+    <string name="transfer_setup_queueing_files">正在加入队列…</string>
+    <string name="transfer_setup_delivering_invite">正在发送邀请…</string>
+    <string name="transfer_setup_queue_files">加入发送队列</string>
+    <string name="transfer_setup_ready_section">传输设置已就绪</string>
+    <string name="transfer_setup_nearby_invite_delivery">开始后，邀请会发送到附近设备。</string>
+    <string name="transfer_setup_shared_invite">此传输将使用已分享的邀请。</string>
+    <string name="transfer_setup_connection_ready">连接信息已就绪。</string>
+    <string name="transfer_setup_found_over">通过 %1$s 发现</string>
+    <string name="transfer_setup_nearby_not_visible">当前无法发现此设备。请保持此页面打开；设备重新出现后即可发送文件。</string>
+    <string name="transfer_setup_secure_local_delivery">房间邀请将加密发送到所选局域网端点；公开的设备名称仍未经验证。</string>
+    <string name="transfer_setup_insecure_ble_warning">实验性非安全 BLE 配对：邀请未经对端身份认证。附近的攻击者可能冒充或中继此设备。</string>
+    <string name="transfer_setup_ble_unreachable">当前无法通过 BLE 连接此设备。请使用二维码或粘贴完整邀请链接。</string>
 </resources>

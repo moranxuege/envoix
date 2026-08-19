@@ -137,20 +137,18 @@ internal fun NewTransferSheet(
 ) {
     val colors = Envoix.colors
     val clipboard = LocalClipboardManager.current
-    val language = LocalAppLanguage.current
-
-    fun text(
-        english: String,
-        simplifiedChinese: String,
-    ) = AppText.value(english, simplifiedChinese, language)
     val switchedToSendNotice = appString(R.string.switched_to_send_notice)
     val switchedToReceiveNotice = appString(R.string.switched_to_receive_notice)
+    val invalidInvitationError = appString(R.string.transfer_setup_complete_invitation_required)
+    val clipboardEmptyError = appString(R.string.hub_clipboard_empty)
+    val invalidFlowError = appString(R.string.transfer_setup_invalid_invitation_flow)
+    val receiveSetupClosedError = appString(R.string.transfer_setup_receive_closed)
     val sourcePreparationMessages =
         TransferSourcePreparationMessages(
-            prepareFailed = text("Could not prepare the selected source", "无法准备所选内容"),
-            removeFailed = text("Could not remove the selected source", "无法移除所选来源"),
-            selectionChanged = text("Source selection changed while authorizing", "授权期间所选内容发生了变化"),
-            authorizationFailed = text("Could not authorize the selected folder", "无法授权所选文件夹"),
+            prepareFailed = appString(R.string.transfer_setup_prepare_source_failed),
+            removeFailed = appString(R.string.transfer_setup_remove_source_failed),
+            selectionChanged = appString(R.string.transfer_setup_selection_changed),
+            authorizationFailed = appString(R.string.transfer_setup_authorize_folder_failed),
         )
     val broker = roomEndpoint?.broker ?: preferences.broker
     val relay = roomEndpoint?.relay ?: preferences.relay
@@ -280,12 +278,6 @@ internal fun NewTransferSheet(
         return true
     }
 
-    fun invalidInvitationError() =
-        text(
-            "Paste or scan a complete Envoix invitation link",
-            "请粘贴或扫描完整的 Envoix 邀请链接",
-        )
-
     fun applyPairingInput(input: String): Boolean {
         pairingInputError = null
         if (input.startsWith("envoix:") && applyScanned(input)) {
@@ -301,7 +293,7 @@ internal fun NewTransferSheet(
     LaunchedEffect(draftId, initialPairingInput) {
         if (!initialPairingInputApplied) {
             initialPairingInput?.takeIf(String::isNotBlank)?.let {
-                if (!applyPairingInput(it)) pairingInputError = invalidInvitationError()
+                if (!applyPairingInput(it)) pairingInputError = invalidInvitationError
             }
             initialPairingInputApplied = true
         }
@@ -344,9 +336,9 @@ internal fun NewTransferSheet(
     ) {
         Text(
             if (roomMode && role == "send") {
-                text("Offer files", "发送文件")
+                appString(R.string.transfer_setup_offer_files)
             } else if (roomMode) {
-                text("Receive files", "接收文件")
+                appString(R.string.transfer_setup_receive_files)
             } else if (role == "send") {
                 appString(R.string.send_action_title)
             } else {
@@ -359,9 +351,9 @@ internal fun NewTransferSheet(
         )
         Text(
             if (roomMode && role == "send") {
-                text("Choose what to share with this device.", "选择要发送给此设备的内容。")
+                appString(R.string.transfer_setup_offer_files_explanation)
             } else if (roomMode) {
-                text("Confirm where incoming files will be saved.", "确认接收文件的保存位置。")
+                appString(R.string.transfer_setup_receive_files_explanation)
             } else if (role == "send") {
                 appString(R.string.send_setup_subtitle)
             } else {
@@ -470,11 +462,11 @@ internal fun NewTransferSheet(
                             Text(
                                 when {
                                     prepared.partialApproved ->
-                                        text("Folder · accessible content only", "文件夹 · 仅发送可访问内容")
+                                        appString(R.string.transfer_setup_folder_accessible_only)
                                     prepared.issueCount > 0 ->
-                                        text("Folder · source decision required", "文件夹 · 需要处理来源访问问题")
-                                    prepared.source.directory -> text("Folder", "文件夹")
-                                    else -> text("File", "文件")
+                                        appString(R.string.transfer_setup_folder_decision_required)
+                                    prepared.source.directory -> appString(R.string.activity_folder_label)
+                                    else -> appString(R.string.activity_file_label)
                                 },
                                 color = if (prepared.issueCount > 0 && !prepared.partialApproved) colors.warning else colors.muted,
                                 fontSize = 11.sp,
@@ -482,7 +474,7 @@ internal fun NewTransferSheet(
                         }
                         if (prepared.issueCount > 0 && !prepared.partialApproved) {
                             Text(
-                                text("Authorize again", "重新授权"),
+                                appString(R.string.transfer_setup_authorize_again),
                                 color = colors.accent,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
@@ -497,7 +489,7 @@ internal fun NewTransferSheet(
                             )
                             if (prepared.canApprovePartial) {
                                 Text(
-                                    text("Send accessible", "发送可访问内容"),
+                                    appString(R.string.transfer_setup_send_accessible),
                                     color = colors.accent,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
@@ -513,9 +505,9 @@ internal fun NewTransferSheet(
                         Icon(
                             Icons.Default.Close,
                             contentDescription =
-                                text(
-                                    "Remove ${prepared.source.displayName}",
-                                    "移除 ${prepared.source.displayName}",
+                                appString(
+                                    R.string.transfer_setup_remove_source,
+                                    prepared.source.displayName,
                                 ),
                             tint = colors.muted,
                             modifier =
@@ -534,9 +526,10 @@ internal fun NewTransferSheet(
                 }
                 if (preparingCount > 0) {
                     Text(
-                        text(
-                            "Preparing $preparingCount selected source(s)…",
-                            "正在准备 $preparingCount 个所选来源…",
+                        appQuantityString(
+                            R.plurals.transfer_setup_preparing_sources,
+                            preparingCount,
+                            preparingCount,
                         ),
                         color = colors.accent,
                         fontSize = 12.sp,
@@ -556,18 +549,21 @@ internal fun NewTransferSheet(
                             .padding(horizontal = 12.dp, vertical = 9.dp),
                     ) {
                         Text(
-                            text(
-                                "${preparedSources.size} selected root(s)",
-                                "已选择 ${preparedSources.size} 个根项目",
+                            appQuantityString(
+                                R.plurals.transfer_setup_selected_roots,
+                                preparedSources.size,
+                                preparedSources.size,
                             ),
                             color = colors.accentStrong,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                         )
                         Text(
-                            text(
-                                "$files files · $directories folders · $size",
-                                "$files 个文件 · $directories 个文件夹 · $size",
+                            appString(
+                                R.string.room_offer_summary_format,
+                                appQuantityString(R.plurals.room_file_count, files, files),
+                                appQuantityString(R.plurals.room_folder_count, directories, directories),
+                                size,
                             ),
                             color = colors.muted,
                             fontSize = 12.sp,
@@ -630,17 +626,25 @@ internal fun NewTransferSheet(
                             InlineScanner(
                                 onScanned = {
                                     if (!applyScanned(it)) {
-                                        pairingInputError = invalidInvitationError()
+                                        pairingInputError = invalidInvitationError
                                     }
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         } else if (joining) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(text("You'll join", "即将加入"), color = colors.muted, fontSize = 13.sp)
+                                Text(
+                                    appString(R.string.transfer_setup_joining_preview),
+                                    color = colors.muted,
+                                    fontSize = 13.sp,
+                                )
                                 Spacer(Modifier.height(6.dp))
                                 Text(
-                                    if (invitationInput == null) typed else text("Invitation ready", "邀请已就绪"),
+                                    if (invitationInput == null) {
+                                        typed
+                                    } else {
+                                        appString(R.string.transfer_setup_invitation_ready)
+                                    },
                                     color = colors.accent,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold,
@@ -648,10 +652,7 @@ internal fun NewTransferSheet(
                                 )
                                 Spacer(Modifier.height(6.dp))
                                 Text(
-                                    text(
-                                        "Clear the invitation link below to show your own",
-                                        "清空下方邀请链接即可显示自己的二维码",
-                                    ),
+                                    appString(R.string.transfer_setup_clear_invitation_hint),
                                     color = colors.muted,
                                     fontSize = 11.sp,
                                 )
@@ -671,7 +672,7 @@ internal fun NewTransferSheet(
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
                                         Text(
-                                            text("Copy invite link", "复制邀请链接"),
+                                            appString(R.string.activity_copy_invite_link),
                                             color = colors.muted,
                                             fontSize = 13.sp,
                                         )
@@ -709,9 +710,9 @@ internal fun NewTransferSheet(
                                 ?.trim()
                                 .orEmpty()
                         if (pasted.isEmpty()) {
-                            pairingInputError = text("Clipboard is empty", "剪贴板为空")
+                            pairingInputError = clipboardEmptyError
                         } else if (!applyPairingInput(pasted)) {
-                            pairingInputError = invalidInvitationError()
+                            pairingInputError = invalidInvitationError
                         }
                     },
                     modifier =
@@ -719,7 +720,7 @@ internal fun NewTransferSheet(
                             .align(Alignment.End)
                             .testTag("transfer_code_paste"),
                 ) {
-                    Text(text("Paste", "粘贴"))
+                    Text(appString(R.string.common_paste))
                 }
                 pairingInputError?.let { error ->
                     Text(
@@ -744,13 +745,13 @@ internal fun NewTransferSheet(
                         checked = rememberAfterPairing,
                         onCheckedChange = { rememberAfterPairing = it },
                     )
-                    Text(text("Remember this device", "记住此设备"), color = colors.text)
+                    Text(appString(R.string.transfer_setup_remember_device), color = colors.text)
                 }
                 if (rememberAfterPairing) {
                     OutlinedTextField(
                         value = rememberLabel,
                         onValueChange = { rememberLabel = it },
-                        placeholder = { Text(text("Device label", "设备名称")) },
+                        placeholder = { Text(appString(R.string.transfer_setup_device_label)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -799,8 +800,7 @@ internal fun NewTransferSheet(
                         if (joining) {
                             InviteCodec.parseForRole(invitationInput ?: typed, role)
                                 ?: run {
-                                    rendezvousError =
-                                        text("The invitation is invalid for this flow", "邀请与当前传输方向不匹配")
+                                    rendezvousError = invalidFlowError
                                     startSubmitted = false
                                     return@clickable
                                 }
@@ -897,11 +897,7 @@ internal fun NewTransferSheet(
                             } else if (!preparation.transferOwnership()) {
                                 onCancelPreparedReceive(receiveId)
                                 rendezvousBusy = false
-                                rendezvousError =
-                                    text(
-                                        "The receive setup was already closed",
-                                        "接收设置已关闭",
-                                    )
+                                rendezvousError = receiveSetupClosedError
                                 startSubmitted = false
                             } else {
                                 beforeStart { decisionError ->
@@ -938,15 +934,15 @@ internal fun NewTransferSheet(
             Text(
                 when {
                     rendezvousBusy && role == "receive" ->
-                        text("Preparing receiver…", "正在准备接收…")
+                        appString(R.string.room_preparing_receiver)
                     rendezvousBusy && onQueuePreparedSend != null ->
-                        text("Queueing files…", "正在加入队列…")
-                    rendezvousBusy -> text("Delivering invite…", "正在发送邀请…")
-                    onQueuePreparedSend != null -> text("Queue files", "加入发送队列")
-                    roomMode && role == "send" -> text("Offer files", "发送文件")
-                    roomMode -> text("Receive", "接收")
-                    role == "send" -> text("Send", "发送")
-                    else -> text("Receive", "接收")
+                        appString(R.string.transfer_setup_queueing_files)
+                    rendezvousBusy -> appString(R.string.transfer_setup_delivering_invite)
+                    onQueuePreparedSend != null -> appString(R.string.transfer_setup_queue_files)
+                    roomMode && role == "send" -> appString(R.string.transfer_setup_offer_files)
+                    roomMode -> appString(R.string.receive_action_title)
+                    role == "send" -> appString(R.string.send_action_title)
+                    else -> appString(R.string.receive_action_title)
                 },
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
@@ -970,7 +966,7 @@ private fun RoomConnectionSummary(
             .padding(14.dp),
     ) {
         Text(
-            appText("TRANSFER SETUP READY", "传输设置已就绪"),
+            appString(R.string.transfer_setup_ready_section),
             color = colors.accentStrong,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
@@ -980,16 +976,10 @@ private fun RoomConnectionSummary(
         Text(
             when {
                 nearbySelection != null ->
-                    appText(
-                        "The invite will be delivered to the nearby device when you start.",
-                        "开始后，邀请会发送到附近设备。",
-                    )
+                    appString(R.string.transfer_setup_nearby_invite_delivery)
                 !initialPairingInput.isNullOrBlank() ->
-                    appText(
-                        "The shared invite will be used for this transfer.",
-                        "此传输将使用已分享的邀请。",
-                    )
-                else -> appText("Connection details are ready.", "连接信息已就绪。")
+                    appString(R.string.transfer_setup_shared_invite)
+                else -> appString(R.string.transfer_setup_connection_ready)
             },
             color = colors.muted,
             fontSize = 12.sp,
@@ -1004,12 +994,6 @@ private fun NearbyPairingContext(
     nearbyDeliveryAvailable: Boolean,
 ) {
     val colors = Envoix.colors
-    val language = LocalAppLanguage.current
-
-    fun text(
-        english: String,
-        simplifiedChinese: String,
-    ) = AppText.value(english, simplifiedChinese, language)
     val sourceText =
         selection.sources
             .sortedBy(DiscoverySource::ordinal)
@@ -1031,36 +1015,28 @@ private fun NearbyPairingContext(
             .padding(14.dp),
     ) {
         Text(
-            selection.displayName ?: text("Nearby Envoix device", "附近的 Envoix 设备"),
+            selection.displayName ?: appString(R.string.nearby_envoix_device),
             color = colors.text,
             fontWeight = FontWeight.Bold,
             fontSize = 16.sp,
         )
         if (sourceText.isNotEmpty()) {
-            Text(text("Found over $sourceText", "通过 $sourceText 发现"), color = colors.muted, fontSize = 12.sp)
+            Text(
+                appString(R.string.transfer_setup_found_over, sourceText),
+                color = colors.muted,
+                fontSize = 12.sp,
+            )
         }
         Spacer(Modifier.height(6.dp))
         Text(
             if (!nearbyDeliveryAvailable) {
-                text(
-                    "This device is not visible right now. Keep this sheet open; offering files becomes available after it reappears.",
-                    "当前无法发现此设备。请保持此页面打开；设备重新出现后即可发送文件。",
-                )
+                appString(R.string.transfer_setup_nearby_not_visible)
             } else if (secureLocalDelivery) {
-                text(
-                    "The room invitation will be encrypted to the selected local-network endpoint. The public device name is still unverified.",
-                    "房间邀请将加密发送到所选局域网端点；公开的设备名称仍未经验证。",
-                )
+                appString(R.string.transfer_setup_secure_local_delivery)
             } else if (DiscoverySource.Bluetooth in selection.sources) {
-                text(
-                    "Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device.",
-                    "实验性非安全 BLE 配对：邀请未经对端身份认证。附近的攻击者可能冒充或中继此设备。",
-                )
+                appString(R.string.transfer_setup_insecure_ble_warning)
             } else {
-                text(
-                    "This device is not currently reachable over BLE. Use QR or paste a complete invitation link.",
-                    "当前无法通过 BLE 连接此设备。请使用二维码或粘贴完整邀请链接。",
-                )
+                appString(R.string.transfer_setup_ble_unreachable)
             },
             color = colors.muted,
             fontSize = 12.sp,
