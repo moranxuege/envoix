@@ -188,6 +188,9 @@ instructions, and join-other-role titles come from tested
 Receive destination modes, folder-availability guidance, address disclosure,
 and primary-action priority are isolated in `ReceivePresentationText`; the View
 continues to own platform bookmark and file-system effects, not their copy.
+Destination authorization feedback, invitation validation, and unavailable
+offer/control failures resolve catalog keys as well, leaving `ReceiveView`
+without inline bilingual values or hard-coded user-facing error strings.
 
 Android migration is incremental and M6 remains open until the primary flows
 are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,

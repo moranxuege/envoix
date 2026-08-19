@@ -890,7 +890,10 @@ struct ReceiveView: View {
         let input = value.trimmed
         do {
             guard input.hasPrefix(inviteV2URLPrefix) else {
-                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                throw RuntimeSettingsError(AppText.localized(
+                    "transfer.pairing.enter_complete_error",
+                    language: uiLanguage
+                ))
             }
             _ = try parsePairingInviteForRole(input: input, localRole: .receive)
             joiningInvite = input
@@ -976,9 +979,8 @@ struct ReceiveView: View {
                     localRole: .receive
                 )
             case .room, .remembered, .token:
-                throw RuntimeSettingsError(AppText.value(
-                    "This room offer needs a new InviteV2 invitation.",
-                    "此房间邀请需要新的 InviteV2 邀请。",
+                throw RuntimeSettingsError(AppText.localized(
+                    "receive.error.room_offer_needs_invite",
                     language: uiLanguage
                 ))
             }
@@ -1008,9 +1010,8 @@ struct ReceiveView: View {
                 )
                 isAcceptingRoomOffer = false
                 if case .offerUnavailable = result {
-                    ToastCenter.shared.show(AppText.value(
-                        "The file offer is no longer available.",
-                        "此文件邀请已不可用。",
+                    ToastCenter.shared.show(AppText.localized(
+                        "receive.error.offer_unavailable",
                         language: uiLanguage
                     ))
                 }
@@ -1020,7 +1021,10 @@ struct ReceiveView: View {
             viewModel.handleFailed(error.localizedDescription)
         }
         #else
-        viewModel.handleFailed("Room control receive is unavailable on this platform.")
+        viewModel.handleFailed(AppText.localized(
+            "receive.error.room_control_unavailable",
+            language: uiLanguage
+        ))
         #endif
     }
 
@@ -1111,7 +1115,10 @@ struct ReceiveView: View {
     private func startReceiveWithInvite() {
         do {
             guard joiningInvite.trimmed.hasPrefix(inviteV2URLPrefix) else {
-                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                throw RuntimeSettingsError(AppText.localized(
+                    "transfer.pairing.enter_complete_error",
+                    language: uiLanguage
+                ))
             }
             let parsed = try parsePairingInviteForRole(
                 input: joiningInvite,
@@ -1209,9 +1216,8 @@ struct ReceiveView: View {
         do {
             let access = SecurityScopedResourceAccess(url: url)
             guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
-                throw RuntimeSettingsError(AppText.value(
-                    "macOS did not grant access to the selected folder. Choose it again and confirm the system prompt.",
-                    "macOS 未授予所选文件夹访问权限。请重新选择并确认系统授权提示。",
+                throw RuntimeSettingsError(AppText.localized(
+                    "receive.destination.error.macos_access_denied",
                     language: uiLanguage
                 ))
             }
@@ -1221,9 +1227,8 @@ struct ReceiveView: View {
             outputDirPath = url.path
             outputDirDisplayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
             model.retainDestinationAccessForAppLifetime(access)
-            ToastCenter.shared.show(AppText.value(
-                "Save folder authorized",
-                "保存文件夹已授权",
+            ToastCenter.shared.show(AppText.localized(
+                "receive.destination.authorized",
                 language: uiLanguage
             ))
             if startAfterSelection {
@@ -1241,23 +1246,24 @@ struct ReceiveView: View {
         guard let url = outputDir else {
             #if os(iOS)
             if hasCustomOutputDir {
-                throw RuntimeSettingsError(AppText.value(
-                    "The selected Files folder is unavailable. Choose it again or reset to the default save folder.",
-                    "已选择的 Files 文件夹不可用。请重新选择，或重置为默认保存位置。",
+                throw RuntimeSettingsError(AppText.localized(
+                    "receive.destination.error.ios_unavailable",
                     language: uiLanguage
                 ))
             }
             #endif
-            throw RuntimeSettingsError(AppText.value("Choose a save folder first.", "请先选择保存文件夹。", language: uiLanguage))
+            throw RuntimeSettingsError(AppText.localized(
+                "receive.destination.error.choose_first",
+                language: uiLanguage
+            ))
         }
         #if os(iOS)
         let access: AnyObject?
         if hasCustomOutputDir {
             let scopedAccess = SecurityScopedResourceAccess(url: url)
             guard scopedAccess.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
-                throw RuntimeSettingsError(AppText.value(
-                    "Envoix cannot write to the selected Files folder. Choose it again or reset to the default save folder.",
-                    "Envoix 无法写入已选择的 Files 文件夹。请重新选择，或重置为默认保存位置。",
+                throw RuntimeSettingsError(AppText.localized(
+                    "receive.destination.error.ios_not_writable",
                     language: uiLanguage
                 ))
             }
@@ -1267,17 +1273,15 @@ struct ReceiveView: View {
         }
         #else
         guard UserDefaults.standard.data(forKey: outputDirBookmarkKey) != nil else {
-            throw RuntimeSettingsError(AppText.value(
-                "Choose the save folder once to grant macOS access before receiving.",
-                "接收前请先选择一次保存文件夹，以授予 macOS 访问权限。",
+            throw RuntimeSettingsError(AppText.localized(
+                "receive.destination.error.macos_grant_first",
                 language: uiLanguage
             ))
         }
         let scopedAccess = SecurityScopedResourceAccess(url: url)
         guard scopedAccess.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
-            throw RuntimeSettingsError(AppText.value(
-                "The save-folder permission is unavailable. Choose the folder again.",
-                "保存文件夹权限不可用。请重新选择该文件夹。",
+            throw RuntimeSettingsError(AppText.localized(
+                "receive.destination.error.permission_unavailable",
                 language: uiLanguage
             ))
         }
@@ -1286,9 +1290,8 @@ struct ReceiveView: View {
         do {
             try validateWritableDirectoryAccess(url)
         } catch {
-            throw RuntimeSettingsError(AppText.value(
-                "Envoix cannot write to the selected save folder. Choose it again or check its permissions.",
-                "Envoix 无法写入所选保存文件夹。请重新选择或检查文件夹权限。",
+            throw RuntimeSettingsError(AppText.localized(
+                "receive.destination.error.not_writable",
                 language: uiLanguage
             ))
         }
@@ -1307,7 +1310,10 @@ struct ReceiveView: View {
             UserDefaults.standard.set(bookmark, forKey: outputDirBookmarkKey)
             outputDirDisplayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
             isFolderPickerPresented = false
-            ToastCenter.shared.show(AppText.value("Save folder selected", "已选择保存文件夹", language: uiLanguage))
+            ToastCenter.shared.show(AppText.localized(
+                "receive.destination.selected",
+                language: uiLanguage
+            ))
             if shouldStartAfterFolderPick {
                 shouldStartAfterFolderPick = false
                 DispatchQueue.main.async {
@@ -1324,7 +1330,10 @@ struct ReceiveView: View {
     private func resetOutputFolder() {
         UserDefaults.standard.removeObject(forKey: outputDirBookmarkKey)
         outputDirDisplayName = ""
-        ToastCenter.shared.show(AppText.value("Default save folder restored", "已恢复默认保存位置", language: uiLanguage))
+        ToastCenter.shared.show(AppText.localized(
+            "receive.destination.default_restored",
+            language: uiLanguage
+        ))
     }
     #endif
 }

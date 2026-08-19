@@ -9,6 +9,39 @@ final class ReceivePresentationTests: XCTestCase {
                 "Finish sending before starting a receive.",
                 "请先完成发送任务，再开始接收。"
             ),
+            ("receive.destination.authorized", "Save folder authorized", "保存文件夹已授权"),
+            ("receive.destination.default_restored", "Default save folder restored", "已恢复默认保存位置"),
+            ("receive.destination.error.choose_first", "Choose a save folder first.", "请先选择保存文件夹。"),
+            (
+                "receive.destination.error.ios_not_writable",
+                "Envoix cannot write to the selected Files folder. Choose it again or reset to the default save folder.",
+                "Envoix 无法写入已选择的 Files 文件夹。请重新选择，或重置为默认保存位置。"
+            ),
+            (
+                "receive.destination.error.ios_unavailable",
+                "The selected Files folder is unavailable. Choose it again or reset to the default save folder.",
+                "已选择的 Files 文件夹不可用。请重新选择，或重置为默认保存位置。"
+            ),
+            (
+                "receive.destination.error.macos_access_denied",
+                "macOS did not grant access to the selected folder. Choose it again and confirm the system prompt.",
+                "macOS 未授予所选文件夹访问权限。请重新选择并确认系统授权提示。"
+            ),
+            (
+                "receive.destination.error.macos_grant_first",
+                "Choose the save folder once to grant macOS access before receiving.",
+                "接收前请先选择一次保存文件夹，以授予 macOS 访问权限。"
+            ),
+            (
+                "receive.destination.error.not_writable",
+                "Envoix cannot write to the selected save folder. Choose it again or check its permissions.",
+                "Envoix 无法写入所选保存文件夹。请重新选择或检查文件夹权限。"
+            ),
+            (
+                "receive.destination.error.permission_unavailable",
+                "The save-folder permission is unavailable. Choose the folder again.",
+                "保存文件夹权限不可用。请重新选择该文件夹。"
+            ),
             ("receive.destination.ios_default", "On My iPhone / Envoix / Downloads", "我的 iPhone / Envoix / Downloads"),
             ("receive.destination.ios_unavailable", "Selected Files folder unavailable", "已选 Files 文件夹不可用"),
             ("receive.destination.macos_choose", "Choose a save folder", "请选择保存文件夹"),
@@ -22,6 +55,7 @@ final class ReceivePresentationTests: XCTestCase {
             ("receive.destination.method_title", "Save method", "保存方式"),
             ("receive.destination.reset", "Reset", "重置"),
             ("receive.destination.select", "Select", "选择"),
+            ("receive.destination.selected", "Save folder selected", "已选择保存文件夹"),
             ("receive.destination.title", "Save to", "保存到"),
             (
                 "receive.invite.role",
@@ -29,6 +63,21 @@ final class ReceivePresentationTests: XCTestCase {
                 "此邀请已将本设备指定为接收端。"
             ),
             ("receive.invite.verified", "InviteV2 verified", "InviteV2 已验证"),
+            (
+                "receive.error.offer_unavailable",
+                "The file offer is no longer available.",
+                "此文件邀请已不可用。"
+            ),
+            (
+                "receive.error.room_control_unavailable",
+                "Room control receive is unavailable on this platform.",
+                "此平台不支持房间控制接收。"
+            ),
+            (
+                "receive.error.room_offer_needs_invite",
+                "This room offer needs a new InviteV2 invitation.",
+                "此房间邀请需要新的 InviteV2 邀请。"
+            ),
         ]
         for (key, english, chinese) in cases {
             XCTAssertEqual(AppText.localized(key, language: "en"), english, key)

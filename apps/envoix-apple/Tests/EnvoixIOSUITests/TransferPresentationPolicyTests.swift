@@ -445,6 +445,11 @@ final class TransferPresentationPolicyTests: XCTestCase {
                 "Or enter a complete InviteV2 link",
                 "或输入完整 InviteV2 链接"
             ),
+            (
+                "transfer.pairing.enter_complete_error",
+                "Enter a complete InviteV2 link.",
+                "请输入完整的 InviteV2 链接。"
+            ),
             ("transfer.pairing.forget_device", "Forget device", "忘记设备"),
             (
                 "transfer.pairing.invalid_link",
