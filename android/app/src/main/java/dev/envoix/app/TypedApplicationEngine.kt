@@ -3,14 +3,11 @@ package dev.envoix.app
 import dev.envoix.app.ffi.FfiApplicationBindingInfo
 import dev.envoix.app.ffi.FfiApplicationCommandEnvelope
 import dev.envoix.app.ffi.FfiApplicationEffectEnvelope
-import dev.envoix.app.ffi.FfiApplicationEngine
 import dev.envoix.app.ffi.FfiApplicationEngineInterface
 import dev.envoix.app.ffi.FfiApplicationEventEnvelope
 import dev.envoix.app.ffi.FfiApplicationSnapshot
 import dev.envoix.app.ffi.FfiApplyOutcome
 import dev.envoix.app.ffi.FfiCoreInfo
-import dev.envoix.app.ffi.envoixApplicationBindingInfo
-import dev.envoix.app.ffi.envoixCoreInfo
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -20,10 +17,11 @@ import kotlinx.coroutines.withContext
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 
-internal const val EXPECTED_FFI_API_VERSION: UInt = 21u
+internal const val EXPECTED_FFI_API_VERSION: UInt = 22u
 internal const val EXPECTED_APPLICATION_BINDING_VERSION: UInt = 1u
 internal const val EXPECTED_APPLICATION_CONTRACT_VERSION: UShort = 6u
 private const val TYPED_APPLICATION_CAPABILITY = "typed_application_contract_v6"
+private const val PERSISTENT_APPLICATION_CAPABILITY = "persistent_application_engine_v1"
 
 internal class IncompatibleApplicationBinding(
     message: String,
@@ -36,17 +34,19 @@ internal fun validateApplicationBinding(
     if (core.ffiApiVersion != EXPECTED_FFI_API_VERSION ||
         binding.bindingVersion != EXPECTED_APPLICATION_BINDING_VERSION ||
         binding.contractVersion != EXPECTED_APPLICATION_CONTRACT_VERSION ||
-        TYPED_APPLICATION_CAPABILITY !in core.capabilities
+        TYPED_APPLICATION_CAPABILITY !in core.capabilities ||
+        PERSISTENT_APPLICATION_CAPABILITY !in core.capabilities
     ) {
         throw IncompatibleApplicationBinding(
             "Unsupported Envoix binding: FFI ${core.ffiApiVersion}, " +
-                "binding ${binding.bindingVersion}, contract ${binding.contractVersion}",
+                "binding ${binding.bindingVersion}, contract ${binding.contractVersion}; " +
+                "requires typed application and persistent Engine capabilities",
         )
     }
 }
 
 /**
- * The only coroutine owner for one in-process application Engine handle.
+ * Coroutine adapter for an injected application Engine handle.
  *
  * Product transitions remain synchronous and serialized in Rust. Cancellation
  * is checked before entering that short critical section; long-running transfer
@@ -80,17 +80,9 @@ internal class TypedApplicationEngine private constructor(
                 check(!closed.get()) { "application Engine is closed" }
                 operation()
             }
-        }
+    }
 
     companion object {
-        fun open(dispatcher: CoroutineDispatcher = Dispatchers.Default): TypedApplicationEngine {
-            val core = envoixCoreInfo()
-            val binding = envoixApplicationBindingInfo()
-            validateApplicationBinding(core, binding)
-            val engine = FfiApplicationEngine()
-            return TypedApplicationEngine(engine, engine::close, dispatcher)
-        }
-
         internal fun forTesting(
             engine: FfiApplicationEngineInterface,
             release: () -> Unit = {},

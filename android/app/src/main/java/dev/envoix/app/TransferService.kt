@@ -184,14 +184,11 @@ class TransferService : Service() {
                 }
                 reference
             }
-        val pendingRemember =
+        val rememberLabel =
             intent
                 .getStringExtra(EXTRA_REMEMBER_LABEL)
                 ?.trim()
                 ?.takeIf(String::isNotEmpty)
-                ?.let { RememberedPeerStore.get(this).prepare(it, broker, relay) }
-        val sessionRelationshipId =
-            rememberedRelationshipId ?: pendingRemember?.relationshipId
         val activityReference =
             if (remembered == null) {
                 InviteCodec.activityReference(
@@ -212,40 +209,11 @@ class TransferService : Service() {
             } else {
                 TransferRepository.create(direction, activityReference)
             }
-        sessionRelationshipId?.let { relationshipId ->
-            TransferRepository.assignActivityGroup(
-                id = id,
-                groupId = TransferActivityGroup.remembered(relationshipId),
-                groupLabel = remembered?.summary?.label ?: pendingRemember?.label,
-            )
-        }
-        val spec =
-            ManifestSpec(
-                id = id,
-                direction = direction,
-                room = room,
-                broker = broker,
-                relay = relay,
-                jobId = intent.getStringExtra(EXTRA_JOB_ID),
-                qrPayload = qrPayload,
-                invitationCreator = invitationCreator,
-                destinationCopyApproved = intent.getBooleanExtra(EXTRA_COPY_APPROVED, false),
-                useRoom = useRoom,
-                useMdns = useMdns,
-                holdState = null,
-                mode = if (remembered == null) "invitation" else "remembered",
-                rememberConsent = pendingRemember != null,
-                pendingRemember = pendingRemember,
-                rememberedRelationshipId = sessionRelationshipId,
-                rememberedCredentialReference = protectedReference,
-                rememberedGeneration = remembered?.summary?.generation ?: 0,
-                rememberedPreviousGeneration = remembered?.summary?.previousGeneration,
-                restorable = false,
-            )
+        val jobId = intent.getStringExtra(EXTRA_JOB_ID)
         TransferRepository.update(id) {
             it.copy(
                 room = activityReference,
-                jobId = spec.jobId,
+                jobId = jobId,
             )
         }
         if (!useRoom && !useMdns) {
@@ -266,7 +234,7 @@ class TransferService : Service() {
             }
             return
         }
-        if (direction == Direction.Send && spec.jobId.isNullOrBlank()) {
+        if (direction == Direction.Send && jobId.isNullOrBlank()) {
             TransferRepository.update(id) {
                 it.copy(
                     status = Status.Failed,
@@ -275,10 +243,59 @@ class TransferService : Service() {
             }
             return
         }
+        val pendingRemember =
+            if (rememberLabel == null) {
+                null
+            } else {
+                try {
+                    RememberedPeerStore.get(this).prepare(rememberLabel, broker, relay)
+                } catch (_: Exception) {
+                    failReservedStart(
+                        id,
+                        uiText(R.string.service_start_failed),
+                        "relationship_prepare_failed",
+                        RecoveryAction.Retry,
+                    )
+                    return
+                }
+            }
+        val sessionRelationshipId =
+            rememberedRelationshipId ?: pendingRemember?.relationshipId
+        sessionRelationshipId?.let { relationshipId ->
+            TransferRepository.assignActivityGroup(
+                id = id,
+                groupId = TransferActivityGroup.remembered(relationshipId),
+                groupLabel = remembered?.summary?.label ?: pendingRemember?.label,
+            )
+        }
+        val spec =
+            ManifestSpec(
+                id = id,
+                direction = direction,
+                room = room,
+                broker = broker,
+                relay = relay,
+                jobId = jobId,
+                qrPayload = qrPayload,
+                invitationCreator = invitationCreator,
+                destinationCopyApproved = intent.getBooleanExtra(EXTRA_COPY_APPROVED, false),
+                useRoom = useRoom,
+                useMdns = useMdns,
+                holdState = null,
+                mode = if (remembered == null) "invitation" else "remembered",
+                rememberConsent = pendingRemember != null,
+                pendingRemember = pendingRemember,
+                rememberedRelationshipId = sessionRelationshipId,
+                rememberedCredentialReference = protectedReference,
+                rememberedGeneration = remembered?.summary?.generation ?: 0,
+                rememberedPreviousGeneration = remembered?.summary?.previousGeneration,
+                restorable = false,
+            )
         if (
             sessionRelationshipId != null &&
             !RememberedPeerStore.get(this).acquireSession(sessionRelationshipId)
         ) {
+            pendingRemember?.let { RememberedPeerStore.get(this).discard(it) }
             TransferRepository.update(id) {
                 it.copy(
                     status = Status.Failed,
@@ -872,9 +889,9 @@ class TransferService : Service() {
     }
 
     private fun releaseRememberedSession(spec: ManifestSpec?) {
-        spec
-            ?.rememberedRelationshipId
-            ?.let { RememberedPeerStore.get(this).releaseSession(it) }
+        val store = RememberedPeerStore.get(this)
+        spec?.pendingRemember?.let(store::discard)
+        spec?.rememberedRelationshipId?.let(store::releaseSession)
     }
 
     private fun restoreSessions() {

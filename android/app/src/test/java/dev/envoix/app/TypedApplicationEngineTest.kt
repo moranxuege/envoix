@@ -10,6 +10,9 @@ import dev.envoix.app.ffi.FfiApplicationSnapshot
 import dev.envoix.app.ffi.FfiApplyOutcome
 import dev.envoix.app.ffi.FfiCoreInfo
 import dev.envoix.app.ffi.FfiPlatformCapabilities
+import dev.envoix.app.ffi.FfiPreparedRelationship
+import dev.envoix.app.ffi.FfiRememberedRelationship
+import dev.envoix.app.ffi.FfiRememberedRelationshipMaterial
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
@@ -44,6 +47,18 @@ class TypedApplicationEngineTest {
         }
         assertThrows(IncompatibleApplicationBinding::class.java) {
             validateApplicationBinding(core.copy(capabilities = emptyList()), binding)
+        }
+        assertThrows(IncompatibleApplicationBinding::class.java) {
+            validateApplicationBinding(
+                core.copy(capabilities = listOf("persistent_application_engine_v1")),
+                binding,
+            )
+        }
+        assertThrows(IncompatibleApplicationBinding::class.java) {
+            validateApplicationBinding(
+                core.copy(capabilities = listOf("typed_application_contract_v6")),
+                binding,
+            )
         }
     }
 
@@ -106,7 +121,11 @@ class TypedApplicationEngineTest {
         FfiCoreInfo(
             ffiApiVersion = EXPECTED_FFI_API_VERSION,
             coreVersion = "test",
-            capabilities = listOf("typed_application_contract_v6"),
+            capabilities =
+                listOf(
+                    "typed_application_contract_v6",
+                    "persistent_application_engine_v1",
+                ),
         )
 
     private fun bindingInfo() =
@@ -143,4 +162,35 @@ private class FakeEngine(
             commandId = envelope.commandId,
             effect = FfiApplicationEffect.CreateRoom,
         )
+
+    override fun prepareRelationship(
+        label: String,
+        broker: String,
+        relay: String,
+    ): FfiPreparedRelationship = error("not used")
+
+    override fun discardPreparedRelationship(relationshipId: String) = Unit
+
+    override fun commitRelationship(
+        relationshipId: String,
+        opaqueCredential: ByteArray,
+        generation: ULong,
+    ): FfiRememberedRelationship = error("not used")
+
+    override fun relationships(): List<FfiRememberedRelationship> = emptyList()
+
+    override fun loadRelationship(relationshipId: String): FfiRememberedRelationshipMaterial? = null
+
+    override fun rotateRelationship(
+        relationshipId: String,
+        opaqueCredential: ByteArray,
+        generation: ULong,
+    ): FfiRememberedRelationship = error("not used")
+
+    override fun renameRelationship(
+        relationshipId: String,
+        label: String,
+    ): FfiRememberedRelationship = error("not used")
+
+    override fun revokeRelationship(relationshipId: String): FfiRememberedRelationship = error("not used")
 }

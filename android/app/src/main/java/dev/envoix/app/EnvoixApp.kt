@@ -21,6 +21,7 @@ class EnvoixApp : Application() {
         initLogging(LogSink) // before initContext, so init logs are captured
         SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
         Native.initContext(this)
+        RememberedPeerStore.get(this) // acquire the single persistent Engine owner
         RoomControlGatewayProvider.gateway = NativeRoomControlGateway(this)
         RememberedRoomConnectionManager.get(this)
         RememberedRoomTransferCoordinator.get(this)

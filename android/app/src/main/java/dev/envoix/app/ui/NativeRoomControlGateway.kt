@@ -639,7 +639,13 @@ internal class RoomControlCredentialVault(
 private fun rememberedDevicePersistence(store: RememberedPeerStore): VerifiedDevicePersistence =
     { label, endpoint, credential ->
         val pending = runCatching { store.prepare(label, endpoint.broker, endpoint.relay) }.getOrNull()
-        pending != null && store.create(pending, credential, 0L)
+        if (pending == null) {
+            false
+        } else {
+            store.create(pending, credential, 0L).also { persisted ->
+                if (!persisted) store.discard(pending)
+            }
+        }
     }
 
 /**
