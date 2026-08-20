@@ -5,4 +5,7 @@
 mod agent;
 
 #[cfg(any(unix, windows))]
-pub use agent::{AgentHost, AgentHostConfiguration, AgentShutdownHandle, run_cli};
+pub use agent::{
+    AgentHost, AgentHostConfiguration, AgentHostError, AgentHostErrorCode, AgentHostFailure,
+    AgentHostLifecycleHandle, AgentHostLifecycleState, AgentShutdownHandle, run_cli,
+};

@@ -24,7 +24,7 @@ use envoix_client::model::{
     RememberedGenerationRole, Transfer, TransferDirection, TransferFailure, TransferId,
     TransferRejection, remembered_generation_attempts,
 };
-use envoix_client::ports::SecureVaultPort;
+use envoix_client::ports::{PlatformPortError, SecureVaultPort};
 use envoix_client::product::{
     AGENT_PROTOCOL_VERSION, AgentControlTransport, AgentCredentialProtection, AgentDiagnostics,
     AgentEvent, AgentEventCursor, AgentEventEnvelope, AgentOfferDecision, AgentPathKind,
@@ -37,7 +37,7 @@ use envoix_client::product::{
 };
 #[cfg(windows)]
 use envoix_client::product::{current_windows_user_sid, windows_process_user_sid};
-use envoix_client::storage::ENGINE_STATE_SCHEMA_VERSION;
+use envoix_client::storage::{ENGINE_STATE_SCHEMA_VERSION, EngineStoreError};
 use envoix_client::{
     DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, IdentityConfig, TransferCancelToken,
 };
@@ -46,7 +46,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
 const REMEMBERED_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
@@ -102,15 +102,192 @@ pub struct AgentHostConfiguration {
     pub relay: Option<String>,
 }
 
+impl AgentHostConfiguration {
+    fn validate(&self) -> Result<(), AgentHostError> {
+        if !self.state_directory.is_absolute() || !self.inbox_directory.is_absolute() {
+            return Err(AgentHostError::invalid_configuration(
+                "Agent state and Inbox directories must be absolute",
+            ));
+        }
+        #[cfg(unix)]
+        if !self.control_endpoint.is_absolute() {
+            return Err(AgentHostError::invalid_configuration(
+                "Agent control endpoint must be absolute",
+            ));
+        }
+        #[cfg(windows)]
+        validate_windows_pipe_endpoint(&self.control_endpoint)
+            .map_err(AgentHostError::invalid_configuration)?;
+        let device_name = self.device_name.trim();
+        if device_name != self.device_name
+            || device_name.is_empty()
+            || device_name.chars().count() > 64
+            || device_name.chars().any(char::is_control)
+        {
+            return Err(AgentHostError::invalid_configuration(
+                "Agent device name must contain 1 to 64 visible characters without surrounding whitespace",
+            ));
+        }
+        api::parse_broker_addr(&self.broker, self.relay.as_deref())
+            .map_err(AgentHostError::invalid_configuration)?;
+        Ok(())
+    }
+}
+
+/// Stable startup and runtime failure categories for an embedded Agent host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentHostErrorCode {
+    InvalidConfiguration,
+    StateAlreadyOwned,
+    UnsupportedPersistentState,
+    StateCorrupt,
+    VaultUnavailable,
+    VaultInteractionRequired,
+    VaultPermissionDenied,
+    VaultCorrupt,
+    VaultCanceled,
+    IoFailure,
+    Internal,
+}
+
+/// A typed, secret-free Agent host failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentHostFailure {
+    pub code: AgentHostErrorCode,
+    pub reason: String,
+}
+
+/// Error returned by [`AgentHost::run`].
+#[derive(Debug, thiserror::Error)]
+#[error("{reason}")]
+pub struct AgentHostError {
+    code: AgentHostErrorCode,
+    reason: String,
+}
+
+impl AgentHostError {
+    pub fn code(&self) -> AgentHostErrorCode {
+        self.code
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    fn invalid_configuration(reason: impl std::fmt::Display) -> Self {
+        Self {
+            code: AgentHostErrorCode::InvalidConfiguration,
+            reason: reason.to_string(),
+        }
+    }
+
+    fn from_runtime(error: anyhow::Error) -> Self {
+        let code = error
+            .chain()
+            .find_map(|cause| {
+                cause
+                    .downcast_ref::<EngineStoreError>()
+                    .map(engine_store_host_error_code)
+                    .or_else(|| {
+                        cause
+                            .downcast_ref::<PlatformPortError>()
+                            .map(platform_host_error_code)
+                    })
+                    .or_else(|| {
+                        cause
+                            .downcast_ref::<io::Error>()
+                            .map(|_| AgentHostErrorCode::IoFailure)
+                    })
+            })
+            .unwrap_or(AgentHostErrorCode::Internal);
+        Self {
+            code,
+            reason: format!("{error:#}"),
+        }
+    }
+
+    fn failure(&self) -> AgentHostFailure {
+        AgentHostFailure {
+            code: self.code,
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+fn engine_store_host_error_code(error: &EngineStoreError) -> AgentHostErrorCode {
+    match error {
+        EngineStoreError::AlreadyOwned { .. } => AgentHostErrorCode::StateAlreadyOwned,
+        EngineStoreError::UnsupportedSchema { .. }
+        | EngineStoreError::UnsupportedLegacyState { .. } => {
+            AgentHostErrorCode::UnsupportedPersistentState
+        }
+        EngineStoreError::StateTooLarge { .. }
+        | EngineStoreError::InvalidState(_)
+        | EngineStoreError::Decode(_) => AgentHostErrorCode::StateCorrupt,
+        EngineStoreError::MissingVaultCredential => AgentHostErrorCode::VaultUnavailable,
+        EngineStoreError::PlatformPort(error) => platform_host_error_code(error),
+        EngineStoreError::Io(_) => AgentHostErrorCode::IoFailure,
+    }
+}
+
+fn platform_host_error_code(error: &PlatformPortError) -> AgentHostErrorCode {
+    match error {
+        PlatformPortError::Unavailable | PlatformPortError::Limited => {
+            AgentHostErrorCode::VaultUnavailable
+        }
+        PlatformPortError::PermissionDenied => AgentHostErrorCode::VaultPermissionDenied,
+        PlatformPortError::InteractionRequired => AgentHostErrorCode::VaultInteractionRequired,
+        PlatformPortError::InvalidRequest => AgentHostErrorCode::InvalidConfiguration,
+        PlatformPortError::CorruptData => AgentHostErrorCode::VaultCorrupt,
+        PlatformPortError::Canceled => AgentHostErrorCode::VaultCanceled,
+    }
+}
+
+/// Observable lifecycle of one embedded Agent host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentHostLifecycleState {
+    Starting,
+    Ready,
+    Stopping,
+    Stopped,
+    Failed { failure: AgentHostFailure },
+}
+
+/// A cloneable observer for Agent readiness and terminal state.
+#[derive(Clone, Debug)]
+pub struct AgentHostLifecycleHandle {
+    receiver: watch::Receiver<AgentHostLifecycleState>,
+}
+
+impl AgentHostLifecycleHandle {
+    pub fn state(&self) -> AgentHostLifecycleState {
+        self.receiver.borrow().clone()
+    }
+
+    pub async fn changed(&mut self) -> Option<AgentHostLifecycleState> {
+        self.receiver.changed().await.ok()?;
+        Some(self.state())
+    }
+}
+
 /// A cloneable request handle for an orderly Agent shutdown.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AgentShutdownHandle {
     token: TransferCancelToken,
+    lifecycle: watch::Sender<AgentHostLifecycleState>,
 }
 
 impl AgentShutdownHandle {
     /// Requests shutdown. The operation is idempotent.
     pub fn shutdown(&self) {
+        self.lifecycle.send_modify(|state| {
+            if matches!(
+                state,
+                AgentHostLifecycleState::Starting | AgentHostLifecycleState::Ready
+            ) {
+                *state = AgentHostLifecycleState::Stopping;
+            }
+        });
         self.token.cancel();
     }
 
@@ -126,6 +303,7 @@ pub struct AgentHost {
     vault: Arc<dyn SecureVaultPort>,
     credential_protection: AgentCredentialProtection,
     shutdown: AgentShutdownHandle,
+    lifecycle: watch::Sender<AgentHostLifecycleState>,
 }
 
 impl AgentHost {
@@ -137,12 +315,17 @@ impl AgentHost {
         vault: Arc<dyn SecureVaultPort>,
         credential_protection: AgentCredentialProtection,
     ) -> Self {
+        let (lifecycle, _) = watch::channel(AgentHostLifecycleState::Starting);
         Self {
             config,
             client,
             vault,
             credential_protection,
-            shutdown: AgentShutdownHandle::default(),
+            shutdown: AgentShutdownHandle {
+                token: TransferCancelToken::new(),
+                lifecycle: lifecycle.clone(),
+            },
+            lifecycle,
         }
     }
 
@@ -159,11 +342,38 @@ impl AgentHost {
         self.shutdown.clone()
     }
 
+    pub fn lifecycle_handle(&self) -> AgentHostLifecycleHandle {
+        AgentHostLifecycleHandle {
+            receiver: self.lifecycle.subscribe(),
+        }
+    }
+
     /// Runs until shutdown is requested or the local control transport fails.
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self) -> Result<(), AgentHostError> {
+        let lifecycle = self.lifecycle.clone();
+        let result = if let Err(error) = self.config.validate() {
+            Err(error)
+        } else {
+            self.run_inner().await.map_err(AgentHostError::from_runtime)
+        };
+        match &result {
+            Ok(()) => {
+                lifecycle.send_replace(AgentHostLifecycleState::Stopped);
+            }
+            Err(error) => {
+                lifecycle.send_replace(AgentHostLifecycleState::Failed {
+                    failure: error.failure(),
+                });
+            }
+        }
+        result
+    }
+
+    async fn run_inner(self) -> Result<()> {
         if self.shutdown.is_shutdown_requested() {
             return Ok(());
         }
+        let lifecycle = self.lifecycle.clone();
         create_private_directory(&self.config.state_directory)?;
         create_directory(&self.config.inbox_directory)?;
         let store = ProductStore::open_with_vault(&self.config.state_directory, self.vault)?;
@@ -192,7 +402,7 @@ impl AgentHost {
             spawn_remembered_receiver(runtime.clone(), device_id);
         }
 
-        let result = serve(runtime.clone()).await;
+        let result = serve(runtime.clone(), &lifecycle).await;
         shutdown_background_tasks(&runtime).await;
         result
     }
@@ -754,13 +964,13 @@ pub async fn run_cli() -> Result<()> {
     let running = host.run();
     tokio::pin!(running);
     tokio::select! {
-        result = &mut running => result,
+        result = &mut running => result.map_err(Into::into),
         signal = termination_signal() => {
             shutdown.shutdown();
             match signal {
                 Ok(()) => {
                     tracing::info!("shutting down");
-                    running.await
+                    running.await.map_err(Into::into)
                 }
                 Err(error) => {
                     let _ = running.await;
@@ -802,7 +1012,10 @@ fn read_agent_settings(path: &Path) -> Result<AgentSettings> {
 }
 
 #[cfg(unix)]
-async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
+async fn serve(
+    runtime: Arc<AgentRuntime>,
+    lifecycle: &watch::Sender<AgentHostLifecycleState>,
+) -> Result<()> {
     prepare_socket(&runtime.config.control_endpoint).await?;
     let listener = UnixListener::bind(&runtime.config.control_endpoint)
         .with_context(|| format!("bind {}", runtime.config.control_endpoint.display()))?;
@@ -817,6 +1030,10 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
         inbox = %runtime.config.inbox_directory.display(),
         "Envoix Agent ready"
     );
+    if runtime.shutdown.is_cancelled() {
+        return Ok(());
+    }
+    lifecycle.send_replace(AgentHostLifecycleState::Ready);
 
     loop {
         tokio::select! {
@@ -841,7 +1058,10 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
 }
 
 #[cfg(windows)]
-async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
+async fn serve(
+    runtime: Arc<AgentRuntime>,
+    lifecycle: &watch::Sender<AgentHostLifecycleState>,
+) -> Result<()> {
     let endpoint = validate_windows_pipe_endpoint(&runtime.config.control_endpoint)?.to_string();
     let owner_sid = current_windows_user_sid()?;
     let mut server = create_windows_pipe(&endpoint, &owner_sid, true)?;
@@ -850,6 +1070,10 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
         inbox = %runtime.config.inbox_directory.display(),
         "Envoix Agent ready"
     );
+    if runtime.shutdown.is_cancelled() {
+        return Ok(());
+    }
+    lifecycle.send_replace(AgentHostLifecycleState::Ready);
 
     loop {
         tokio::select! {
@@ -2830,7 +3054,7 @@ mod tests {
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: control_endpoint.clone(),
                 device_name: "embedded-test".into(),
-                broker: "broker".into(),
+                broker: DEFAULT_RENDEZVOUS_BROKER.into(),
                 relay: None,
             },
             api::Client::default(),
@@ -2838,6 +3062,8 @@ mod tests {
             AgentCredentialProtection::OwnerOnlyFile,
         );
         let shutdown = host.shutdown_handle();
+        let lifecycle = host.lifecycle_handle();
+        assert_eq!(lifecycle.state(), AgentHostLifecycleState::Starting);
         let running = tokio::spawn(host.run());
         let client = AgentControlClient::new(&control_endpoint);
 
@@ -2866,6 +3092,7 @@ mod tests {
             diagnostics.credential_protection,
             AgentCredentialProtection::OwnerOnlyFile
         );
+        assert_eq!(lifecycle.state(), AgentHostLifecycleState::Ready);
         assert!(
             ProductStore::open_with_vault(&state_directory, Arc::new(PanicVault))
                 .err()
@@ -2873,6 +3100,10 @@ mod tests {
         );
 
         shutdown.shutdown();
+        assert!(matches!(
+            lifecycle.state(),
+            AgentHostLifecycleState::Stopping | AgentHostLifecycleState::Stopped
+        ));
         tokio::time::timeout(Duration::from_secs(5), running)
             .await
             .expect("embedded Agent did not shut down")
@@ -2880,7 +3111,40 @@ mod tests {
             .unwrap();
 
         assert!(!control_endpoint.exists());
+        assert_eq!(lifecycle.state(), AgentHostLifecycleState::Stopped);
         ProductStore::open_with_vault(&state_directory, Arc::new(PanicVault)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn embedded_host_reports_a_typed_startup_failure() {
+        let host = AgentHost::new(
+            AgentHostConfiguration {
+                state_directory: "relative-state".into(),
+                inbox_directory: "relative-inbox".into(),
+                control_endpoint: "relative.sock".into(),
+                device_name: "embedded-test".into(),
+                broker: DEFAULT_RENDEZVOUS_BROKER.into(),
+                relay: None,
+            },
+            api::Client::default(),
+            Arc::new(PanicVault),
+            AgentCredentialProtection::OwnerOnlyFile,
+        );
+        let lifecycle = host.lifecycle_handle();
+
+        let error = host.run().await.unwrap_err();
+
+        assert_eq!(error.code(), AgentHostErrorCode::InvalidConfiguration);
+        assert!(matches!(
+            lifecycle.state(),
+            AgentHostLifecycleState::Failed {
+                failure: AgentHostFailure {
+                    code: AgentHostErrorCode::InvalidConfiguration,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -2915,19 +3179,19 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_rejects_v8_with_a_typed_version_error() {
+    fn request_decoder_rejects_v9_with_a_typed_version_error() {
         let error = decode_request(
-            br#"{"protocol_version":8,"request_id":"request_test","request":{"command":"status"}}"#,
+            br#"{"protocol_version":9,"request_id":"request_test","request":{"command":"status"}}"#,
         )
         .unwrap_err();
         assert_eq!(error.request_id, "request_test");
         assert_eq!(error.code, "unsupported_protocol_version");
-        assert!(error.message.contains("8"));
+        assert!(error.message.contains("9"));
         assert!(error.message.contains(&AGENT_PROTOCOL_VERSION.to_string()));
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v9_envelope() {
+    fn request_decoder_accepts_a_valid_v10_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -3852,7 +4116,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v9_envelope() {
+    async fn local_socket_round_trips_a_v10_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -3896,7 +4160,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_named_pipe_round_trips_a_v9_envelope_for_its_owner() {
+    async fn windows_named_pipe_round_trips_a_v10_envelope_for_its_owner() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let directory = tempfile::tempdir().unwrap();

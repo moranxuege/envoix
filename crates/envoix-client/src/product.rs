@@ -33,7 +33,7 @@ use crate::storage::{
     VaultReference,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 9;
+pub const AGENT_PROTOCOL_VERSION: u16 = 10;
 pub const AGENT_SETTINGS_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
@@ -399,6 +399,7 @@ pub enum AgentControlTransport {
 pub enum AgentCredentialProtection {
     OwnerOnlyFile,
     WindowsDpapi,
+    AppleKeychain,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2384,7 +2385,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -2409,7 +2410,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 5);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -2429,7 +2430,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 6);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 12);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 15);
         assert!(
@@ -2447,7 +2448,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 7);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 15);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 18);
         assert!(
@@ -2465,7 +2466,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 8);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 16);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 19);
         assert_eq!(
@@ -2475,13 +2476,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_v9_fixture_round_trips_every_variant() {
+    fn agent_wire_v9_fixture_remains_readable_and_frozen() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/v0.3/agent-control-v9.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
-        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+        assert_eq!(fixture["protocol_version"], 9);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
 
         let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
         settings.validate().unwrap();
@@ -2570,7 +2572,6 @@ mod tests {
             ]
         ));
         for (request, expected) in requests.iter().zip(request_values) {
-            request.validate().unwrap();
             assert_eq!(serde_json::to_value(request).unwrap(), *expected);
         }
 
@@ -2669,7 +2670,6 @@ mod tests {
             ]
         ));
         for (response, expected) in responses.iter().zip(response_values) {
-            response.validate_for(&response.request_id).unwrap();
             assert_eq!(serde_json::to_value(response).unwrap(), *expected);
         }
         let AgentResponse::Events { events, .. } = &responses[2].response else {
@@ -2736,6 +2736,33 @@ mod tests {
             unreachable!("fixture order is checked above");
         };
         assert_eq!(pairing.expires_at_unix_seconds, 1);
+    }
+
+    #[test]
+    fn agent_wire_v10_fixture_freezes_apple_keychain_diagnostics() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v10.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+
+        let request: AgentRequestEnvelope =
+            serde_json::from_value(fixture["request"].clone()).unwrap();
+        request.validate().unwrap();
+        assert!(matches!(request.request, AgentRequest::Diagnostics));
+
+        let response: AgentResponseEnvelope =
+            serde_json::from_value(fixture["response"].clone()).unwrap();
+        response.validate_for(&request.request_id).unwrap();
+        let AgentResponse::Diagnostics { diagnostics } = &response.response else {
+            panic!("expected Agent diagnostics response")
+        };
+        assert_eq!(
+            diagnostics.credential_protection,
+            AgentCredentialProtection::AppleKeychain
+        );
+        assert_eq!(serde_json::to_value(response).unwrap(), fixture["response"]);
     }
 
     #[test]

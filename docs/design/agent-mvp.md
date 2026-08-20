@@ -53,7 +53,7 @@ WSL envoix-agent <--- Room offer + canonical Manifest v2 ---> WSL Inbox
 
 ## Local Agent contract
 
-`envoix-client::product` is the shared product contract. Protocol version 9
+`envoix-client::product` is the shared product contract. Protocol version 10
 defines these commands:
 
 - `status`
