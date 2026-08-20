@@ -38,6 +38,56 @@ enum SendPresentationText {
         return AppText.localized("transfer.direction.send", language: language)
     }
 
+    static func folderImportReady(count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "send.selection.folder_ready",
+            defaultValue: "\(displayCount) folders ready to upload",
+            language: language
+        )
+    }
+
+    static func photoSelectionLimit(maximum: Int, language: String) -> String {
+        let displayMaximum = Int64(max(maximum, 0))
+        return AppText.localized(
+            "send.selection.photo_limit",
+            defaultValue: "Select no more than \(displayMaximum) Photos items.",
+            language: language
+        )
+    }
+
+    static func photoImportReady(count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "send.selection.photo_ready",
+            defaultValue: "\(displayCount) Photos items ready to send",
+            language: language
+        )
+    }
+
+    static func sharedSelectionReady(count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "send.selection.shared_ready",
+            defaultValue: "\(displayCount) items ready to send",
+            language: language
+        )
+    }
+
+    static func photoSelectionError(
+        _ error: ShareProviderSelectionError,
+        language: String
+    ) -> String {
+        let key: String
+        switch error {
+        case .livePhotoUnsupported:
+            key = "send.selection.error.photo_live_unsupported"
+        case .folderUnsupported, .unsupportedItem:
+            key = "send.selection.error.photo_unreadable"
+        }
+        return AppText.localized(key, language: language)
+    }
+
     static func photoImportProgress(
         itemNumber: Int,
         itemCount: Int,

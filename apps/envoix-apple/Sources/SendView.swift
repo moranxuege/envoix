@@ -1200,7 +1200,10 @@ struct SendView: View {
         let input = value.trimmed
         do {
             guard input.hasPrefix(inviteV2URLPrefix) else {
-                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                throw RuntimeSettingsError(AppText.localized(
+                    "transfer.pairing.enter_complete_error",
+                    language: uiLanguage
+                ))
             }
             _ = try parsePairingInviteForRole(input: input, localRole: .send)
             invite = input
@@ -1354,11 +1357,7 @@ struct SendView: View {
     }
 
     private var invalidSelectionMessage: String {
-        AppText.value(
-            "Choose regular files or folders. Links and special items are not supported.",
-            "请选择普通文件或文件夹；暂不支持链接和特殊项目。",
-            language: uiLanguage
-        )
+        AppText.localized("send.selection.error.unsupported_item", language: uiLanguage)
     }
 
     private var selectionTitle: String {
@@ -1460,11 +1459,12 @@ struct SendView: View {
         do {
             guard !urls.isEmpty else { return }
             guard try adoptUserSelectedItems(urls, expectedKind: .folders) else { return }
-            ToastCenter.shared.show(AppText.value(
-                urls.count == 1 ? "Folder ready to upload" : "Folders ready to upload",
-                urls.count == 1 ? "文件夹已准备上传" : "多个文件夹已准备上传",
-                language: uiLanguage
-            ))
+            ToastCenter.shared.show(
+                SendPresentationText.folderImportReady(
+                    count: urls.count,
+                    language: uiLanguage
+                )
+            )
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }
@@ -1473,11 +1473,12 @@ struct SendView: View {
     private func beginPhotoImport(_ providers: [NSItemProvider]) {
         guard !providers.isEmpty else { return }
         guard providers.count <= ShareDraftStore.maxItemCount else {
-            ToastCenter.shared.show(AppText.value(
-                "Select no more than \(ShareDraftStore.maxItemCount) Photos items.",
-                "照片项目不能超过 \(ShareDraftStore.maxItemCount) 个。",
-                language: uiLanguage
-            ))
+            ToastCenter.shared.show(
+                SendPresentationText.photoSelectionLimit(
+                    maximum: ShareDraftStore.maxItemCount,
+                    language: uiLanguage
+                )
+            )
             return
         }
 
@@ -1495,7 +1496,9 @@ struct SendView: View {
             )
         } catch let error as ShareProviderSelectionError {
             photoImporter = nil
-            ToastCenter.shared.show(photoSelectionErrorMessage(error))
+            ToastCenter.shared.show(
+                SendPresentationText.photoSelectionError(error, language: uiLanguage)
+            )
         } catch {
             photoImporter = nil
             ToastCenter.shared.show(error.localizedDescription)
@@ -1522,22 +1525,24 @@ struct SendView: View {
                     try? store.discard(id: draft.descriptor.id)
                     return
                 }
-                ToastCenter.shared.show(AppText.value(
-                    draft.fileURLs.count == 1
-                        ? "Photo ready to send"
-                        : "\(draft.fileURLs.count) Photos items ready to send",
-                    draft.fileURLs.count == 1
-                        ? "照片已准备发送"
-                        : "\(draft.fileURLs.count) 个照片项目已准备发送",
-                    language: uiLanguage
-                ))
+                ToastCenter.shared.show(
+                    SendPresentationText.photoImportReady(
+                        count: draft.fileURLs.count,
+                        language: uiLanguage
+                    )
+                )
             } catch {
                 try? store.discard(id: draft.descriptor.id)
                 ToastCenter.shared.show(error.localizedDescription)
             }
         case .failure(let error):
             if let selectionError = error as? ShareProviderSelectionError {
-                ToastCenter.shared.show(photoSelectionErrorMessage(selectionError))
+                ToastCenter.shared.show(
+                    SendPresentationText.photoSelectionError(
+                        selectionError,
+                        language: uiLanguage
+                    )
+                )
             } else {
                 ToastCenter.shared.show(error.localizedDescription)
             }
@@ -1549,23 +1554,6 @@ struct SendView: View {
         photoImporter = nil
         photoImportItemNumber = 0
         photoImportItemCount = 0
-    }
-
-    private func photoSelectionErrorMessage(_ error: ShareProviderSelectionError) -> String {
-        switch error {
-        case .livePhotoUnsupported:
-            return AppText.value(
-                "Paired Live Photos are not supported yet. Choose a still image or video instead.",
-                "暂不支持成对的 Live Photo，请改选静态照片或视频。",
-                language: uiLanguage
-            )
-        case .folderUnsupported, .unsupportedItem:
-            return AppText.value(
-                "Envoix could not read this Photos item as an image or video.",
-                "Envoix 无法将这个照片项目读取为图片或视频。",
-                language: uiLanguage
-            )
-        }
     }
 
     #endif
@@ -1583,15 +1571,12 @@ struct SendView: View {
             pendingSelectionID: selection.id
         ) else { return }
         model.consumePendingSendSelection(id: selection.id)
-        ToastCenter.shared.show(AppText.value(
-            selection.fileURLs.count == 1
-                ? "Item ready to send"
-                : "\(selection.fileURLs.count) items ready to send",
-            selection.fileURLs.count == 1
-                ? "项目已准备发送"
-                : "\(selection.fileURLs.count) 个项目已准备发送",
-            language: uiLanguage
-        ))
+        ToastCenter.shared.show(
+            SendPresentationText.sharedSelectionReady(
+                count: selection.fileURLs.count,
+                language: uiLanguage
+            )
+        )
     }
 
     private func selectedSourceAccessForTransfer() -> AnyObject? {
@@ -1603,7 +1588,9 @@ struct SendView: View {
             let urls = try result.get()
             guard !urls.isEmpty else { return }
             guard try adoptUserSelectedItems(urls, expectedKind: .files) else { return }
-            ToastCenter.shared.show(AppText.value("Files selected", "已选择文件", language: uiLanguage))
+            ToastCenter.shared.show(
+                AppText.localized("send.selection.files_selected", language: uiLanguage)
+            )
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }
@@ -1617,11 +1604,12 @@ struct SendView: View {
         let accesses = urls.map(SecurityScopedResourceAccess.init)
         for (url, access) in zip(urls, accesses) {
             guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
-                throw RuntimeSettingsError(AppText.value(
-                    "Envoix could not access every selected item. Choose them again from Files.",
-                    "Envoix 无法访问全部所选项目。请从 Files 中重新选择。",
-                    language: uiLanguage
-                ))
+                throw RuntimeSettingsError(
+                    AppText.localized(
+                        "send.selection.error.source_access",
+                        language: uiLanguage
+                    )
+                )
             }
         }
         try validateImportedItems(urls, expectedKind: expectedKind)
@@ -1645,19 +1633,21 @@ struct SendView: View {
                 }
             case .files:
                 guard values.isRegularFile == true else {
-                    throw RuntimeSettingsError(AppText.value(
-                        "Use the Folder button to upload a folder.",
-                        "请使用“文件夹”按钮上传文件夹。",
-                        language: uiLanguage
-                    ))
+                    throw RuntimeSettingsError(
+                        AppText.localized(
+                            "send.selection.error.folder_requires_button",
+                            language: uiLanguage
+                        )
+                    )
                 }
             case .folders:
                 guard values.isDirectory == true else {
-                    throw RuntimeSettingsError(AppText.value(
-                        "Choose folders, not files.",
-                        "请选择文件夹，而不是文件。",
-                        language: uiLanguage
-                    ))
+                    throw RuntimeSettingsError(
+                        AppText.localized(
+                            "send.selection.error.folders_only",
+                            language: uiLanguage
+                        )
+                    )
                 }
             }
         }
@@ -1669,12 +1659,12 @@ struct SendView: View {
 
         let path = (raw as NSString).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: path) else {
-            ToastCenter.shared.show(AppText.value("Path not found", "未找到路径", language: uiLanguage))
+            ToastCenter.shared.show(AppText.localized("send.path.not_found", language: uiLanguage))
             return
         }
 
         guard selectItems([URL(fileURLWithPath: path)]) else { return }
-        ToastCenter.shared.show(AppText.value("Path selected", "已选择路径", language: uiLanguage))
+        ToastCenter.shared.show(AppText.localized("send.path.selected", language: uiLanguage))
     }
 
     private func loadDroppedItems(_ providers: [NSItemProvider]) {
@@ -1708,11 +1698,7 @@ struct SendView: View {
     #if os(macOS)
     private func pasteClipboardSelection() {
         guard let content = clipboardSendContent() else {
-            ToastCenter.shared.show(AppText.value(
-                "Clipboard does not contain a file, path, or image.",
-                "剪贴板中没有文件、路径或图片。",
-                language: uiLanguage
-            ))
+            ToastCenter.shared.show(AppText.localized("send.clipboard.empty", language: uiLanguage))
             return
         }
 
@@ -1720,11 +1706,9 @@ struct SendView: View {
         case .file(let url):
             do {
                 guard try adoptUserSelectedItems([url]) else { return }
-                ToastCenter.shared.show(AppText.value(
-                    "Clipboard item ready to send",
-                    "剪贴板项目已准备发送",
-                    language: uiLanguage
-                ))
+                ToastCenter.shared.show(
+                    AppText.localized("send.clipboard.item_ready", language: uiLanguage)
+                )
             } catch {
                 ToastCenter.shared.show(error.localizedDescription)
             }
@@ -1749,11 +1733,9 @@ struct SendView: View {
                     try? store.discard(id: draft.descriptor.id)
                     throw error
                 }
-                ToastCenter.shared.show(AppText.value(
-                    "Clipboard image ready to send",
-                    "剪贴板图片已准备发送",
-                    language: uiLanguage
-                ))
+                ToastCenter.shared.show(
+                    AppText.localized("send.clipboard.image_ready", language: uiLanguage)
+                )
             } catch {
                 ToastCenter.shared.show(error.localizedDescription)
             }
@@ -1849,7 +1831,10 @@ struct SendView: View {
             }
             if let roomControlOffer {
                 guard let roomControlEndpoint else {
-                    throw RuntimeSettingsError("The room transfer route is unavailable.")
+                    throw RuntimeSettingsError(AppText.localized(
+                        "send.error.room_route_unavailable",
+                        language: uiLanguage
+                    ))
                 }
                 let settings = try RuntimeSettingsProvider.make(
                     concurrentTransfers: concurrentTransfers,
@@ -1885,11 +1870,12 @@ struct SendView: View {
                         pendingRoomOfferID = nil
                         onRoomOfferPendingChange?(false)
                         guard accepted else {
-                            ToastCenter.shared.show(AppText.value(
-                                "The file offer was declined.",
-                                "对方拒绝了文件邀请。",
-                                language: uiLanguage
-                            ))
+                            ToastCenter.shared.show(
+                                AppText.localized(
+                                    "send.error.room_offer_declined",
+                                    language: uiLanguage
+                                )
+                            )
                             return
                         }
                         startRoomSend(
@@ -1927,7 +1913,10 @@ struct SendView: View {
                     }
                 } else {
                     guard input.hasPrefix(inviteV2URLPrefix) else {
-                        throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                        throw RuntimeSettingsError(AppText.localized(
+                            "transfer.pairing.enter_complete_error",
+                            language: uiLanguage
+                        ))
                     }
                     let parsed = try parsePairingInviteForRole(
                         input: input,
@@ -1942,7 +1931,10 @@ struct SendView: View {
                 }
             case .invite:
                 guard invite.trimmed.hasPrefix(inviteV2URLPrefix) else {
-                    throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                    throw RuntimeSettingsError(AppText.localized(
+                        "transfer.pairing.enter_complete_error",
+                        language: uiLanguage
+                    ))
                 }
                 let parsed = try parsePairingInviteForRole(input: invite.trimmed, localRole: .send)
                 startInviteSend(

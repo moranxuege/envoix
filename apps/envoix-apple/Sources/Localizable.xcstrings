@@ -1220,10 +1220,40 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待对方接受…" } }
       }
     },
+    "send.clipboard.empty" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Clipboard does not contain a file, path, or image." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "剪贴板中没有文件、路径或图片。" } }
+      }
+    },
+    "send.clipboard.image_ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Clipboard image ready to send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "剪贴板图片已准备发送" } }
+      }
+    },
+    "send.clipboard.item_ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Clipboard item ready to send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "剪贴板项目已准备发送" } }
+      }
+    },
     "send.concurrent.finish_receive" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Finish receiving before starting a send." } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先完成接收任务，再开始发送。" } }
+      }
+    },
+    "send.error.room_offer_declined" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The file offer was declined." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "对方拒绝了文件邀请。" } }
+      }
+    },
+    "send.error.room_route_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The room transfer route is unavailable." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间传输路径不可用。" } }
       }
     },
     "send.invite.receiver_link_detail" : {
@@ -1256,10 +1286,22 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制所选路径" } }
       }
     },
+    "send.path.not_found" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Path not found" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未找到路径" } }
+      }
+    },
     "send.path.placeholder" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Paste an absolute file path here" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "在这里粘贴绝对文件路径" } }
+      }
+    },
+    "send.path.selected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Path selected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已选择路径" } }
       }
     },
     "send.path.use" : {
@@ -1305,6 +1347,67 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "粘贴文件或图片" } }
       }
     },
+    "send.selection.error.folder_requires_button" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Use the Folder button to upload a folder." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请使用“文件夹”按钮上传文件夹。" } }
+      }
+    },
+    "send.selection.error.folders_only" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose folders, not files." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请选择文件夹，而不是文件。" } }
+      }
+    },
+    "send.selection.error.photo_live_unsupported" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paired Live Photos are not supported yet. Choose a still image or video instead." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂不支持成对的 Live Photo，请改选静态照片或视频。" } }
+      }
+    },
+    "send.selection.error.photo_unreadable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix could not read this Photos item as an image or video." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 无法将这个照片项目读取为图片或视频。" } }
+      }
+    },
+    "send.selection.error.source_access" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix could not access every selected item. Choose them again from Files." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 无法访问全部所选项目。请从 Files 中重新选择。" } }
+      }
+    },
+    "send.selection.error.unsupported_item" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose regular files or folders. Links and special items are not supported." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请选择普通文件或文件夹；暂不支持链接和特殊项目。" } }
+      }
+    },
+    "send.selection.files_selected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Files selected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已选择文件" } }
+      }
+    },
+    "send.selection.folder_ready" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "Folder ready to upload" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld folders ready to upload" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 个文件夹已准备上传" } }
+            }
+          }
+        }
+      }
+    },
     "send.selection.guidance.desktop" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose, drop, or paste files and images. Folder structure is preserved." } },
@@ -1348,10 +1451,35 @@
         }
       }
     },
+    "send.selection.photo_limit" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Select no more than %lld Photos items." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "照片项目不能超过 %lld 个。" } }
+      }
+    },
     "send.selection.photo_progress" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing photo %1$lld of %2$lld…" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备第 %1$lld/%2$lld 个照片项目…" } }
+      }
+    },
+    "send.selection.photo_ready" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "Photo ready to send" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld Photos items ready to send" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 个照片项目已准备发送" } }
+            }
+          }
+        }
       }
     },
     "send.selection.preparing" : {
@@ -1380,6 +1508,25 @@
           "variations" : {
             "plural" : {
               "other" : { "stringUnit" : { "state" : "translated", "value" : "已选择 %lld 个项目" } }
+            }
+          }
+        }
+      }
+    },
+    "send.selection.shared_ready" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "Item ready to send" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld items ready to send" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld 个项目已准备发送" } }
             }
           }
         }
