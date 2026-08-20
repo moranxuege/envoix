@@ -118,7 +118,11 @@ struct SettingsStageView: View {
     }
 
     private var coreBuildLabel: String {
-        "\(appDebugBuildLabel) · Core \(coreInfo.coreVersion) · API \(coreInfo.ffiApiVersion)"
+        AppleBuildPresentation.label(
+            infoDictionary: Bundle.main.infoDictionary,
+            coreVersion: coreInfo.coreVersion,
+            apiVersion: coreInfo.ffiApiVersion
+        )
     }
 
     private var developerToolsSection: some View {

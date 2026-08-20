@@ -38,15 +38,49 @@ enum AppleApplicationRuntimePolicy {
     }
 }
 
+#if os(iOS)
+enum AppleApplicationEngineLocation {
+    private static let rootDirectoryName = "envoix"
+    private static let engineDirectoryName = "application-engine-v2"
+
+    static func persistentStateDirectory(
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        guard let supportDirectory = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return supportDirectory
+            .appendingPathComponent(rootDirectoryName, isDirectory: true)
+            .appendingPathComponent(engineDirectoryName, isDirectory: true)
+            .standardizedFileURL
+    }
+}
+#elseif os(macOS)
+/// Stage-A ownership seam. The concrete IPC client is supplied by the signed
+/// helper work in stage B; this GUI-side marker owns no Engine or vault handle.
+protocol MacOSHelperControlClient: AnyObject, Sendable {}
+
+final class PendingMacOSHelperControlClient: MacOSHelperControlClient, @unchecked Sendable {}
+#endif
+
+private enum AppleApplicationProcessOwner {
+    #if os(iOS)
+    case applicationEngine(ApplicationEngineAdapter)
+    #elseif os(macOS)
+    case helperControlClient(MacOSHelperControlClient)
+    #endif
+}
+
 /// Owns process-wide Apple platform effects while each window keeps its own
 /// presentation and navigation state.
 @MainActor
 final class AppleApplicationRuntime: ObservableObject {
     static let shared = AppleApplicationRuntime()
 
-    /// The process-wide application Engine owner. The injected adapter keeps
-    /// scene composition independent from the concrete durable Engine binding.
-    let applicationEngine: ApplicationEngineAdapter
+    private let processOwner: AppleApplicationProcessOwner
     let nearbyCoordinator: NearbyDiscoveryCoordinator
     let presence: NearbyPresencePreferences
     let workflow: ConnectionWorkflowState
@@ -60,13 +94,59 @@ final class AppleApplicationRuntime: ObservableObject {
     private var nextSceneOrder = 0
     private var systemPairingLease: AppleWifiAwareServiceCoordinator.Lease?
 
-    convenience init() {
-        self.init(applicationEngine: Self.makeInMemoryApplicationEngine())
+    #if os(iOS)
+    /// The single process-wide durable Engine owner shared by every scene.
+    var applicationEngine: ApplicationEngineAdapter {
+        guard case let .applicationEngine(engine) = processOwner else {
+            preconditionFailure("The iOS runtime has no application Engine owner")
+        }
+        return engine
     }
 
+    var rememberedRelationshipStore: RememberedPeerStoring {
+        applicationEngine.relationshipStore
+    }
+    #elseif os(macOS)
+    /// The GUI-side helper boundary. It deliberately exposes no Engine or vault.
+    var helperControlClient: MacOSHelperControlClient {
+        guard case let .helperControlClient(client) = processOwner else {
+            preconditionFailure("The macOS runtime has no helper control client")
+        }
+        return client
+    }
+    #endif
+
+    convenience init() {
+        #if os(iOS)
+        do {
+            try self.init(applicationEngine: Self.makePersistentApplicationEngine())
+        } catch {
+            preconditionFailure("The persistent application Engine could not open: \(error)")
+        }
+        #elseif os(macOS)
+        self.init(helperControlClient: PendingMacOSHelperControlClient())
+        #endif
+    }
+
+    #if os(iOS)
     convenience init(applicationEngine: ApplicationEngineAdapter) {
+        let rememberedStore = applicationEngine.relationshipStore
         self.init(
-            applicationEngine: applicationEngine,
+            processOwner: .applicationEngine(applicationEngine),
+            nearbyCoordinator: NearbyDiscoveryCoordinator(),
+            presence: NearbyPresencePreferences(),
+            workflow: ConnectionWorkflowState(
+                gateway: RoomControlGatewayFactory.make(rememberedStore: rememberedStore),
+                rememberedStore: rememberedStore
+            ),
+            rememberedOutbox: RememberedRoomOutboxController(),
+            wifiAwareServices: .shared
+        )
+    }
+    #elseif os(macOS)
+    convenience init(helperControlClient: MacOSHelperControlClient) {
+        self.init(
+            processOwner: .helperControlClient(helperControlClient),
             nearbyCoordinator: NearbyDiscoveryCoordinator(),
             presence: NearbyPresencePreferences(),
             workflow: ConnectionWorkflowState(
@@ -76,16 +156,17 @@ final class AppleApplicationRuntime: ObservableObject {
             wifiAwareServices: .shared
         )
     }
+    #endif
 
-    init(
-        applicationEngine: ApplicationEngineAdapter,
+    private init(
+        processOwner: AppleApplicationProcessOwner,
         nearbyCoordinator: NearbyDiscoveryCoordinator,
         presence: NearbyPresencePreferences,
         workflow: ConnectionWorkflowState,
         rememberedOutbox: RememberedRoomOutboxController,
         wifiAwareServices: AppleWifiAwareServiceCoordinator
     ) {
-        self.applicationEngine = applicationEngine
+        self.processOwner = processOwner
         self.nearbyCoordinator = nearbyCoordinator
         self.presence = presence
         self.workflow = workflow
@@ -204,12 +285,13 @@ final class AppleApplicationRuntime: ObservableObject {
         )
     }
 
-    private static func makeInMemoryApplicationEngine() -> ApplicationEngineAdapter {
-        do {
-            return try ApplicationEngineAdapter()
-        } catch {
-            preconditionFailure("The bundled application Engine is incompatible: \(error)")
-        }
+    #if os(iOS)
+    private static func makePersistentApplicationEngine() throws -> ApplicationEngineAdapter {
+        try ApplicationEngineAdapter.openPersistent(
+            stateDirectory: AppleApplicationEngineLocation.persistentStateDirectory(),
+            vault: AppleApplicationVault(configuration: .iOSApplication)
+        )
     }
+    #endif
 }
 #endif

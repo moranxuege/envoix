@@ -371,8 +371,8 @@ private struct StoredAppleManifestSessionV2: Codable {
 final class AppModel: ObservableObject {
     static let shared = AppModel()
 
-    let receive = TransferViewModel()
-    let send = TransferViewModel()
+    let receive: TransferViewModel
+    let send: TransferViewModel
     @Published private(set) var activities: [TransferActivityRecord] = []
     @Published private(set) var pendingActivityRemovalIDs = Set<String>()
     @Published private(set) var activityMetrics: [String: ActivityMetrics] = [:]
@@ -387,6 +387,13 @@ final class AppModel: ObservableObject {
     #endif
 
     private init() {
+        #if os(iOS)
+        let rememberedStore = AppleApplicationRuntime.shared.rememberedRelationshipStore
+        #else
+        let rememberedStore: RememberedPeerStoring = RememberedPeerStore.shared
+        #endif
+        receive = TransferViewModel(rememberedStore: rememberedStore)
+        send = TransferViewModel(rememberedStore: rememberedStore)
         receive.appModel = self
         send.appModel = self
         for model in [receive, send] {
@@ -714,6 +721,11 @@ final class AppModel: ObservableObject {
 final class TransferViewModel: ObservableObject {
     private static let activeSendSessionFileName = "active-send.json"
     private static let activeReceiveSessionFileName = "active-receive.json"
+    private let rememberedStore: RememberedPeerStoring
+
+    init(rememberedStore: RememberedPeerStoring = RememberedPeerStore.shared) {
+        self.rememberedStore = rememberedStore
+    }
 
     private struct PreparedSelection {
         let job: FfiTransferJobV2
@@ -1226,9 +1238,9 @@ final class TransferViewModel: ObservableObject {
         sourceAccess: AnyObject? = nil
     ) {
         do {
-            let persistence = try RememberPersistenceContext(peer: peer)
+            let persistence = try RememberPersistenceContext(peer: peer, store: rememberedStore)
             do {
-                let credential = try RememberedPeerStore.shared.credential(for: peer)
+                let credential = try rememberedStore.credential(for: peer)
                 let handle = try registerProtectedRememberedCredential(opaqueCredential: credential)
                 startSend(
                     selectedPaths: selectedPaths,
@@ -1560,9 +1572,9 @@ final class TransferViewModel: ObservableObject {
         destinationAccess: AnyObject? = nil
     ) {
         do {
-            let persistence = try RememberPersistenceContext(peer: peer)
+            let persistence = try RememberPersistenceContext(peer: peer, store: rememberedStore)
             do {
-                let credential = try RememberedPeerStore.shared.credential(for: peer)
+                let credential = try rememberedStore.credential(for: peer)
                 let handle = try registerProtectedRememberedCredential(opaqueCredential: credential)
                 startReceive(
                     targetDirectory: outputDir,
@@ -2833,11 +2845,12 @@ final class TransferViewModel: ObservableObject {
         guard let label, !label.trimmed.isEmpty else { return nil }
         do {
             return try RememberPersistenceContext(
-                pending: RememberedPeerStore.shared.prepare(
+                pending: rememberedStore.prepare(
                     label: label,
                     broker: settings.serverUrl,
                     relay: settings.relayUrl
-                )
+                ),
+                store: rememberedStore
             )
         } catch {
             handleFailed(error.localizedDescription)

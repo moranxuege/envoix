@@ -6,12 +6,12 @@ Date: 2026-08-20
 
 ## Context
 
-The current macOS application constructs an in-memory `FfiApplicationEngine`
-inside the SwiftUI process. Its remembered-credential compatibility path uses
-an owner-only file store by default because the application is built ad hoc.
-Those are development bridges, not the v0.3 release architecture: quitting the
-GUI removes the Engine owner, a CLI cannot share that owner, and an ad-hoc
-signature does not provide a stable Keychain identity across upgrades.
+Before the API 22 host preparation, the macOS application constructed an
+in-memory `FfiApplicationEngine` inside the SwiftUI process, and its
+remembered-credential compatibility path could use an owner-only file store.
+Those were development bridges, not the v0.3 release architecture: quitting
+the GUI removed the Engine owner, a CLI could not share that owner, and an
+ad-hoc signature did not provide a stable Keychain identity across upgrades.
 
 v0.3 requires one durable Engine owner, one writer for its state directory,
 and one trusted host for credentials. The GUI and CLI must not open a second
@@ -144,28 +144,40 @@ job. An ad-hoc signature is never a v0.3 distribution or release fallback.
 Mac App Store packaging is not part of the v0.3 path; its sandbox, login-item,
 and review constraints require a separate ADR before that channel is added.
 
-### Dependency on the shared persistent binding
+### API 22 integration and deferred legacy migration
 
-Host wiring is intentionally deferred until the shared persistent Engine and
-vault UniFFI binding is merged. The second phase needs that binding to provide,
-without a Swift-owned parallel contract:
+API 22 provides the shared persistent Engine and vault UniFFI binding. Apple
+host wiring consumes that contract without a Swift-owned parallel contract:
 
 - opening one durable Engine at a caller-supplied state directory, including
-  lifetime locking, recovery, migration reporting, and deterministic shutdown;
-- the versioned command, event, snapshot, capability, and control-client
-  semantics used by every desktop host;
+  lifetime locking and current-store recovery; API 22 releases the lock when
+  the final generated Engine handle is released and exposes no shutdown call;
+- the versioned command, event, snapshot, and capability semantics used by
+  embedded hosts;
 - injection of the secure-vault port using opaque vault references and
-  non-serializable secret values, with typed interaction-required,
-  authorization, unavailable, and corruption outcomes;
+  credential bytes confined to its dedicated callback, with typed
+  interaction-required, authorization, cancellation, unavailable, and
+  corruption outcomes;
 - Engine-owned snapshot and command coverage for device lists, pairing,
-  credential rotation, revocation, and migration evidence.
+  credential rotation, and revocation.
 
-Until those capabilities exist, Apple code must not change the
-`FfiApplicationEngine` construction path, migrate `remembered-peers-v1.json`,
-migrate `RememberedRoomOutbox`, or invent a helper-specific vault/control API.
-The later phase will embed the persistent Engine in iOS/iPadOS, host it in this
-macOS helper, and move Relationship lifecycle operations to Engine
-snapshots/commands. Existing state and credentials remain untouched meanwhile.
+API 22 does not expose an Engine-store origin, recovery report, migration
+report, or helper control-client contract through UniFFI. Apple acceptance
+tests therefore provide external evidence for fresh state opens,
+current-schema reopen, and legacy-state rejection; they must not describe
+that evidence as a runtime report or as proof that Apple inspected or imported
+v0.2 data. This phase does not read, migrate, or delete
+`remembered-peers-v1.json`, legacy file credentials or Keychain items,
+`RememberedRoomOutbox`, or received files.
+
+Any legacy Apple migration is separate future work. It requires explicit
+approval, a versioned import contract, and independent evidence covering the
+source inventory, validated destination, rollback, and retention behavior.
+Until then, legacy data remains retained but outside the API 22 Engine owner.
+
+The signed helper target, its entitlements, owner-only IPC implementation,
+Developer ID signing, hardened runtime, and notarization remain stage B work;
+API 22 integration does not claim that release topology as implemented.
 
 ## Alternatives considered
 
@@ -206,5 +218,5 @@ decision.
   signing, login-item, or Keychain evidence.
 - Helper lifecycle and upgrade compatibility require real-host tests in
   addition to hosted Swift tests.
-- The transition waits for the shared binding, so current legacy stores remain
-  in place temporarily without being treated as the target architecture.
+- API 22 integration leaves legacy stores in place without treating them as
+  migration input or as the target architecture.

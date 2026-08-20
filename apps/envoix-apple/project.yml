@@ -27,6 +27,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app
         MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "5"
+        ENVOIX_BUILD_TIMESTAMP: "unavailable"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info-macOS.plist
@@ -72,6 +73,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios
         MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "5"
+        ENVOIX_BUILD_TIMESTAMP: "unavailable"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info.plist
@@ -182,6 +184,7 @@ targets:
       - Tests/EnvoixIOSUITests/AppleWifiAwareServiceCoordinatorTests.swift
       - Tests/EnvoixIOSUITests/WifiAwareRendezvousProtocolTests.swift
       - Tests/EnvoixIOSUITests/ApplicationEngineAdapterTests.swift
+      - Tests/EnvoixIOSUITests/AppleApplicationVaultTests.swift
       - Tests/EnvoixMacOSUITests/ConnectionHubPresentationTests.swift
       - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
       - Tests/EnvoixMacOSUITests/RoomCodeInputFormatterTests.swift
@@ -218,6 +221,7 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - Sources/ClipboardIntake.swift
+      - Sources/AppleKeychainAccess.swift
       - Sources/RememberedPeers.swift
       - Shared/ShareDraftStore.swift
       - Tests/EnvoixMacOSUITests/ClipboardIntakeTests.swift

@@ -51,7 +51,7 @@ struct PendingRememberedPeer {
     let relay: String
 }
 
-enum RememberedPeerStoreError: LocalizedError {
+enum RememberedPeerStoreError: LocalizedError, Equatable {
     case invalidLabel
     case missingCredential
     case activeTransfer
@@ -83,7 +83,28 @@ enum RememberedPeerStoreError: LocalizedError {
     }
 }
 
-final class RememberedPeerStore: @unchecked Sendable {
+protocol RememberedPeerStoring: AnyObject, Sendable {
+    func prepare(label: String, broker: String, relay: String) throws -> PendingRememberedPeer
+    func discardPrepared(_ pending: PendingRememberedPeer) throws
+    func peers() throws -> [RememberedPeerSummary]
+    func credential(for peer: RememberedPeerSummary) throws -> Data
+    func sessionMaterial(relationshipID: String) throws -> RememberedPeerSessionMaterial
+    func acquireSession(_ relationshipID: String) throws
+    func releaseSession(_ relationshipID: String)
+    func create(
+        _ pending: PendingRememberedPeer,
+        opaqueCredential: Data,
+        generation: UInt64
+    ) throws
+    func rotate(
+        relationshipID: String,
+        opaqueCredential: Data,
+        generation: UInt64
+    ) throws
+    func delete(_ peer: RememberedPeerSummary) throws
+}
+
+final class RememberedPeerStore: RememberedPeerStoring, @unchecked Sendable {
     static let shared = RememberedPeerStore()
 
     private let lock = NSLock()
@@ -116,6 +137,8 @@ final class RememberedPeerStore: @unchecked Sendable {
             relay: relay
         )
     }
+
+    func discardPrepared(_: PendingRememberedPeer) throws {}
 
     func peers() throws -> [RememberedPeerSummary] {
         try lock.withEnvoixLock {
@@ -289,25 +312,44 @@ final class RememberPersistenceContext: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+    private let store: RememberedPeerStoring
     private let target: Target
     private let relationshipLease: String?
     private var createdRelationshipID: String?
 
-    init(pending: PendingRememberedPeer) throws {
-        try RememberedPeerStore.shared.acquireSession(pending.relationshipID)
+    init(
+        pending: PendingRememberedPeer,
+        store: RememberedPeerStoring = RememberedPeerStore.shared
+    ) throws {
+        try store.acquireSession(pending.relationshipID)
+        self.store = store
         target = .pending(pending)
         relationshipLease = pending.relationshipID
     }
 
-    init(peer: RememberedPeerSummary) throws {
-        try RememberedPeerStore.shared.acquireSession(peer.relationshipID)
+    init(
+        peer: RememberedPeerSummary,
+        store: RememberedPeerStoring = RememberedPeerStore.shared
+    ) throws {
+        try store.acquireSession(peer.relationshipID)
+        self.store = store
         target = .relationship(peer.relationshipID)
         relationshipLease = peer.relationshipID
     }
 
     deinit {
+        let pending = lock.withEnvoixLock { () -> PendingRememberedPeer? in
+            guard createdRelationshipID == nil,
+                  case let .pending(pending) = target else {
+                return nil
+            }
+            return pending
+        }
+        if let pending {
+            try? store.discardPrepared(pending)
+        }
         if let relationshipLease {
-            RememberedPeerStore.shared.releaseSession(relationshipLease)
+            store.releaseSession(relationshipLease)
         }
     }
 
@@ -315,7 +357,7 @@ final class RememberPersistenceContext: @unchecked Sendable {
         lock.withEnvoixLock {
             do {
                 if let createdRelationshipID {
-                    try RememberedPeerStore.shared.rotate(
+                    try store.rotate(
                         relationshipID: createdRelationshipID,
                         opaqueCredential: opaqueCredential,
                         generation: generation
@@ -323,14 +365,14 @@ final class RememberPersistenceContext: @unchecked Sendable {
                 } else {
                     switch target {
                     case let .pending(pending):
-                        try RememberedPeerStore.shared.create(
+                        try store.create(
                             pending,
                             opaqueCredential: opaqueCredential,
                             generation: generation
                         )
                         createdRelationshipID = pending.relationshipID
                     case let .relationship(relationshipID):
-                        try RememberedPeerStore.shared.rotate(
+                        try store.rotate(
                             relationshipID: relationshipID,
                             opaqueCredential: opaqueCredential,
                             generation: generation
@@ -424,39 +466,6 @@ final class MacOSFileCredentialStore: RememberedCredentialStoring {
     }
 }
 #endif
-
-protocol AppleKeychainAccessing {
-    func update(
-        _ query: [CFString: Any],
-        attributes: [CFString: Any]
-    ) -> OSStatus
-    func add(_ item: [CFString: Any]) -> OSStatus
-    func copyMatching(_ query: [CFString: Any]) -> (OSStatus, Data?)
-    func delete(_ query: [CFString: Any]) -> OSStatus
-}
-
-private final class SystemAppleKeychainAccess: AppleKeychainAccessing {
-    func update(
-        _ query: [CFString: Any],
-        attributes: [CFString: Any]
-    ) -> OSStatus {
-        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-    }
-
-    func add(_ item: [CFString: Any]) -> OSStatus {
-        SecItemAdd(item as CFDictionary, nil)
-    }
-
-    func copyMatching(_ query: [CFString: Any]) -> (OSStatus, Data?) {
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        return (status, result as? Data)
-    }
-
-    func delete(_ query: [CFString: Any]) -> OSStatus {
-        SecItemDelete(query as CFDictionary)
-    }
-}
 
 final class AppleCredentialStore: RememberedCredentialStoring {
     private static let service = "com.envoix.remembered-credential.v1"

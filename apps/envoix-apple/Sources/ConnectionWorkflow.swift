@@ -255,7 +255,7 @@ final class ConnectionWorkflowState: ObservableObject {
     @Published private(set) var isRoomCreator = false
 
     private let gateway: RoomControlGateway?
-    private let rememberedStore: RememberedPeerStore
+    private let rememberedStore: RememberedPeerStoring
     private let reconnectPolicy: RememberedRoomReconnectPolicy
     private let clock: () -> Date
     private let jitterUnit: () -> Double
@@ -292,7 +292,7 @@ final class ConnectionWorkflowState: ObservableObject {
 
     init(
         gateway: RoomControlGateway? = nil,
-        rememberedStore: RememberedPeerStore = .shared,
+        rememberedStore: RememberedPeerStoring = RememberedPeerStore.shared,
         reconnectPolicy: RememberedRoomReconnectPolicy = .live,
         jitterUnit: @escaping () -> Double = { Double.random(in: 0...1) },
         clock: @escaping () -> Date = Date.init
@@ -732,12 +732,13 @@ final class ConnectionWorkflowState: ObservableObject {
         }
         defer { releaseRememberedLease(peer.relationshipID) }
 
-        let material: RememberedPeerSessionMaterial
+        let relationship: RememberedPeerSummary
         let credentialReference: String
         do {
-            material = try rememberedStore.sessionMaterial(
+            let material = try rememberedStore.sessionMaterial(
                 relationshipID: peer.relationshipID
             )
+            relationship = material.summary
             if let existing = rememberedCredentialReferences[peer.relationshipID] {
                 credentialReference = existing
             } else {
@@ -774,8 +775,8 @@ final class ConnectionWorkflowState: ObservableObject {
             : []
 
         let generations = ConnectionWorkflowPolicy.rememberedGenerationSchedule(
-            current: material.summary.generation,
-            previous: material.summary.previousGeneration,
+            current: relationship.generation,
+            previous: relationship.previousGeneration,
             mode: mode
         )
         var lastPreAuthenticationFailure = false
@@ -792,8 +793,8 @@ final class ConnectionWorkflowState: ObservableObject {
                         credentialReference: credentialReference,
                         generation: attemptedGeneration,
                         endpoint: RoomControlEndpoint(
-                            broker: material.summary.broker,
-                            relay: material.summary.relay
+                            broker: relationship.broker,
+                            relay: relationship.relay
                         ),
                         displayName: rememberedDisplayName,
                         identityPath: rememberedIdentityPath
@@ -806,16 +807,19 @@ final class ConnectionWorkflowState: ObservableObject {
                                 "Remembered-room credential generation is exhausted."
                             )
                         }
+                        let rotationMaterial = try rememberedStore.sessionMaterial(
+                            relationshipID: peer.relationshipID
+                        )
                         try rememberedStore.rotate(
                             relationshipID: peer.relationshipID,
-                            opaqueCredential: material.opaqueCredential,
+                            opaqueCredential: rotationMaterial.opaqueCredential,
                             generation: authenticatedGeneration + 1
                         )
                     },
                     onEvent: { [weak self] event in
                         self?.handleRemembered(
                             event,
-                            peer: material.summary,
+                            peer: relationship,
                             generation: generation
                         )
                     }

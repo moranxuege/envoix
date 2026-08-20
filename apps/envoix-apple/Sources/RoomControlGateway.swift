@@ -289,6 +289,11 @@ final class LiveRoomControlGateway: RoomControlGateway {
     private var session: FfiRoomControlSession?
     private var cancellation: FfiRoomControlCancellation?
     private var verificationPersistence: PendingDeviceVerification?
+    private let rememberedStore: RememberedPeerStoring
+
+    init(rememberedStore: RememberedPeerStoring = RememberedPeerStore.shared) {
+        self.rememberedStore = rememberedStore
+    }
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         project(try makeRoomControlInvite(broker: broker, relay: relay))
@@ -711,7 +716,8 @@ final class LiveRoomControlGateway: RoomControlGateway {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let vault = try RoomControlCredentialVault(
             label: authenticatedLabel.isEmpty ? pending.fallbackLabel : authenticatedLabel,
-            endpoint: pending.endpoint
+            endpoint: pending.endpoint,
+            store: rememberedStore
         )
         guard session.storePairingCredential(vault: vault) else {
             throw RuntimeSettingsError(
@@ -828,13 +834,22 @@ final class LiveRoomControlGateway: RoomControlGateway {
 final class RoomControlCredentialVault: FfiRememberedCredentialVault, @unchecked Sendable {
     private let persistence: RememberPersistenceContext
 
-    init(label: String, endpoint: RoomControlEndpoint) throws {
-        let prepared = try RememberedPeerStore.shared.prepare(
+    init(
+        label: String,
+        endpoint: RoomControlEndpoint,
+        store: RememberedPeerStoring = RememberedPeerStore.shared
+    ) throws {
+        let prepared = try store.prepare(
             label: label,
             broker: endpoint.broker,
             relay: endpoint.relay
         )
-        persistence = try RememberPersistenceContext(pending: prepared)
+        do {
+            persistence = try RememberPersistenceContext(pending: prepared, store: store)
+        } catch {
+            try? store.discardPrepared(prepared)
+            throw error
+        }
     }
 
     func storeRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
@@ -846,13 +861,15 @@ final class RoomControlCredentialVault: FfiRememberedCredentialVault, @unchecked
 
 @MainActor
 enum RoomControlGatewayFactory {
-    static func make() -> RoomControlGateway {
+    static func make(
+        rememberedStore: RememberedPeerStoring = RememberedPeerStore.shared
+    ) -> RoomControlGateway {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--ui-testing-discovery-fixtures") {
             return FixtureRoomControlGateway()
         }
         #endif
-        return LiveRoomControlGateway()
+        return LiveRoomControlGateway(rememberedStore: rememberedStore)
     }
 }
 

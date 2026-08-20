@@ -185,6 +185,13 @@ result_bundle_args() {
   fi
 }
 
+apple_build_timestamp() {
+  case "$apple_build_configuration" in
+    Debug) date '+%Y-%m-%dT%H:%M:%S%z' ;;
+    Release) date '+%Y-%m-%d' ;;
+  esac
+}
+
 scheme_for_suite() {
   case "$1" in
     hosted) printf '%s\n' Envoix-iOS-Hosted ;;
@@ -203,6 +210,10 @@ run_ios() {
   shift 2
   local destination
   destination="$(resolve_ios_sim_destination)"
+  local -a build_timestamp_args=()
+  if [[ "$action" != "test-without-building" ]]; then
+    build_timestamp_args=("ENVOIX_BUILD_TIMESTAMP=$(apple_build_timestamp)")
+  fi
   local -a result_args=()
   while IFS= read -r argument; do
     result_args+=("$argument")
@@ -214,6 +225,7 @@ run_ios() {
     -configuration "$apple_build_configuration" \
     -destination "$destination" \
     -derivedDataPath "$ios_sim_cache" \
+    ${build_timestamp_args[@]+"${build_timestamp_args[@]}"} \
     COMPILER_INDEX_STORE_ENABLE=NO \
     ${result_args[@]+"${result_args[@]}"} \
     "$action" \
@@ -319,6 +331,7 @@ case "$command_name" in
       exit 2
     }
     prepare_project
+    envoix_build_timestamp="$(apple_build_timestamp)"
     xcodebuild \
       -project "$project" \
       -scheme Envoix-iOS \
@@ -326,12 +339,14 @@ case "$command_name" in
       -destination "$ENVOIX_IOS_DEVICE_DESTINATION" \
       -derivedDataPath "$ios_device_cache" \
       -allowProvisioningUpdates \
+      ENVOIX_BUILD_TIMESTAMP="$envoix_build_timestamp" \
       COMPILER_INDEX_STORE_ENABLE=NO \
       build \
       "$@"
     ;;
   macos-build)
     prepare_project
+    envoix_build_timestamp="$(apple_build_timestamp)"
     xcodebuild \
       -project "$project" \
       -scheme Envoix \
@@ -341,12 +356,14 @@ case "$command_name" in
       CODE_SIGNING_ALLOWED=YES \
       CODE_SIGNING_REQUIRED=YES \
       CODE_SIGN_IDENTITY=- \
+      ENVOIX_BUILD_TIMESTAMP="$envoix_build_timestamp" \
       COMPILER_INDEX_STORE_ENABLE=NO \
       build \
       "$@"
     ;;
   macos-test)
     prepare_project
+    envoix_build_timestamp="$(apple_build_timestamp)"
     result_args=()
     while IFS= read -r argument; do
       result_args+=("$argument")
@@ -357,6 +374,7 @@ case "$command_name" in
       -configuration "$apple_build_configuration" \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_cache" \
+      ENVOIX_BUILD_TIMESTAMP="$envoix_build_timestamp" \
       COMPILER_INDEX_STORE_ENABLE=NO \
       ${result_args[@]+"${result_args[@]}"} \
       test \
@@ -364,12 +382,14 @@ case "$command_name" in
     ;;
   macos-test-build)
     prepare_project
+    envoix_build_timestamp="$(apple_build_timestamp)"
     xcodebuild \
       -project "$project" \
       -scheme Envoix-macOS-Hosted \
       -configuration "$apple_build_configuration" \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_cache" \
+      ENVOIX_BUILD_TIMESTAMP="$envoix_build_timestamp" \
       COMPILER_INDEX_STORE_ENABLE=NO \
       build-for-testing \
       "$@"
@@ -392,12 +412,14 @@ case "$command_name" in
     ;;
   macos-clipboard-test)
     prepare_project
+    envoix_build_timestamp="$(apple_build_timestamp)"
     xcodebuild \
       -project "$project" \
       -scheme Envoix-macOS-Clipboard \
       -configuration "$apple_build_configuration" \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_cache" \
+      ENVOIX_BUILD_TIMESTAMP="$envoix_build_timestamp" \
       COMPILER_INDEX_STORE_ENABLE=NO \
       test \
       "$@"
