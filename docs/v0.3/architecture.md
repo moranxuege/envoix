@@ -25,7 +25,7 @@ These rules are release gates, not suggestions.
    snapshots, and explicit platform ports.
 5. Network protocol types do not become UI state by re-export.
 6. A Room ending cannot implicitly delete a Transfer or Relationship.
-7. Received user files are outside build caches and migration cleanup.
+7. Received user files are outside build caches and lifecycle state cleanup.
 8. Secret material is never stored in ordinary application state or emitted in
    diagnostics.
 9. One process has one durable Engine owner. Multiple windows have independent
@@ -72,8 +72,8 @@ capabilities. A display name is metadata and is not identity.
 ### Relationship
 
 Durable trust established by a verified pairing transcript. It owns the peer
-identity, credential generation, trust state, revocation state, and migration
-metadata. It does not own current connectivity.
+identity, credential generation, trust state, and revocation state. It does
+not own current connectivity.
 
 Revocation preserves Room and Transfer history but prevents any new Transfer
 authorization or attempt from starting, including accept, start, resume, and
@@ -143,7 +143,7 @@ translate those typed values into their native binding types, but must not
 maintain independent error-to-recovery or error-to-terminal-state tables or
 parse diagnostic prose. Application contract v6 makes the fine-grained failure
 codes canonical while preserving read compatibility for v1-v5 fixtures;
-UniFFI API 21 carries the complete projection to Apple and Android clients;
+UniFFI API 22 carries the complete projection to Apple and Android clients;
 application binding v1 projects application contract v6 as typed
 Command/Event/Snapshot/Effect values without JSON orchestration.
 
@@ -256,7 +256,8 @@ Android embeds the Engine and exposes work through a Compose presentation and
 OS-managed service/work APIs. Android Keystore, ContentResolver/MediaStore,
 notifications, nearby discovery, and background scheduling remain Kotlin
 adapters. Product state transitions do not remain in `TransferService` or
-composables.
+composables. The process opens one persistent Engine handle; the migrated
+Relationship slice reads and mutates only that Engine state.
 
 Compose feature screens receive immutable UI state and intent callbacks. For
 example, the Connection Hub renders `DiscoveryUiState` and nearby presence
@@ -308,11 +309,43 @@ Win32 calls are isolated to the security descriptor and token adapter because
 Tokio exposes `SECURITY_ATTRIBUTES` as an unsafe raw-pointer boundary; no
 protocol or Engine code uses `unsafe`.
 
+The CLI installs the paired Windows binaries under
+`%LOCALAPPDATA%\Envoix\bin` and registers a per-user Task Scheduler definition
+under a task name derived from the same owner SID. Its logon trigger uses
+`InteractiveToken` and `LeastPrivilege`, so installation stores no password and
+requires no administrator elevation. The task runs a single Agent instance,
+has no execution time limit, and uses the schema's one-minute minimum restart
+interval after failure. Start, stop, and restart wait for the prior executable
+image to be released before continuing, avoiding a stop/start race without
+parsing localized command output.
+
+Windows update replaces each installed binary atomically while retaining task
+settings, compatible Engine state, credentials, and Inbox. A breaking Engine
+schema change requires confirmed state cleanup and re-pairing. Default
+uninstall removes the task and binaries but retains data. Its separately
+confirmed cleanup mode
+removes only explicit Agent-owned state entries and settings; Inbox and unknown
+files remain. When uninstall runs from the installed CLI itself, a bounded,
+hidden system cleanup process removes that locked executable after it exits.
+The Windows CI job runs
+[`windows-agent-lifecycle-test.ps1`](../../scripts/windows-agent-lifecycle-test.ps1)
+against an isolated temporary product root. It refuses to replace an existing
+Envoix task and covers install, stop, start, restart, update, both uninstall
+policies, self-removal, and Inbox preservation.
+
 ### Linux and WSL
 
 Linux/WSL runs a per-user Agent, normally through a systemd user service, with
 the Rust CLI as its supported control surface. A Linux GUI is outside v0.3
 unless a later decision adds it.
+
+The CLI installs and updates the paired `envoix` and `envoix-agent` binaries in
+place, preserving settings and compatible durable state across updates. A
+breaking Engine schema change requires confirmed state cleanup and re-pairing.
+Uninstall removes the user unit and binaries by default without deleting data.
+Its separately
+confirmed state-cleanup mode removes only explicit Agent-owned state entries;
+received Inbox files are never part of lifecycle cleanup.
 
 ## 8. Local control protocol
 
@@ -349,9 +382,22 @@ progress is checkpointed every 4 MiB and at payload completion. Queued and
 nonterminal in-flight Transfers are eligible again after process restart, while
 paused and failed Transfers are never retried implicitly. Peer decline, busy,
 expiry, and invalid-offer decisions remain typed rejection outcomes.
-Requests are limited to 64 KiB and responses to 20 MiB. v3 through v5 requests
-receive `unsupported_protocol_version`; the Agent does not run a legacy
-decoder.
+Protocol v7 adds bounded, secret-free summaries for incoming offers that exceed
+the automatic receive limit or half of currently allocatable Inbox space. The
+Agent keeps at most 64 such offers in memory and starts no payload transfer
+until the owner approves one through the local control protocol. Approval and
+rejection are single-use decisions; Room closure, Relationship revocation, or
+Agent restart discards the pending summary without persisting its directional
+invitation.
+Protocol v8 introduced selected transfer paths in at most 256 transient Agent
+records. Snapshots and event polling expose typed `lan`, `direct`, `relay`,
+`wifi_aware`, or `other` values without retaining raw peer addresses or relay
+URLs. Direct-address classification is diagnostic only: it never changes
+Relationship authentication, authorization, or candidate selection. A path is
+removed when its transfer settles and is never written to product state.
+Protocol v9 is current and binds diagnostics to Engine schema v2. Requests are
+limited to 64 KiB and responses to 20 MiB. v3 through v8 requests receive
+`unsupported_protocol_version`; the Agent does not execute a legacy decoder.
 
 ## 9. Persistence and secret ownership
 
@@ -361,21 +407,23 @@ The Engine owns the versioned schema for non-secret product state:
 - Rooms needed for recovery;
 - Transfer records and outcomes;
 - Inbox/Outbox metadata;
-- capability and migration metadata.
+- capability metadata.
 
 The storage implementation is the bounded atomic-file Engine store selected by
 [ADR 0001](adr/0001-engine-storage.md). Its single-writer constraint follows
 the Engine ownership rule; strict validation, size bounds, last-known-good
 recovery, and atomic activation are required parts of the store.
 
-Engine schema v1 stores the immutable application snapshot, durable
-Relationship routes and vault references, Inbox metadata, and migration
-evidence. It stores neither payload bytes nor credential values. The owner
-lock is held for the lifetime of the store, including migration.
+Engine schema v2 stores the immutable application snapshot, durable
+Relationship routes and vault references, and Inbox metadata. It stores
+neither payload bytes, credential values, nor legacy migration evidence. The
+owner lock is held for the lifetime of the store.
 
 The desktop Agent now projects pairing, generation rotation, revocation, and
-Inbox updates into this schema. Its former ProductStore implementation is
-compiled only as a v0.2 fixture writer; it is not a production runtime path.
+Inbox updates into this schema. The former ProductStore implementation and
+importer are absent from the runtime. With no schema v2 state, recognized v0.2
+or schema v1 state fails explicitly and requires a test-build reset and
+re-pairing; received files remain outside that reset.
 The Unix control adapter sets the socket to owner-only mode and verifies each
 accepted peer UID against the socket owner before decoding a command.
 
@@ -403,12 +451,14 @@ adapter. The Engine host injects the `SecureVaultPort`; the contract exchanges
 only validated vault references and zeroizing, non-serializable secret values,
 and represents required user interaction as a typed result.
 
-The Apple/Android UniFFI boundary enforces the same ownership rule. Room
-snapshots and general transfer observers never contain credential bytes. Only
-the dedicated `FfiRememberedCredentialVault` callback receives a new or rotated
-opaque credential and must synchronously hand it to the platform vault owner.
-Loading an existing credential into the native process registry is likewise a
-trusted host operation; UI state receives only its opaque reference.
+The Apple/Android UniFFI boundary enforces the same ownership rule. Room and
+application snapshots and general transfer observers never contain credential
+bytes. The dedicated `FfiRememberedCredentialVault` session callback hands a
+new or rotated opaque credential to its platform owner. The persistent Engine
+uses `FfiApplicationVault` to store, load, and delete that material by a
+bounded non-secret reference. Loading a credential for an authenticated native
+operation is an explicit trusted host call; UI state receives only its opaque
+process reference.
 
 ## 10. Presentation architecture
 

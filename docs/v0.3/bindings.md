@@ -6,7 +6,7 @@ Status: normative for M5 and later platform migrations.
 
 The native library exposes two independent versions:
 
-- UniFFI API `21` identifies the complete native symbol/type surface;
+- UniFFI API `22` identifies the complete native symbol/type surface;
 - application binding `1` projects application contract `6`.
 
 Callers must check both `envoixCoreInfo()` and
@@ -14,20 +14,35 @@ Callers must check both `envoixCoreInfo()` and
 An unsupported version fails closed; a frontend must not guess field or state
 semantics.
 
-API 21 makes credential delivery a dedicated trusted boundary.
-`FfiRememberedCredentialVault` is the only foreign callback that receives a
-newly paired or rotated opaque credential. `FfiRoomControlSnapshot` and the
-general `TransferObserver` contain no credential bytes. Room pairing invokes
-`storePairingCredential(vault:)`; authenticated transfer entry points receive
-the vault separately from their progress observer. A platform vault adapter
-must store the value immediately and must not project, retain, or log it.
+API 22 makes credential delivery and durable credential storage dedicated
+trusted boundaries.
+`FfiRememberedCredentialVault` is the only Room/Transfer-session callback that
+receives a newly paired or rotated opaque credential. `FfiRoomControlSnapshot`
+and the general `TransferObserver` contain no credential bytes. Room pairing
+invokes `storePairingCredential(vault:)`; authenticated transfer entry points
+receive the vault separately from their progress observer. A platform vault
+adapter must store the value immediately and must not project, retain, or log
+it.
+
+`FfiApplicationEngine.openPersistent(stateDirectory:vault:)` acquires the
+single durable Engine owner for a host state directory. Relationship labels,
+endpoints, generations, revocation state, and bounded vault references live in
+Engine schema v2. `FfiApplicationVault` stores only opaque credential bytes by
+those non-secret references. Credentials may return only from the explicit
+trusted `loadRelationship` call used to enter an authenticated operation; they
+never appear in application snapshots, events, commands, effects, or
+diagnostics. A second owner, legacy state, unavailable vault, interaction
+requirement, permission denial, and corrupt vault data are distinct typed
+errors; cancellation remains distinct from invalid input.
 
 ## Control boundary
 
-`FfiApplicationEngine` owns one ordered application snapshot. It accepts typed
-event envelopes, returns immutable typed snapshots, and decides typed commands
-against that snapshot. The returned effect is the only work a live platform
-adapter may execute. Replaying a snapshot or event never executes an effect.
+`FfiApplicationEngine` owns one ordered application snapshot. Its no-argument
+constructor is limited to contract tests and transient previews; product hosts
+open the persistent constructor. It accepts typed event envelopes, returns
+immutable typed snapshots, and decides typed commands against that snapshot.
+The returned effect is the only work a live platform adapter may execute.
+Replaying a snapshot or event never executes an effect.
 
 The binding intentionally uses sorted record arrays instead of foreign maps so
 Swift and Kotlin receive identical ordering. Bulk file bytes, endpoint details,
@@ -44,7 +59,8 @@ to `MainActor` before touching observable application state and reject events
 from stale operation identities. Android callback targets are thread-safe and
 may be invoked concurrently; they never mutate Compose state directly. Tests
 exercise both contracts so a generated-binding runtime change cannot silently
-introduce UI-thread violations.
+introduce UI-thread violations. A vault callback performs storage only and must
+not re-enter the application Engine that invoked it.
 
 `ManifestV2PlatformDestination` is the typed exception to Rust-owned local
 filesystem output. It freezes public root names before Accept and asynchronously
@@ -76,13 +92,13 @@ scripts/check-generated-bindings.sh
 ```
 
 The script builds one metadata-bearing native library, generates Swift and
-Kotlin from it, and verifies that Command/Event/Snapshot types exist in both
-outputs. It also rejects an asynchronous zero-argument `close()` before UniFFI
-can emit an uncompilable Kotlin overload. The gate also requires the dedicated
-credential-vault callback and rejects credential fields on Room snapshots or
-Transfer observers. Generated source is build output and is not checked into
-the repository; Apple packaging and Android staging generate from the same
-crate.
+Kotlin from it, and verifies that Command/Event/Snapshot types and the
+persistent Engine/Relationship/vault surface exist in both outputs. It also
+rejects an asynchronous zero-argument `close()` before UniFFI can emit an
+uncompilable Kotlin overload. The gate rejects credential fields on application
+or Room snapshots and on Transfer observers. Generated source is build output
+and is not checked into the repository; Apple packaging and Android staging
+generate from the same crate.
 
 ## Android migration ledger
 
@@ -110,6 +126,18 @@ New and rotated credentials travel through a separate
 owner. They are absent from general session observers and Room snapshots, so a
 presentation or progress adapter cannot accidentally acquire credential
 material.
+
+Android remembered Relationships now use one persistent
+`FfiApplicationEngine` handle. The former Kotlin-owned
+`relationships-v1.json` metadata and generation-indexed credential files are
+not read by the v0.3 runtime. Engine schema v2 owns the non-secret record, while
+an `FfiApplicationVault` adapter AES-GCM wraps the credential with a
+non-exportable Android Keystore key under `noBackupFilesDir`. Rotation replaces
+one referenced credential atomically, and the Engine coordinates state-write
+rollback for rotation and revoke failures. Missing or modified ciphertext
+fails closed without removing the Relationship. Existing Android v1 files are
+retained but not imported, so upgraded test installations must pair again;
+received files are untouched.
 
 All production Android Manifest v2 sends now restore and explicitly seal the
 canonical job, open the session, observe typed progress/failure/path/timing

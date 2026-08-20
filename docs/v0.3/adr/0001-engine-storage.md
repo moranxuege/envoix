@@ -1,13 +1,13 @@
 # ADR 0001: Use a bounded atomic-file Engine store
 
-Status: accepted
+Status: accepted; amended for the v0.3 breaking state boundary
 
-Date: 2026-08-18
+Date: 2026-08-18; amended 2026-08-20
 
 ## Context
 
-v0.3 needs one Engine-owned schema for durable Relationship, Transfer, Inbox,
-and migration metadata. The same implementation must work in embedded mobile
+v0.3 needs one Engine-owned schema for durable Relationship, Transfer, and
+Inbox metadata. The same implementation must work in embedded mobile
 applications and desktop Agents. Received file contents and vault secrets are
 outside this store.
 
@@ -25,18 +25,18 @@ directory. Do not add SQLite in v0.3.
 The implementation must provide:
 
 - one schema envelope containing the application snapshot, vault references,
-  Inbox metadata, and migration metadata;
+  and Inbox metadata;
 - semantic validation after decoding and before every activation;
 - a same-directory temporary file, file flush, atomic replacement, and parent
   directory flush where the platform exposes that operation;
 - one last-known-good snapshot for recovery from corrupt or interrupted state;
-- an exclusive lifetime lock acquired before migration or Engine startup;
+- an exclusive lifetime lock acquired before Engine startup;
 - a hard encoded-size limit and bounded collections before allocation;
 - durable checkpoints at product transitions, with progress coalesced instead
   of flushing every byte callback;
 - vault references only. A secret value must never enter the JSON envelope;
-- a one-time, restartable v0.2 import that creates an immutable backup before
-  activating v0.3 state;
+- explicit rejection of v0.2 ProductStore and Engine schema v1 when no current
+  state exists; no legacy state is decoded into the Engine;
 - Windows replacement and locking implemented with native file semantics, and
   Unix locking plus owner-only modes.
 
@@ -45,13 +45,10 @@ The initial layout is:
 ```text
 state-directory/
   engine.lock
-  engine-state-v1.json
-  engine-state-v1.previous.json
-  migration/
-    v0.2-product-state-v1.backup.json
-    import-v0.2-v1.json
+  engine-state-v2.json
+  engine-state-v2.previous.json
   vault/                         # desktop protected-credential adapter
-  inbox/                         # received user files; never migration-owned
+  inbox/                         # received user files; never state-cleanup-owned
 ```
 
 The Windows adapter stores only versioned, user-scoped DPAPI ciphertext in the
@@ -88,14 +85,17 @@ snapshot at durable checkpoints.
 
 ### Keep the v0.2 ProductStore
 
-The current store persists only remembered-device metadata and completed Inbox
+The old store persists only remembered-device metadata and completed Inbox
 items. It cannot make active Transfers or shared application state durable and
-would leave two product schemas. It remains only as a bounded import adapter
-until the v0.2 migration removal gate is met.
+would leave two product schemas. The v0.3 test cycle permits a breaking reset,
+so the runtime and importer are removed; old state is identified only far
+enough to return `UnsupportedLegacyState`.
 
 ## Consequences
 
 - Packaging and fixture tests stay portable and deterministic.
+- Test builds with ProductStore or Engine schema v1 state must reset and
+  re-pair; lifecycle cleanup still preserves received files.
 - One owner lock, size bounds, validation, backup, and recovery are required
   correctness mechanisms rather than optional hardening.
 - Write amplification must be controlled at the Engine checkpoint boundary.

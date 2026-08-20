@@ -45,7 +45,7 @@ as typed capabilities, not inferred by a frontend.
 
 - [Target architecture](architecture.md)
 - [Milestone plan](milestones.md)
-- [Compatibility and migration policy](compatibility.md)
+- [Compatibility and breaking-upgrade policy](compatibility.md)
 - [Engineering standard](engineering.md)
 - [Native presentation contract](presentation.md)
 - [Typed binding contract](bindings.md)
@@ -73,9 +73,9 @@ milestone either updates or archives them.
    operating system permits it.
 7. Use the paid Apple Developer Program team for stable development and
    distribution signing. Ad-hoc signing is not a release path.
-8. Prefer selective migration over indefinite compatibility code: preserve
-   received files and protocol-compatible durable identity, but permit an
-   explicit reset of transient v0.2 state.
+8. Use a breaking state boundary for the v0.3 test cycle: preserve received
+   files, but reset legacy ProductStore/Engine state and re-pair instead of
+   retaining an importer or parallel credential model.
 9. Use one bounded atomic-file Engine store with an exclusive owner lock;
    credentials remain behind vault references.
 
@@ -100,8 +100,8 @@ v0.3.0 is complete only when:
   implementation and one shared transition test suite;
 - old app-facing send/invite workflows and the temporary desktop demo are no
   longer shipped;
-- persisted v0.2 data follows the documented migration policy and received
-  files are never deleted by migration;
+- persisted v0.2 and Engine schema v1 data fail with the documented explicit
+  reset requirement, while lifecycle cleanup never deletes received files;
 - Apple secrets use stable signed Keychain access without prompt loops;
 - Android secrets continue to use Android Keystore;
 - Windows and Linux/WSL have supported Agent and CLI lifecycle paths;

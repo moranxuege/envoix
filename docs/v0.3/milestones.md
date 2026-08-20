@@ -15,7 +15,7 @@ v0.3 branch.
 | M1 | Establish trustworthy behavior and security baselines | M0 | characterization tests, CI gates, dependency audit |
 | M2 | Turn `envoix-client` into a narrow application boundary | M1 | dependency checks and contract tests |
 | M3 | Move Room, Relationship, and Transfer policy into shared reducers | M2 | shared transition suites and reference transfer |
-| M4 | Establish durable product storage and Agent control protocol | M3 | migration fixtures, restart tests, CLI/Agent tests |
+| M4 | Establish durable product storage and Agent control protocol | M3 | schema/rejection fixtures, restart tests, CLI/Agent tests |
 | M5 | Replace parallel Swift/Kotlin orchestration with typed bindings and ports | M3, M4 | binding contract tests and device-hosted tests |
 | M6 | Rebuild native presentation and the Apple universal app | M5 | hosted UI tests, iPad adaptability evidence |
 | M7 | Complete desktop host topology and supported CLI operations | M4, M5 | macOS/Windows/WSL lifecycle and transfer evidence |
@@ -30,7 +30,7 @@ architecture rewrite.
 ### Deliverables
 
 - authoritative v0.3 architecture and domain vocabulary;
-- compatibility and migration policy;
+- compatibility and breaking-upgrade policy;
 - engineering and documentation standard;
 - milestone and verification matrix;
 - source version moved to `0.3.0` without replacing the current public v0.2.2
@@ -59,8 +59,8 @@ architecture rewrite.
 
 - characterization tests for current Room code, verification pairing,
   remembered reconnect, revocation, Transfer resume, and delivery proof;
-- golden fixtures for Agent control messages and binding events that must
-  survive the first migration;
+- golden fixtures for Agent control messages and binding events that remain
+  frozen across contract revisions;
 - CI triggered for pushes to the v0.3 branch, not only pull requests;
 - one pinned Rust toolchain used locally and in CI;
 - RustSec audit and dependency/license policy in CI;
@@ -158,7 +158,8 @@ architecture rewrite.
 - ADR selecting SQLite or an atomic-file store based on migrations,
   concurrency, corruption recovery, packaging, and testability;
 - vault references separated from non-secret metadata;
-- atomic v0.2 import with backup and explicit re-pair fallback;
+- explicit rejection of v0.2 ProductStore and Engine schema v1, with a
+  received-file-preserving reset and re-pair procedure;
 - versioned Agent Command/Event/Snapshot protocol;
 - owner-only Unix socket and Windows Named Pipe transport contracts;
 - one durable Engine owner and explicit process/state locking;
@@ -168,14 +169,14 @@ architecture rewrite.
 ### Exit criteria
 
 - process death and restart do not lose a durable Transfer or Relationship;
-- a failed migration leaves the old store and received files intact;
+- legacy-state rejection leaves the old store and received files intact;
 - two local controllers cannot create competing durable Engine owners;
 - control messages are bounded and contract-tested;
 - the CLI never loads platform credentials directly.
 
 ### Verification
 
-- versioned fixture migrations, including malformed and interrupted input;
+- current schema round trips plus frozen legacy-state rejection fixtures;
 - concurrent-controller and peer-credential tests;
 - Agent restart/revoke/resume tests on Linux/WSL;
 - Windows IPC contract tests even if the GUI is not yet implemented.
@@ -301,7 +302,7 @@ architecture rewrite.
   intentionally scoped as development-only;
 - no unaccepted high-severity security finding;
 - a full reference matrix demonstrates Room pairing, remembered reconnect,
-  Transfer, resume, revoke, and migration behavior;
+  Transfer, resume, revoke, and legacy-state rejection behavior;
 - v0.3.0 release notes accurately describe supported and unavailable features.
 
 ### Verification

@@ -126,7 +126,7 @@ presentation state and localization. Views render state and emit UI intent.
 | binding/control | type parity, version mismatch, lifetime, cancellation, event-gap recovery |
 | platform adapter | hosted unit tests plus real API/instrumentation tests where simulation is insufficient |
 | presentation | state rendering, interaction, accessibility, adaptive layout |
-| persistence/migration | version fixtures, interruption, corruption, atomic activation, received-file preservation |
+| persistence/upgrade boundary | current-schema fixtures, legacy rejection, interruption, corruption, atomic activation, received-file preservation |
 | cross-device | named source/target builds, immutable revisions, result evidence, clean-state requirements |
 
 A flaky UI test is reported and fixed or quarantined with an owner and issue. A

@@ -1,10 +1,14 @@
-# v0.3 compatibility and migration policy
+# v0.3 compatibility and upgrade policy
 
-Status: accepted policy; desktop ProductStore import is implemented in M4.
+Status: accepted breaking-upgrade policy for the v0.3 test cycle.
 
-v0.3 deliberately breaks accidental internal interfaces. It does not use an
-architecture refactor as permission to lose received files, silently weaken
-authentication, or produce ambiguous cross-version failures.
+v0.3 uses the new Engine architecture as its only product runtime. It does not
+import or execute v0.2 product state. This deliberately trades test-build
+upgrade continuity for one state owner, one credential path, and one durable
+schema before the stable release.
+
+Received files are the exception: they are user data and are never removed by
+Engine startup, legacy-state rejection, update, or lifecycle state cleanup.
 
 ## 1. Compatibility classes
 
@@ -12,140 +16,91 @@ authentication, or produce ambiguous cross-version failures.
 | --- | --- | --- |
 | Manifest v2 transfer wire | preserve unless a security defect requires a versioned change | proven core behavior and cross-device interoperability |
 | SPAKE2 and channel binding | preserve security properties | authentication boundary |
-| Room code and current Room capability | preserve where compatible; keep version parsing explicit | supports staged client updates |
-| legacy word/direct invite product workflow | remove from app-facing APIs after reachability audit | superseded product model |
-| Rust internal/public re-exports | breaking changes allowed | currently prevent a real application boundary |
-| Swift/Kotlin binding API | replace with versioned Command/Event/Snapshot contract | current parallel orchestration is the primary debt |
-| Agent local control API | introduce a versioned v0.3 protocol | GUI and CLI require stable local control |
-| received files | always preserve | user data, never migration scratch space |
-| device identity | migrate when cryptographically and operationally safe | avoids unnecessary identity churn |
-| remembered Relationship | attempt one bounded migration; otherwise require explicit re-pair | no indefinite legacy credential path |
-| transient Room/session state | reset allowed | temporary state must not constrain the architecture |
-| pending v0.2 outbox/UI drafts | reset allowed after backup and user-visible notice | formats are duplicated and not reliable contracts |
-| completed Transfer history | migrate when trustworthy; otherwise preserve raw backup | useful metadata but not equal to received files |
-| settings | migrate supported semantic values, discard obsolete switches | prevents old transport modes from surviving as product concepts |
+| Room code and current Room capability | preserve where compatible; reject unsupported versions explicitly | supports controlled endpoint rollout |
+| legacy word/direct invite product workflow | remove from app-facing APIs | superseded product model |
+| Rust internal/public re-exports | breaking changes allowed | enables the Engine application boundary |
+| Swift/Kotlin binding API | replace with versioned Command/Event/Snapshot contracts | removes parallel product orchestration |
+| Agent local control API | current protocol only; older versions receive a typed error | prevents two local semantics under one version |
+| Engine/ProductStore state | no v0.2 or Engine schema v1 import | avoids retaining a second state and credential model |
+| remembered Relationship and credential | reset and re-pair | old identity/credential meaning is not carried into the new Engine |
+| transient Room/session/outbox state | reset | temporary state must not constrain the architecture |
+| received files | always preserve | user data is not Agent-owned migration scratch space |
+| settings | retain only while their current version validates | invalid settings fail closed |
 
 ## 2. Version separation
 
-The following versions are independent:
+The application release, Manifest/network protocol, Engine schema,
+application binding contract, and Agent IPC protocol have independent version
+numbers. Every serialized boundary carries or implies its version and rejects
+unsupported versions explicitly.
 
-- application release version (`0.3.0`);
-- network protocol/manifest version;
-- Engine schema version;
-- binding/control contract version;
-- Agent local IPC version.
+The first migration-bearing Engine envelope is frozen as schema v1. The
+breaking test-cycle cleanup removes its v0.2 migration metadata and introduces
+schema v2 rather than silently changing v1. Agent diagnostics expose that
+schema change, so the paired CLI/Agent control contract advances to protocol
+v9. A v9 process does not execute v3-v8 commands.
 
-A source release bump does not automatically require a wire version bump.
-Every serialized boundary carries or implies its own version and rejects an
-unsupported version with a typed error.
+## 3. Breaking state boundary
 
-## 3. Migration invariants
+On startup, the Engine follows this order:
 
-1. Migration never traverses, deletes, or moves received user files.
-2. The old state remains intact until the new state is fully written and
-   validated.
-3. Migration is restartable or records a terminal, recoverable failure.
-4. A secret is never copied into an ordinary JSON/database field during
-   migration.
-5. Unknown credential formats do not fall back to plaintext.
-6. Re-pairing is explicit and explains which Relationship could not be
-   imported.
-7. A failed import cannot make a valid v0.2 install unusable without retaining
-   a recoverable backup.
-8. Compatibility code has a removal milestone and cannot become a second
-   permanent runtime path.
+1. Load and validate `engine-state-v2.json`, recovering its v2 previous
+   snapshot when allowed.
+2. If valid v2 state exists, ignore residual v0.2 ProductStore and Engine v1
+   files; they are not read or merged.
+3. If no v2 state exists but an Engine v1 snapshot or
+   `product/product-state-v1.json` exists, return `UnsupportedLegacyState`.
+4. Only a directory with neither current nor recognized legacy state may start
+   as a fresh Engine.
 
-## 4. Migration transaction
+The explicit rejection prevents a binary update from looking successful while
+silently discarding Relationships. It does not modify the old state, vault, or
+Inbox. There is no automatic importer, fallback ProductStore, or
+`re_pair_required` shadow model.
 
-The target sequence is:
+The Android pre-Engine Relationship store used a platform-specific location
+and is outside the Engine directory. The v0.3 Android host records a diagnostic
+when that v1 metadata exists, retains both its metadata and encrypted
+credentials, and opens a fresh Engine v2 state without importing either one.
+The remembered-device list is therefore empty until the devices pair again.
+This boundary never traverses or removes received files.
+
+## 4. Test-build upgrade procedure
+
+During the v0.3 test cycle, upgrade by intentionally resetting Agent-owned
+state and then re-pairing:
 
 ```text
-discover old state
-  -> validate and inventory
-  -> create immutable backup/reference
-  -> build new state in a temporary location
-  -> validate schema and vault references
-  -> atomically activate new state
-  -> retain bounded migration evidence
+stop/uninstall the old Agent with confirmed state cleanup
+  -> install the paired v0.3 CLI and Agent
+  -> verify protocol v9 and Engine schema v2
+  -> pair supported devices again
 ```
 
-If validation fails, v0.3 starts in a recovery state with these choices:
+Lifecycle cleanup is allowlisted. It may remove old and current Engine
+snapshots, vault entries, ProductStore data, migration remnants, transfer
+checkpoints, and settings. It must not traverse or remove `inbox/`, an external
+configured Inbox, or unknown files. Copy any other test-only history that is
+wanted before confirming the reset.
 
-- retry migration after correcting the reported condition;
-- continue with a fresh local product state while preserving the backup and
-  received files;
-- re-pair relationships that cannot be imported.
+## 5. Cross-version network behavior
 
-There is no silent fallback that runs v0.2 and v0.3 product engines side by
-side.
+Manifest and authentication compatibility is independent from local state and
+IPC compatibility. Where the preserved protocol is sufficient, a v0.2 and
+v0.3 endpoint may still complete that protocol. No v0.3 product feature may
+depend on this without a dedicated compatibility test.
 
-The v0.3 Agent control protocol starts at version 4. Its request/response
-envelopes and snapshot remain frozen in a v0.3 fixture. Version 5 adds bounded
-event polling and explicit snapshot recovery in a new fixture without
-rewriting v4. Version 6 adds durable Transfer creation/status and secret-free
-diagnostics in another immutable fixture. v3 through v5 commands are recognized
-only far enough to return a typed version error; they are never executed by a
-v6 Agent.
+When a v0.3-only Room, Relationship, or capability is required, the older
+endpoint receives a version/capability error. It must not be represented as a
+generic timeout, wrong code, or connection failure.
 
-## 5. Relationship migration
+## 6. Fixtures and removal rule
 
-A remembered Relationship is imported only if all of these are true:
+Current Engine v2 and Agent v9 fixtures round-trip every supported field.
+Engine v1 and Agent v3-v8 fixtures remain frozen only to prove explicit
+rejection or document the superseded contract. Retired ProductStore migration
+fixtures and the importer are removed; Git history is their archive.
 
-- the peer identity and local identity are unambiguous;
-- credential generation and relation identifiers validate;
-- secret material can be moved or referenced without exposing it;
-- the new Engine can distinguish imported, rotated, and revoked state;
-- both endpoints can produce a clear authentication failure if their
-  generations no longer agree.
-
-Otherwise, metadata may be retained for explanation, but the Relationship is
-marked `re_pair_required`. A user must never see it as trusted-but-offline when
-its credential is unusable.
-
-## 6. Cross-version behavior
-
-Where Manifest v2 and authentication remain compatible, v0.2 and v0.3 may
-complete a basic Transfer during staged rollout. No product feature may depend
-on this unless it has an explicit compatibility test.
-
-When a v0.3-only Room, Relationship, or control behavior is required, the
-older endpoint receives a version/capability error. It must not be represented
-as a generic timeout, wrong code, or connection failure.
-
-The broker and relay remain backward-compatible only for the bounded rollout
-window documented by their deployment milestone. The repository does not keep
-unused public server APIs indefinitely for hypothetical clients.
-
-## 7. Fixtures and tests
-
-M1 records sanitized, secret-free fixtures for:
-
-- current Room codes and Room control envelopes;
-- Agent command/event envelopes;
-- remembered Relationship metadata with fake credentials;
-- Transfer records in active, paused, delivered, and failed states;
-- corrupt, truncated, unknown-version, and partially migrated state.
-
-M4 migration tests run against copies of those fixtures. Fixtures never contain
-real device identities, production endpoints that reveal private data, or
-usable credentials.
-
-The desktop Agent opens the Engine store at the state-directory root. On first
-open it discovers the v0.2 `product/` store, validates the complete candidate,
-installs an immutable source backup, copies only supported opaque credentials
-into the Agent vault, and atomically activates Engine schema v1. Missing or
-unsupported credentials are recorded as `re_pair_required`; the legacy store
-and received files remain untouched.
-
-## 8. Removal rule
-
-A legacy API or schema adapter may be removed when:
-
-1. repository reachability shows no supported consumer;
-2. the replacement has characterization and contract tests;
-3. every affected supported host builds and passes its relevant tests;
-4. staged rollout behavior is documented;
-5. any required one-time migration remains available without retaining the old
-   runtime implementation.
-
-Git history is the archive. Dead production code is not documentation.
+A legacy decoder may remain only when it is the smallest safe way to identify
+an obsolete version and return a typed error. It must not construct domain
+state, read old credentials, or execute a command.
