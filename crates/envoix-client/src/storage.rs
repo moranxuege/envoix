@@ -16,14 +16,16 @@ use crate::ports::PlatformPortError;
 use crate::product::InboxItem;
 use crate::snapshot::EngineSnapshot;
 
-pub const ENGINE_STATE_SCHEMA_VERSION: u16 = 1;
+pub const ENGINE_STATE_SCHEMA_VERSION: u16 = 2;
 pub const MAX_ENGINE_STATE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_DURABLE_ENTITIES: usize = 1_000;
 
-const ENGINE_STATE_FILE: &str = "engine-state-v1.json";
-const PREVIOUS_ENGINE_STATE_FILE: &str = "engine-state-v1.previous.json";
+const ENGINE_STATE_FILE: &str = "engine-state-v2.json";
+const PREVIOUS_ENGINE_STATE_FILE: &str = "engine-state-v2.previous.json";
 const ENGINE_LOCK_FILE: &str = "engine.lock";
-const MIGRATION_DIRECTORY: &str = "migration";
+const LEGACY_ENGINE_STATE_FILES: &[&str] =
+    &["engine-state-v1.json", "engine-state-v1.previous.json"];
+const LEGACY_PRODUCT_STATE_FILE: &str = "product/product-state-v1.json";
 const MAX_REFERENCE_BYTES: usize = 128;
 const MAX_LABEL_CHARS: usize = 256;
 const MAX_ENDPOINT_BYTES: usize = 2_048;
@@ -37,8 +39,14 @@ pub enum EngineStoreError {
     StateTooLarge { actual: u64, maximum: u64 },
     #[error("unsupported Engine state schema {actual}; expected {expected}")]
     UnsupportedSchema { expected: u16, actual: u16 },
+    #[error(
+        "unsupported legacy state at {path}; v0.3 requires fresh Engine state and re-pairing (received Inbox files are not removed)"
+    )]
+    UnsupportedLegacyState { path: PathBuf },
     #[error("invalid Engine state: {0}")]
     InvalidState(String),
+    #[error("remembered Relationship credential is missing from the secure vault")]
+    MissingVaultCredential,
     #[error("decode Engine state: {0}")]
     Decode(#[source] serde_json::Error),
     #[error(transparent)]
@@ -120,37 +128,6 @@ impl DurableRelationship {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RePairReason {
-    InvalidMetadata,
-    MissingCredential,
-    UnsupportedCredential,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RePairRequiredRelationship {
-    pub legacy_device_id: String,
-    pub label: String,
-    pub reason: RePairReason,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct V02ImportRecord {
-    pub backup_file: String,
-    pub imported_relationships: u32,
-    pub imported_inbox_items: u32,
-    pub re_pair_required: Vec<RePairRequiredRelationship>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MigrationMetadata {
-    pub v0_2_import: Option<V02ImportRecord>,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineState {
@@ -158,7 +135,6 @@ pub struct EngineState {
     pub snapshot: EngineSnapshot,
     pub durable_relationships: BTreeMap<RelationshipId, DurableRelationship>,
     pub inbox: Vec<InboxItem>,
-    pub migration: MigrationMetadata,
 }
 
 impl Default for EngineState {
@@ -168,7 +144,6 @@ impl Default for EngineState {
             snapshot: EngineSnapshot::new(),
             durable_relationships: BTreeMap::new(),
             inbox: Vec::new(),
-            migration: MigrationMetadata::default(),
         }
     }
 }
@@ -344,28 +319,6 @@ impl EngineState {
             }
         }
 
-        if let Some(import) = &self.migration.v0_2_import {
-            validate_backup_file(&import.backup_file)?;
-            validate_entity_count(
-                "relationships requiring re-pair",
-                import.re_pair_required.len(),
-            )?;
-            let mut legacy_ids = BTreeSet::new();
-            for relationship in &import.re_pair_required {
-                validate_text_bytes(
-                    "legacy device ID",
-                    &relationship.legacy_device_id,
-                    MAX_REFERENCE_BYTES,
-                )?;
-                validate_text("legacy device label", &relationship.label, MAX_LABEL_CHARS)?;
-                if !legacy_ids.insert(&relationship.legacy_device_id) {
-                    return Err(invalid(format!(
-                        "duplicate legacy device {} in migration metadata",
-                        relationship.legacy_device_id
-                    )));
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -399,6 +352,10 @@ impl EngineStore {
             },
             Err(error) => return Err(error),
         };
+
+        if origin == EngineStoreOrigin::Empty {
+            reject_legacy_state(&directory)?;
+        }
 
         Ok(Self {
             directory,
@@ -439,57 +396,6 @@ impl EngineStore {
         self.has_current_snapshot = true;
         Ok(())
     }
-
-    pub(crate) fn install_migration_backup(
-        &self,
-        file_name: &str,
-        bytes: &[u8],
-    ) -> Result<(), EngineStoreError> {
-        validate_backup_file(file_name)?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENGINE_STATE_BYTES {
-            return Err(EngineStoreError::StateTooLarge {
-                actual: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                maximum: MAX_ENGINE_STATE_BYTES,
-            });
-        }
-        let directory = self.directory.join(MIGRATION_DIRECTORY);
-        create_private_directory(&directory)?;
-        let target = directory.join(file_name);
-        match read_bounded_file(&target)? {
-            Some(existing) if existing == bytes => return Ok(()),
-            Some(_) => {
-                return Err(invalid(format!(
-                    "migration backup {file_name} already exists with different contents"
-                )));
-            }
-            None => {}
-        }
-
-        let temporary = temporary_path(&directory, file_name)?;
-        let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            replace_file(&temporary, &target)?;
-            #[cfg(unix)]
-            {
-                fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o400))?;
-                File::open(&directory)?.sync_all()?;
-            }
-            Ok::<(), io::Error>(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result.map_err(Into::into)
-    }
 }
 
 impl EngineStoreError {
@@ -520,6 +426,22 @@ fn load_state(path: &Path) -> Result<Option<EngineState>, EngineStoreError> {
     let state: EngineState = serde_json::from_slice(&bytes).map_err(EngineStoreError::Decode)?;
     state.validate()?;
     Ok(Some(state))
+}
+
+fn reject_legacy_state(directory: &Path) -> Result<(), EngineStoreError> {
+    for relative in LEGACY_ENGINE_STATE_FILES
+        .iter()
+        .copied()
+        .chain(std::iter::once(LEGACY_PRODUCT_STATE_FILE))
+    {
+        let path = directory.join(relative);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(EngineStoreError::UnsupportedLegacyState { path }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn read_bounded_file(path: &Path) -> Result<Option<Vec<u8>>, EngineStoreError> {
@@ -714,17 +636,6 @@ fn validate_text_bytes(name: &str, value: &str, max_bytes: usize) -> Result<(), 
     Ok(())
 }
 
-fn validate_backup_file(value: &str) -> Result<(), EngineStoreError> {
-    if value.is_empty()
-        || value.len() > MAX_REFERENCE_BYTES
-        || value.contains(['/', '\\'])
-        || value.chars().any(char::is_control)
-    {
-        return Err(invalid("migration backup must be a bounded file name"));
-    }
-    Ok(())
-}
-
 fn invalid(message: impl Into<String>) -> EngineStoreError {
     EngineStoreError::InvalidState(message.into())
 }
@@ -856,13 +767,13 @@ mod tests {
         let target = directory.path().join(ENGINE_STATE_FILE);
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
-        value["schema_version"] = serde_json::json!(2);
+        value["schema_version"] = serde_json::json!(3);
         fs::write(&target, serde_json::to_vec(&value).unwrap()).unwrap();
 
         let error = EngineStore::open(directory.path()).err().unwrap();
         assert!(matches!(
             error,
-            EngineStoreError::UnsupportedSchema { actual: 2, .. }
+            EngineStoreError::UnsupportedSchema { actual: 3, .. }
         ));
     }
 
@@ -894,13 +805,43 @@ mod tests {
     }
 
     #[test]
-    fn empty_fixture_freezes_schema_one() {
-        let fixture = include_bytes!("../../../tests/fixtures/v0.3/engine-state-v1.json");
+    fn empty_fixture_freezes_schema_two() {
+        let fixture = include_bytes!("../../../tests/fixtures/v0.3/engine-state-v2.json");
         let state: EngineState = serde_json::from_slice(fixture).unwrap();
         state.validate().unwrap();
         assert_eq!(state, EngineState::default());
-        assert_eq!(serde_json::to_value(state).unwrap()["schema_version"], 1);
+        assert_eq!(serde_json::to_value(state).unwrap()["schema_version"], 2);
         assert_eq!(crate::APPLICATION_CONTRACT_VERSION, 6);
+    }
+
+    #[test]
+    fn legacy_engine_state_is_rejected_without_rewriting_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = include_bytes!("../../../tests/fixtures/v0.3/engine-state-v1.json");
+        let path = directory.path().join("engine-state-v1.json");
+        fs::write(&path, fixture).unwrap();
+
+        let error = EngineStore::open(directory.path()).err().unwrap();
+
+        assert!(matches!(
+            error,
+            EngineStoreError::UnsupportedLegacyState { path: error_path } if error_path == path
+        ));
+        assert_eq!(fs::read(path).unwrap(), fixture);
+    }
+
+    #[test]
+    fn current_state_ignores_residual_legacy_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = EngineStore::open(directory.path()).unwrap();
+        store.replace(EngineState::default()).unwrap();
+        drop(store);
+        fs::write(directory.path().join("engine-state-v1.json"), b"legacy").unwrap();
+
+        let reopened = EngineStore::open(directory.path()).unwrap();
+
+        assert_eq!(reopened.origin(), EngineStoreOrigin::Current);
+        assert_eq!(reopened.state(), &EngineState::default());
     }
 
     #[cfg(unix)]

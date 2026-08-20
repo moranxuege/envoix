@@ -39,6 +39,8 @@ Manifest v1 and the former single-file protocol are not supported.
 The Agent gives Linux/WSL and Windows a durable Inbox and Outbox while the CLI
 remains its local controller:
 
+#### Linux/WSL
+
 ```bash
 scripts/with-build-cache-guard.sh cargo build -p envoix-agent -p envoix-cli
 
@@ -60,12 +62,46 @@ target/debug/envoix agent install --inbox "$PWD/inbox" --device-name WSL
 ~/.local/bin/envoix inbox list
 ~/.local/bin/envoix inbox latest
 ~/.local/bin/envoix agent diagnostics
+
+# Replace both installed binaries from a newly built pair. This preserves
+# settings and Agent data when the Engine schema is compatible.
+target/debug/envoix agent update --agent-binary target/debug/envoix-agent
 ```
 
-Use `envoix agent stop` and `envoix agent start` to manage the installed
-service. The installer enables autostart for the user service but does not edit
-`/etc/wsl.conf`; if systemd is unavailable, its error includes the equivalent
-foreground command.
+Use `envoix agent stop`, `start`, and `restart` to manage the installed service.
+`envoix agent uninstall` removes the service and installed binaries while
+preserving settings, Engine state, credentials, and Inbox files. The explicit
+`uninstall --delete-state --yes` form also removes allowlisted Engine state and
+credentials, but still never removes received Inbox files. The installer
+enables systemd user-service autostart but does not edit `/etc/wsl.conf`; if
+systemd is unavailable, its error includes the equivalent foreground command.
+
+The v0.3 test cycle intentionally breaks v0.2 ProductStore and Engine schema
+v1 state. If startup reports `unsupported legacy state`, reset Agent-owned
+state with `target/debug/envoix agent uninstall --delete-state --yes`, install
+the new binary pair again, and re-pair devices. This removes Relationships,
+credentials, and transfer history; the allowlisted cleanup still preserves
+the configured Inbox and unknown files.
+
+#### Windows 10/11
+
+Keep the two Windows release binaries together, then install from PowerShell
+without administrator privileges:
+
+```powershell
+.\envoix-cli-windows-x86_64.exe agent install `
+  --agent-binary .\envoix-agent-windows-x86_64.exe `
+  --device-name Windows
+& "$env:LOCALAPPDATA\Envoix\bin\envoix.exe" agent status
+& "$env:LOCALAPPDATA\Envoix\bin\envoix.exe" agent restart
+```
+
+The installer copies the pair under `%LOCALAPPDATA%\Envoix\bin`, keeps settings
+under `%LOCALAPPDATA%\Envoix\config`, and registers `Envoix Agent <user-SID>` as
+a current-user Task Scheduler task. It runs only with an interactive user token
+at limited privilege, starts at logon, and retries failures without storing a
+password. The same update and uninstall commands and Inbox-preservation policy
+shown above apply on Windows.
 
 `devices forget <ID-or-label> --yes` revokes that remembered credential and
 stops future reconnects without deleting completed Inbox files or history.

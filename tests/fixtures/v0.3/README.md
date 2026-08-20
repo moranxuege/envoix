@@ -22,10 +22,20 @@ fixture covers every current command and event variant; its valid event stream
 reconstructs the embedded snapshot, and its removed Transfer is intentionally
 absent from that snapshot.
 
-`engine-state-v1.json` freezes the empty, non-secret Engine storage envelope.
-Storage migrations add a new fixture rather than rewriting this file.
+`engine-state-v1.json` freezes the retired migration-bearing Engine envelope.
+`engine-state-v2.json` is the current empty, non-secret envelope and removes
+legacy migration metadata without rewriting v1.
 
 `agent-control-v4.json` freezes the first explicitly versioned Agent request
 and response envelopes, including the immutable Engine/Inbox snapshot.
 `agent-control-v5.json` adds a snapshot event cursor, bounded event polling,
 and an explicit `snapshot_required` recovery response without rewriting v4.
+`agent-control-v6.json` adds durable Transfer creation and inspection plus a
+secret-free diagnostic response without rewriting v4 or v5.
+`agent-control-v7.json` adds bounded, secret-free pending incoming-offer state,
+single-use approve/reject commands, and pending-offer events without rewriting
+v4-v6.
+`agent-control-v8.json` adds bounded active-path snapshots, list responses, and
+selected/cleared path events without rewriting v4-v7.
+`agent-control-v9.json` binds diagnostics to Engine schema v2 and is the
+current paired CLI/Agent contract without rewriting v8.

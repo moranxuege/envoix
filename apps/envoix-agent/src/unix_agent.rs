@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::io;
+use std::net::IpAddr;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
@@ -13,24 +14,25 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::Parser;
 use envoix_client::api::{
-    self, DestinationDecisionV2, DestinationRequestV2, EventSink, PendingManifestV2Receive,
-    RememberedCredential, RememberedRoomControlRole, RoomControlEvent, RoomControlInvite,
-    RoomControlSession, RoomOfferRejection, RoomTransferOffer, TransferEvent, TransferOptions,
-    TransferRole,
+    self, DataPath, DestinationDecisionV2, DestinationRequestV2, EventSink,
+    PendingManifestV2Receive, RememberedCredential, RememberedRoomControlRole, RoomControlEvent,
+    RoomControlInvite, RoomControlSession, RoomOfferRejection, RoomTransferOffer, TransferEvent,
+    TransferOptions, TransferRole,
 };
 use envoix_client::model::{
     ContentId, FailureCode, FailureOutcome, FailurePhase, RecoveryAction, RememberedAttemptOutcome,
-    RememberedGenerationRole, Transfer, TransferFailure, TransferId, TransferRejection,
-    remembered_generation_attempts,
+    RememberedGenerationRole, Transfer, TransferDirection, TransferFailure, TransferId,
+    TransferRejection, remembered_generation_attempts,
 };
 use envoix_client::product::{
     AGENT_PROTOCOL_VERSION, AgentControlTransport, AgentCredentialProtection, AgentDiagnostics,
-    AgentEvent, AgentEventCursor, AgentEventEnvelope, AgentRelationshipChange, AgentRequest,
-    AgentRequestEnvelope, AgentResponse, AgentResponseEnvelope, AgentSettings, AgentSnapshot,
-    AgentStatus, InboxItem, InboxRoot, MAX_AGENT_EVENT_BATCH, MAX_AGENT_REQUEST_BYTES,
-    MAX_AGENT_RESPONSE_BYTES, PairingInvitation, PreparedRememberedDevice, ProductStore,
-    RememberedDeviceRecord, default_agent_control_endpoint, default_agent_state_directory,
-    is_valid_agent_request_id,
+    AgentEvent, AgentEventCursor, AgentEventEnvelope, AgentOfferDecision, AgentPathKind,
+    AgentPendingOffer, AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
+    AgentResponseEnvelope, AgentSettings, AgentSnapshot, AgentStatus, AgentTransferPath, InboxItem,
+    InboxRoot, MAX_AGENT_ACTIVE_PATHS, MAX_AGENT_EVENT_BATCH, MAX_AGENT_PENDING_OFFERS,
+    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation, PreparedRememberedDevice,
+    ProductStore, RememberedDeviceRecord, default_agent_control_endpoint,
+    default_agent_state_directory, is_valid_agent_request_id,
 };
 #[cfg(windows)]
 use envoix_client::product::{current_windows_user_sid, windows_process_user_sid};
@@ -43,7 +45,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 
 const REMEMBERED_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
@@ -106,6 +108,8 @@ struct AgentRuntime {
     active_rooms: Mutex<HashMap<String, Arc<Notify>>>,
     active_outgoing: Mutex<HashMap<String, ActiveOutgoingTransfer>>,
     active_pairings: Mutex<HashSet<String>>,
+    active_paths: Mutex<Vec<AgentTransferPath>>,
+    pending_offers: Mutex<HashMap<String, PendingOfferControl>>,
     events: Mutex<AgentEventLog>,
     shutdown: TransferCancelToken,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -123,6 +127,55 @@ struct PreparedOutgoingTransfer {
     broker: String,
     relay: Option<String>,
     offer: RoomTransferOffer,
+}
+
+struct PendingOfferControl {
+    offer: AgentPendingOffer,
+    decision: Option<oneshot::Sender<AgentOfferDecision>>,
+}
+
+struct PendingIncomingOffer {
+    offer: RoomTransferOffer,
+    decision: oneshot::Receiver<AgentOfferDecision>,
+    runtime: Arc<AgentRuntime>,
+}
+
+struct ActivePathCleanup {
+    runtime: Arc<AgentRuntime>,
+    transfer_id: String,
+    direction: TransferDirection,
+}
+
+impl ActivePathCleanup {
+    fn new(
+        runtime: Arc<AgentRuntime>,
+        transfer_id: impl Into<String>,
+        direction: TransferDirection,
+    ) -> Self {
+        Self {
+            runtime,
+            transfer_id: transfer_id.into(),
+            direction,
+        }
+    }
+}
+
+impl Drop for ActivePathCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = clear_active_path(&self.runtime, &self.transfer_id, self.direction) {
+            tracing::error!(
+                transfer_id = %self.transfer_id,
+                %error,
+                "active transfer path could not be cleared"
+            );
+        }
+    }
+}
+
+impl Drop for PendingIncomingOffer {
+    fn drop(&mut self) {
+        clear_pending_offer(&self.runtime, &self.offer.offer_id);
+    }
 }
 
 struct AgentEventLog {
@@ -214,6 +267,11 @@ impl AgentRuntime {
         let paired_devices = lock(&self.store)?.devices().len();
         let active_receivers = lock(&self.active_receivers)?.len();
         let active_pairings = lock(&self.active_pairings)?.len();
+        let active_paths = lock(&self.active_paths)?.len();
+        let pending_offers = lock(&self.pending_offers)?
+            .values()
+            .filter(|pending| pending.decision.is_some())
+            .count();
         Ok(AgentStatus {
             protocol_version: AGENT_PROTOCOL_VERSION,
             pid: std::process::id(),
@@ -225,6 +283,8 @@ impl AgentRuntime {
             paired_devices,
             active_receivers,
             active_pairings,
+            active_paths,
+            pending_offers,
         })
     }
 
@@ -236,12 +296,16 @@ impl AgentRuntime {
 
     fn snapshot(&self, inbox_limit: usize) -> Result<AgentSnapshot> {
         let status = self.status()?;
+        let active_paths = self.active_paths()?;
+        let pending_offers = self.pending_offers()?;
         let store = lock(&self.store)?;
         let event_cursor = lock(&self.events)?.cursor();
         Ok(AgentSnapshot {
             status,
             engine: store.engine_snapshot(),
             inbox: store.inbox(inbox_limit),
+            active_paths,
+            pending_offers,
             event_cursor,
         })
     }
@@ -268,13 +332,248 @@ impl AgentRuntime {
             relationships: engine.relationships.len(),
             transfers: engine.transfers.len(),
             inbox_items: store.inbox(usize::MAX).len(),
+            active_paths: lock(&self.active_paths)?.len(),
+            pending_offers: lock(&self.pending_offers)?
+                .values()
+                .filter(|pending| pending.decision.is_some())
+                .count(),
         })
+    }
+
+    fn pending_offers(&self) -> Result<Vec<AgentPendingOffer>> {
+        let mut offers = lock(&self.pending_offers)?
+            .values()
+            .filter(|pending| pending.decision.is_some())
+            .map(|pending| pending.offer.clone())
+            .collect::<Vec<_>>();
+        offers.sort_by(|left, right| left.offer_id.cmp(&right.offer_id));
+        Ok(offers)
+    }
+
+    fn active_paths(&self) -> Result<Vec<AgentTransferPath>> {
+        let mut paths = lock(&self.active_paths)?.clone();
+        paths.sort_by(|left, right| {
+            left.transfer_id.cmp(&right.transfer_id).then_with(|| {
+                transfer_direction_order(left.direction)
+                    .cmp(&transfer_direction_order(right.direction))
+            })
+        });
+        Ok(paths)
     }
 }
 
 fn record_agent_event(runtime: &AgentRuntime, event: AgentEvent) -> Result<()> {
     lock(&runtime.events)?.record(event)?;
     Ok(())
+}
+
+fn stage_pending_offer(
+    runtime: &Arc<AgentRuntime>,
+    device_id: &str,
+    device_label: &str,
+    offer: RoomTransferOffer,
+    allocatable_bytes: u64,
+) -> Result<PendingIncomingOffer> {
+    let summary = AgentPendingOffer {
+        offer_id: offer.offer_id.clone(),
+        from_device_id: device_id.to_string(),
+        from_device_label: device_label.to_string(),
+        root_names: offer.root_names.clone(),
+        item_count: offer.item_count,
+        directory_count: offer.directory_count,
+        total_bytes: offer.total_bytes,
+        allocatable_bytes,
+    };
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut pending = lock(&runtime.pending_offers)?;
+        if pending.len() >= MAX_AGENT_PENDING_OFFERS {
+            bail!("Agent already has the maximum number of pending offers");
+        }
+        if pending.contains_key(&offer.offer_id) {
+            bail!("offer {} is already pending", offer.offer_id);
+        }
+        pending.insert(
+            offer.offer_id.clone(),
+            PendingOfferControl {
+                offer: summary,
+                decision: Some(sender),
+            },
+        );
+    }
+    if let Err(error) = record_agent_event(
+        runtime,
+        AgentEvent::PendingOfferChanged {
+            offer_id: offer.offer_id.clone(),
+            pending: true,
+        },
+    ) {
+        lock(&runtime.pending_offers)?.remove(&offer.offer_id);
+        return Err(error);
+    }
+    Ok(PendingIncomingOffer {
+        offer,
+        decision: receiver,
+        runtime: runtime.clone(),
+    })
+}
+
+fn decide_pending_offer(
+    runtime: &AgentRuntime,
+    offer_id: &str,
+    decision: AgentOfferDecision,
+) -> Result<AgentPendingOffer> {
+    let (offer, sender) = {
+        let mut pending = lock(&runtime.pending_offers)?;
+        let pending = pending
+            .get_mut(offer_id)
+            .ok_or_else(|| anyhow!("pending offer {offer_id} does not exist"))?;
+        let sender = pending
+            .decision
+            .take()
+            .ok_or_else(|| anyhow!("pending offer {offer_id} already has a decision"))?;
+        (pending.offer.clone(), sender)
+    };
+    if sender.send(decision).is_err() {
+        clear_pending_offer(runtime, offer_id);
+        bail!("pending offer {offer_id} is no longer active");
+    }
+    Ok(offer)
+}
+
+fn clear_pending_offer(runtime: &AgentRuntime, offer_id: &str) {
+    let removed = match lock(&runtime.pending_offers) {
+        Ok(mut pending) => pending.remove(offer_id).is_some(),
+        Err(error) => {
+            tracing::error!(offer_id, %error, "pending offer state could not be locked");
+            false
+        }
+    };
+    if removed
+        && let Err(error) = record_agent_event(
+            runtime,
+            AgentEvent::PendingOfferChanged {
+                offer_id: offer_id.to_string(),
+                pending: false,
+            },
+        )
+    {
+        tracing::error!(offer_id, %error, "pending offer event could not be recorded");
+    }
+}
+
+fn transfer_direction_order(direction: TransferDirection) -> u8 {
+    match direction {
+        TransferDirection::Send => 0,
+        TransferDirection::Receive => 1,
+    }
+}
+
+fn project_agent_path(path: &DataPath) -> AgentPathKind {
+    match path {
+        DataPath::Direct { addr } if is_lan_ip(addr.ip()) => AgentPathKind::Lan,
+        DataPath::Direct { .. } => AgentPathKind::Direct,
+        DataPath::Relay { .. } => AgentPathKind::Relay,
+        DataPath::WifiAware => AgentPathKind::WifiAware,
+        DataPath::Other { .. } => AgentPathKind::Other,
+    }
+}
+
+fn is_lan_ip(ip: IpAddr) -> bool {
+    if is_tailscale_ip(ip) {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+        IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_loopback(),
+    }
+}
+
+fn is_tailscale_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            octets[0] == 100 && (64..=127).contains(&octets[1])
+        }
+        IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
+}
+
+fn set_active_path(
+    runtime: &AgentRuntime,
+    transfer_id: &str,
+    direction: TransferDirection,
+    path: &DataPath,
+) -> Result<()> {
+    let path = project_agent_path(path);
+    {
+        let mut active = lock(&runtime.active_paths)?;
+        if let Some(current) = active
+            .iter_mut()
+            .find(|current| current.transfer_id == transfer_id && current.direction == direction)
+        {
+            if current.path == path {
+                return Ok(());
+            }
+            current.path = path;
+        } else {
+            if active.len() >= MAX_AGENT_ACTIVE_PATHS {
+                bail!("Agent already has the maximum number of active transfer paths");
+            }
+            active.push(AgentTransferPath {
+                transfer_id: transfer_id.to_string(),
+                direction,
+                path,
+            });
+        }
+    }
+    record_agent_event(
+        runtime,
+        AgentEvent::TransferPathChanged {
+            transfer_id: transfer_id.to_string(),
+            direction,
+            path: Some(path),
+        },
+    )
+}
+
+fn clear_active_path(
+    runtime: &AgentRuntime,
+    transfer_id: &str,
+    direction: TransferDirection,
+) -> Result<()> {
+    let removed = {
+        let mut active = lock(&runtime.active_paths)?;
+        active
+            .iter()
+            .position(|current| {
+                current.transfer_id == transfer_id && current.direction == direction
+            })
+            .map(|index| active.swap_remove(index))
+            .is_some()
+    };
+    if removed {
+        record_agent_event(
+            runtime,
+            AgentEvent::TransferPathChanged {
+                transfer_id: transfer_id.to_string(),
+                direction,
+                path: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn requires_explicit_offer_approval(total_bytes: u64, allocatable_bytes: u64) -> bool {
+    total_bytes > api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES || total_bytes > allocatable_bytes / 2
+}
+
+fn prepare_inbox_destination(runtime: &AgentRuntime) -> Result<(PathBuf, u64)> {
+    create_directory(&runtime.config.inbox_directory)?;
+    let target_directory = fs::canonicalize(&runtime.config.inbox_directory)?;
+    let allocatable_bytes = api::local_allocatable_bytes(&target_directory)?;
+    Ok((target_directory, allocatable_bytes))
 }
 
 fn wake_active_room(runtime: &AgentRuntime, relationship_id: &str) -> Result<()> {
@@ -355,6 +654,8 @@ pub async fn run() -> Result<()> {
         active_rooms: Mutex::new(HashMap::new()),
         active_outgoing: Mutex::new(HashMap::new()),
         active_pairings: Mutex::new(HashSet::new()),
+        active_paths: Mutex::new(Vec::new()),
+        pending_offers: Mutex::new(HashMap::new()),
         events: Mutex::new(AgentEventLog::new()?),
         shutdown: TransferCancelToken::new(),
         background_tasks: Mutex::new(Vec::new()),
@@ -787,7 +1088,7 @@ async fn handle_request_result(
             status: runtime.status()?,
         }),
         AgentRequest::Snapshot { inbox_limit } => Ok(AgentResponse::Snapshot {
-            snapshot: runtime.snapshot(inbox_limit)?,
+            snapshot: Box::new(runtime.snapshot(inbox_limit)?),
         }),
         AgentRequest::Events { after, limit } => {
             match lock(&runtime.events)?.read_after(&after, limit) {
@@ -823,11 +1124,21 @@ async fn handle_request_result(
         AgentRequest::ListTransfers => Ok(AgentResponse::Transfers {
             transfers: lock(&runtime.store)?.transfers(),
         }),
+        AgentRequest::ListTransferPaths => Ok(AgentResponse::TransferPaths {
+            paths: runtime.active_paths()?,
+        }),
         AgentRequest::GetTransfer { transfer_id } => {
             let transfer = lock(&runtime.store)?
                 .transfer(&transfer_id)?
                 .ok_or_else(|| anyhow!("Transfer {transfer_id} does not exist"))?;
             Ok(AgentResponse::Transfer { transfer })
+        }
+        AgentRequest::ListPendingOffers => Ok(AgentResponse::PendingOffers {
+            offers: runtime.pending_offers()?,
+        }),
+        AgentRequest::DecidePendingOffer { offer_id, decision } => {
+            let offer = decide_pending_offer(&runtime, &offer_id, decision)?;
+            Ok(AgentResponse::PendingOfferDecided { offer, decision })
         }
         AgentRequest::ListInbox { limit } => Ok(AgentResponse::Inbox {
             items: lock(&runtime.store)?.inbox(limit),
@@ -1131,13 +1442,17 @@ async fn establish_initial_room(
 }
 
 async fn receive_invitation_offer(
-    runtime: &AgentRuntime,
+    runtime: &Arc<AgentRuntime>,
+    transfer_id: &str,
     bootstrap: api::InvitationBootstrap,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive> {
     let relay = runtime.config.relay.as_deref();
     let broker = api::parse_broker_addr(&runtime.config.broker, relay)?;
-    let events: Arc<dyn EventSink> = Arc::new(AgentEvents);
+    let events: Arc<dyn EventSink> = Arc::new(AgentIncomingEvents {
+        runtime: runtime.clone(),
+        transfer_id: transfer_id.to_string(),
+    });
     api::receive_manifest_v2_offer_via_room(
         broker,
         bootstrap,
@@ -1351,6 +1666,21 @@ async fn connect_remembered_room(
     Err(last_error.unwrap_or_else(|| anyhow!("remembered device has no usable generation")))
 }
 
+enum RoomSessionInput {
+    Control(RoomControlEvent),
+    Wake,
+    PendingDecision(Result<AgentOfferDecision, oneshot::error::RecvError>),
+}
+
+async fn wait_for_pending_offer_decision(
+    pending: &mut Option<PendingIncomingOffer>,
+) -> Result<AgentOfferDecision, oneshot::error::RecvError> {
+    match pending {
+        Some(pending) => (&mut pending.decision).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn run_room_session(
     runtime: &Arc<AgentRuntime>,
     session: Arc<RoomControlSession>,
@@ -1370,6 +1700,7 @@ async fn run_room_session(
 
     let result = async {
         let mut pending_outgoing = None;
+        let mut pending_incoming = None;
         loop {
             if pending_outgoing.is_none() && !relationship_has_active_outgoing(runtime, device_id)?
             {
@@ -1377,19 +1708,110 @@ async fn run_room_session(
                     offer_next_outgoing(runtime, &session, device_id, device_label).await?;
             }
 
-            let event = tokio::select! {
-                event = session.next_event() => Some(event?),
-                _ = wake.notified() => None,
+            let input = tokio::select! {
+                event = session.next_event() => RoomSessionInput::Control(event?),
+                _ = wake.notified() => RoomSessionInput::Wake,
+                decision = wait_for_pending_offer_decision(&mut pending_incoming) => {
+                    RoomSessionInput::PendingDecision(decision)
+                }
                 _ = runtime.shutdown.cancelled() => return Ok(()),
                 _ = receiver_cancel.cancelled() => return Ok(()),
             };
-            let Some(event) = event else {
-                continue;
-            };
-            match event {
-                RoomControlEvent::IncomingOffer(offer) => {
+            match input {
+                RoomSessionInput::Wake => continue,
+                RoomSessionInput::PendingDecision(decision) => {
+                    let pending = pending_incoming
+                        .take()
+                        .expect("pending decision requires a staged offer");
+                    let offer = pending.offer.clone();
+                    drop(pending);
+                    match decision {
+                        Ok(AgentOfferDecision::Approve) => {
+                            match receive_room_offer(
+                                runtime,
+                                session.as_ref(),
+                                device_id,
+                                device_label,
+                                offer,
+                                true,
+                            )
+                            .await
+                            {
+                                Ok(item) => tracing::info!(
+                                    device = device_label,
+                                    item = %item.id,
+                                    "approved incoming room transfer received"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    device = device_label,
+                                    %error,
+                                    "approved incoming room transfer failed"
+                                ),
+                            }
+                        }
+                        Ok(AgentOfferDecision::Reject) | Err(_) => {
+                            session
+                                .reject_offer(&offer.offer_id, RoomOfferRejection::Declined)
+                                .await?;
+                        }
+                    }
+                }
+                RoomSessionInput::Control(RoomControlEvent::IncomingOffer(offer)) => {
                     if receiver_cancel.is_cancelled() {
                         return Ok(());
+                    }
+                    if pending_incoming.is_some() {
+                        session
+                            .reject_offer(&offer.offer_id, RoomOfferRejection::Busy)
+                            .await?;
+                        continue;
+                    }
+                    let allocatable_bytes = match prepare_inbox_destination(runtime) {
+                        Ok((_, allocatable_bytes)) => allocatable_bytes,
+                        Err(error) => {
+                            session
+                                .reject_offer(&offer.offer_id, RoomOfferRejection::Declined)
+                                .await?;
+                            tracing::warn!(
+                                device = device_label,
+                                offer_id = %offer.offer_id,
+                                %error,
+                                "incoming room transfer has no available Inbox destination"
+                            );
+                            continue;
+                        }
+                    };
+                    if requires_explicit_offer_approval(offer.total_bytes, allocatable_bytes) {
+                        match stage_pending_offer(
+                            runtime,
+                            device_id,
+                            device_label,
+                            offer.clone(),
+                            allocatable_bytes,
+                        ) {
+                            Ok(pending) => {
+                                tracing::info!(
+                                    device = device_label,
+                                    offer_id = %offer.offer_id,
+                                    total_bytes = offer.total_bytes,
+                                    allocatable_bytes,
+                                    "incoming room transfer is waiting for approval"
+                                );
+                                pending_incoming = Some(pending);
+                            }
+                            Err(error) => {
+                                session
+                                    .reject_offer(&offer.offer_id, RoomOfferRejection::Busy)
+                                    .await?;
+                                tracing::warn!(
+                                    device = device_label,
+                                    offer_id = %offer.offer_id,
+                                    %error,
+                                    "incoming room transfer could not be staged for approval"
+                                );
+                            }
+                        }
+                        continue;
                     }
                     match receive_room_offer(
                         runtime,
@@ -1397,6 +1819,7 @@ async fn run_room_session(
                         device_id,
                         device_label,
                         offer,
+                        false,
                     )
                     .await
                     {
@@ -1412,11 +1835,11 @@ async fn run_room_session(
                         ),
                     }
                 }
-                RoomControlEvent::OfferAccepted { offer_id } => {
+                RoomSessionInput::Control(RoomControlEvent::OfferAccepted { offer_id }) => {
                     let outgoing = take_pending_outgoing(&mut pending_outgoing, &offer_id)?;
                     start_outgoing_transfer(runtime, session.clone(), outgoing)?;
                 }
-                RoomControlEvent::OfferRejected { offer_id, reason } => {
+                RoomSessionInput::Control(RoomControlEvent::OfferRejected { offer_id, reason }) => {
                     let outgoing = take_pending_outgoing(&mut pending_outgoing, &offer_id)?;
                     let transfer_id = outgoing.transfer.id;
                     lock(&runtime.store)?
@@ -1428,11 +1851,15 @@ async fn run_room_session(
                         },
                     )?;
                 }
-                RoomControlEvent::PeerClosed(_) => return Ok(()),
-                RoomControlEvent::LifetimeChanged(_)
-                | RoomControlEvent::Pong { .. }
-                | RoomControlEvent::VerificationSucceeded => {}
-                RoomControlEvent::VerificationRequested | RoomControlEvent::VerificationFailed => {
+                RoomSessionInput::Control(RoomControlEvent::PeerClosed(_)) => return Ok(()),
+                RoomSessionInput::Control(
+                    RoomControlEvent::LifetimeChanged(_)
+                    | RoomControlEvent::Pong { .. }
+                    | RoomControlEvent::VerificationSucceeded,
+                ) => {}
+                RoomSessionInput::Control(
+                    RoomControlEvent::VerificationRequested | RoomControlEvent::VerificationFailed,
+                ) => {
                     bail!("peer attempted device verification after pairing completed");
                 }
             }
@@ -1639,6 +2066,11 @@ async fn run_outgoing_transfer(
 ) {
     let transfer_id = outgoing.transfer.id.clone();
     let relationship_id = outgoing.transfer.relationship_id.to_string();
+    let _path_cleanup = ActivePathCleanup::new(
+        runtime.clone(),
+        transfer_id.to_string(),
+        TransferDirection::Send,
+    );
     let events = Arc::new(AgentOutgoingEvents::new(
         runtime.clone(),
         transfer_id.clone(),
@@ -1770,35 +2202,31 @@ async fn receive_room_offer(
     device_id: &str,
     device_label: &str,
     offer: RoomTransferOffer,
+    exceptional_transfer_approved: bool,
 ) -> Result<InboxItem> {
-    create_directory(&runtime.config.inbox_directory)?;
-    let target_directory = fs::canonicalize(&runtime.config.inbox_directory)?;
-    let available = api::local_allocatable_bytes(&target_directory)?;
-    if offer.total_bytes > api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES
-        || offer.total_bytes > available / 2
-    {
-        session
-            .reject_offer(&offer.offer_id, RoomOfferRejection::Declined)
-            .await?;
-        bail!(
-            "offer requires explicit approval ({} bytes offered, {} bytes allocatable)",
-            offer.total_bytes,
-            available
-        );
-    }
-
     let bootstrap = api::parse_invitation_for_role(
         &offer.transfer_invite,
         TransferRole::Receiver,
         unix_seconds()?,
     )?
     .into_bootstrap();
+    let _path_cleanup = ActivePathCleanup::new(
+        runtime.clone(),
+        offer.offer_id.clone(),
+        TransferDirection::Receive,
+    );
     let receive_cancel = TransferCancelToken::new();
     let task_cancel = receive_cancel.clone();
     let task_runtime = runtime.clone();
+    let task_transfer_id = offer.offer_id.clone();
     let receiver = tokio::spawn(async move {
         tokio::select! {
-            result = receive_invitation_offer(&task_runtime, bootstrap, &task_cancel) => result,
+            result = receive_invitation_offer(
+                &task_runtime,
+                &task_transfer_id,
+                bootstrap,
+                &task_cancel,
+            ) => result,
             _ = task_runtime.shutdown.cancelled() => {
                 task_cancel.cancel();
                 Err(anyhow!("Agent shut down while waiting for the transfer sender"))
@@ -1851,7 +2279,14 @@ async fn receive_room_offer(
         let _ = session.set_local_transfer_active(false).await;
         bail!("authenticated file list did not match the accepted room offer");
     }
-    let result = receive_to_inbox(runtime, device_id, device_label, pending).await;
+    let result = receive_to_inbox(
+        runtime,
+        device_id,
+        device_label,
+        pending,
+        exceptional_transfer_approved,
+    )
+    .await;
     let inactive = session.set_local_transfer_active(false).await;
     if let Err(error) = inactive {
         return Err(error.into());
@@ -1864,14 +2299,13 @@ async fn receive_to_inbox(
     device_id: &str,
     device_label: &str,
     pending: PendingManifestV2Receive,
+    exceptional_transfer_approved: bool,
 ) -> Result<InboxItem> {
-    fs::create_dir_all(&runtime.config.inbox_directory)?;
-    let target_directory = fs::canonicalize(&runtime.config.inbox_directory)?;
-    let available = api::local_allocatable_bytes(&target_directory)?;
+    let (target_directory, available) = prepare_inbox_destination(runtime)?;
     let manifest = pending.offer().manifest.clone();
     let total = manifest.totals.total_plaintext_bytes;
-    let exceptional = total > api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES || total > available / 2;
-    if exceptional {
+    let exceptional = requires_explicit_offer_approval(total, available);
+    if exceptional && !exceptional_transfer_approved {
         pending.reject().await;
         bail!(
             "offer requires explicit approval ({} bytes offered, {} bytes allocatable)",
@@ -1888,7 +2322,7 @@ async fn receive_to_inbox(
                 target_allocatable_bytes: Some(available),
                 staging_allocatable_bytes: None,
                 stable_object_identity: true,
-                exceptional_transfer_approved: false,
+                exceptional_transfer_approved: exceptional && exceptional_transfer_approved,
                 preplanned_root_names: None,
             },
             runtime.config.state_directory.join("transfer-state-v2"),
@@ -2059,9 +2493,22 @@ impl EventSink for AgentOutgoingEvents {
                 tracing::debug!(transfer_id = %self.transfer_id, %message, "outgoing transfer diagnostic");
             }
             TransferEvent::Pairing { .. } => self.set_phase(FailurePhase::Pairing),
-            TransferEvent::Connecting
-            | TransferEvent::Connected { .. }
-            | TransferEvent::PathChanged { .. } => self.set_phase(FailurePhase::Connecting),
+            TransferEvent::Connecting => self.set_phase(FailurePhase::Connecting),
+            TransferEvent::Connected { path } | TransferEvent::PathChanged { path } => {
+                self.set_phase(FailurePhase::Connecting);
+                if let Err(error) = set_active_path(
+                    &self.runtime,
+                    self.transfer_id.as_str(),
+                    TransferDirection::Send,
+                    &path,
+                ) {
+                    tracing::error!(
+                        transfer_id = %self.transfer_id,
+                        %error,
+                        "outgoing transfer path could not be recorded"
+                    );
+                }
+            }
             TransferEvent::Progress {
                 bytes_transferred,
                 total_bytes,
@@ -2097,8 +2544,35 @@ impl EventSink for AgentOutgoingEvents {
     }
 }
 
+struct AgentIncomingEvents {
+    runtime: Arc<AgentRuntime>,
+    transfer_id: String,
+}
+
+impl EventSink for AgentIncomingEvents {
+    fn on_event(&self, event: TransferEvent) {
+        if let TransferEvent::Connected { path } | TransferEvent::PathChanged { path } = &event
+            && let Err(error) = set_active_path(
+                &self.runtime,
+                &self.transfer_id,
+                TransferDirection::Receive,
+                path,
+            )
+        {
+            tracing::error!(
+                transfer_id = %self.transfer_id,
+                %error,
+                "incoming transfer path could not be recorded"
+            );
+        }
+        tracing::debug!(?event, "incoming transfer event");
+    }
+}
+
+#[cfg(all(test, unix))]
 struct AgentEvents;
 
+#[cfg(all(test, unix))]
 impl EventSink for AgentEvents {
     fn on_event(&self, event: TransferEvent) {
         tracing::debug!(?event, "transfer event");
@@ -2253,7 +2727,19 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v6_envelope() {
+    fn request_decoder_rejects_v8_with_a_typed_version_error() {
+        let error = decode_request(
+            br#"{"protocol_version":8,"request_id":"request_test","request":{"command":"status"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.request_id, "request_test");
+        assert_eq!(error.code, "unsupported_protocol_version");
+        assert!(error.message.contains("8"));
+        assert!(error.message.contains(&AGENT_PROTOCOL_VERSION.to_string()));
+    }
+
+    #[test]
+    fn request_decoder_accepts_a_valid_v9_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -2349,6 +2835,8 @@ mod tests {
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
@@ -2361,6 +2849,8 @@ mod tests {
         assert_eq!(status.device_name, "test-wsl");
         assert_eq!(status.protocol_version, AGENT_PROTOCOL_VERSION);
         assert_eq!(status.paired_devices, 0);
+        assert_eq!(status.active_paths, 0);
+        assert_eq!(status.pending_offers, 0);
         let AgentResponse::Snapshot { snapshot } =
             handle_request(runtime.clone(), AgentRequest::Snapshot { inbox_limit: 20 }).await
         else {
@@ -2368,6 +2858,8 @@ mod tests {
         };
         assert_eq!(snapshot.engine.contract_version, 6);
         assert!(snapshot.inbox.is_empty());
+        assert!(snapshot.active_paths.is_empty());
+        assert!(snapshot.pending_offers.is_empty());
         assert_eq!(snapshot.event_cursor.sequence, 0);
         snapshot.event_cursor.validate().unwrap();
         let AgentResponse::Diagnostics { diagnostics } =
@@ -2378,10 +2870,254 @@ mod tests {
         assert_eq!(diagnostics.agent_protocol_version, AGENT_PROTOCOL_VERSION);
         assert_eq!(diagnostics.engine_sequence, 0);
         assert_eq!(diagnostics.transfers, 0);
+        assert_eq!(diagnostics.active_paths, 0);
+        assert_eq!(diagnostics.pending_offers, 0);
+
+        let path_cursor = lock(&runtime.events).unwrap().cursor();
+        set_active_path(
+            &runtime,
+            "transfer_path_fixture",
+            TransferDirection::Send,
+            &DataPath::Direct {
+                addr: "192.168.1.20:4433".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        set_active_path(
+            &runtime,
+            "transfer_path_fixture",
+            TransferDirection::Send,
+            &DataPath::Direct {
+                addr: "10.0.0.20:4433".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        let AgentResponse::TransferPaths { paths } =
+            handle_request(runtime.clone(), AgentRequest::ListTransferPaths).await
+        else {
+            panic!("unexpected response")
+        };
+        assert_eq!(
+            paths,
+            vec![AgentTransferPath {
+                transfer_id: "transfer_path_fixture".into(),
+                direction: TransferDirection::Send,
+                path: AgentPathKind::Lan,
+            }]
+        );
+        assert_eq!(runtime.status().unwrap().active_paths, 1);
+
+        set_active_path(
+            &runtime,
+            "transfer_path_fixture",
+            TransferDirection::Send,
+            &DataPath::Relay {
+                url: "https://relay.fixture.invalid".into(),
+            },
+        )
+        .unwrap();
+        drop(ActivePathCleanup::new(
+            runtime.clone(),
+            "transfer_path_fixture",
+            TransferDirection::Send,
+        ));
+        assert!(runtime.active_paths().unwrap().is_empty());
+        let AgentEventRead::Events { events, .. } =
+            lock(&runtime.events).unwrap().read_after(&path_cursor, 10)
+        else {
+            panic!("path events unexpectedly required a snapshot")
+        };
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AgentEventEnvelope {
+                    event: AgentEvent::TransferPathChanged {
+                        path: Some(AgentPathKind::Lan),
+                        ..
+                    },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::TransferPathChanged {
+                        path: Some(AgentPathKind::Relay),
+                        ..
+                    },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::TransferPathChanged { path: None, .. },
+                    ..
+                }
+            ]
+        ));
         assert_eq!(
             handle_request(runtime, AgentRequest::LatestInbox).await,
             AgentResponse::Latest { item: None }
         );
+    }
+
+    #[test]
+    fn exceptional_offer_policy_preserves_both_size_boundaries() {
+        assert!(!requires_explicit_offer_approval(
+            api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES,
+            u64::MAX
+        ));
+        assert!(requires_explicit_offer_approval(
+            api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES + 1,
+            u64::MAX
+        ));
+        assert!(!requires_explicit_offer_approval(50, 100));
+        assert!(requires_explicit_offer_approval(51, 100));
+    }
+
+    #[test]
+    fn path_projection_distinguishes_lan_tailnet_direct_and_relay() {
+        for address in ["192.168.1.2:4433", "10.0.0.2:4433", "[fd00::2]:4433"] {
+            assert_eq!(
+                project_agent_path(&DataPath::Direct {
+                    addr: address.parse().unwrap(),
+                }),
+                AgentPathKind::Lan
+            );
+        }
+        for address in [
+            "100.64.0.2:4433",
+            "100.127.255.254:4433",
+            "[fd7a:115c:a1e0::2]:4433",
+            "203.0.113.2:4433",
+        ] {
+            assert_eq!(
+                project_agent_path(&DataPath::Direct {
+                    addr: address.parse().unwrap(),
+                }),
+                AgentPathKind::Direct
+            );
+        }
+        assert_eq!(
+            project_agent_path(&DataPath::Relay {
+                url: "https://relay.fixture.invalid".into(),
+            }),
+            AgentPathKind::Relay
+        );
+        assert_eq!(
+            project_agent_path(&DataPath::WifiAware),
+            AgentPathKind::WifiAware
+        );
+        assert_eq!(
+            project_agent_path(&DataPath::Other {
+                description: "future transport".into(),
+            }),
+            AgentPathKind::Other
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_offer_is_secret_free_and_requires_one_owner_decision() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let runtime = Arc::new(AgentRuntime {
+            config: RuntimeConfig {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: state_directory.join("agent.sock"),
+                device_name: "test-wsl".into(),
+                broker: "broker".into(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+        let initial_cursor = lock(&runtime.events).unwrap().cursor();
+        let offer = RoomTransferOffer {
+            offer_id: "offer_fixture".into(),
+            transfer_invite: "secret-invitation-must-not-cross-control".into(),
+            root_names: vec!["archive.bin".into()],
+            item_count: 1,
+            directory_count: 0,
+            total_bytes: 51,
+        };
+
+        let mut pending =
+            stage_pending_offer(&runtime, "relationship_fixture", "Fixture Mac", offer, 100)
+                .unwrap();
+        let AgentResponse::PendingOffers { offers } =
+            handle_request(runtime.clone(), AgentRequest::ListPendingOffers).await
+        else {
+            panic!("unexpected response")
+        };
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].offer_id, "offer_fixture");
+        assert_eq!(offers[0].allocatable_bytes, 100);
+        assert!(
+            !serde_json::to_string(&offers)
+                .unwrap()
+                .contains("secret-invitation")
+        );
+        assert_eq!(runtime.status().unwrap().pending_offers, 1);
+        assert_eq!(runtime.snapshot(20).unwrap().pending_offers, offers);
+
+        let response = handle_request(
+            runtime.clone(),
+            AgentRequest::DecidePendingOffer {
+                offer_id: "offer_fixture".into(),
+                decision: AgentOfferDecision::Approve,
+            },
+        )
+        .await;
+        assert!(matches!(
+            response,
+            AgentResponse::PendingOfferDecided {
+                decision: AgentOfferDecision::Approve,
+                ..
+            }
+        ));
+        assert_eq!(
+            (&mut pending.decision).await.unwrap(),
+            AgentOfferDecision::Approve
+        );
+        assert!(runtime.pending_offers().unwrap().is_empty());
+        assert!(matches!(
+            handle_request(
+                runtime.clone(),
+                AgentRequest::DecidePendingOffer {
+                    offer_id: "offer_fixture".into(),
+                    decision: AgentOfferDecision::Reject,
+                },
+            )
+            .await,
+            AgentResponse::Error { .. }
+        ));
+
+        drop(pending);
+        assert!(lock(&runtime.pending_offers).unwrap().is_empty());
+        let AgentEventRead::Events { events, .. } = lock(&runtime.events)
+            .unwrap()
+            .read_after(&initial_cursor, 10)
+        else {
+            panic!("pending-offer events unexpectedly required a snapshot")
+        };
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AgentEventEnvelope {
+                    event: AgentEvent::PendingOfferChanged { pending: true, .. },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::PendingOfferChanged { pending: false, .. },
+                    ..
+                }
+            ]
+        ));
     }
 
     #[tokio::test]
@@ -2415,6 +3151,8 @@ mod tests {
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
@@ -2531,6 +3269,8 @@ mod tests {
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
@@ -2584,7 +3324,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn remembered_room_dispatches_a_queued_transfer_to_delivery() {
+    async fn remembered_room_dispatches_a_queued_transfer_and_gates_exceptional_offers() {
         use envoix_rendezvous::RoomRegistry;
         use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
         use iroh::{RelayMode, SecretKey};
@@ -2636,6 +3376,8 @@ mod tests {
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
@@ -2672,6 +3414,8 @@ mod tests {
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
@@ -2827,6 +3571,78 @@ mod tests {
         .unwrap();
         assert!(lock(&runtime.active_outgoing).unwrap().is_empty());
 
+        let invitation = api::create_invitation(
+            broker_text.clone(),
+            Vec::new(),
+            TransferRole::Sender,
+            unix_seconds().unwrap(),
+        )
+        .unwrap();
+        connector
+            .offer_transfer(RoomTransferOffer {
+                offer_id: "offer_requires_approval".into(),
+                transfer_invite: invitation.payload,
+                root_names: vec!["large.bin".into()],
+                item_count: 1,
+                directory_count: 0,
+                total_bytes: api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES + 1,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while runtime.pending_offers().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let premature_decision = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                let event = connector.next_event().await.unwrap();
+                if matches!(
+                    event,
+                    RoomControlEvent::OfferAccepted { .. } | RoomControlEvent::OfferRejected { .. }
+                ) {
+                    break event;
+                }
+            }
+        })
+        .await;
+        assert!(premature_decision.is_err());
+
+        assert!(matches!(
+            handle_request(
+                runtime.clone(),
+                AgentRequest::DecidePendingOffer {
+                    offer_id: "offer_requires_approval".into(),
+                    decision: AgentOfferDecision::Reject,
+                },
+            )
+            .await,
+            AgentResponse::PendingOfferDecided {
+                decision: AgentOfferDecision::Reject,
+                ..
+            }
+        ));
+        let rejection = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = connector.next_event().await.unwrap();
+                if matches!(event, RoomControlEvent::OfferRejected { .. }) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            rejection,
+            RoomControlEvent::OfferRejected {
+                offer_id,
+                reason: RoomOfferRejection::Declined,
+            } if offer_id == "offer_requires_approval"
+        ));
+        assert!(lock(&runtime.store).unwrap().inbox(usize::MAX).is_empty());
+
         runtime.shutdown.cancel();
         connector.shutdown().await;
         responder.shutdown().await;
@@ -2842,7 +3658,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v6_envelope() {
+    async fn local_socket_round_trips_a_v9_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -2860,6 +3676,8 @@ mod tests {
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
@@ -2883,7 +3701,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_named_pipe_round_trips_a_v6_envelope_for_its_owner() {
+    async fn windows_named_pipe_round_trips_a_v9_envelope_for_its_owner() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let directory = tempfile::tempdir().unwrap();
@@ -2908,6 +3726,8 @@ mod tests {
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
             active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
@@ -2987,6 +3807,8 @@ mod tests {
                 },
             )])),
             active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),

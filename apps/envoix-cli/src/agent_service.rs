@@ -1,5 +1,76 @@
+use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+#[cfg(any(windows, test))]
+mod windows;
+
+const MANAGED_STATE_ENTRIES: &[&str] = &[
+    "agent.sock",
+    "identity.key",
+    "engine-state-v2.json",
+    "engine-state-v2.previous.json",
+    "engine-state-v1.json",
+    "engine-state-v1.previous.json",
+    "engine.lock",
+    "migration",
+    "vault",
+    "product",
+    "outbox",
+    "transfer-state-v2",
+];
+
+fn require_file(path: &Path, label: &str) -> io::Result<()> {
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "{label} is not installed at {}; run `envoix agent install` first",
+            path.display()
+        ),
+    ))
+}
+
+fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn clear_managed_state(directory: &Path) -> io::Result<()> {
+    for entry in MANAGED_STATE_ENTRIES {
+        remove_managed_path(&directory.join(entry))?;
+    }
+    match fs::remove_dir(directory) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_managed_path(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
 
 pub(crate) struct InstallOptions {
     pub(crate) inbox: Option<PathBuf>,
@@ -7,11 +78,24 @@ pub(crate) struct InstallOptions {
     pub(crate) agent_binary: Option<PathBuf>,
 }
 
+pub(crate) struct UpdateOptions {
+    pub(crate) agent_binary: Option<PathBuf>,
+}
+
+pub(crate) struct UninstallOptions {
+    pub(crate) delete_state: bool,
+}
+
 pub(crate) struct InstalledAgent {
     pub(crate) agent_binary: PathBuf,
     pub(crate) cli_binary: PathBuf,
+    pub(crate) service_definition: PathBuf,
     pub(crate) settings_file: PathBuf,
-    pub(crate) unit_file: PathBuf,
+}
+
+pub(crate) struct UninstalledAgent {
+    pub(crate) state_directory: PathBuf,
+    pub(crate) state_cleared: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -19,7 +103,12 @@ pub(crate) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
     linux::install(options)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub(crate) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
+    windows::install(options)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
     let InstallOptions {
         inbox,
@@ -35,7 +124,12 @@ pub(crate) fn start() -> io::Result<()> {
     linux::systemctl(&["start", linux::SERVICE_NAME])
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub(crate) fn start() -> io::Result<()> {
+    windows::start()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn start() -> io::Result<()> {
     Err(unsupported())
 }
@@ -45,16 +139,70 @@ pub(crate) fn stop() -> io::Result<()> {
     linux::systemctl(&["stop", linux::SERVICE_NAME])
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub(crate) fn stop() -> io::Result<()> {
+    windows::stop()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn stop() -> io::Result<()> {
     Err(unsupported())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "linux")]
+pub(crate) fn restart() -> io::Result<()> {
+    linux::systemctl(&["restart", linux::SERVICE_NAME])
+}
+
+#[cfg(windows)]
+pub(crate) fn restart() -> io::Result<()> {
+    windows::restart()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub(crate) fn restart() -> io::Result<()> {
+    Err(unsupported())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn update(options: UpdateOptions) -> io::Result<InstalledAgent> {
+    linux::update(options)
+}
+
+#[cfg(windows)]
+pub(crate) fn update(options: UpdateOptions) -> io::Result<InstalledAgent> {
+    windows::update(options)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub(crate) fn update(options: UpdateOptions) -> io::Result<InstalledAgent> {
+    let UpdateOptions { agent_binary } = options;
+    let _ = agent_binary;
+    Err(unsupported())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn uninstall(options: UninstallOptions) -> io::Result<UninstalledAgent> {
+    linux::uninstall(options)
+}
+
+#[cfg(windows)]
+pub(crate) fn uninstall(options: UninstallOptions) -> io::Result<UninstalledAgent> {
+    windows::uninstall(options)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub(crate) fn uninstall(options: UninstallOptions) -> io::Result<UninstalledAgent> {
+    let UninstallOptions { delete_state } = options;
+    let _ = delete_state;
+    Err(unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn unsupported() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        "managed Agent services are currently supported only on Linux and WSL",
+        "managed Agent services are supported only on Linux, WSL, and Windows",
     )
 }
 
@@ -72,30 +220,58 @@ mod linux {
         AGENT_SETTINGS_VERSION, AgentSettings, default_agent_state_directory,
     };
 
-    use super::{InstallOptions, InstalledAgent};
+    use super::{
+        InstallOptions, InstalledAgent, UninstallOptions, UninstalledAgent, UpdateOptions,
+        clear_managed_state, remove_file_if_exists, require_file,
+    };
 
     pub(super) const SERVICE_NAME: &str = "envoix-agent.service";
 
+    struct ServiceLayout {
+        agent_binary: PathBuf,
+        cli_binary: PathBuf,
+        settings_file: PathBuf,
+        state_directory: PathBuf,
+        unit_file: PathBuf,
+    }
+
+    impl ServiceLayout {
+        fn discover() -> io::Result<Self> {
+            let home = absolute(home_directory()?)?;
+            let config_home = absolute(
+                env::var_os("XDG_CONFIG_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".config")),
+            )?;
+            let bin_directory = home.join(".local/bin");
+            Ok(Self {
+                agent_binary: bin_directory.join("envoix-agent"),
+                cli_binary: bin_directory.join("envoix"),
+                settings_file: config_home.join("envoix/agent.json"),
+                state_directory: absolute(default_agent_state_directory()?)?,
+                unit_file: config_home.join("systemd/user").join(SERVICE_NAME),
+            })
+        }
+
+        fn installed(&self) -> InstalledAgent {
+            InstalledAgent {
+                agent_binary: self.agent_binary.clone(),
+                cli_binary: self.cli_binary.clone(),
+                service_definition: self.unit_file.clone(),
+                settings_file: self.settings_file.clone(),
+            }
+        }
+    }
+
     pub(super) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
-        let home = absolute(home_directory()?)?;
-        let config_home = absolute(
-            env::var_os("XDG_CONFIG_HOME")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".config")),
-        )?;
-        let bin_directory = home.join(".local/bin");
-        let settings_file = config_home.join("envoix/agent.json");
-        let unit_file = config_home.join("systemd/user").join(SERVICE_NAME);
+        let layout = ServiceLayout::discover()?;
         let cli_source = fs::canonicalize(env::current_exe()?)?;
         let agent_source = resolve_agent_binary(options.agent_binary, &cli_source)?;
-        let cli_binary = bin_directory.join("envoix");
-        let agent_binary = bin_directory.join("envoix-agent");
-        let state_directory = absolute(default_agent_state_directory()?)?;
         let inbox_directory = absolute(
             options
                 .inbox
-                .unwrap_or_else(|| state_directory.join("inbox")),
+                .unwrap_or_else(|| layout.state_directory.join("inbox")),
         )?;
         let settings = AgentSettings {
             version: AGENT_SETTINGS_VERSION,
@@ -104,14 +280,18 @@ mod linux {
         };
         settings.validate()?;
 
-        create_directory(&bin_directory, 0o755)?;
-        install_executable(&cli_source, &cli_binary)?;
-        install_executable(&agent_source, &agent_binary)?;
+        let bin_directory = layout
+            .cli_binary
+            .parent()
+            .expect("installed CLI path has a parent");
+        create_directory(bin_directory, 0o755)?;
+        install_executable(&cli_source, &layout.cli_binary)?;
+        install_executable(&agent_source, &layout.agent_binary)?;
         let settings_bytes = serde_json::to_vec_pretty(&settings)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        write_file(&settings_file, &settings_bytes, 0o600)?;
-        let unit = render_unit(&agent_binary, &settings_file)?;
-        write_file(&unit_file, unit.as_bytes(), 0o644)?;
+        write_file(&layout.settings_file, &settings_bytes, 0o600)?;
+        let unit = render_unit(&layout.agent_binary, &layout.settings_file)?;
+        write_file(&layout.unit_file, unit.as_bytes(), 0o644)?;
 
         let activation = systemctl(&["daemon-reload"])
             .and_then(|()| systemctl(&["enable", SERVICE_NAME]))
@@ -120,16 +300,44 @@ mod linux {
             io::Error::other(format!(
                 "Agent files were installed, but the user service could not start: {error}; \
                  enable systemd for this WSL distribution or run {} --settings {} in a foreground shell",
-                agent_binary.display(),
-                settings_file.display()
+                layout.agent_binary.display(),
+                layout.settings_file.display()
             ))
         })?;
 
-        Ok(InstalledAgent {
-            agent_binary,
-            cli_binary,
-            settings_file,
-            unit_file,
+        Ok(layout.installed())
+    }
+
+    pub(super) fn update(options: UpdateOptions) -> io::Result<InstalledAgent> {
+        let layout = ServiceLayout::discover()?;
+        require_file(&layout.settings_file, "Agent settings")?;
+        require_file(&layout.unit_file, "Agent systemd unit")?;
+        let cli_source = fs::canonicalize(env::current_exe()?)?;
+        let agent_source = resolve_agent_binary(options.agent_binary, &cli_source)?;
+
+        install_executable(&agent_source, &layout.agent_binary)?;
+        install_executable(&cli_source, &layout.cli_binary)?;
+        systemctl(&["restart", SERVICE_NAME])?;
+        Ok(layout.installed())
+    }
+
+    pub(super) fn uninstall(options: UninstallOptions) -> io::Result<UninstalledAgent> {
+        let layout = ServiceLayout::discover()?;
+        require_file(&layout.unit_file, "Agent systemd unit")?;
+        systemctl(&["disable", "--now", SERVICE_NAME])?;
+        remove_file_if_exists(&layout.unit_file)?;
+        systemctl(&["daemon-reload"])?;
+        remove_file_if_exists(&layout.agent_binary)?;
+        remove_file_if_exists(&layout.cli_binary)?;
+
+        if options.delete_state {
+            clear_managed_state(&layout.state_directory)?;
+            remove_file_if_exists(&layout.settings_file)?;
+        }
+
+        Ok(UninstalledAgent {
+            state_directory: layout.state_directory,
+            state_cleared: options.delete_state,
         })
     }
 
@@ -299,6 +507,7 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::os::unix::fs::symlink;
 
         #[test]
         fn unit_quotes_spaces_and_systemd_expansion_characters() {
@@ -324,6 +533,49 @@ mod linux {
                     Path::new("/tmp/settings")
                 )
                 .is_err()
+            );
+        }
+
+        #[test]
+        fn state_cleanup_is_allowlisted_and_does_not_follow_symlinks() {
+            let temporary = tempfile::tempdir().unwrap();
+            let state = temporary.path().join("state");
+            let external = temporary.path().join("external");
+            fs::create_dir_all(state.join("inbox")).unwrap();
+            fs::create_dir_all(&external).unwrap();
+            fs::write(state.join("engine-state-v2.json"), "engine").unwrap();
+            fs::write(state.join("engine-state-v1.json"), "legacy engine").unwrap();
+            fs::create_dir_all(state.join("product")).unwrap();
+            fs::write(
+                state.join("product/product-state-v1.json"),
+                "legacy product",
+            )
+            .unwrap();
+            fs::create_dir_all(state.join("migration")).unwrap();
+            fs::write(state.join("migration/backup.json"), "legacy backup").unwrap();
+            fs::write(state.join("inbox/received.txt"), "received").unwrap();
+            fs::write(state.join("unknown.txt"), "unknown").unwrap();
+            fs::write(external.join("credential"), "external").unwrap();
+            symlink(&external, state.join("vault")).unwrap();
+
+            clear_managed_state(&state).unwrap();
+
+            assert!(!state.join("engine-state-v2.json").exists());
+            assert!(!state.join("engine-state-v1.json").exists());
+            assert!(!state.join("product").exists());
+            assert!(!state.join("migration").exists());
+            assert!(!state.join("vault").exists());
+            assert_eq!(
+                fs::read_to_string(state.join("inbox/received.txt")).unwrap(),
+                "received"
+            );
+            assert_eq!(
+                fs::read_to_string(state.join("unknown.txt")).unwrap(),
+                "unknown"
+            );
+            assert_eq!(
+                fs::read_to_string(external.join("credential")).unwrap(),
+                "external"
             );
         }
     }

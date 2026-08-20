@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "snapshot": {
+    "contract_version": 6,
+    "last_sequence": 0,
+    "capabilities": {
+      "values": {}
+    },
+    "devices": {},
+    "relationships": {},
+    "rooms": {},
+    "transfers": {}
+  },
+  "durable_relationships": {},
+  "inbox": []
+}

@@ -19,9 +19,11 @@ use envoix_client::api::{
     InvitationConsumption, PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision,
     SourceSelectionState, TransferEvent, TransferJobStore, acquire_invitation,
 };
+use envoix_client::model::TransferDirection;
 use envoix_client::product::{
-    AgentEventCursor, AgentRequest, AgentRequestEnvelope, AgentResponse, AgentResponseEnvelope,
-    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, default_agent_control_endpoint,
+    AgentEventCursor, AgentOfferDecision, AgentPathKind, AgentRequest, AgentRequestEnvelope,
+    AgentResponse, AgentResponseEnvelope, AgentTransferPath, MAX_AGENT_REQUEST_BYTES,
+    MAX_AGENT_RESPONSE_BYTES, default_agent_control_endpoint,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 
@@ -114,6 +116,14 @@ async fn run(cli: Cli) -> CliResult<()> {
             } => install_agent(inbox, device_name, agent_binary, json),
             AgentCommand::Start => manage_agent_service("started", agent_service::start, json),
             AgentCommand::Stop => manage_agent_service("stopped", agent_service::stop, json),
+            AgentCommand::Restart => {
+                manage_agent_service("restarted", agent_service::restart, json)
+            }
+            AgentCommand::Update { agent_binary } => update_agent(agent_binary, json),
+            AgentCommand::Uninstall {
+                delete_state,
+                yes: _,
+            } => uninstall_agent(delete_state, json),
             AgentCommand::Pair { name } => show_pairing(
                 call_agent(agent_endpoint, AgentRequest::Pair { label: name }).await?,
                 json,
@@ -147,6 +157,36 @@ async fn run(cli: Cli) -> CliResult<()> {
             ),
             TransfersCommand::Show { transfer_id } => show_transfer(
                 call_agent(agent_endpoint, AgentRequest::GetTransfer { transfer_id }).await?,
+                json,
+            ),
+            TransfersCommand::Paths => show_transfer_paths(
+                call_agent(agent_endpoint, AgentRequest::ListTransferPaths).await?,
+                json,
+            ),
+            TransfersCommand::Pending => show_pending_offers(
+                call_agent(agent_endpoint, AgentRequest::ListPendingOffers).await?,
+                json,
+            ),
+            TransfersCommand::Approve { offer_id } => show_pending_offer_decision(
+                call_agent(
+                    agent_endpoint,
+                    AgentRequest::DecidePendingOffer {
+                        offer_id,
+                        decision: AgentOfferDecision::Approve,
+                    },
+                )
+                .await?,
+                json,
+            ),
+            TransfersCommand::Reject { offer_id } => show_pending_offer_decision(
+                call_agent(
+                    agent_endpoint,
+                    AgentRequest::DecidePendingOffer {
+                        offer_id,
+                        decision: AgentOfferDecision::Reject,
+                    },
+                )
+                .await?,
                 json,
             ),
         },
@@ -286,8 +326,8 @@ fn install_agent(
                 "kind": "agent_service_installed",
                 "agent_binary": installed.agent_binary,
                 "cli_binary": installed.cli_binary,
+                "service_definition": installed.service_definition,
                 "settings_file": installed.settings_file,
-                "unit_file": installed.unit_file,
             })
         );
     } else {
@@ -295,7 +335,54 @@ fn install_agent(
         println!("agent: {}", installed.agent_binary.display());
         println!("cli: {}", installed.cli_binary.display());
         println!("settings: {}", installed.settings_file.display());
-        println!("service: {}", installed.unit_file.display());
+        println!("service: {}", installed.service_definition.display());
+    }
+    Ok(())
+}
+
+fn update_agent(agent_binary: Option<PathBuf>, json: bool) -> CliResult<()> {
+    let installed = agent_service::update(agent_service::UpdateOptions { agent_binary })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_updated",
+                "agent_binary": installed.agent_binary,
+                "cli_binary": installed.cli_binary,
+                "service_definition": installed.service_definition,
+                "settings_file": installed.settings_file,
+            })
+        );
+    } else {
+        println!("Agent binaries updated and service restarted.");
+        println!("agent: {}", installed.agent_binary.display());
+        println!("cli: {}", installed.cli_binary.display());
+    }
+    Ok(())
+}
+
+fn uninstall_agent(delete_state: bool, json: bool) -> CliResult<()> {
+    let uninstalled = agent_service::uninstall(agent_service::UninstallOptions { delete_state })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_uninstalled",
+                "state_directory": uninstalled.state_directory,
+                "state_cleared": uninstalled.state_cleared,
+                "inbox_preserved": true,
+            })
+        );
+    } else {
+        println!("Agent service and installed binaries removed.");
+        if uninstalled.state_cleared {
+            println!("Engine state and credentials removed; Inbox files preserved.");
+        } else {
+            println!(
+                "Settings and data preserved; Agent state remains under {}.",
+                uninstalled.state_directory.display()
+            );
+        }
     }
     Ok(())
 }
@@ -351,6 +438,8 @@ fn show_agent_status(response: AgentResponse, json: bool) -> CliResult<()> {
         "devices: {} paired, {} listening, {} pairing",
         status.paired_devices, status.active_receivers, status.active_pairings
     );
+    println!("pending offers: {}", status.pending_offers);
+    println!("active paths: {}", status.active_paths);
     println!("broker: {}", status.broker);
     println!("relay: {}", status.relay.as_deref().unwrap_or("disabled"));
     Ok(())
@@ -370,6 +459,11 @@ fn show_agent_snapshot(response: AgentResponse, json: bool) -> CliResult<()> {
     println!("rooms: {}", snapshot.engine.rooms.len());
     println!("transfers: {}", snapshot.engine.transfers.len());
     println!("inbox: {}", snapshot.inbox.len());
+    println!("pending offers: {}", snapshot.pending_offers.len());
+    println!("active paths: {}", snapshot.active_paths.len());
+    for path in &snapshot.active_paths {
+        print_agent_transfer_path(path);
+    }
     println!(
         "event cursor: {}:{}",
         snapshot.event_cursor.instance_id, snapshot.event_cursor.sequence
@@ -420,8 +514,12 @@ fn show_agent_diagnostics(response: AgentResponse, json: bool) -> CliResult<()> 
     println!("credentials: {:?}", diagnostics.credential_protection);
     println!("engine sequence: {}", diagnostics.engine_sequence);
     println!(
-        "state: {} relationships, {} Transfers, {} Inbox items",
-        diagnostics.relationships, diagnostics.transfers, diagnostics.inbox_items
+        "state: {} relationships, {} Transfers, {} Inbox items, {} active paths, {} pending offers",
+        diagnostics.relationships,
+        diagnostics.transfers,
+        diagnostics.inbox_items,
+        diagnostics.active_paths,
+        diagnostics.pending_offers
     );
     Ok(())
 }
@@ -536,6 +634,84 @@ fn show_transfer(response: AgentResponse, json: bool) -> CliResult<()> {
         "progress: {} / {} bytes",
         transfer.transferred_bytes, transfer.total_bytes
     );
+    Ok(())
+}
+
+fn show_transfer_paths(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::TransferPaths { paths } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if paths.is_empty() {
+        println!("No active transfer paths.");
+        return Ok(());
+    }
+    for path in &paths {
+        print_agent_transfer_path(path);
+    }
+    Ok(())
+}
+
+fn print_agent_transfer_path(path: &AgentTransferPath) {
+    let direction = match path.direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "receive",
+    };
+    let path_name = match path.path {
+        AgentPathKind::Lan => "lan",
+        AgentPathKind::Direct => "tailnet/direct",
+        AgentPathKind::Relay => "relay",
+        AgentPathKind::WifiAware => "wifi_aware",
+        AgentPathKind::Other => "other",
+    };
+    println!("{}\t{direction}\t{path_name}", path.transfer_id);
+}
+
+fn show_pending_offers(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::PendingOffers { offers } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if offers.is_empty() {
+        println!("No pending offers.");
+        return Ok(());
+    }
+    for offer in offers {
+        println!(
+            "{}\t{}\t{} items\t{} bytes\t{} bytes allocatable\t{}",
+            offer.offer_id,
+            offer.from_device_label,
+            offer.item_count,
+            offer.total_bytes,
+            offer.allocatable_bytes,
+            offer.root_names.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn show_pending_offer_decision(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::PendingOfferDecided { offer, decision } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    let action = match decision {
+        AgentOfferDecision::Approve => "Approved",
+        AgentOfferDecision::Reject => "Rejected",
+    };
+    println!("{action} pending offer: {}", offer.offer_id);
     Ok(())
 }
 

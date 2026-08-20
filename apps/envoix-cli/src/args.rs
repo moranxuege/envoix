@@ -88,13 +88,13 @@ pub(crate) enum AgentCommand {
     },
     /// Print a secret-free Agent and Engine health report.
     Diagnostics,
-    /// Install and start the Agent as a systemd user service.
+    /// Install and start the Agent as a managed per-user service.
     Install {
         /// Inbox directory; defaults to the Agent state directory's Inbox.
         #[arg(long)]
         inbox: Option<PathBuf>,
         /// Name shown to sending devices.
-        #[arg(long, default_value = "WSL")]
+        #[arg(long, default_value = "Envoix Agent")]
         device_name: String,
         /// Prebuilt envoix-agent binary; defaults to the CLI's directory or PATH.
         #[arg(long)]
@@ -104,6 +104,23 @@ pub(crate) enum AgentCommand {
     Start,
     /// Stop the installed Agent service.
     Stop,
+    /// Restart the installed Agent service.
+    Restart,
+    /// Replace the installed CLI and Agent binaries without changing settings or state.
+    Update {
+        /// Prebuilt envoix-agent binary; defaults to the CLI's directory or PATH.
+        #[arg(long)]
+        agent_binary: Option<PathBuf>,
+    },
+    /// Remove the managed service and installed binaries.
+    Uninstall {
+        /// Also remove Envoix Engine state and credentials; received Inbox files are preserved.
+        #[arg(long, requires = "yes")]
+        delete_state: bool,
+        /// Confirm deletion requested by --delete-state.
+        #[arg(long, requires = "delete_state")]
+        yes: bool,
+    },
     /// Create a one-time receive invitation that becomes a remembered device.
     Pair {
         /// Name for the Mac or other sending device.
@@ -153,6 +170,14 @@ pub(crate) enum TransfersCommand {
     List,
     /// Show one durable Transfer by ID.
     Show { transfer_id: String },
+    /// List the network paths selected by active Agent transfers.
+    Paths,
+    /// List incoming offers waiting for an explicit size approval.
+    Pending,
+    /// Approve one pending incoming offer before payload starts.
+    Approve { offer_id: String },
+    /// Reject one pending incoming offer.
+    Reject { offer_id: String },
 }
 
 #[derive(Args, Debug)]
@@ -610,6 +635,25 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["envoix", "agent", "start"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "agent", "stop"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "agent", "restart"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "agent", "update"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "agent",
+                "update",
+                "--agent-binary",
+                "/tmp/envoix-agent",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "agent", "uninstall"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["envoix", "agent", "uninstall", "--delete-state", "--yes",])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "agent", "uninstall", "--delete-state"]).is_err());
+        assert!(Cli::try_parse_from(["envoix", "agent", "uninstall", "--yes"]).is_err());
         assert!(Cli::try_parse_from(["envoix", "agent", "pair", "--name", "MacBook"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "list"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook", "--yes"]).is_ok());
@@ -627,6 +671,10 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["envoix", "transfers", "list"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "transfers", "show", "transfer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "paths"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "pending"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "approve", "offer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "reject", "offer_1"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "inbox", "latest"]).is_ok());
     }
 

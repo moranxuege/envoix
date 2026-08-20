@@ -20,6 +20,7 @@ on:
       - 'scripts/check-android-jni-transfer-surface.sh'
       - 'scripts/cross-device-transfer-matrix.sh'
       - 'scripts/matrix_contract.py'
+      - 'scripts/windows-agent-lifecycle-test.ps1'
       - 'scripts/tests/**'
       - 'scripts/with-build-cache-guard.sh'
       - 'scripts/build-cache-guard.sh'
@@ -79,6 +80,40 @@ jobs:
           cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
       - name: Audit Rust dependencies
         run: cargo audit --deny unsound
+
+  windows:
+    name: Windows CLI + Agent
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up pinned Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy
+          rustup default "$RUST_VERSION"
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint Windows CLI and Agent
+        shell: bash
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo clippy --locked -p envoix-cli -p envoix-agent --all-targets -- -D warnings
+      - name: Test Windows CLI and Agent
+        shell: bash
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo test --locked -p envoix-cli -p envoix-agent --all-targets
+      - name: Build Windows lifecycle pair
+        shell: bash
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo build --locked -p envoix-cli -p envoix-agent
+      - name: Test Windows Agent lifecycle
+        shell: pwsh
+        run: >-
+          ./scripts/windows-agent-lifecycle-test.ps1
+          -Cli ./target/debug/envoix.exe
+          -Agent ./target/debug/envoix-agent.exe
 
   android:
     name: Android lint + unit test + debug build

@@ -43,7 +43,7 @@ pub use envoix_transfer::{
     TransferEvent, TransferJobError, TransferJobStore, TransferStage, VerifiedEntryV2,
     local_allocatable_bytes, sender_resume_intent,
 };
-pub use envoix_types::TransferDirection;
+pub use envoix_types::{DataPath, TransferDirection};
 use iroh::Endpoint;
 pub use iroh::EndpointAddr;
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};

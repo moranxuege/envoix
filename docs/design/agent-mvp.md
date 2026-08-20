@@ -53,13 +53,22 @@ WSL envoix-agent <--- Room offer + canonical Manifest v2 ---> WSL Inbox
 
 ## Local Agent contract
 
-`envoix-client::product` is the shared product contract. Protocol version 3
+`envoix-client::product` is the shared product contract. Protocol version 8
 defines these commands:
 
 - `status`
+- `snapshot { inbox_limit }`
+- `events { after, limit }`
+- `diagnostics`
 - `pair { label }`
 - `list_devices`
-- `forget_device { device }`
+- `revoke_device { device }`
+- `create_transfer { device, paths }`
+- `list_transfers`
+- `list_transfer_paths`
+- `get_transfer { transfer_id }`
+- `list_pending_offers`
+- `decide_pending_offer { offer_id, decision }`
 - `list_inbox { limit }`
 - `latest_inbox`
 
@@ -67,9 +76,10 @@ The wire format is tagged JSON with one request and response per connection.
 The socket is mode `0600`; its state directory is mode `0700`. Requests are
 limited to 64 KiB.
 
-The persisted `product-state-v1.json` records device metadata and completed
-Inbox items. Opaque credentials live under the separate `credentials/`
-directory and are never serialized into Agent responses. A managed process
+The persisted `engine-state-v2.json` records the shared Engine snapshot,
+durable Relationship metadata, and completed Inbox items. Opaque credentials
+live under the separate `vault/` directory and are never serialized into Agent
+responses. A managed process
 loads its device name and Inbox location from the versioned, owner-only
 `~/.config/envoix/agent.json`; command-line arguments still take precedence for
 development runs.
@@ -104,7 +114,12 @@ against the control offer before saving anything.
 
 The Agent automatically accepts ordinary transfers. Offers above the existing
 automatic-receive threshold, or above half of currently allocatable Inbox
-space, are rejected until an explicit approval workflow is added.
+space, remain at the authenticated Room offer boundary until the local owner
+runs `envoix transfers approve <offer-id>` or rejects them. `envoix transfers
+pending` shows only bounded device, root-preview, item-count, byte-count, and
+capacity metadata; the directional InviteV2 payload never crosses the local
+control protocol. A Room close, device revocation, or Agent restart discards
+the in-memory pending offer without creating or modifying Inbox files.
 
 ## macOS clipboard intake
 
@@ -135,6 +150,14 @@ direct paths can still form where reachability permits.
 WSL mirrored networking is an optional later optimization. Enabling it requires
 changing Windows `.wslconfig` and restarting WSL, so it is intentionally not an
 Agent installation side effect.
+
+The Agent projects the transfer layer's selected-path events into bounded,
+in-memory telemetry. `lan` means a private or link-local direct address except
+the Tailscale CGNAT and IPv6 ranges; those and other direct addresses are shown
+as `tailnet/direct`. Relay, Wi-Fi Aware, and unknown custom transports remain
+distinct. This classification is display-only and is never an authentication,
+authorization, or candidate-filtering input. Path state disappears when the
+transfer ends or the Agent restarts.
 
 ## Running the slice
 
@@ -167,14 +190,32 @@ Manage and use the Agent from any WSL shell:
 
 ```bash
 ~/.local/bin/envoix agent start
+~/.local/bin/envoix agent restart
 ~/.local/bin/envoix agent status
 ~/.local/bin/envoix agent pair --name MacBook
 ~/.local/bin/envoix devices list
 ~/.local/bin/envoix devices forget MacBook --yes
+~/.local/bin/envoix transfers paths
+~/.local/bin/envoix transfers pending
+~/.local/bin/envoix transfers approve <offer-id>
+~/.local/bin/envoix transfers reject <offer-id>
 ~/.local/bin/envoix inbox list
 ~/.local/bin/envoix inbox latest
 ~/.local/bin/envoix agent stop
 ```
+
+A newly built CLI updates both installed binaries in place and restarts the
+service without rewriting settings or Agent data:
+
+```bash
+target/debug/envoix agent update --agent-binary target/debug/envoix-agent
+```
+
+`envoix agent uninstall` disables the service and removes the installed
+binaries while preserving settings, Engine state, credentials, and Inbox.
+`envoix agent uninstall --delete-state --yes` additionally removes only the
+explicitly allowlisted Agent state and credentials. Received Inbox files and
+unknown files under the state root are preserved in both modes.
 
 Forgetting accepts a device ID or its exact label and requires `--yes`. It
 removes only the remembered relationship and protected credential, cancels its
@@ -190,8 +231,5 @@ route.
 
 ## Next slices
 
-1. Add an explicit large-offer approval command and pending-offer state.
-2. Add path telemetry (`lan`, `tailnet/direct`, `relay`) without using path type
-   as an authentication decision.
-3. Add an optional store-and-forward relay only if offline delivery becomes a
+1. Add an optional store-and-forward relay only if offline delivery becomes a
    real requirement; it is not part of this MVP.

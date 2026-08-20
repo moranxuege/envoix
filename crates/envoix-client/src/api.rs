@@ -19,7 +19,7 @@ pub use envoix_protocol::manifest_v2_frames::RootPlanV2;
 use envoix_session::DEFAULT_DATA_STREAM_WINDOW;
 pub use envoix_session::{
     AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES, AuthenticationHandler, AuthenticationOutcome, BindAddrs,
-    CandidateFilter, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2,
+    CandidateFilter, CanonicalTransferJob, DataPath, DestinationDecisionV2, DestinationRequestV2,
     EndpointAddr, EventSink, IdentityConfig, InventoryCursor, InventoryItem, JobLifecycle,
     LocalSourceOrigin, ManifestV2DataError, ManifestV2ProgressPhase, ManifestV2ResultGate,
     NativeTransportRead, NearbyInvite, NearbyInviteEndpoint, NearbyInviteInbox, PairingConfig,

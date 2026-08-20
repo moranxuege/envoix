@@ -7,17 +7,14 @@
 use std::collections::BTreeSet;
 use std::env;
 #[cfg(test)]
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io;
-#[cfg(test)]
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use crate::api::DesktopCredentialStore;
 use crate::api::RememberedCredential;
@@ -26,29 +23,30 @@ use crate::decision::decide;
 use crate::effect::EngineEffect;
 use crate::event::{EngineEvent, EventEnvelope};
 use crate::model::{
-    CommandId, ContentId, Device, DeviceId, Relationship, RelationshipId, RelationshipState,
-    Transfer, TransferDirection, TransferFailure, TransferId, TransferRejection, TransferState,
+    CommandId, ContentId, DeviceId, RelationshipId, RelationshipState, Transfer, TransferDirection,
+    TransferFailure, TransferId, TransferRejection, TransferState,
 };
-use crate::ports::{SecretBytes, SecureVaultPort};
-use crate::snapshot::EngineSnapshot;
+use crate::ports::{PlatformPortError, SecretBytes, SecureVaultPort};
+use crate::snapshot::{ApplyOutcome, EngineSnapshot};
 use crate::storage::{
-    DurableRelationship, EngineState, EngineStore, EngineStoreError, EngineStoreOrigin,
-    MAX_DURABLE_ENTITIES, RePairReason, RePairRequiredRelationship, V02ImportRecord,
-    VaultReference, read_bounded_file,
+    DurableRelationship, EngineState, EngineStore, EngineStoreError, MAX_DURABLE_ENTITIES,
+    VaultReference,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 6;
+pub const AGENT_PROTOCOL_VERSION: u16 = 9;
 pub const AGENT_SETTINGS_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_AGENT_EVENT_BATCH: usize = 256;
+pub const MAX_AGENT_ACTIVE_PATHS: usize = 256;
+pub const MAX_AGENT_PENDING_OFFERS: usize = 64;
 pub const MAX_AGENT_TRANSFER_PATHS: usize = 64;
 const MAX_AGENT_REQUEST_ID_BYTES: usize = 64;
+const MAX_AGENT_OFFER_ID_BYTES: usize = 128;
+const MAX_AGENT_OFFER_ROOTS: usize = 3;
+const MAX_AGENT_OFFER_ROOT_NAME_BYTES: usize = 255;
 const MAX_AGENT_PATH_BYTES: usize = 4_096;
-const PRODUCT_STATE_SCHEMA_VERSION: u16 = 1;
-const PRODUCT_STATE_FILE: &str = "product-state-v1.json";
 const MAX_INBOX_ITEMS: usize = 1_000;
-const V02_PRODUCT_STATE_BACKUP: &str = "v0.2-product-state-v1.backup.json";
 
 /// User-owned settings loaded by a managed Agent process.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -107,8 +105,14 @@ pub enum AgentRequest {
         paths: Vec<PathBuf>,
     },
     ListTransfers,
+    ListTransferPaths,
     GetTransfer {
         transfer_id: String,
+    },
+    ListPendingOffers,
+    DecidePendingOffer {
+        offer_id: String,
+        decision: AgentOfferDecision,
     },
     ListInbox {
         limit: usize,
@@ -139,8 +143,18 @@ pub enum AgentResponse {
     Transfers {
         transfers: Vec<Transfer>,
     },
+    TransferPaths {
+        paths: Vec<AgentTransferPath>,
+    },
     Transfer {
         transfer: Transfer,
+    },
+    PendingOffers {
+        offers: Vec<AgentPendingOffer>,
+    },
+    PendingOfferDecided {
+        offer: AgentPendingOffer,
+        decision: AgentOfferDecision,
     },
     Inbox {
         items: Vec<InboxItem>,
@@ -149,7 +163,7 @@ pub enum AgentResponse {
         item: Option<InboxItem>,
     },
     Snapshot {
-        snapshot: AgentSnapshot,
+        snapshot: Box<AgentSnapshot>,
     },
     Events {
         cursor: AgentEventCursor,
@@ -226,6 +240,9 @@ impl AgentRequestEnvelope {
                     io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                 })?;
             }
+            AgentRequest::DecidePendingOffer { offer_id, .. } => {
+                validate_agent_offer_id(offer_id)?;
+            }
             _ => {}
         }
         Ok(())
@@ -280,6 +297,8 @@ impl AgentResponseEnvelope {
                         "Agent snapshot contains too many Inbox items",
                     ));
                 }
+                validate_agent_transfer_paths(&snapshot.active_paths)?;
+                validate_agent_pending_offers(&snapshot.pending_offers)?;
                 snapshot.event_cursor.validate()?;
             }
             AgentResponse::Events { cursor, events } => {
@@ -333,6 +352,15 @@ impl AgentResponseEnvelope {
                     }
                 }
             }
+            AgentResponse::TransferPaths { paths } => {
+                validate_agent_transfer_paths(paths)?;
+            }
+            AgentResponse::PendingOffers { offers } => {
+                validate_agent_pending_offers(offers)?;
+            }
+            AgentResponse::PendingOfferDecided { offer, .. } => {
+                validate_agent_pending_offer(offer)?;
+            }
             AgentResponse::Diagnostics { diagnostics } => {
                 diagnostics.validate()?;
             }
@@ -355,6 +383,8 @@ pub struct AgentStatus {
     pub paired_devices: usize,
     pub active_receivers: usize,
     pub active_pairings: usize,
+    pub active_paths: usize,
+    pub pending_offers: usize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -384,6 +414,8 @@ pub struct AgentDiagnostics {
     pub relationships: usize,
     pub transfers: usize,
     pub inbox_items: usize,
+    pub active_paths: usize,
+    pub pending_offers: usize,
 }
 
 impl AgentDiagnostics {
@@ -403,6 +435,8 @@ impl AgentDiagnostics {
             || self.relationships > MAX_DURABLE_ENTITIES
             || self.transfers > MAX_DURABLE_ENTITIES
             || self.inbox_items > MAX_INBOX_ITEMS
+            || self.active_paths > MAX_AGENT_ACTIVE_PATHS
+            || self.pending_offers > MAX_AGENT_PENDING_OFFERS
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -419,6 +453,8 @@ pub struct AgentSnapshot {
     pub status: AgentStatus,
     pub engine: EngineSnapshot,
     pub inbox: Vec<InboxItem>,
+    pub active_paths: Vec<AgentTransferPath>,
+    pub pending_offers: Vec<AgentPendingOffer>,
     pub event_cursor: AgentEventCursor,
 }
 
@@ -460,6 +496,15 @@ pub enum AgentEvent {
     TransferChanged {
         transfer_id: String,
     },
+    TransferPathChanged {
+        transfer_id: String,
+        direction: TransferDirection,
+        path: Option<AgentPathKind>,
+    },
+    PendingOfferChanged {
+        offer_id: String,
+        pending: bool,
+    },
 }
 
 impl AgentEvent {
@@ -485,11 +530,13 @@ impl AgentEvent {
                     io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                 })?;
             }
-            Self::TransferChanged { transfer_id } => {
+            Self::TransferChanged { transfer_id }
+            | Self::TransferPathChanged { transfer_id, .. } => {
                 TransferId::parse(transfer_id.clone()).map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                 })?;
             }
+            Self::PendingOfferChanged { offer_id, .. } => validate_agent_offer_id(offer_id)?,
         }
         Ok(())
     }
@@ -566,6 +613,44 @@ pub struct DeviceSummary {
     pub previous_generation: Option<u64>,
     pub broker: String,
     pub relay: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOfferDecision {
+    Approve,
+    Reject,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPathKind {
+    Lan,
+    Direct,
+    Relay,
+    WifiAware,
+    Other,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTransferPath {
+    pub transfer_id: String,
+    pub direction: TransferDirection,
+    pub path: AgentPathKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPendingOffer {
+    pub offer_id: String,
+    pub from_device_id: String,
+    pub from_device_label: String,
+    pub root_names: Vec<String>,
+    pub item_count: u32,
+    pub directory_count: u32,
+    pub total_bytes: u64,
+    pub allocatable_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -671,215 +756,6 @@ impl RememberedDeviceRecord {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct PersistentProductState {
-    schema_version: u16,
-    devices: Vec<RememberedDeviceRecord>,
-    inbox: Vec<InboxItem>,
-}
-
-impl Default for PersistentProductState {
-    fn default() -> Self {
-        Self {
-            schema_version: PRODUCT_STATE_SCHEMA_VERSION,
-            devices: Vec::new(),
-            inbox: Vec::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-struct LegacyProductStore {
-    directory: PathBuf,
-    credentials: DesktopCredentialStore,
-    state: PersistentProductState,
-}
-
-#[cfg(test)]
-impl LegacyProductStore {
-    pub fn open(directory: impl Into<PathBuf>) -> io::Result<Self> {
-        let directory = directory.into();
-        create_private_directory(&directory)?;
-        let path = directory.join(PRODUCT_STATE_FILE);
-        let state = match fs::read(&path) {
-            Ok(bytes) => {
-                let state: PersistentProductState = serde_json::from_slice(&bytes)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                if state.schema_version != PRODUCT_STATE_SCHEMA_VERSION {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("unsupported product state schema {}", state.schema_version),
-                    ));
-                }
-                state
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                PersistentProductState::default()
-            }
-            Err(error) => return Err(error),
-        };
-        Ok(Self {
-            credentials: DesktopCredentialStore::new(directory.join("credentials")),
-            directory,
-            state,
-        })
-    }
-
-    pub fn prepare_device(
-        &self,
-        label: &str,
-        broker: &str,
-        relay: Option<&str>,
-    ) -> io::Result<PreparedRememberedDevice> {
-        let label = validate_label(label)?;
-        if self
-            .state
-            .devices
-            .iter()
-            .any(|device| device.label.eq_ignore_ascii_case(&label))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("device label {label:?} is already paired"),
-            ));
-        }
-        if broker.trim().is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "remembered device broker cannot be empty",
-            ));
-        }
-        Ok(PreparedRememberedDevice {
-            id: random_identifier("dev")?,
-            label,
-            credential_reference: random_identifier("cred")?,
-            broker: broker.to_string(),
-            relay: relay.map(str::to_string),
-        })
-    }
-
-    pub fn commit_device(
-        &mut self,
-        prepared: PreparedRememberedDevice,
-        opaque_credential: &[u8],
-        generation: u64,
-    ) -> io::Result<DeviceSummary> {
-        if self.state.devices.iter().any(|device| {
-            device.id == prepared.id || device.label.eq_ignore_ascii_case(&prepared.label)
-        }) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "remembered device already exists",
-            ));
-        }
-        self.credentials
-            .put(&prepared.credential_reference, opaque_credential)?;
-        let record = RememberedDeviceRecord {
-            id: prepared.id,
-            label: prepared.label,
-            credential_reference: prepared.credential_reference,
-            generation,
-            previous_generation: None,
-            broker: prepared.broker,
-            relay: prepared.relay,
-        };
-        self.state.devices.push(record);
-        if let Err(error) = self.save() {
-            let record = self.state.devices.pop().expect("new device was appended");
-            let _ = self.credentials.delete(&record.credential_reference);
-            return Err(error);
-        }
-        Ok(self
-            .state
-            .devices
-            .last()
-            .expect("new device remains stored")
-            .summary())
-    }
-
-    pub fn device_records(&self) -> Vec<RememberedDeviceRecord> {
-        self.state.devices.clone()
-    }
-
-    pub fn device_credential(&self, id: &str) -> io::Result<Vec<u8>> {
-        let device = self
-            .state
-            .devices
-            .iter()
-            .find(|device| device.id == id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remembered device missing"))?;
-        self.credentials
-            .get(&device.credential_reference)?
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "remembered device credential missing",
-                )
-            })
-    }
-
-    pub fn append_inbox(&mut self, item: InboxItem) -> io::Result<()> {
-        if self
-            .state
-            .inbox
-            .iter()
-            .any(|existing| existing.id == item.id)
-        {
-            return Ok(());
-        }
-        let previous = self.state.inbox.clone();
-        self.state.inbox.push(item);
-        self.state
-            .inbox
-            .sort_by_key(|item| item.received_at_unix_ms);
-        let overflow = self.state.inbox.len().saturating_sub(MAX_INBOX_ITEMS);
-        if overflow > 0 {
-            self.state.inbox.drain(..overflow);
-        }
-        if let Err(error) = self.save() {
-            self.state.inbox = previous;
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    pub fn latest_inbox(&self) -> Option<InboxItem> {
-        self.state.inbox.last().cloned()
-    }
-
-    fn save(&self) -> io::Result<()> {
-        create_private_directory(&self.directory)?;
-        let target = self.directory.join(PRODUCT_STATE_FILE);
-        let temporary = self
-            .directory
-            .join(format!(".{PRODUCT_STATE_FILE}.{}.tmp", std::process::id()));
-        let bytes = serde_json::to_vec_pretty(&self.state)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            replace_file(&temporary, &target)?;
-            #[cfg(unix)]
-            fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-            File::open(&self.directory)?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
-    }
-}
-
 /// Agent-facing projection of the unified Engine store and desktop vault.
 pub struct ProductStore {
     engine: EngineStore,
@@ -898,8 +774,7 @@ impl ProductStore {
         vault: Arc<dyn SecureVaultPort>,
     ) -> Result<Self, EngineStoreError> {
         let directory = directory.into();
-        let mut engine = EngineStore::open(&directory)?;
-        import_v0_2_product_state(&mut engine, &directory.join("product"), vault.as_ref())?;
+        let engine = EngineStore::open(&directory)?;
         Ok(Self { engine, vault })
     }
 
@@ -1030,9 +905,12 @@ impl ProductStore {
             return Ok(());
         }
         let vault_reference = VaultReference::parse(current.credential_reference.clone())?;
-        let old_credential = self.vault.load(&vault_reference)?.ok_or_else(|| {
-            EngineStoreError::InvalidState("remembered device credential is missing".into())
-        })?;
+        let old_credential = self
+            .vault
+            .load(&vault_reference)?
+            .ok_or(EngineStoreError::MissingVaultCredential)?;
+        RememberedCredential::from_opaque(old_credential.expose())
+            .map_err(|_| crate::ports::PlatformPortError::CorruptData)?;
         let changed = old_credential.expose() != opaque_credential;
         if changed {
             let secret = SecretBytes::new(opaque_credential.to_vec())?;
@@ -1076,6 +954,44 @@ impl ProductStore {
                 .cmp(&right.label.to_ascii_lowercase())
         });
         devices
+    }
+
+    pub fn rename_device(
+        &mut self,
+        id: &str,
+        label: &str,
+    ) -> Result<DeviceSummary, EngineStoreError> {
+        let label = validate_label(label)?;
+        let record = self
+            .device_record(id)
+            .ok_or_else(|| EngineStoreError::InvalidState("remembered device is missing".into()))?;
+        if record.label == label {
+            return Ok(record.summary());
+        }
+        if self
+            .device_records()
+            .iter()
+            .any(|device| device.id != id && device.label.eq_ignore_ascii_case(&label))
+        {
+            return Err(EngineStoreError::InvalidState(format!(
+                "device label {label:?} is already paired"
+            )));
+        }
+
+        let device_id = DeviceId::parse(record.id)
+            .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        let mut state = self.engine.state().clone();
+        apply_product_event(
+            &mut state,
+            EngineEvent::DeviceObserved {
+                device_id,
+                display_name: label,
+            },
+        )?;
+        self.engine.replace(state)?;
+        self.device_record(id)
+            .ok_or_else(|| EngineStoreError::InvalidState("renamed device is missing".into()))
+            .map(|device| device.summary())
     }
 
     pub fn device_records(&self) -> Vec<RememberedDeviceRecord> {
@@ -1123,15 +1039,23 @@ impl ProductStore {
             .device_record(id)
             .ok_or_else(|| EngineStoreError::InvalidState("remembered device is missing".into()))?;
         let reference = VaultReference::parse(device.credential_reference)?;
-        self.vault.load(&reference)?.ok_or_else(|| {
-            EngineStoreError::InvalidState("remembered device credential is missing".into())
-        })
+        let credential = self
+            .vault
+            .load(&reference)?
+            .ok_or(EngineStoreError::MissingVaultCredential)?;
+        RememberedCredential::from_opaque(credential.expose())
+            .map_err(|_| crate::ports::PlatformPortError::CorruptData)?;
+        Ok(credential)
     }
 
     pub fn forget_device(&mut self, selector: &str) -> Result<DeviceSummary, EngineStoreError> {
         let record = self.resolve_device(selector)?;
         let vault_reference = VaultReference::parse(record.credential_reference.clone())?;
-        let credential = self.vault.load(&vault_reference)?;
+        let credential = match self.vault.load(&vault_reference) {
+            Ok(credential) => credential,
+            Err(PlatformPortError::CorruptData) => None,
+            Err(error) => return Err(error.into()),
+        };
         self.vault.delete(&vault_reference)?;
 
         let relationship_id =
@@ -1493,8 +1417,28 @@ impl ProductStore {
         self.engine.state().inbox.last().cloned()
     }
 
+    pub fn apply_event(
+        &mut self,
+        envelope: EventEnvelope,
+    ) -> Result<ApplyOutcome, EngineStoreError> {
+        let mut state = self.engine.state().clone();
+        let outcome = state
+            .snapshot
+            .apply(envelope)
+            .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        if outcome == ApplyOutcome::Applied {
+            self.engine.replace(state)?;
+        }
+        Ok(outcome)
+    }
+
     pub fn engine_snapshot(&self) -> EngineSnapshot {
         self.engine.state().snapshot.clone()
+    }
+
+    /// Borrows the current snapshot while the caller retains this store owner.
+    pub fn engine_snapshot_ref(&self) -> &EngineSnapshot {
+        &self.engine.state().snapshot
     }
 }
 
@@ -1539,6 +1483,107 @@ fn validate_agent_status(status: &AgentStatus) -> io::Result<()> {
             "Agent status protocol version does not match its envelope",
         ));
     }
+    if status.active_paths > MAX_AGENT_ACTIVE_PATHS
+        || status.pending_offers > MAX_AGENT_PENDING_OFFERS
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent status contains too many active paths or pending offers",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_offer_id(offer_id: &str) -> io::Result<()> {
+    if offer_id.is_empty()
+        || offer_id.len() > MAX_AGENT_OFFER_ID_BYTES
+        || !offer_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Agent offer ID must be 1-128 ASCII letters, digits, '-' or '_'",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_pending_offer(offer: &AgentPendingOffer) -> io::Result<()> {
+    validate_agent_offer_id(&offer.offer_id)?;
+    RelationshipId::parse(offer.from_device_id.clone())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    if validate_label(&offer.from_device_label)? != offer.from_device_label {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pending offer device label cannot have leading or trailing whitespace",
+        ));
+    }
+    if offer.directory_count > offer.item_count || offer.root_names.len() > MAX_AGENT_OFFER_ROOTS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pending offer contains inconsistent item counts or root previews",
+        ));
+    }
+    for name in &offer.root_names {
+        if name.is_empty()
+            || name.len() > MAX_AGENT_OFFER_ROOT_NAME_BYTES
+            || matches!(name.as_str(), "." | "..")
+            || name
+                .chars()
+                .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "pending offer contains an invalid root preview",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_pending_offers(offers: &[AgentPendingOffer]) -> io::Result<()> {
+    if offers.len() > MAX_AGENT_PENDING_OFFERS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent response contains too many pending offers",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for offer in offers {
+        validate_agent_pending_offer(offer)?;
+        if !ids.insert(&offer.offer_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Agent response contains duplicate pending offers",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_transfer_paths(paths: &[AgentTransferPath]) -> io::Result<()> {
+    if paths.len() > MAX_AGENT_ACTIVE_PATHS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent response contains too many active transfer paths",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for path in paths {
+        TransferId::parse(path.transfer_id.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+        let direction = match path.direction {
+            TransferDirection::Send => 0,
+            TransferDirection::Receive => 1,
+        };
+        if !ids.insert((path.transfer_id.as_str(), direction)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Agent response contains duplicate active transfer paths",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1570,191 +1615,6 @@ fn validate_agent_source_path(path: &Path) -> io::Result<()> {
         ));
     }
     Ok(())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum V02ProductImportOutcome {
-    NoLegacyState,
-    AlreadyImported(V02ImportRecord),
-    Imported(V02ImportRecord),
-}
-
-/// Imports the desktop v0.2 ProductStore into an empty Engine store.
-///
-/// The source JSON and credential directory are read-only inputs. Usable
-/// credentials are copied through the Agent-owned vault adapter before the new
-/// Engine state is activated; unusable records become explicit re-pair items.
-pub fn import_v0_2_product_state(
-    engine: &mut EngineStore,
-    legacy_directory: &Path,
-    target_vault: &dyn SecureVaultPort,
-) -> Result<V02ProductImportOutcome, EngineStoreError> {
-    if let Some(record) = &engine.state().migration.v0_2_import {
-        return Ok(V02ProductImportOutcome::AlreadyImported(record.clone()));
-    }
-    let source_path = legacy_directory.join(PRODUCT_STATE_FILE);
-    let Some(source_bytes) = read_bounded_file(&source_path)? else {
-        return Ok(V02ProductImportOutcome::NoLegacyState);
-    };
-    if engine.origin() != EngineStoreOrigin::Empty {
-        return Err(EngineStoreError::InvalidState(
-            "cannot import v0.2 state into an initialized Engine store".into(),
-        ));
-    }
-
-    let legacy: PersistentProductState =
-        serde_json::from_slice(&source_bytes).map_err(EngineStoreError::Decode)?;
-    if legacy.schema_version != PRODUCT_STATE_SCHEMA_VERSION {
-        return Err(EngineStoreError::InvalidState(format!(
-            "unsupported v0.2 product schema {}",
-            legacy.schema_version
-        )));
-    }
-    if legacy.devices.len() > MAX_DURABLE_ENTITIES || legacy.inbox.len() > MAX_INBOX_ITEMS {
-        return Err(EngineStoreError::InvalidState(
-            "v0.2 product state exceeds collection limits".into(),
-        ));
-    }
-
-    let source_vault = DesktopCredentialStore::new(legacy_directory.join("credentials"));
-    let mut candidate = EngineState::default();
-    candidate.inbox = legacy.inbox;
-    let mut credential_copies = Vec::new();
-    let mut re_pair_required = Vec::new();
-    let mut labels = BTreeSet::new();
-
-    for record in legacy.devices {
-        let label = validate_label(&record.label).map_err(EngineStoreError::Io)?;
-        if !labels.insert(label.to_ascii_lowercase()) {
-            return Err(EngineStoreError::InvalidState(format!(
-                "duplicate v0.2 device label {label:?}"
-            )));
-        }
-        let device_id = match DeviceId::parse(record.id.clone()) {
-            Ok(device_id) => device_id,
-            Err(_) => {
-                re_pair_required.push(RePairRequiredRelationship {
-                    legacy_device_id: record.id,
-                    label,
-                    reason: RePairReason::InvalidMetadata,
-                });
-                continue;
-            }
-        };
-        let relationship_id = RelationshipId::parse(device_id.as_str().to_string())
-            .expect("Device and Relationship identifiers share validation");
-        if candidate.snapshot.devices.contains_key(&device_id) {
-            return Err(EngineStoreError::InvalidState(format!(
-                "duplicate v0.2 device ID {device_id}"
-            )));
-        }
-        if record
-            .previous_generation
-            .is_some_and(|previous| previous >= record.generation)
-        {
-            re_pair_required.push(RePairRequiredRelationship {
-                legacy_device_id: record.id,
-                label,
-                reason: RePairReason::InvalidMetadata,
-            });
-            continue;
-        }
-        let vault_reference = match VaultReference::parse(record.credential_reference.clone()) {
-            Ok(reference) => reference,
-            Err(_) => {
-                re_pair_required.push(RePairRequiredRelationship {
-                    legacy_device_id: record.id,
-                    label,
-                    reason: RePairReason::InvalidMetadata,
-                });
-                continue;
-            }
-        };
-        let durable = DurableRelationship {
-            vault_reference: Some(vault_reference.clone()),
-            broker: record.broker,
-            relay: record.relay,
-        };
-        if durable.validate(RelationshipState::Trusted).is_err() {
-            re_pair_required.push(RePairRequiredRelationship {
-                legacy_device_id: record.id,
-                label,
-                reason: RePairReason::InvalidMetadata,
-            });
-            continue;
-        }
-        let Some(opaque) = source_vault
-            .get(&record.credential_reference)
-            .map_err(EngineStoreError::Io)?
-        else {
-            re_pair_required.push(RePairRequiredRelationship {
-                legacy_device_id: record.id,
-                label,
-                reason: RePairReason::MissingCredential,
-            });
-            continue;
-        };
-        let opaque = Zeroizing::new(opaque);
-        if RememberedCredential::from_opaque(&opaque).is_err() {
-            re_pair_required.push(RePairRequiredRelationship {
-                legacy_device_id: record.id,
-                label,
-                reason: RePairReason::UnsupportedCredential,
-            });
-            continue;
-        }
-
-        candidate.snapshot.devices.insert(
-            device_id.clone(),
-            Device {
-                id: device_id.clone(),
-                display_name: label,
-            },
-        );
-        candidate.snapshot.relationships.insert(
-            relationship_id.clone(),
-            Relationship {
-                id: relationship_id.clone(),
-                device_id,
-                generation: record.generation,
-                previous_generation: record.previous_generation,
-                state: RelationshipState::Trusted,
-            },
-        );
-        candidate
-            .durable_relationships
-            .insert(relationship_id, durable);
-        credential_copies.push((vault_reference, opaque));
-    }
-
-    let imported_relationships =
-        u32::try_from(candidate.snapshot.relationships.len()).expect("collection limit fits u32");
-    let imported_inbox_items = u32::try_from(candidate.inbox.len()).expect("Inbox limit fits u32");
-    let import_record = V02ImportRecord {
-        backup_file: V02_PRODUCT_STATE_BACKUP.into(),
-        imported_relationships,
-        imported_inbox_items,
-        re_pair_required,
-    };
-    candidate.migration.v0_2_import = Some(import_record.clone());
-    candidate.validate()?;
-
-    engine.install_migration_backup(V02_PRODUCT_STATE_BACKUP, &source_bytes)?;
-    for (reference, credential) in credential_copies {
-        if let Some(existing) = target_vault.load(&reference)? {
-            if existing.expose() != credential.as_slice() {
-                return Err(EngineStoreError::InvalidState(format!(
-                    "target vault reference {} already contains different data",
-                    reference.as_str()
-                )));
-            }
-        } else {
-            let secret = SecretBytes::new(credential.to_vec())?;
-            target_vault.store(&reference, &secret)?;
-        }
-    }
-    engine.replace(candidate)?;
-    Ok(V02ProductImportOutcome::Imported(import_record))
 }
 
 pub fn default_agent_state_directory() -> io::Result<PathBuf> {
@@ -2058,34 +1918,13 @@ fn random_identifier(prefix: &str) -> io::Result<String> {
 }
 
 #[cfg(test)]
-fn create_private_directory(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    Ok(())
-}
-
-#[cfg(not(windows))]
-#[cfg(test)]
-fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
-    fs::rename(temporary, target)
-}
-
-#[cfg(windows)]
-#[cfg(test)]
-fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
-    tempfile::TempPath::try_from_path(temporary.to_path_buf())?
-        .persist(target)
-        .map_err(io::Error::from)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[derive(Default)]
     struct MemoryVault {
         values: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+        load_error: std::sync::Mutex<Option<PlatformPortError>>,
     }
 
     impl SecureVaultPort for MemoryVault {
@@ -2112,6 +1951,9 @@ mod tests {
             &self,
             reference: &VaultReference,
         ) -> Result<Option<SecretBytes>, crate::ports::PlatformPortError> {
+            if let Some(error) = *self.load_error.lock().unwrap() {
+                return Err(error);
+            }
             self.values
                 .lock()
                 .unwrap()
@@ -2199,7 +2041,7 @@ mod tests {
         store.commit_device(pending, &credential, 0).unwrap();
         store.rotate_device(&id, &credential, 1).unwrap();
 
-        let metadata = fs::read(directory.path().join("engine-state-v1.json")).unwrap();
+        let metadata = fs::read(directory.path().join("engine-state-v2.json")).unwrap();
         assert!(
             !metadata
                 .windows(credential.len())
@@ -2227,7 +2069,7 @@ mod tests {
         let id = pending.id().to_string();
         store.commit_device(pending, &credential, 0).unwrap();
 
-        let serialized = fs::read(directory.path().join("engine-state-v1.json")).unwrap();
+        let serialized = fs::read(directory.path().join("engine-state-v2.json")).unwrap();
         assert!(
             !serialized
                 .windows(credential.len())
@@ -2240,6 +2082,99 @@ mod tests {
             reopened.device_credential(&id).unwrap().expose(),
             credential.as_slice()
         );
+    }
+
+    #[test]
+    fn corrupt_vault_material_is_typed_until_explicit_revoke() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Arc::new(MemoryVault::default());
+        let mut store = ProductStore::open_with_vault(directory.path(), vault.clone()).unwrap();
+        let pending = store.prepare_device("Android", "broker", None).unwrap();
+        let id = pending.id().to_string();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+        *vault.values.lock().unwrap().values_mut().next().unwrap() = vec![0x5a; 37];
+
+        assert!(matches!(
+            store.device_credential(&id),
+            Err(EngineStoreError::PlatformPort(
+                crate::ports::PlatformPortError::CorruptData
+            ))
+        ));
+        assert!(store.device_record(&id).is_some());
+
+        *vault.load_error.lock().unwrap() = Some(PlatformPortError::CorruptData);
+        store.forget_device(&id).unwrap();
+        assert!(store.device_record(&id).is_none());
+        assert!(vault.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn device_rename_is_engine_owned_and_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let pending = store.prepare_device("Android", "broker", None).unwrap();
+        let id = pending.id().to_string();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+
+        let renamed = store.rename_device(&id, " Pixel Tablet ").unwrap();
+
+        assert_eq!(renamed.label, "Pixel Tablet");
+        drop(store);
+        assert_eq!(
+            ProductStore::open(directory.path())
+                .unwrap()
+                .device_record(&id)
+                .unwrap()
+                .label(),
+            "Pixel Tablet"
+        );
+    }
+
+    #[test]
+    fn generic_application_events_are_persisted_or_rejected_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let observed = EventEnvelope {
+            contract_version: crate::APPLICATION_CONTRACT_VERSION,
+            sequence: 1,
+            event: EngineEvent::DeviceObserved {
+                device_id: DeviceId::parse("device_event_fixture").unwrap(),
+                display_name: "Observed".into(),
+            },
+        };
+
+        assert_eq!(
+            store.apply_event(observed.clone()).unwrap(),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            store.apply_event(observed).unwrap(),
+            ApplyOutcome::IgnoredDuplicate
+        );
+        assert!(
+            store
+                .apply_event(EventEnvelope {
+                    contract_version: crate::APPLICATION_CONTRACT_VERSION,
+                    sequence: 2,
+                    event: EngineEvent::RelationshipTrusted {
+                        relationship_id: RelationshipId::parse("relationship_without_metadata")
+                            .unwrap(),
+                        device_id: DeviceId::parse("device_event_fixture").unwrap(),
+                        generation: 0,
+                    },
+                })
+                .is_err()
+        );
+        assert!(store.devices().is_empty());
+
+        drop(store);
+        let reopened = ProductStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.engine_snapshot().last_sequence, 1);
+        assert!(reopened.engine_snapshot().relationships.is_empty());
     }
 
     #[test]
@@ -2392,216 +2327,41 @@ mod tests {
     }
 
     #[test]
-    fn product_state_fixtures_load_or_fail_closed() {
-        let valid = include_bytes!("../../../tests/fixtures/v0.2/product-state-v1.json");
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(directory.path().join(PRODUCT_STATE_FILE), valid).unwrap();
-
-        let store = LegacyProductStore::open(directory.path()).unwrap();
-        let device = &store.device_records()[0];
-        assert_eq!(device.id(), "dev_fixture_not_a_real_identity");
-        assert_eq!(device.generation(), 4);
-        assert_eq!(device.previous_generation(), Some(3));
-        assert_eq!(store.latest_inbox().unwrap().id, "job_fixture_delivered");
-        assert_eq!(
-            store.device_credential(device.id()).unwrap_err().kind(),
-            io::ErrorKind::NotFound
-        );
-
-        for (name, invalid) in [
-            (
-                "corrupt",
-                include_bytes!("../../../tests/fixtures/v0.2/product-state-v1-corrupt.json")
-                    as &[u8],
-            ),
-            (
-                "truncated",
-                include_bytes!("../../../tests/fixtures/v0.2/product-state-v1-truncated.json"),
-            ),
-            (
-                "unknown-version",
-                include_bytes!("../../../tests/fixtures/v0.2/product-state-unknown-version.json"),
-            ),
-            (
-                "partial-migration",
-                include_bytes!("../../../tests/fixtures/v0.2/product-state-partial-migration.json"),
-            ),
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            fs::write(directory.path().join(PRODUCT_STATE_FILE), invalid).unwrap();
-            let error = LegacyProductStore::open(directory.path())
-                .err()
-                .unwrap_or_else(|| panic!("{name} fixture unexpectedly loaded"));
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
-        }
-    }
-
-    #[test]
-    fn v0_2_import_is_atomic_restartable_and_keeps_secrets_out_of_engine_state() {
-        let directory = tempfile::tempdir().unwrap();
-        let legacy_directory = directory.path().join("product");
-        let credential = RememberedCredential::from_control_pairing(
-            b"fixture control key",
-            envoix_invite::Commitment::sha256(b"fixture transcript"),
-        )
-        .to_opaque();
-        let mut legacy = LegacyProductStore::open(&legacy_directory).unwrap();
-        let pending = legacy
-            .prepare_device(
-                "MacBook",
-                "broker.invalid:8445",
-                Some("https://relay.invalid"),
-            )
-            .unwrap();
-        let device_id = pending.id().to_string();
-        let credential_reference = pending.credential_reference.clone();
-        legacy.commit_device(pending, &credential, 4).unwrap();
-        legacy.append_inbox(inbox_item("received", 1)).unwrap();
-        drop(legacy);
-        let source_path = legacy_directory.join(PRODUCT_STATE_FILE);
-        let source_bytes = fs::read(&source_path).unwrap();
-
-        let target_vault = DesktopCredentialStore::new(directory.path().join("vault"));
-        let mut engine = EngineStore::open(directory.path()).unwrap();
-        let outcome =
-            import_v0_2_product_state(&mut engine, &legacy_directory, &target_vault).unwrap();
-        let V02ProductImportOutcome::Imported(record) = outcome else {
-            panic!("expected a new import");
-        };
-        assert_eq!(record.imported_relationships, 1);
-        assert_eq!(record.imported_inbox_items, 1);
-        assert!(record.re_pair_required.is_empty());
-        let relationship_id = RelationshipId::parse(device_id.clone()).unwrap();
-        assert_eq!(
-            engine
-                .state()
-                .snapshot
-                .relationships
-                .get(&relationship_id)
-                .unwrap()
-                .generation,
-            4
-        );
-        assert_eq!(
-            target_vault.get(&credential_reference).unwrap().unwrap(),
-            credential
-        );
-        assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
-        assert_eq!(
-            fs::read(
-                directory
-                    .path()
-                    .join("migration")
-                    .join(V02_PRODUCT_STATE_BACKUP)
-            )
-            .unwrap(),
-            source_bytes
-        );
-        let serialized = serde_json::to_vec(engine.state()).unwrap();
-        assert!(
-            !serialized
-                .windows(credential.len())
-                .any(|value| value == credential)
-        );
-
-        assert!(matches!(
-            import_v0_2_product_state(&mut engine, &legacy_directory, &target_vault).unwrap(),
-            V02ProductImportOutcome::AlreadyImported(_)
-        ));
-        drop(engine);
-        let reopened = EngineStore::open(directory.path()).unwrap();
-        assert!(
-            reopened
-                .state()
-                .snapshot
-                .relationships
-                .contains_key(&relationship_id)
-        );
-    }
-
-    #[test]
-    fn v0_2_import_records_missing_credentials_as_re_pair_required() {
+    fn v0_2_product_state_is_rejected_without_touching_user_files() {
         let directory = tempfile::tempdir().unwrap();
         let legacy_directory = directory.path().join("product");
         fs::create_dir_all(&legacy_directory).unwrap();
-        let source = include_bytes!("../../../tests/fixtures/v0.2/product-state-v1.json");
-        fs::write(legacy_directory.join(PRODUCT_STATE_FILE), source).unwrap();
-        let migration_directory = directory.path().join("migration");
-        fs::create_dir_all(&migration_directory).unwrap();
-        fs::write(migration_directory.join(V02_PRODUCT_STATE_BACKUP), source).unwrap();
+        let legacy_state = br#"{"schema_version":1}"#;
+        let legacy_path = legacy_directory.join("product-state-v1.json");
+        fs::write(&legacy_path, legacy_state).unwrap();
+        let inbox_file = directory.path().join("inbox/received.txt");
+        fs::create_dir_all(inbox_file.parent().unwrap()).unwrap();
+        fs::write(&inbox_file, b"received bytes").unwrap();
 
-        let target_vault = DesktopCredentialStore::new(directory.path().join("vault"));
-        let mut engine = EngineStore::open(directory.path()).unwrap();
-        let V02ProductImportOutcome::Imported(record) =
-            import_v0_2_product_state(&mut engine, &legacy_directory, &target_vault).unwrap()
-        else {
-            panic!("expected a resumed import");
-        };
+        let error = ProductStore::open(directory.path()).err().unwrap();
 
-        assert_eq!(record.imported_relationships, 0);
-        assert_eq!(record.imported_inbox_items, 1);
-        assert_eq!(record.re_pair_required.len(), 1);
-        assert_eq!(
-            record.re_pair_required[0].reason,
-            RePairReason::MissingCredential
-        );
-        assert!(engine.state().snapshot.relationships.is_empty());
-        assert_eq!(
-            fs::read(legacy_directory.join(PRODUCT_STATE_FILE)).unwrap(),
-            source
-        );
-        assert_eq!(
-            fs::read(migration_directory.join(V02_PRODUCT_STATE_BACKUP)).unwrap(),
-            source
-        );
+        assert!(matches!(
+            error,
+            EngineStoreError::UnsupportedLegacyState { path } if path == legacy_path
+        ));
+        assert_eq!(fs::read(legacy_path).unwrap(), legacy_state);
+        assert_eq!(fs::read(inbox_file).unwrap(), b"received bytes");
     }
 
     #[test]
-    fn failed_v0_2_import_preserves_source_and_received_files() {
-        for (name, source) in [
-            (
-                "corrupt",
-                include_bytes!("../../../tests/fixtures/v0.2/product-state-v1-corrupt.json")
-                    as &[u8],
-            ),
-            (
-                "truncated",
-                include_bytes!("../../../tests/fixtures/v0.2/product-state-v1-truncated.json"),
-            ),
-            (
-                "unknown-version",
-                include_bytes!("../../../tests/fixtures/v0.2/product-state-unknown-version.json"),
-            ),
-            (
-                "partial-migration",
-                include_bytes!("../../../tests/fixtures/v0.2/product-state-partial-migration.json"),
-            ),
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            let legacy_directory = directory.path().join("product");
-            fs::create_dir_all(&legacy_directory).unwrap();
-            let source_path = legacy_directory.join(PRODUCT_STATE_FILE);
-            fs::write(&source_path, source).unwrap();
-            let inbox_directory = directory.path().join("inbox");
-            fs::create_dir_all(&inbox_directory).unwrap();
-            let received_path = inbox_directory.join("keep.txt");
-            fs::write(&received_path, b"received bytes").unwrap();
-            let target_vault = DesktopCredentialStore::new(directory.path().join("vault"));
-            let mut engine = EngineStore::open(directory.path()).unwrap();
+    fn current_engine_state_ignores_residual_v0_2_product_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        store.append_inbox(inbox_item("received", 1)).unwrap();
+        drop(store);
+        let legacy_path = directory.path().join("product/product-state-v1.json");
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, b"legacy residue").unwrap();
 
-            assert!(
-                import_v0_2_product_state(&mut engine, &legacy_directory, &target_vault).is_err(),
-                "{name} unexpectedly imported"
-            );
-            assert_eq!(engine.origin(), EngineStoreOrigin::Empty, "{name}");
-            assert_eq!(engine.state(), &EngineState::default(), "{name}");
-            assert_eq!(fs::read(&source_path).unwrap(), source, "{name}");
-            assert_eq!(
-                fs::read(&received_path).unwrap(),
-                b"received bytes",
-                "{name}"
-            );
-        }
+        let reopened = ProductStore::open(directory.path()).unwrap();
+
+        assert_eq!(reopened.latest_inbox().unwrap().id, "received");
+        assert_eq!(fs::read(legacy_path).unwrap(), b"legacy residue");
     }
 
     #[test]
@@ -2624,7 +2384,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 6);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -2649,7 +2409,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 5);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 6);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -2662,9 +2422,62 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_v6_fixture_round_trips_every_variant() {
+    fn agent_wire_v6_fixture_remains_frozen() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/v0.3/agent-control-v6.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], 6);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+        assert_eq!(fixture["requests"].as_array().unwrap().len(), 12);
+        assert_eq!(fixture["responses"].as_array().unwrap().len(), 15);
+        assert!(
+            fixture["responses"][1]["response"]["snapshot"]
+                .get("pending_offers")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn agent_wire_v7_fixture_remains_frozen() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v7.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], 7);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+        assert_eq!(fixture["requests"].as_array().unwrap().len(), 15);
+        assert_eq!(fixture["responses"].as_array().unwrap().len(), 18);
+        assert!(
+            fixture["responses"][1]["response"]["snapshot"]
+                .get("active_paths")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn agent_wire_v8_fixture_remains_frozen() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v8.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], 8);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+        assert_eq!(fixture["requests"].as_array().unwrap().len(), 16);
+        assert_eq!(fixture["responses"].as_array().unwrap().len(), 19);
+        assert_eq!(
+            fixture["responses"][17]["response"]["diagnostics"]["engine_schema_version"],
+            1
+        );
+    }
+
+    #[test]
+    fn agent_wire_v9_fixture_round_trips_every_variant() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v9.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
@@ -2717,7 +2530,29 @@ mod tests {
                     ..
                 },
                 AgentRequestEnvelope {
+                    request: AgentRequest::ListTransferPaths,
+                    ..
+                },
+                AgentRequestEnvelope {
                     request: AgentRequest::GetTransfer { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::ListPendingOffers,
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::DecidePendingOffer {
+                        decision: AgentOfferDecision::Approve,
+                        ..
+                    },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::DecidePendingOffer {
+                        decision: AgentOfferDecision::Reject,
+                        ..
+                    },
                     ..
                 },
                 AgentRequestEnvelope {
@@ -2786,7 +2621,29 @@ mod tests {
                     ..
                 },
                 AgentResponseEnvelope {
+                    response: AgentResponse::TransferPaths { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
                     response: AgentResponse::Transfer { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::PendingOffers { .. },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::PendingOfferDecided {
+                        decision: AgentOfferDecision::Approve,
+                        ..
+                    },
+                    ..
+                },
+                AgentResponseEnvelope {
+                    response: AgentResponse::PendingOfferDecided {
+                        decision: AgentOfferDecision::Reject,
+                        ..
+                    },
                     ..
                 },
                 AgentResponseEnvelope {
@@ -2854,6 +2711,25 @@ mod tests {
                     event: AgentEvent::TransferChanged { .. },
                     ..
                 },
+                AgentEventEnvelope {
+                    event: AgentEvent::TransferPathChanged {
+                        path: Some(AgentPathKind::Lan),
+                        ..
+                    },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::TransferPathChanged { path: None, .. },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::PendingOfferChanged { pending: true, .. },
+                    ..
+                },
+                AgentEventEnvelope {
+                    event: AgentEvent::PendingOfferChanged { pending: false, .. },
+                    ..
+                },
             ]
         ));
         let AgentResponse::Pairing { pairing } = &responses[4].response else {
@@ -2879,6 +2755,8 @@ mod tests {
                     paired_devices: 0,
                     active_receivers: 0,
                     active_pairings: 0,
+                    active_paths: 0,
+                    pending_offers: 0,
                 },
             },
         )
@@ -2922,6 +2800,111 @@ mod tests {
         )
         .unwrap();
         request.validate().unwrap();
+    }
+
+    #[test]
+    fn agent_pending_offers_are_bounded_and_secret_free() {
+        let invalid_request = AgentRequestEnvelope::new(
+            "request_1",
+            AgentRequest::DecidePendingOffer {
+                offer_id: "../offer".into(),
+                decision: AgentOfferDecision::Approve,
+            },
+        )
+        .unwrap();
+        assert!(invalid_request.validate().is_err());
+
+        let offer = AgentPendingOffer {
+            offer_id: "offer_fixture".into(),
+            from_device_id: "relationship_fixture".into(),
+            from_device_label: "Fixture Mac".into(),
+            root_names: vec!["fixture.bin".into()],
+            item_count: 1,
+            directory_count: 0,
+            total_bytes: 43,
+            allocatable_bytes: 84,
+        };
+        let response = AgentResponseEnvelope::new(
+            "request_2",
+            AgentResponse::PendingOffers {
+                offers: vec![offer.clone()],
+            },
+        )
+        .unwrap();
+        response.validate_for("request_2").unwrap();
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert!(!encoded.contains("transfer_invite"));
+
+        let mut invalid = offer;
+        invalid.root_names = vec!["../secret".into()];
+        let response = AgentResponseEnvelope::new(
+            "request_3",
+            AgentResponse::PendingOffers {
+                offers: vec![invalid],
+            },
+        )
+        .unwrap();
+        assert!(response.validate_for("request_3").is_err());
+    }
+
+    #[test]
+    fn agent_transfer_paths_are_bounded_and_unique_per_direction() {
+        let path = AgentTransferPath {
+            transfer_id: "transfer_fixture".into(),
+            direction: TransferDirection::Send,
+            path: AgentPathKind::Lan,
+        };
+        let response = AgentResponseEnvelope::new(
+            "request_1",
+            AgentResponse::TransferPaths {
+                paths: vec![
+                    path.clone(),
+                    AgentTransferPath {
+                        direction: TransferDirection::Receive,
+                        path: AgentPathKind::Relay,
+                        ..path.clone()
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        response.validate_for("request_1").unwrap();
+
+        let duplicate = AgentResponseEnvelope::new(
+            "request_2",
+            AgentResponse::TransferPaths {
+                paths: vec![path.clone(), path.clone()],
+            },
+        )
+        .unwrap();
+        assert!(duplicate.validate_for("request_2").is_err());
+
+        let oversized = AgentResponseEnvelope::new(
+            "request_oversized",
+            AgentResponse::TransferPaths {
+                paths: (0..=MAX_AGENT_ACTIVE_PATHS)
+                    .map(|index| AgentTransferPath {
+                        transfer_id: format!("transfer_{index}"),
+                        direction: TransferDirection::Send,
+                        path: AgentPathKind::Direct,
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+        assert!(oversized.validate_for("request_oversized").is_err());
+
+        let invalid = AgentResponseEnvelope::new(
+            "request_3",
+            AgentResponse::TransferPaths {
+                paths: vec![AgentTransferPath {
+                    transfer_id: "../transfer".into(),
+                    ..path
+                }],
+            },
+        )
+        .unwrap();
+        assert!(invalid.validate_for("request_3").is_err());
     }
 
     #[test]

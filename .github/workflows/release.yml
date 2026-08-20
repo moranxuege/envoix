@@ -1,7 +1,8 @@
 name: release
 
-# Builds the envoix CLI for Linux, macOS arm64+x86_64, and Windows. Android is
-# intentionally absent until M8 provides production signing and verification.
+# Builds the paired CLI and Agent for Linux/Windows, plus the standalone CLI for
+# macOS arm64+x86_64. Android is intentionally absent until M8 provides
+# production signing and verification.
 #   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
 #   - run manually (Actions -> release -> Run workflow) -> builds everything as
 #     downloadable run artifacts, without publishing a release
@@ -26,7 +27,7 @@ env:
 
 jobs:
   cli:
-    name: build CLI ${{ matrix.name }}
+    name: build desktop binaries ${{ matrix.artifact }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -34,16 +35,28 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            name: envoix-cli-linux-x86_64
+            artifact: envoix-linux-x86_64
+            cli_name: envoix-cli-linux-x86_64
+            agent_package: -p envoix-agent
+            agent_name: envoix-agent-linux-x86_64
           - os: macos-14
             target: aarch64-apple-darwin
-            name: envoix-cli-macos-aarch64
+            artifact: envoix-cli-macos-aarch64
+            cli_name: envoix-cli-macos-aarch64
+            agent_package: ''
+            agent_name: ''
           - os: macos-14
             target: x86_64-apple-darwin
-            name: envoix-cli-macos-x86_64
+            artifact: envoix-cli-macos-x86_64
+            cli_name: envoix-cli-macos-x86_64
+            agent_package: ''
+            agent_name: ''
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            name: envoix-cli-windows-x86_64.exe
+            artifact: envoix-windows-x86_64
+            cli_name: envoix-cli-windows-x86_64.exe
+            agent_package: -p envoix-agent
+            agent_name: envoix-agent-windows-x86_64.exe
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,23 +74,28 @@ jobs:
         shell: bash
         run: >-
           scripts/with-build-cache-guard.sh
-          cargo build --locked --release -p envoix-cli --target ${{ matrix.target }}
+          cargo build --locked --release -p envoix-cli ${{ matrix.agent_package }}
+          --target ${{ matrix.target }}
 
       - name: Stage binary
         shell: bash
         run: |
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/envoix.exe" "dist/${{ matrix.name }}"
+            cp "target/${{ matrix.target }}/release/envoix.exe" "dist/${{ matrix.cli_name }}"
+            cp "target/${{ matrix.target }}/release/envoix-agent.exe" "dist/${{ matrix.agent_name }}"
           else
-            cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.name }}"
+            cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.cli_name }}"
+            if [ -n "${{ matrix.agent_name }}" ]; then
+              cp "target/${{ matrix.target }}/release/envoix-agent" "dist/${{ matrix.agent_name }}"
+            fi
           fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: dist/${{ matrix.name }}
+          name: ${{ matrix.artifact }}
+          path: dist/*
           if-no-files-found: error
 
   release:
