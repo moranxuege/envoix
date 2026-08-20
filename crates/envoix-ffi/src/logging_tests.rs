@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn core_info_advertises_the_typed_log_sink() {
     let info = crate::envoix_core_info();
-    assert_eq!(info.ffi_api_version, 21);
+    assert_eq!(info.ffi_api_version, 22);
     assert!(
         info.capabilities
             .iter()

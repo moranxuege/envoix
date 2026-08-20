@@ -44,6 +44,17 @@ test -s "$swift_binding"
 rg -q 'sealed class FfiApplicationCommand' "$kotlin_binding"
 rg -q 'sealed class FfiApplicationEvent' "$kotlin_binding"
 rg -q 'data class FfiApplicationSnapshot' "$kotlin_binding"
+rg -q 'interface FfiApplicationVault' "$kotlin_binding"
+rg -q 'fun `openPersistent`' "$kotlin_binding"
+rg -q 'fun `prepareRelationship`' "$kotlin_binding"
+rg -q 'fun `discardPreparedRelationship`' "$kotlin_binding"
+rg -q 'fun `commitRelationship`' "$kotlin_binding"
+rg -q 'fun `relationships`' "$kotlin_binding"
+rg -q 'fun `loadRelationship`' "$kotlin_binding"
+rg -q 'fun `rotateRelationship`' "$kotlin_binding"
+rg -q 'fun `renameRelationship`' "$kotlin_binding"
+rg -q 'fun `revokeRelationship`' "$kotlin_binding"
+rg -q 'sealed class FfiApplicationVaultException' "$kotlin_binding"
 rg -q 'sealed class FfiRoomControlException' "$kotlin_binding"
 rg -q 'class Rejected' "$kotlin_binding"
 rg -q 'class NetworkLost' "$kotlin_binding"
@@ -67,6 +78,11 @@ if awk '/data class FfiRoomControlSnapshot \(/{capture=1} capture{print} capture
   echo "error: Kotlin room snapshot exposes a pairing credential" >&2
   exit 1
 fi
+if awk '/data class FfiApplicationSnapshot \(/{capture=1} capture{print} capture && /^\)/{exit}' \
+    "$kotlin_binding" | rg -qi 'credential'; then
+  echo "error: Kotlin application snapshot exposes a Relationship credential" >&2
+  exit 1
+fi
 if awk '/public interface TransferObserver/{capture=1} capture{print} capture && /^}/{exit}' \
     "$kotlin_binding" | rg -q 'onRememberedCredential'; then
   echo "error: Kotlin transfer observer exposes a remembered credential" >&2
@@ -79,6 +95,17 @@ fi
 rg -q 'public enum FfiApplicationCommand' "$swift_binding"
 rg -q 'public enum FfiApplicationEvent' "$swift_binding"
 rg -q 'public struct FfiApplicationSnapshot' "$swift_binding"
+rg -q 'protocol FfiApplicationVault' "$swift_binding"
+rg -q 'func openPersistent' "$swift_binding"
+rg -q 'func prepareRelationship' "$swift_binding"
+rg -q 'func discardPreparedRelationship' "$swift_binding"
+rg -q 'func commitRelationship' "$swift_binding"
+rg -q 'func relationships' "$swift_binding"
+rg -q 'func loadRelationship' "$swift_binding"
+rg -q 'func rotateRelationship' "$swift_binding"
+rg -q 'func renameRelationship' "$swift_binding"
+rg -q 'func revokeRelationship' "$swift_binding"
+rg -q 'enum FfiApplicationVaultError' "$swift_binding"
 rg -q 'public enum FfiRoomControlError' "$swift_binding"
 rg -q 'case Rejected' "$swift_binding"
 rg -q 'case NetworkLost' "$swift_binding"
@@ -100,6 +127,11 @@ rg -q 'func storePairingCredential' "$swift_binding"
 if awk '/public struct FfiRoomControlSnapshot:/{capture=1} capture{print} capture && /^}/{exit}' \
     "$swift_binding" | rg -q 'pairingCredential'; then
   echo "error: Swift room snapshot exposes a pairing credential" >&2
+  exit 1
+fi
+if awk '/public struct FfiApplicationSnapshot:/{capture=1} capture{print} capture && /^}/{exit}' \
+    "$swift_binding" | rg -qi 'credential'; then
+  echo "error: Swift application snapshot exposes a Relationship credential" >&2
   exit 1
 fi
 if awk '/public protocol TransferObserver:/{capture=1} capture{print} capture && /^}/{exit}' \

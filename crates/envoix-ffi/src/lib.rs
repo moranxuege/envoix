@@ -38,7 +38,7 @@ pub use room_control::*;
 #[cfg(feature = "android-jni")]
 mod android_jni;
 
-const ENVOIX_FFI_API_VERSION: u32 = 21;
+const ENVOIX_FFI_API_VERSION: u32 = 22;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
@@ -512,6 +512,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "typed_remembered_credential_vault_v1".into(),
             "remembered_devices_v1".into(),
             "typed_application_contract_v6".into(),
+            "persistent_application_engine_v1".into(),
         ],
     }
 }
