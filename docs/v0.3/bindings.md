@@ -6,7 +6,7 @@ Status: normative for M5 and later platform migrations.
 
 The native library exposes two independent versions:
 
-- UniFFI API `22` identifies the complete native symbol/type surface;
+- UniFFI API `23` identifies the complete native symbol/type surface;
 - application binding `1` projects application contract `6`.
 
 Callers must check both `envoixCoreInfo()` and
@@ -14,8 +14,9 @@ Callers must check both `envoixCoreInfo()` and
 An unsupported version fails closed; a frontend must not guess field or state
 semantics.
 
-API 22 makes credential delivery and durable credential storage dedicated
-trusted boundaries.
+API 22 introduced dedicated trusted boundaries for credential delivery and
+durable credential storage; API 23 retains those boundaries and adds the
+desktop Agent host/control projection.
 `FfiRememberedCredentialVault` is the only Room/Transfer-session callback that
 receives a newly paired or rotated opaque credential. `FfiRoomControlSnapshot`
 and the general `TransferObserver` contain no credential bytes. Room pairing
@@ -36,6 +37,24 @@ requirement, permission denial, and corrupt vault data are distinct typed
 errors; cancellation remains distinct from invalid input.
 
 ## Control boundary
+
+`FfiAgentHost` is the sole desktop owner of the durable Engine, injected
+`FfiApplicationVault`, and owner-only local control endpoint. Its lifecycle is
+typed as starting, ready, stopping, stopped, or failed; callers must await
+readiness and await explicit `shutdown()` before assuming the Engine lock or
+endpoint has been released. Host failures have stable categories, including
+single-owner, persistent-state, and vault failures. Linux, macOS, and Windows
+may start a host; mobile targets expose the same binding surface but fail with
+`UnsupportedPlatform`.
+
+`FfiAgentControlClient` projects every Agent command and response as typed
+UniFFI enums and records and rejects an incompatible Agent protocol version.
+The bounded JSON envelope remains an implementation detail of the owner-only
+Rust IPC transport. Snapshots, events, status, diagnostics, and lifecycle
+records contain no credential or invitation material. The immediate pairing
+response is the explicit exception: it carries ephemeral room and verification
+codes for display/consumption, redacts them from Rust debug output, and must not
+be persisted or logged.
 
 `FfiApplicationEngine` owns one ordered application snapshot. Its no-argument
 constructor is limited to contract tests and transient previews; product hosts

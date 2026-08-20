@@ -55,6 +55,20 @@ rg -q 'fun `rotateRelationship`' "$kotlin_binding"
 rg -q 'fun `renameRelationship`' "$kotlin_binding"
 rg -q 'fun `revokeRelationship`' "$kotlin_binding"
 rg -q 'sealed class FfiApplicationVaultException' "$kotlin_binding"
+rg -q 'class FfiAgentHost' "$kotlin_binding"
+rg -q 'class FfiAgentControlClient' "$kotlin_binding"
+rg -q 'sealed class FfiAgentRequest' "$kotlin_binding"
+rg -q 'sealed class FfiAgentResponse' "$kotlin_binding"
+rg -q 'sealed class FfiAgentHostLifecycleState' "$kotlin_binding"
+rg -q 'data class FfiAgentHostConfiguration' "$kotlin_binding"
+rg -q 'suspend fun `waitUntilReady`' "$kotlin_binding"
+rg -q 'suspend fun `shutdown`' "$kotlin_binding"
+rg -q 'suspend fun `call`' "$kotlin_binding"
+rg -q 'checksum_constructor_ffiagenthost_start' "$kotlin_binding"
+rg -q 'checksum_method_ffiagenthost_wait_until_ready' "$kotlin_binding"
+rg -q 'checksum_method_ffiagenthost_shutdown' "$kotlin_binding"
+rg -q 'checksum_constructor_ffiagentcontrolclient_new' "$kotlin_binding"
+rg -q 'checksum_method_ffiagentcontrolclient_call' "$kotlin_binding"
 rg -q 'sealed class FfiRoomControlException' "$kotlin_binding"
 rg -q 'class Rejected' "$kotlin_binding"
 rg -q 'class NetworkLost' "$kotlin_binding"
@@ -83,6 +97,11 @@ if awk '/data class FfiApplicationSnapshot \(/{capture=1} capture{print} capture
   echo "error: Kotlin application snapshot exposes a Relationship credential" >&2
   exit 1
 fi
+if awk '/data class FfiAgentSnapshot \(/{capture=1} capture{print} capture && /^\)/{exit}' \
+    "$kotlin_binding" | rg -qi 'credential|verificationCode|roomCode'; then
+  echo "error: Kotlin Agent snapshot exposes credential or invitation material" >&2
+  exit 1
+fi
 if awk '/public interface TransferObserver/{capture=1} capture{print} capture && /^}/{exit}' \
     "$kotlin_binding" | rg -q 'onRememberedCredential'; then
   echo "error: Kotlin transfer observer exposes a remembered credential" >&2
@@ -106,6 +125,20 @@ rg -q 'func rotateRelationship' "$swift_binding"
 rg -q 'func renameRelationship' "$swift_binding"
 rg -q 'func revokeRelationship' "$swift_binding"
 rg -q 'enum FfiApplicationVaultError' "$swift_binding"
+rg -q 'class FfiAgentHost' "$swift_binding"
+rg -q 'class FfiAgentControlClient' "$swift_binding"
+rg -q 'public enum FfiAgentRequest' "$swift_binding"
+rg -q 'public enum FfiAgentResponse' "$swift_binding"
+rg -q 'public enum FfiAgentHostLifecycleState' "$swift_binding"
+rg -q 'public struct FfiAgentHostConfiguration' "$swift_binding"
+rg -q 'func waitUntilReady' "$swift_binding"
+rg -q 'func shutdown' "$swift_binding"
+rg -q 'func call' "$swift_binding"
+rg -q 'checksum_constructor_ffiagenthost_start' "$swift_binding"
+rg -q 'checksum_method_ffiagenthost_wait_until_ready' "$swift_binding"
+rg -q 'checksum_method_ffiagenthost_shutdown' "$swift_binding"
+rg -q 'checksum_constructor_ffiagentcontrolclient_new' "$swift_binding"
+rg -q 'checksum_method_ffiagentcontrolclient_call' "$swift_binding"
 rg -q 'public enum FfiRoomControlError' "$swift_binding"
 rg -q 'case Rejected' "$swift_binding"
 rg -q 'case NetworkLost' "$swift_binding"
@@ -132,6 +165,11 @@ fi
 if awk '/public struct FfiApplicationSnapshot:/{capture=1} capture{print} capture && /^}/{exit}' \
     "$swift_binding" | rg -qi 'credential'; then
   echo "error: Swift application snapshot exposes a Relationship credential" >&2
+  exit 1
+fi
+if awk '/public struct FfiAgentSnapshot:/{capture=1} capture{print} capture && /^}/{exit}' \
+    "$swift_binding" | rg -qi 'credential|verificationCode|roomCode'; then
+  echo "error: Swift Agent snapshot exposes credential or invitation material" >&2
   exit 1
 fi
 if awk '/public protocol TransferObserver:/{capture=1} capture{print} capture && /^}/{exit}' \

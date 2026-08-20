@@ -529,7 +529,7 @@ impl FfiApplicationEngine {
             ));
         }
         let store =
-            ProductStore::open_with_vault(directory, Arc::new(ForeignApplicationVault { vault }))
+            ProductStore::open_with_vault(directory, Arc::new(ForeignApplicationVault::new(vault)))
                 .map_err(store_error)?;
         Ok(Arc::new(Self {
             state: Mutex::new(ApplicationEngineState {
@@ -766,8 +766,14 @@ fn ffi_remembered_relationship(record: &RememberedDeviceRecord) -> FfiRemembered
     }
 }
 
-struct ForeignApplicationVault {
+pub(crate) struct ForeignApplicationVault {
     vault: Arc<dyn FfiApplicationVault>,
+}
+
+impl ForeignApplicationVault {
+    pub(crate) fn new(vault: Arc<dyn FfiApplicationVault>) -> Self {
+        Self { vault }
+    }
 }
 
 impl SecureVaultPort for ForeignApplicationVault {
@@ -1185,7 +1191,7 @@ fn ffi_effect_envelope(envelope: EffectEnvelope) -> FfiApplicationEffectEnvelope
     }
 }
 
-fn ffi_snapshot(snapshot: &EngineSnapshot) -> FfiApplicationSnapshot {
+pub(crate) fn ffi_snapshot(snapshot: &EngineSnapshot) -> FfiApplicationSnapshot {
     FfiApplicationSnapshot {
         contract_version: snapshot.contract_version,
         last_sequence: snapshot.last_sequence,
@@ -1223,19 +1229,25 @@ fn ffi_snapshot(snapshot: &EngineSnapshot) -> FfiApplicationSnapshot {
         transfers: snapshot
             .transfers
             .values()
-            .map(|transfer| FfiApplicationTransfer {
-                id: transfer.id.to_string(),
-                relationship_id: transfer.relationship_id.to_string(),
-                room_id: transfer.room_id.as_ref().map(ToString::to_string),
-                content_id: transfer.content_id.to_string(),
-                direction: ffi_direction(transfer.direction),
-                state: ffi_transfer_state(transfer.state),
-                transferred_bytes: transfer.transferred_bytes,
-                total_bytes: transfer.total_bytes,
-                failure: transfer.failure.as_ref().map(ffi_failure),
-                rejection: transfer.rejection.map(ffi_rejection),
-            })
+            .map(ffi_application_transfer)
             .collect(),
+    }
+}
+
+pub(crate) fn ffi_application_transfer(
+    transfer: &envoix_client::model::Transfer,
+) -> FfiApplicationTransfer {
+    FfiApplicationTransfer {
+        id: transfer.id.to_string(),
+        relationship_id: transfer.relationship_id.to_string(),
+        room_id: transfer.room_id.as_ref().map(ToString::to_string),
+        content_id: transfer.content_id.to_string(),
+        direction: ffi_direction(transfer.direction),
+        state: ffi_transfer_state(transfer.state),
+        transferred_bytes: transfer.transferred_bytes,
+        total_bytes: transfer.total_bytes,
+        failure: transfer.failure.as_ref().map(ffi_failure),
+        rejection: transfer.rejection.map(ffi_rejection),
     }
 }
 
@@ -1353,7 +1365,7 @@ fn core_room_close_reason(reason: FfiApplicationRoomCloseReason) -> RoomCloseRea
     }
 }
 
-fn ffi_direction(direction: TransferDirection) -> FfiTransferDirection {
+pub(crate) fn ffi_direction(direction: TransferDirection) -> FfiTransferDirection {
     match direction {
         TransferDirection::Send => FfiTransferDirection::Send,
         TransferDirection::Receive => FfiTransferDirection::Receive,

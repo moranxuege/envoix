@@ -143,7 +143,7 @@ translate those typed values into their native binding types, but must not
 maintain independent error-to-recovery or error-to-terminal-state tables or
 parse diagnostic prose. Application contract v6 makes the fine-grained failure
 codes canonical while preserving read compatibility for v1-v5 fixtures;
-UniFFI API 22 carries the complete projection to Apple and Android clients;
+UniFFI API 23 carries the complete projection to Apple and Android clients;
 application binding v1 projects application contract v6 as typed
 Command/Event/Snapshot/Effect values without JSON orchestration.
 

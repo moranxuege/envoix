@@ -37,5 +37,8 @@ uniffi.workspace = true
 thiserror.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+envoix-agent = { path = "../../apps/envoix-agent" }
+
 [dev-dependencies]
 tempfile.workspace = true

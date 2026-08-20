@@ -19,6 +19,8 @@ uniffi::setup_scaffolding!();
 
 mod datagram_transport;
 pub use datagram_transport::*;
+mod agent_host;
+pub use agent_host::*;
 mod application_contract;
 pub use application_contract::*;
 mod manifest_v2_job;
@@ -38,7 +40,7 @@ pub use room_control::*;
 #[cfg(feature = "android-jni")]
 mod android_jni;
 
-const ENVOIX_FFI_API_VERSION: u32 = 22;
+const ENVOIX_FFI_API_VERSION: u32 = 23;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
@@ -513,6 +515,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "remembered_devices_v1".into(),
             "typed_application_contract_v6".into(),
             "persistent_application_engine_v1".into(),
+            "agent_host_control_v1".into(),
         ],
     }
 }
