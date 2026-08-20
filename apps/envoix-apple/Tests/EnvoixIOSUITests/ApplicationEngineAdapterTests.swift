@@ -85,6 +85,94 @@ final class ApplicationEngineAdapterTests: XCTestCase {
         await adapter.close()
     }
 
+    func testDefaultAdaptersCurrentlyOwnIndependentInMemoryEngines() async throws {
+        let first = try ApplicationEngineAdapter()
+        let second = try ApplicationEngineAdapter()
+        let observed = FfiApplicationEventEnvelope(
+            contractVersion: expectedApplicationContractVersion,
+            sequence: 1,
+            event: .deviceObserved(
+                deviceId: "first_process_device",
+                displayName: "First Process Device"
+            )
+        )
+
+        let applied = try await first.apply(observed)
+        let firstSnapshot = try await first.snapshot()
+        let secondSnapshot = try await second.snapshot()
+
+        XCTAssertEqual(applied, .applied)
+        XCTAssertEqual(firstSnapshot.devices.map(\.id), ["first_process_device"])
+        XCTAssertTrue(secondSnapshot.devices.isEmpty)
+
+        await first.close()
+        await second.close()
+    }
+
+    @MainActor
+    func testSharedRuntimeOwnsOneEngineAndControlWorkflowPerProcess() {
+        let firstSceneLookup = AppleApplicationRuntime.shared
+        let secondSceneLookup = AppleApplicationRuntime.shared
+
+        XCTAssertTrue(firstSceneLookup === secondSceneLookup)
+        XCTAssertTrue(
+            firstSceneLookup.applicationEngine === secondSceneLookup.applicationEngine
+        )
+        XCTAssertTrue(firstSceneLookup.workflow === secondSceneLookup.workflow)
+    }
+
+    @MainActor
+    func testMultipleScenesKeepIndependentPresentationAndOneProcessOwner() async throws {
+        let fake = FakeApplicationEngine()
+        let adapter = try ApplicationEngineAdapter(
+            engine: fake,
+            core: compatibleCoreInfo(),
+            binding: compatibleBindingInfo()
+        )
+        let runtime = AppleApplicationRuntime(applicationEngine: adapter)
+        let engineOwner = runtime.applicationEngine
+        let controlOwner = runtime.workflow
+        let firstScene = UUID()
+        let secondScene = UUID()
+        let firstPresentation = MobileSceneNavigationState()
+        let secondPresentation = MobileSceneNavigationState(initialPage: .activity)
+
+        firstPresentation.show(.settings)
+        runtime.updateScene(
+            id: firstScene,
+            isActive: true,
+            requestsDiscovery: false,
+            keepsRememberedConnected: false,
+            displayName: "First scene",
+            identityPath: ""
+        )
+        runtime.updateScene(
+            id: secondScene,
+            isActive: true,
+            requestsDiscovery: false,
+            keepsRememberedConnected: false,
+            displayName: "Second scene",
+            identityPath: ""
+        )
+
+        XCTAssertEqual(firstPresentation.page, .settings)
+        XCTAssertEqual(secondPresentation.page, .activity)
+        XCTAssertEqual(runtime.presentationOwnerSceneID, firstScene)
+        XCTAssertTrue(runtime.applicationEngine === engineOwner)
+        XCTAssertTrue(runtime.workflow === controlOwner)
+
+        runtime.removeScene(id: firstScene)
+
+        XCTAssertEqual(runtime.presentationOwnerSceneID, secondScene)
+        XCTAssertTrue(runtime.applicationEngine === engineOwner)
+        XCTAssertTrue(runtime.workflow === controlOwner)
+        _ = try await runtime.applicationEngine.snapshot()
+        XCTAssertEqual(fake.snapshotCalls, 1)
+
+        runtime.removeScene(id: secondScene)
+        await adapter.close()
+    }
+
     func testActorChecksCancellationBeforeCallingFFI() async throws {
         let fake = FakeApplicationEngine()
         let adapter = try ApplicationEngineAdapter(

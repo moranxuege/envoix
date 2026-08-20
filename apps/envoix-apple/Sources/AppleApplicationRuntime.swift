@@ -44,6 +44,9 @@ enum AppleApplicationRuntimePolicy {
 final class AppleApplicationRuntime: ObservableObject {
     static let shared = AppleApplicationRuntime()
 
+    /// The process-wide application Engine owner. The injected adapter keeps
+    /// scene composition independent from the concrete durable Engine binding.
+    let applicationEngine: ApplicationEngineAdapter
     let nearbyCoordinator: NearbyDiscoveryCoordinator
     let presence: NearbyPresencePreferences
     let workflow: ConnectionWorkflowState
@@ -58,7 +61,12 @@ final class AppleApplicationRuntime: ObservableObject {
     private var systemPairingLease: AppleWifiAwareServiceCoordinator.Lease?
 
     convenience init() {
+        self.init(applicationEngine: Self.makeInMemoryApplicationEngine())
+    }
+
+    convenience init(applicationEngine: ApplicationEngineAdapter) {
         self.init(
+            applicationEngine: applicationEngine,
             nearbyCoordinator: NearbyDiscoveryCoordinator(),
             presence: NearbyPresencePreferences(),
             workflow: ConnectionWorkflowState(
@@ -70,12 +78,14 @@ final class AppleApplicationRuntime: ObservableObject {
     }
 
     init(
+        applicationEngine: ApplicationEngineAdapter,
         nearbyCoordinator: NearbyDiscoveryCoordinator,
         presence: NearbyPresencePreferences,
         workflow: ConnectionWorkflowState,
         rememberedOutbox: RememberedRoomOutboxController,
         wifiAwareServices: AppleWifiAwareServiceCoordinator
     ) {
+        self.applicationEngine = applicationEngine
         self.nearbyCoordinator = nearbyCoordinator
         self.presence = presence
         self.workflow = workflow
@@ -192,6 +202,14 @@ final class AppleApplicationRuntime: ObservableObject {
             displayName: configuration?.displayName ?? presence.displayName,
             identityPath: configuration?.identityPath ?? ""
         )
+    }
+
+    private static func makeInMemoryApplicationEngine() -> ApplicationEngineAdapter {
+        do {
+            return try ApplicationEngineAdapter()
+        } catch {
+            preconditionFailure("The bundled application Engine is incompatible: \(error)")
+        }
     }
 }
 #endif

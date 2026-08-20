@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 struct RememberedPeerSummary: Equatable, Identifiable, CustomDebugStringConvertible {
@@ -99,11 +100,7 @@ final class RememberedPeerStore: @unchecked Sendable {
     }
 
     static func makeDefaultCredentialStore() -> RememberedCredentialStoring {
-        #if os(macOS)
-        MacOSFileCredentialStore()
-        #else
         AppleCredentialStore()
-        #endif
     }
 
     func prepare(label: String, broker: String, relay: String) throws -> PendingRememberedPeer {
@@ -354,18 +351,17 @@ protocol RememberedCredentialStoring {
     func delete(_ reference: String) throws
 }
 
-#if os(macOS)
-/// Stores opaque remembered-room credentials in the current user's Application
-/// Support directory so ad-hoc development builds never request Keychain access.
+#if os(macOS) && DEBUG
+/// Development and test-only credential storage. Production code must use the
+/// non-interactive Keychain store and may not fall back here.
 final class MacOSFileCredentialStore: RememberedCredentialStoring {
     private static let directoryPermissions = 0o700
     private static let credentialPermissions = 0o600
-    private static let credentialDirectoryName = "credentials-v1"
 
-    private let configuredDirectoryURL: URL?
+    private let directoryURL: URL
 
-    init(directoryURL: URL? = nil) {
-        configuredDirectoryURL = directoryURL
+    init(directoryURL: URL) {
+        self.directoryURL = directoryURL
     }
 
     func put(_ reference: String, _ credential: Data) throws {
@@ -407,43 +403,69 @@ final class MacOSFileCredentialStore: RememberedCredentialStoring {
         guard UUID(uuidString: reference) != nil else {
             throw RememberedPeerStoreError.corruptMetadata
         }
-        return try directoryURL().appendingPathComponent(reference, isDirectory: false)
+        try prepareDirectory()
+        return directoryURL.appendingPathComponent(reference, isDirectory: false)
     }
 
-    private func directoryURL() throws -> URL {
-        let directory: URL
-        if let configuredDirectoryURL {
-            directory = configuredDirectoryURL
-        } else {
-            guard let support = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first else {
-                throw RememberedPeerStoreError.credentialStorageUnavailable
-            }
-            directory = support
-                .appendingPathComponent("envoix/relationships", isDirectory: true)
-                .appendingPathComponent(Self.credentialDirectoryName, isDirectory: true)
-        }
+    private func prepareDirectory() throws {
         do {
             try FileManager.default.createDirectory(
-                at: directory,
+                at: directoryURL,
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: Self.directoryPermissions]
             )
             try FileManager.default.setAttributes(
                 [.posixPermissions: Self.directoryPermissions],
-                ofItemAtPath: directory.path
+                ofItemAtPath: directoryURL.path
             )
-            return directory
         } catch {
             throw RememberedPeerStoreError.credentialStorageUnavailable
         }
     }
 }
-#else
+#endif
+
+protocol AppleKeychainAccessing {
+    func update(
+        _ query: [CFString: Any],
+        attributes: [CFString: Any]
+    ) -> OSStatus
+    func add(_ item: [CFString: Any]) -> OSStatus
+    func copyMatching(_ query: [CFString: Any]) -> (OSStatus, Data?)
+    func delete(_ query: [CFString: Any]) -> OSStatus
+}
+
+private final class SystemAppleKeychainAccess: AppleKeychainAccessing {
+    func update(
+        _ query: [CFString: Any],
+        attributes: [CFString: Any]
+    ) -> OSStatus {
+        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    }
+
+    func add(_ item: [CFString: Any]) -> OSStatus {
+        SecItemAdd(item as CFDictionary, nil)
+    }
+
+    func copyMatching(_ query: [CFString: Any]) -> (OSStatus, Data?) {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return (status, result as? Data)
+    }
+
+    func delete(_ query: [CFString: Any]) -> OSStatus {
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
 final class AppleCredentialStore: RememberedCredentialStoring {
-    private let service = "com.envoix.remembered-credential.v1"
+    private static let service = "com.envoix.remembered-credential.v1"
+
+    private let keychain: AppleKeychainAccessing
+
+    init(keychain: AppleKeychainAccessing? = nil) {
+        self.keychain = keychain ?? SystemAppleKeychainAccess()
+    }
 
     func put(_ reference: String, _ credential: Data) throws {
         let query = baseQuery(reference)
@@ -451,16 +473,16 @@ final class AppleCredentialStore: RememberedCredentialStoring {
             kSecValueData: credential,
             kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
-        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        let updateStatus = keychain.update(query, attributes: update)
         if updateStatus == errSecSuccess { return }
         guard updateStatus == errSecItemNotFound else {
-            throw RememberedPeerStoreError.keychain(updateStatus)
+            throw credentialError(for: updateStatus)
         }
         var item = query
         update.forEach { item[$0] = $1 }
-        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        let addStatus = keychain.add(item)
         guard addStatus == errSecSuccess else {
-            throw RememberedPeerStoreError.keychain(addStatus)
+            throw credentialError(for: addStatus)
         }
     }
 
@@ -468,34 +490,48 @@ final class AppleCredentialStore: RememberedCredentialStoring {
         var query = baseQuery(reference)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let (status, data) = keychain.copyMatching(query)
         if status == errSecItemNotFound {
             throw RememberedPeerStoreError.missingCredential
         }
-        guard status == errSecSuccess, let data = result as? Data else {
-            throw RememberedPeerStoreError.keychain(status)
+        guard status == errSecSuccess, let data else {
+            throw credentialError(for: status)
         }
         return data
     }
 
     func delete(_ reference: String) throws {
-        let status = SecItemDelete(baseQuery(reference) as CFDictionary)
+        let status = keychain.delete(baseQuery(reference))
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw RememberedPeerStoreError.keychain(status)
+            throw credentialError(for: status)
         }
     }
 
     private func baseQuery(_ reference: String) -> [CFString: Any] {
-        [
+        let authenticationContext = LAContext()
+        authenticationContext.interactionNotAllowed = true
+        return [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
+            kSecAttrService: Self.service,
             kSecAttrAccount: reference,
             kSecAttrSynchronizable: false,
+            kSecUseAuthenticationContext: authenticationContext,
+            kSecUseDataProtectionKeychain: true,
         ]
     }
+
+    private func credentialError(for status: OSStatus) -> RememberedPeerStoreError {
+        switch status {
+        case errSecInteractionNotAllowed,
+             errSecInteractionRequired,
+             errSecAuthFailed,
+             errSecUserCanceled:
+            return .credentialInteractionRequired
+        default:
+            return .keychain(status)
+        }
+    }
 }
-#endif
 
 extension NSLock {
     func withEnvoixLock<T>(_ body: () throws -> T) rethrows -> T {

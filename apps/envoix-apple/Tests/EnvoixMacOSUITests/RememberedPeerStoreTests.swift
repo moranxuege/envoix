@@ -1,4 +1,6 @@
 import Foundation
+import LocalAuthentication
+import Security
 import XCTest
 
 final class RememberedPeerStoreTests: XCTestCase {
@@ -28,12 +30,13 @@ final class RememberedPeerStoreTests: XCTestCase {
         XCTAssertEqual(credentials.getCallCount, 0)
     }
 
-    func testMacOSUsesFileCredentialStoreByDefault() {
+    func testMacOSUsesKeychainCredentialStoreByDefault() {
         XCTAssertTrue(
-            RememberedPeerStore.makeDefaultCredentialStore() is MacOSFileCredentialStore
+            RememberedPeerStore.makeDefaultCredentialStore() is AppleCredentialStore
         )
     }
 
+    #if DEBUG
     func testFileCredentialStoreRoundTripsWithRestrictedPermissions() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -78,6 +81,86 @@ final class RememberedPeerStoreTests: XCTestCase {
             }
         }
     }
+    #endif
+
+    func testKeychainCredentialStoreAlwaysDisablesAuthenticationUI() throws {
+        let keychain = RecordingAppleKeychainAccess()
+        let store = AppleCredentialStore(keychain: keychain)
+        let credential = Data([1, 2, 3, 4])
+
+        try store.put(UUID().uuidString, credential)
+        XCTAssertEqual(try store.get(UUID().uuidString), credential)
+        try store.delete(UUID().uuidString)
+
+        XCTAssertEqual(keychain.queries.count, 3)
+        for query in keychain.queries {
+            let context = try XCTUnwrap(query[kSecUseAuthenticationContext] as? LAContext)
+            XCTAssertTrue(context.interactionNotAllowed)
+            XCTAssertEqual(query[kSecUseDataProtectionKeychain] as? Bool, true)
+        }
+    }
+
+    func testKeychainInteractionFailuresFailClosedWithoutAddFallback() {
+        let statuses = [
+            errSecInteractionNotAllowed,
+            errSecInteractionRequired,
+            errSecAuthFailed,
+            errSecUserCanceled,
+        ]
+
+        for status in statuses {
+            let keychain = RecordingAppleKeychainAccess()
+            keychain.updateStatus = status
+            let store = AppleCredentialStore(keychain: keychain)
+
+            assertCredentialInteractionRequired {
+                try store.put(UUID().uuidString, Data([1]))
+            }
+            XCTAssertEqual(keychain.updateCallCount, 1)
+            XCTAssertEqual(keychain.addCallCount, 0)
+        }
+    }
+
+    func testKeychainAddInteractionFailureDoesNotRetry() {
+        let keychain = RecordingAppleKeychainAccess()
+        keychain.updateStatus = errSecItemNotFound
+        keychain.addStatus = errSecInteractionNotAllowed
+        let store = AppleCredentialStore(keychain: keychain)
+
+        assertCredentialInteractionRequired {
+            try store.put(UUID().uuidString, Data([1]))
+        }
+        XCTAssertEqual(keychain.updateCallCount, 1)
+        XCTAssertEqual(keychain.addCallCount, 1)
+    }
+
+    func testKeychainReadAndDeleteInteractionFailuresFailClosed() {
+        let keychain = RecordingAppleKeychainAccess()
+        keychain.copyStatus = errSecAuthFailed
+        keychain.deleteStatus = errSecInteractionRequired
+        let store = AppleCredentialStore(keychain: keychain)
+
+        assertCredentialInteractionRequired {
+            _ = try store.get(UUID().uuidString)
+        }
+        assertCredentialInteractionRequired {
+            try store.delete(UUID().uuidString)
+        }
+        XCTAssertEqual(keychain.copyCallCount, 1)
+        XCTAssertEqual(keychain.deleteCallCount, 1)
+    }
+
+    private func assertCredentialInteractionRequired(
+        _ operation: () throws -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(try operation(), file: file, line: line) { error in
+            guard case RememberedPeerStoreError.credentialInteractionRequired = error else {
+                return XCTFail("Unexpected error: \(error)", file: file, line: line)
+            }
+        }
+    }
 }
 
 private final class RecordingCredentialStore: RememberedCredentialStoring {
@@ -98,5 +181,46 @@ private final class RecordingCredentialStore: RememberedCredentialStoring {
 
     func delete(_ reference: String) throws {
         values.removeValue(forKey: reference)
+    }
+}
+
+private final class RecordingAppleKeychainAccess: AppleKeychainAccessing {
+    var updateStatus = errSecSuccess
+    var addStatus = errSecSuccess
+    var copyStatus = errSecSuccess
+    var copyData = Data([1, 2, 3, 4])
+    var deleteStatus = errSecSuccess
+
+    private(set) var queries: [[CFString: Any]] = []
+    private(set) var updateCallCount = 0
+    private(set) var addCallCount = 0
+    private(set) var copyCallCount = 0
+    private(set) var deleteCallCount = 0
+
+    func update(
+        _ query: [CFString: Any],
+        attributes _: [CFString: Any]
+    ) -> OSStatus {
+        queries.append(query)
+        updateCallCount += 1
+        return updateStatus
+    }
+
+    func add(_ item: [CFString: Any]) -> OSStatus {
+        queries.append(item)
+        addCallCount += 1
+        return addStatus
+    }
+
+    func copyMatching(_ query: [CFString: Any]) -> (OSStatus, Data?) {
+        queries.append(query)
+        copyCallCount += 1
+        return (copyStatus, copyData)
+    }
+
+    func delete(_ query: [CFString: Any]) -> OSStatus {
+        queries.append(query)
+        deleteCallCount += 1
+        return deleteStatus
     }
 }
