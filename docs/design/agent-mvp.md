@@ -53,7 +53,7 @@ WSL envoix-agent <--- Room offer + canonical Manifest v2 ---> WSL Inbox
 
 ## Local Agent contract
 
-`envoix-client::product` is the shared product contract. Protocol version 8
+`envoix-client::product` is the shared product contract. Protocol version 9
 defines these commands:
 
 - `status`
@@ -83,6 +83,14 @@ responses. A managed process
 loads its device name and Inbox location from the versioned, owner-only
 `~/.config/envoix/agent.json`; command-line arguments still take precedence for
 development runs.
+
+The CLI uses `envoix-client::agent_control::AgentControlClient` for this local
+transport. The `envoix-agent` executable is a thin wrapper around the reusable
+`AgentHost`: an embedding host supplies its configuration and `SecureVaultPort`,
+then retains an `AgentShutdownHandle`. Shutdown is complete only after
+`AgentHost::run` returns, at which point control connections and background
+tasks have stopped, the local endpoint has closed, and the Engine owner lock has
+been released.
 
 ## Pairing and receive lifecycle
 

@@ -24,6 +24,7 @@ use envoix_client::model::{
     RememberedGenerationRole, Transfer, TransferDirection, TransferFailure, TransferId,
     TransferRejection, remembered_generation_attempts,
 };
+use envoix_client::ports::SecureVaultPort;
 use envoix_client::product::{
     AGENT_PROTOCOL_VERSION, AgentControlTransport, AgentCredentialProtection, AgentDiagnostics,
     AgentEvent, AgentEventCursor, AgentEventEnvelope, AgentOfferDecision, AgentPathKind,
@@ -90,20 +91,125 @@ struct Cli {
     verbose: u8,
 }
 
-#[derive(Clone)]
-struct RuntimeConfig {
-    state_directory: PathBuf,
-    inbox_directory: PathBuf,
-    control_endpoint: PathBuf,
-    device_name: String,
-    broker: String,
-    relay: Option<String>,
+/// Filesystem, identity, and routing settings owned by one Agent host.
+#[derive(Clone, Debug)]
+pub struct AgentHostConfiguration {
+    pub state_directory: PathBuf,
+    pub inbox_directory: PathBuf,
+    pub control_endpoint: PathBuf,
+    pub device_name: String,
+    pub broker: String,
+    pub relay: Option<String>,
+}
+
+/// A cloneable request handle for an orderly Agent shutdown.
+#[derive(Clone, Debug, Default)]
+pub struct AgentShutdownHandle {
+    token: TransferCancelToken,
+}
+
+impl AgentShutdownHandle {
+    /// Requests shutdown. The operation is idempotent.
+    pub fn shutdown(&self) {
+        self.token.cancel();
+    }
+
+    pub fn is_shutdown_requested(&self) -> bool {
+        self.token.is_cancelled()
+    }
+}
+
+/// One durable Agent owner backed by an injected secure-vault adapter.
+pub struct AgentHost {
+    config: AgentHostConfiguration,
+    client: api::Client,
+    vault: Arc<dyn SecureVaultPort>,
+    credential_protection: AgentCredentialProtection,
+    shutdown: AgentShutdownHandle,
+}
+
+impl AgentHost {
+    /// Creates an Agent using the supplied vault. The protection classification
+    /// is returned through Agent diagnostics and must describe that adapter.
+    pub fn new(
+        config: AgentHostConfiguration,
+        client: api::Client,
+        vault: Arc<dyn SecureVaultPort>,
+        credential_protection: AgentCredentialProtection,
+    ) -> Self {
+        Self {
+            config,
+            client,
+            vault,
+            credential_protection,
+            shutdown: AgentShutdownHandle::default(),
+        }
+    }
+
+    /// Uses the existing owner-only Unix store or per-user Windows DPAPI store.
+    pub fn with_desktop_vault(config: AgentHostConfiguration, client: api::Client) -> Self {
+        let vault = Arc::new(api::DesktopCredentialStore::new(
+            config.state_directory.join("vault"),
+        ));
+        Self::new(config, client, vault, desktop_credential_protection())
+    }
+
+    /// Returns a handle that remains valid while [`Self::run`] is active.
+    pub fn shutdown_handle(&self) -> AgentShutdownHandle {
+        self.shutdown.clone()
+    }
+
+    /// Runs until shutdown is requested or the local control transport fails.
+    pub async fn run(self) -> Result<()> {
+        if self.shutdown.is_shutdown_requested() {
+            return Ok(());
+        }
+        create_private_directory(&self.config.state_directory)?;
+        create_directory(&self.config.inbox_directory)?;
+        let store = ProductStore::open_with_vault(&self.config.state_directory, self.vault)?;
+        let runtime = Arc::new(AgentRuntime {
+            config: self.config,
+            client: self.client,
+            store: Mutex::new(store),
+            credential_protection: self.credential_protection,
+            active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
+            events: Mutex::new(AgentEventLog::new()?),
+            shutdown: self.shutdown.token,
+            background_tasks: Mutex::new(Vec::new()),
+        });
+
+        let device_ids = lock(&runtime.store)?
+            .device_records()
+            .into_iter()
+            .map(|device| device.id().to_string())
+            .collect::<Vec<_>>();
+        for device_id in device_ids {
+            spawn_remembered_receiver(runtime.clone(), device_id);
+        }
+
+        let result = serve(runtime.clone()).await;
+        shutdown_background_tasks(&runtime).await;
+        result
+    }
+}
+
+fn desktop_credential_protection() -> AgentCredentialProtection {
+    #[cfg(unix)]
+    return AgentCredentialProtection::OwnerOnlyFile;
+    #[cfg(windows)]
+    return AgentCredentialProtection::WindowsDpapi;
 }
 
 struct AgentRuntime {
-    config: RuntimeConfig,
+    config: AgentHostConfiguration,
     client: api::Client,
     store: Mutex<ProductStore>,
+    credential_protection: AgentCredentialProtection,
     active_receivers: Mutex<HashMap<String, TransferCancelToken>>,
     active_rooms: Mutex<HashMap<String, Arc<Notify>>>,
     active_outgoing: Mutex<HashMap<String, ActiveOutgoingTransfer>>,
@@ -317,17 +423,13 @@ impl AgentRuntime {
         let control_transport = AgentControlTransport::UnixSocket;
         #[cfg(windows)]
         let control_transport = AgentControlTransport::WindowsNamedPipe;
-        #[cfg(unix)]
-        let credential_protection = AgentCredentialProtection::OwnerOnlyFile;
-        #[cfg(windows)]
-        let credential_protection = AgentCredentialProtection::WindowsDpapi;
         Ok(AgentDiagnostics {
             agent_protocol_version: AGENT_PROTOCOL_VERSION,
             application_contract_version: envoix_client::APPLICATION_CONTRACT_VERSION,
             engine_schema_version: ENGINE_STATE_SCHEMA_VERSION,
             platform: std::env::consts::OS.to_string(),
             control_transport,
-            credential_protection,
+            credential_protection: self.credential_protection,
             engine_sequence: engine.last_sequence,
             relationships: engine.relationships.len(),
             transfers: engine.transfers.len(),
@@ -599,7 +701,7 @@ fn cancel_outgoing_for_relationship(runtime: &AgentRuntime, relationship_id: &st
     Ok(())
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
     let settings = cli
@@ -636,11 +738,9 @@ pub async fn run() -> Result<()> {
         value => Some(value.to_string()),
     };
 
-    create_private_directory(&state_directory)?;
-    create_directory(&inbox_directory)?;
     let client = agent_client(cli.config.as_deref())?;
-    let runtime = Arc::new(AgentRuntime {
-        config: RuntimeConfig {
+    let host = AgentHost::with_desktop_vault(
+        AgentHostConfiguration {
             state_directory: state_directory.clone(),
             inbox_directory,
             control_endpoint,
@@ -649,28 +749,26 @@ pub async fn run() -> Result<()> {
             relay,
         },
         client,
-        store: Mutex::new(ProductStore::open(&state_directory)?),
-        active_receivers: Mutex::new(HashMap::new()),
-        active_rooms: Mutex::new(HashMap::new()),
-        active_outgoing: Mutex::new(HashMap::new()),
-        active_pairings: Mutex::new(HashSet::new()),
-        active_paths: Mutex::new(Vec::new()),
-        pending_offers: Mutex::new(HashMap::new()),
-        events: Mutex::new(AgentEventLog::new()?),
-        shutdown: TransferCancelToken::new(),
-        background_tasks: Mutex::new(Vec::new()),
-    });
-
-    let device_ids = lock(&runtime.store)?
-        .device_records()
-        .into_iter()
-        .map(|device| device.id().to_string())
-        .collect::<Vec<_>>();
-    for device_id in device_ids {
-        spawn_remembered_receiver(runtime.clone(), device_id);
+    );
+    let shutdown = host.shutdown_handle();
+    let running = host.run();
+    tokio::pin!(running);
+    tokio::select! {
+        result = &mut running => result,
+        signal = termination_signal() => {
+            shutdown.shutdown();
+            match signal {
+                Ok(()) => {
+                    tracing::info!("shutting down");
+                    running.await
+                }
+                Err(error) => {
+                    let _ = running.await;
+                    Err(error.into())
+                }
+            }
+        }
     }
-
-    serve(runtime).await
 }
 
 fn init_tracing(verbosity: u8) {
@@ -720,28 +818,23 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
         "Envoix Agent ready"
     );
 
-    let termination = termination_signal();
-    tokio::pin!(termination);
     loop {
         tokio::select! {
-            signal = &mut termination => {
-                signal?;
-                tracing::info!("shutting down");
-                shutdown_background_tasks(&runtime).await;
-                return Ok(());
-            }
+            _ = runtime.shutdown.cancelled() => return Ok(()),
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
                 if let Err(error) = validate_unix_peer(&stream, socket_uid) {
                     tracing::warn!(%error, "rejected local Agent peer");
                     continue;
                 }
-                let runtime = runtime.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = serve_connection(runtime, stream).await {
+                let connection_runtime = runtime.clone();
+                if let Err(error) = spawn_background_task(&runtime, async move {
+                    if let Err(error) = serve_connection(connection_runtime, stream).await {
                         tracing::warn!(%error, "local Agent request failed");
                     }
-                });
+                }) {
+                    tracing::warn!(%error, "local Agent request could not start");
+                }
             }
         }
     }
@@ -758,16 +851,9 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
         "Envoix Agent ready"
     );
 
-    let termination = termination_signal();
-    tokio::pin!(termination);
     loop {
         tokio::select! {
-            signal = &mut termination => {
-                signal?;
-                tracing::info!("shutting down");
-                shutdown_background_tasks(&runtime).await;
-                return Ok(());
-            }
+            _ = runtime.shutdown.cancelled() => return Ok(()),
             connected = server.connect() => {
                 if let Err(error) = connected {
                     tracing::warn!(%error, "Windows Agent pipe connection failed");
@@ -781,12 +867,14 @@ async fn serve(runtime: Arc<AgentRuntime>) -> Result<()> {
                 }
                 let connected = server;
                 server = create_windows_pipe(&endpoint, &owner_sid, false)?;
-                let runtime = runtime.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = serve_connection(runtime, connected).await {
+                let connection_runtime = runtime.clone();
+                if let Err(error) = spawn_background_task(&runtime, async move {
+                    if let Err(error) = serve_connection(connection_runtime, connected).await {
                         tracing::warn!(%error, "local Agent request failed");
                     }
-                });
+                }) {
+                    tracing::warn!(%error, "local Agent request could not start");
+                }
             }
         }
     }
@@ -2688,11 +2776,111 @@ fn unix_millis() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use envoix_client::agent_control::AgentControlClient;
+    #[cfg(unix)]
+    use envoix_client::ports::{PlatformPortError, SecretBytes};
+    #[cfg(unix)]
+    use envoix_client::storage::VaultReference;
+
+    #[cfg(unix)]
+    struct PanicVault;
+
+    #[cfg(unix)]
+    impl SecureVaultPort for PanicVault {
+        fn contains(&self, _reference: &VaultReference) -> Result<bool, PlatformPortError> {
+            panic!("status polling must not access the injected vault")
+        }
+
+        fn store(
+            &self,
+            _reference: &VaultReference,
+            _secret: &SecretBytes,
+        ) -> Result<(), PlatformPortError> {
+            panic!("status polling must not access the injected vault")
+        }
+
+        fn load(
+            &self,
+            _reference: &VaultReference,
+        ) -> Result<Option<SecretBytes>, PlatformPortError> {
+            panic!("status polling must not access the injected vault")
+        }
+
+        fn delete(&self, _reference: &VaultReference) -> Result<(), PlatformPortError> {
+            panic!("status polling must not access the injected vault")
+        }
+    }
 
     fn opaque_credential() -> Vec<u8> {
         let mut credential = b"ENVR\x01".to_vec();
         credential.extend_from_slice(&[0x42; 32]);
         credential
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn embedded_host_does_not_poll_its_injected_vault_and_shuts_down_cleanly() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let control_endpoint = state_directory.join("agent.sock");
+        let host = AgentHost::new(
+            AgentHostConfiguration {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: control_endpoint.clone(),
+                device_name: "embedded-test".into(),
+                broker: "broker".into(),
+                relay: None,
+            },
+            api::Client::default(),
+            Arc::new(PanicVault),
+            AgentCredentialProtection::OwnerOnlyFile,
+        );
+        let shutdown = host.shutdown_handle();
+        let running = tokio::spawn(host.run());
+        let client = AgentControlClient::new(&control_endpoint);
+
+        let response = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match client.call(AgentRequest::Diagnostics).await {
+                    Ok(response) => break response,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("embedded Agent did not start: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("embedded Agent did not become ready");
+        let AgentResponse::Diagnostics { diagnostics } = response else {
+            panic!("unexpected Agent response")
+        };
+        assert_eq!(
+            diagnostics.credential_protection,
+            AgentCredentialProtection::OwnerOnlyFile
+        );
+        assert!(
+            ProductStore::open_with_vault(&state_directory, Arc::new(PanicVault))
+                .err()
+                .is_some()
+        );
+
+        shutdown.shutdown();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("embedded Agent did not shut down")
+            .unwrap()
+            .unwrap();
+
+        assert!(!control_endpoint.exists());
+        ProductStore::open_with_vault(&state_directory, Arc::new(PanicVault)).unwrap();
     }
 
     #[test]
@@ -2821,7 +3009,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
@@ -2831,6 +3019,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
@@ -3016,7 +3205,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
@@ -3026,6 +3215,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
@@ -3137,7 +3327,7 @@ mod tests {
             .commit_device(pending, &opaque_credential(), 0)
             .unwrap();
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
@@ -3147,6 +3337,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(store),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
@@ -3255,7 +3446,7 @@ mod tests {
         store.start_outgoing_transfer(&transfer_id).unwrap();
         let initial_sequence = store.engine_snapshot().last_sequence;
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
@@ -3265,6 +3456,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(store),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
@@ -3362,7 +3554,7 @@ mod tests {
         let relationship_id = pending.id().to_string();
         store.commit_device(pending, &credential, 0).unwrap();
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
@@ -3372,6 +3564,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(store),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
@@ -3400,7 +3593,7 @@ mod tests {
         }
         drop(runtime);
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
@@ -3410,6 +3603,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
@@ -3662,7 +3856,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
@@ -3672,6 +3866,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
@@ -3712,7 +3907,7 @@ mod tests {
             getrandom::u32().unwrap()
         );
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: PathBuf::from(&endpoint),
@@ -3722,6 +3917,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
@@ -3784,7 +3980,7 @@ mod tests {
         let receiver_cancel = TransferCancelToken::new();
         let outgoing_cancel = TransferCancelToken::new();
         let runtime = Arc::new(AgentRuntime {
-            config: RuntimeConfig {
+            config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
@@ -3794,6 +3990,7 @@ mod tests {
             },
             client: api::Client::default(),
             store: Mutex::new(store),
+            credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::from([(
                 device_id.clone(),
                 receiver_cancel.clone(),

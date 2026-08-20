@@ -1,13 +1,9 @@
 use std::process::ExitCode;
 
 #[cfg(any(unix, windows))]
-#[path = "unix_agent.rs"]
-mod agent;
-
-#[cfg(any(unix, windows))]
 #[tokio::main]
 async fn main() -> ExitCode {
-    match agent::run().await {
+    match envoix_agent::run_cli().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error:#}");
