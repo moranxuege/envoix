@@ -1,5 +1,6 @@
 //! Public application-facing facade for canonical Manifest v2 transfers.
 
+pub mod agent_control;
 pub mod api;
 pub mod command;
 pub mod configuration;

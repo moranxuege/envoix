@@ -14,6 +14,7 @@ use args::{
     TransferPlan, TransfersCommand,
 };
 use clap::Parser;
+use envoix_client::agent_control::AgentControlClient;
 use envoix_client::api::{
     self, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
     InvitationConsumption, PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision,
@@ -21,9 +22,8 @@ use envoix_client::api::{
 };
 use envoix_client::model::TransferDirection;
 use envoix_client::product::{
-    AgentEventCursor, AgentOfferDecision, AgentPathKind, AgentRequest, AgentRequestEnvelope,
-    AgentResponse, AgentResponseEnvelope, AgentTransferPath, MAX_AGENT_REQUEST_BYTES,
-    MAX_AGENT_RESPONSE_BYTES, default_agent_control_endpoint,
+    AgentEventCursor, AgentOfferDecision, AgentPathKind, AgentRequest, AgentResponse,
+    AgentTransferPath,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 
@@ -216,96 +216,12 @@ async fn canonicalize_agent_sources(paths: Vec<PathBuf>) -> CliResult<Vec<PathBu
     Ok(canonical)
 }
 
-#[cfg(unix)]
-async fn call_agent(socket: Option<PathBuf>, request: AgentRequest) -> CliResult<AgentResponse> {
-    use tokio::net::UnixStream;
-
-    let socket = socket
-        .map(Ok)
-        .unwrap_or_else(default_agent_control_endpoint)?;
-    let stream = UnixStream::connect(&socket).await.map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "cannot connect to Envoix Agent at {}: {error}; run `envoix agent start` or start envoix-agent in a foreground shell",
-                socket.display()
-            ),
-        )
-    })?;
-    call_agent_stream(stream, request).await
-}
-
-#[cfg(windows)]
 async fn call_agent(endpoint: Option<PathBuf>, request: AgentRequest) -> CliResult<AgentResponse> {
-    use std::time::Duration;
-
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    let endpoint = endpoint
-        .map(Ok)
-        .unwrap_or_else(default_agent_control_endpoint)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let stream = loop {
-        match ClientOptions::new().open(&endpoint) {
-            Ok(stream) => break stream,
-            Err(error)
-                if error.raw_os_error()
-                    == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32)
-                    && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "cannot connect to Envoix Agent at {}: {error}; start envoix-agent for this user",
-                        endpoint.display()
-                    ),
-                )
-                .into());
-            }
-        }
+    let client = match endpoint {
+        Some(endpoint) => AgentControlClient::new(endpoint),
+        None => AgentControlClient::for_current_user()?,
     };
-    call_agent_stream(stream, request).await
-}
-
-#[cfg(any(unix, windows))]
-async fn call_agent_stream<S>(stream: S, request: AgentRequest) -> CliResult<AgentResponse>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
-    let (read, mut write) = tokio::io::split(stream);
-    let request_id = agent_request_id()?;
-    let envelope = AgentRequestEnvelope::new(request_id.clone(), request)?;
-    let mut bytes = serde_json::to_vec(&envelope)?;
-    if bytes.len() as u64 > MAX_AGENT_REQUEST_BYTES {
-        return Err("Agent request exceeds the control message limit".into());
-    }
-    bytes.push(b'\n');
-    write.write_all(&bytes).await?;
-    write.shutdown().await?;
-    let mut response_bytes = Vec::new();
-    let mut limited = BufReader::new(read).take(MAX_AGENT_RESPONSE_BYTES + 1);
-    limited.read_until(b'\n', &mut response_bytes).await?;
-    if response_bytes.is_empty() {
-        return Err("Envoix Agent closed the control connection without a response".into());
-    }
-    if response_bytes.len() as u64 > MAX_AGENT_RESPONSE_BYTES {
-        return Err("Agent response exceeds the control message limit".into());
-    }
-    let response: AgentResponseEnvelope = serde_json::from_slice(&response_bytes)?;
-    response.validate_for(&request_id)?;
-    Ok(response.response)
-}
-
-fn agent_request_id() -> CliResult<String> {
-    let mut random = [0_u8; 12];
-    getrandom::fill(&mut random)
-        .map_err(|error| io::Error::other(format!("request ID entropy unavailable: {error}")))?;
-    Ok(format!("cli_{}", URL_SAFE_NO_PAD.encode(random)))
+    Ok(client.call(request).await?)
 }
 
 fn install_agent(
@@ -405,14 +321,6 @@ fn manage_agent_service(
         println!("Agent service {completed}.");
     }
     Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-async fn call_agent(
-    _endpoint: Option<PathBuf>,
-    _request: AgentRequest,
-) -> CliResult<AgentResponse> {
-    Err("the local Envoix Agent control transport is unsupported on this platform".into())
 }
 
 fn agent_error(response: AgentResponse) -> CliResult<AgentResponse> {
