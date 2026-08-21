@@ -9,6 +9,9 @@ final class MacApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.servicesProvider = finderSendService
         NSUpdateDynamicServices()
+        Task {
+            await AppleApplicationRuntime.shared.helperService.refresh()
+        }
     }
 
     func applicationShouldHandleReopen(

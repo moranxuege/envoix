@@ -17,8 +17,6 @@ typealias PlatformImage = UIImage
 
 /// Minimum length of a shared pairing token, matching the core requirement.
 let minTokenLength = 12
-let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
-let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
 let defaultLogServer = "https://rdz.chkxwlyh.us:8460"
 let inviteV2URLPrefix = "envoix://invite/v2/"
 let roomControlURLPrefix = "envoix://room/"
@@ -27,26 +25,6 @@ let deprecatedLogServers: Set<String> = [
     "https://envoix.chkxwlyh.us:8460",
     "http://envoix.chkxwlyh.us:8460",
 ]
-
-let expectedCoreFFIAPIVersion: UInt32 = 22
-let expectedRoomControlCoreCapability = "foreground_room_control_v5"
-let expectedNearbyInviteCoreCapability = "nearby_invite_inbox_v1"
-let expectedFailureProjectionCoreCapability = "canonical_failure_projection_v1"
-let expectedRoomControlErrorCoreCapability = "typed_room_control_errors_v1"
-let expectedRememberedCredentialVaultCapability = "typed_remembered_credential_vault_v1"
-let expectedTypedApplicationCapability = "typed_application_contract_v6"
-let expectedPersistentApplicationEngineCapability = "persistent_application_engine_v1"
-
-func coreMatchesExpectedRoomControlContract(_ info: FfiCoreInfo) -> Bool {
-    info.ffiApiVersion == expectedCoreFFIAPIVersion
-        && info.capabilities.contains(expectedRoomControlCoreCapability)
-        && info.capabilities.contains(expectedNearbyInviteCoreCapability)
-        && info.capabilities.contains(expectedFailureProjectionCoreCapability)
-        && info.capabilities.contains(expectedRoomControlErrorCoreCapability)
-        && info.capabilities.contains(expectedRememberedCredentialVaultCapability)
-        && info.capabilities.contains(expectedTypedApplicationCapability)
-        && info.capabilities.contains(expectedPersistentApplicationEngineCapability)
-}
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
 /// `word-word-NN` (always ≥ `minTokenLength` since each word is ≥4 letters).

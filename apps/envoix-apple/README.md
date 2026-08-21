@@ -30,6 +30,23 @@ The iOS app and Share Extension require App Group
 `group.com.envoix.app.shared`. A physical iPhone also needs the normal local
 network, camera, signing, and Share Extension entitlements.
 
+### macOS Agent helper
+
+The macOS application embeds `EnvoixEngineHelper.app` in
+`Contents/Library/LoginItems`. Users explicitly enable it from Settings; the
+GUI then talks to the shared API 23 `FfiAgentControlClient` over the helper's
+owner-only Unix socket. Only the helper starts `FfiAgentHost`, owns the durable
+Engine, and receives the Engine Keychain access group.
+
+Use `scripts/apple-dev.sh macos-build` for certificate-independent compile-only
+builds and `scripts/apple-dev.sh macos-helper-test` for isolated host/control
+tests. These Debug artifacts intentionally omit the production helper Keychain
+entitlement. A distributable build must use `scripts/apple-dev.sh
+macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and
+`ENVOIX_MACOS_NOTARY_PROFILE`; the command fails closed unless Developer ID
+signing, nested entitlement checks, notarization, staple validation, and
+Gatekeeper assessment all succeed.
+
 ## Transfer model
 
 - Files, folders, Photos, and Share Extension representations all become roots

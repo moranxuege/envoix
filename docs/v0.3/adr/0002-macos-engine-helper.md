@@ -144,14 +144,15 @@ job. An ad-hoc signature is never a v0.3 distribution or release fallback.
 Mac App Store packaging is not part of the v0.3 path; its sandbox, login-item,
 and review constraints require a separate ADR before that channel is added.
 
-### API 22 integration and deferred legacy migration
+### API 23 host/control integration and deferred legacy migration
 
-API 22 provides the shared persistent Engine and vault UniFFI binding. Apple
-host wiring consumes that contract without a Swift-owned parallel contract:
+API 22 introduced the shared persistent Engine and vault UniFFI binding. API
+23 adds the shared `FfiAgentHost` and `FfiAgentControlClient` boundary with the
+`agent_host_control_v1` capability. Apple host wiring consumes those contracts
+without a Swift-owned parallel protocol:
 
 - opening one durable Engine at a caller-supplied state directory, including
-  lifetime locking and current-store recovery; API 22 releases the lock when
-  the final generated Engine handle is released and exposes no shutdown call;
+  lifetime locking and current-store recovery;
 - the versioned command, event, snapshot, and capability semantics used by
   embedded hosts;
 - injection of the secure-vault port using opaque vault references and
@@ -160,24 +161,46 @@ host wiring consumes that contract without a Swift-owned parallel contract:
   corruption outcomes;
 - Engine-owned snapshot and command coverage for device lists, pairing,
   credential rotation, and revocation.
+- one typed desktop host with explicit startup, readiness, terminal failure,
+  and idempotent awaitable shutdown; the host owns the Engine, vault, socket,
+  and control handles until shutdown completes;
+- one typed control client that performs protocol compatibility checks inside
+  the shared binding and never exposes Agent JSON to Swift. Mobile builds keep
+  the same binding surface but return `UnsupportedPlatform` instead of
+  starting a desktop host.
 
-API 22 does not expose an Engine-store origin, recovery report, migration
-report, or helper control-client contract through UniFFI. Apple acceptance
-tests therefore provide external evidence for fresh state opens,
-current-schema reopen, and legacy-state rejection; they must not describe
-that evidence as a runtime report or as proof that Apple inspected or imported
-v0.2 data. This phase does not read, migrate, or delete
+API 23 still does not expose an Engine-store origin, recovery report, or
+migration report through UniFFI. Apple acceptance tests therefore provide
+external evidence for fresh state opens, current-schema reopen, owner
+exclusion, awaited shutdown, and legacy-state rejection; they must not
+describe that evidence as a runtime report or as proof that Apple inspected or
+imported v0.2 data. This phase does not read, migrate, or delete
 `remembered-peers-v1.json`, legacy file credentials or Keychain items,
 `RememberedRoomOutbox`, or received files.
 
 Any legacy Apple migration is separate future work. It requires explicit
 approval, a versioned import contract, and independent evidence covering the
 source inventory, validated destination, rollback, and retention behavior.
-Until then, legacy data remains retained but outside the API 22 Engine owner.
+Until then, legacy data remains retained but outside the API 23 Agent owner.
 
-The signed helper target, its entitlements, owner-only IPC implementation,
-Developer ID signing, hardened runtime, and notarization remain stage B work;
-API 22 integration does not claim that release topology as implemented.
+The Apple stage-B implementation embeds `EnvoixEngineHelper.app` at
+`Contents/Library/LoginItems`, registers it only after an explicit Settings
+action through `SMAppService`, and gives only that helper the production
+Keychain access-group entitlement. The helper constructs `FfiAgentHost` with
+`AppleApplicationVault`, validates typed readiness, monitors terminal state,
+and awaits `shutdown()` before exiting. The GUI constructs only
+`FfiAgentControlClient` for the stable owner-only Unix socket and performs no
+Engine open or vault operation. Disabled, approval-pending, unavailable, and
+incompatible states fail closed without an in-memory or legacy-store fallback.
+
+Debug and ordinary test builds deliberately omit the helper Keychain
+entitlement and remain ad-hoc compile/test artifacts. The `macos-release`
+pipeline requires a Team `6638TTB2SF` Developer ID Application identity and a
+notarytool Keychain profile, then verifies the nested helper, Team IDs, bundle
+IDs, designated requirements, helper-only access group, hardened signing,
+notarization, staple, and Gatekeeper assessment. The pipeline existing in the
+repository is not itself notarization evidence; only a successful run with the
+release Keychain inputs can supply that evidence.
 
 ## Alternatives considered
 
@@ -218,5 +241,5 @@ decision.
   signing, login-item, or Keychain evidence.
 - Helper lifecycle and upgrade compatibility require real-host tests in
   addition to hosted Swift tests.
-- API 22 integration leaves legacy stores in place without treating them as
+- API 23 integration leaves legacy stores in place without treating them as
   migration input or as the target architecture.

@@ -54,7 +54,56 @@ final class ApplicationEngineAdapterTests: XCTestCase {
                 binding: binding
             )
         )
+        XCTAssertThrowsError(
+            try validateApplicationBinding(
+                core: FfiCoreInfo(
+                    ffiApiVersion: expectedCoreFFIAPIVersion,
+                    coreVersion: core.coreVersion,
+                    capabilities: [
+                        expectedTypedApplicationCapability,
+                        expectedPersistentApplicationEngineCapability,
+                    ]
+                ),
+                binding: binding
+            )
+        )
     }
+
+    #if os(iOS)
+    func testMobileAgentHostAndControlClientFailClosed() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let configuration = FfiAgentHostConfiguration(
+            stateDirectory: root.appendingPathComponent("state").path,
+            inboxDirectory: root.appendingPathComponent("inbox").path,
+            controlEndpoint: root.appendingPathComponent("agent.sock").path,
+            deviceName: "iPhone",
+            broker: defaultRendezvousBroker,
+            relay: defaultRelayURL,
+            credentialProtection: .appleKeychain
+        )
+
+        XCTAssertThrowsError(
+            try FfiAgentHost.start(
+                configuration: configuration,
+                vault: MemoryApplicationVault()
+            )
+        ) { error in
+            guard case let FfiAgentHostError.Failed(code, _) = error else {
+                return XCTFail("unexpected host error: \(error)")
+            }
+            XCTAssertEqual(code, .unsupportedPlatform)
+        }
+        XCTAssertThrowsError(
+            try FfiAgentControlClient(controlEndpoint: configuration.controlEndpoint)
+        ) { error in
+            guard case let FfiAgentControlError.Failed(code, _) = error else {
+                return XCTFail("unexpected control error: \(error)")
+            }
+            XCTAssertEqual(code, .unsupportedPlatform)
+        }
+    }
+    #endif
 
     func testTypedEventsRebuildSnapshotAndReportGaps() async throws {
         let adapter = try ApplicationEngineAdapter(engine: FfiApplicationEngine())
@@ -564,6 +613,7 @@ final class ApplicationEngineAdapterTests: XCTestCase {
             capabilities: [
                 expectedTypedApplicationCapability,
                 expectedPersistentApplicationEngineCapability,
+                expectedAgentHostControlCapability,
             ]
         )
     }
@@ -759,5 +809,10 @@ private final class MemoryApplicationVault: FfiApplicationVault, @unchecked Send
 
 #if os(macOS)
 private final class FakeMacOSHelperControlClient:
-    MacOSHelperControlClient, @unchecked Sendable {}
+    MacOSHelperControlClient, @unchecked Sendable
+{
+    func call(request: FfiAgentRequest) async throws -> FfiAgentResponse {
+        throw MacOSAgentControlClientError.unavailable
+    }
+}
 #endif

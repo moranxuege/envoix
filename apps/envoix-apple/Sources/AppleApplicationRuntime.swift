@@ -58,12 +58,6 @@ enum AppleApplicationEngineLocation {
             .standardizedFileURL
     }
 }
-#elseif os(macOS)
-/// Stage-A ownership seam. The concrete IPC client is supplied by the signed
-/// helper work in stage B; this GUI-side marker owns no Engine or vault handle.
-protocol MacOSHelperControlClient: AnyObject, Sendable {}
-
-final class PendingMacOSHelperControlClient: MacOSHelperControlClient, @unchecked Sendable {}
 #endif
 
 private enum AppleApplicationProcessOwner {
@@ -114,6 +108,10 @@ final class AppleApplicationRuntime: ObservableObject {
         }
         return client
     }
+
+    lazy var helperService = MacOSAgentServiceController(
+        controlClient: helperControlClient
+    )
     #endif
 
     convenience init() {
@@ -124,7 +122,15 @@ final class AppleApplicationRuntime: ObservableObject {
             preconditionFailure("The persistent application Engine could not open: \(error)")
         }
         #elseif os(macOS)
-        self.init(helperControlClient: PendingMacOSHelperControlClient())
+        let controlClient: MacOSHelperControlClient
+        do {
+            controlClient = try MacOSAgentControlClient(
+                controlEndpoint: MacOSAgentBoundary.controlEndpoint()
+            )
+        } catch {
+            controlClient = UnavailableMacOSAgentControlClient()
+        }
+        self.init(helperControlClient: controlClient)
         #endif
     }
 

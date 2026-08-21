@@ -22,6 +22,13 @@ targets:
       - Resources/PrivacyInfo.xcprivacy
     dependencies:
       - package: EnvoixCore
+      - target: EnvoixEngineHelper
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LoginItems
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app
@@ -49,6 +56,50 @@ targets:
           - "CoreWLAN"
           - "-framework"
           - "CoreBluetooth"
+
+  EnvoixEngineHelper:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: Helper
+        excludes:
+          - Info.plist
+          - EnvoixEngineHelper.entitlements
+      - Sources/AppleApplicationVault.swift
+      - Sources/AppleKeychainAccess.swift
+      - Sources/EnvoixCoreContract.swift
+      - Sources/EnvoixDefaults.swift
+      - Sources/MacOSAgentBoundary.swift
+    dependencies:
+      - package: EnvoixCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.engine-helper
+        PRODUCT_NAME: EnvoixEngineHelper
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "5"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Helper/Info.plist
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SystemConfiguration"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SecurityFoundation"
+          - "-framework"
+          - "CoreWLAN"
+          - "-framework"
+          - "CoreBluetooth"
+      configs:
+        Release:
+          CODE_SIGN_ENTITLEMENTS: Helper/EnvoixEngineHelper.entitlements
 
   Envoix-iOS:
     type: application
@@ -186,6 +237,7 @@ targets:
       - Tests/EnvoixIOSUITests/ApplicationEngineAdapterTests.swift
       - Tests/EnvoixIOSUITests/AppleApplicationVaultTests.swift
       - Tests/EnvoixMacOSUITests/ConnectionHubPresentationTests.swift
+      - Tests/EnvoixMacOSUITests/MacOSAgentControlTests.swift
       - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
       - Tests/EnvoixMacOSUITests/RoomCodeInputFormatterTests.swift
     dependencies:
@@ -233,6 +285,39 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: NO
+
+  EnvoixEngineHelperTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Helper/AgentHostRuntime.swift
+      - Sources/AppleApplicationVault.swift
+      - Sources/AppleKeychainAccess.swift
+      - Sources/EnvoixCoreContract.swift
+      - Sources/EnvoixDefaults.swift
+      - Sources/MacOSAgentBoundary.swift
+      - Tests/EnvoixEngineHelperTests
+    dependencies:
+      - package: EnvoixCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.engine-helper.tests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SystemConfiguration"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SecurityFoundation"
+          - "-framework"
+          - "CoreWLAN"
+          - "-framework"
+          - "CoreBluetooth"
 
 schemes:
   Envoix:
@@ -295,3 +380,14 @@ schemes:
       gatherCoverageData: false
       targets:
         - Envoix-macOSClipboardTests
+
+  Envoix-EngineHelper:
+    build:
+      targets:
+        EnvoixEngineHelper: all
+        EnvoixEngineHelperTests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - EnvoixEngineHelperTests

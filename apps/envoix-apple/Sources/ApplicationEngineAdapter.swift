@@ -1,9 +1,6 @@
 import Foundation
 import EnvoixCore
 
-let expectedApplicationBindingVersion: UInt32 = 1
-let expectedApplicationContractVersion: UInt16 = 6
-
 enum ApplicationEngineAdapterError: Error, Equatable {
     case incompatibleBinding(ffi: UInt32, binding: UInt32, contract: UInt16)
     case closed
@@ -17,7 +14,8 @@ func validateApplicationBinding(
           binding.bindingVersion == expectedApplicationBindingVersion,
           binding.contractVersion == expectedApplicationContractVersion,
           core.capabilities.contains(expectedTypedApplicationCapability),
-          core.capabilities.contains(expectedPersistentApplicationEngineCapability)
+          core.capabilities.contains(expectedPersistentApplicationEngineCapability),
+          core.capabilities.contains(expectedAgentHostControlCapability)
     else {
         throw ApplicationEngineAdapterError.incompatibleBinding(
             ffi: core.ffiApiVersion,

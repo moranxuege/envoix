@@ -17,11 +17,18 @@ struct SettingsStageView: View {
     @AppStorage("envoix.logServer") private var logServer = defaultLogServer
     @State private var showAdvanced = false
     private let coreInfo = envoixCoreInfo()
+    #if os(macOS)
+    @ObservedObject private var agentService = AppleApplicationRuntime.shared.helperService
+    #endif
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 appearanceSection
+
+                #if os(macOS)
+                agentServiceSection
+                #endif
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(AppText.value("Language", "语言", language: language))
@@ -188,6 +195,128 @@ struct SettingsStageView: View {
             .padding(.top, 2)
             .accessibilityIdentifier("settings_core_version")
     }
+
+    #if os(macOS)
+    private var agentServiceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(AppText.value(
+                "Background service",
+                "后台服务",
+                language: language
+            ))
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+            settingToggle(
+                AppText.value(
+                    "Keep Envoix ready in the background",
+                    "让 Envoix 在后台保持就绪",
+                    language: language
+                ),
+                subtitle: AppText.value(
+                    "The signed helper owns persistent state and credentials. Turning it off keeps existing state, credentials, Outbox data, and received files.",
+                    "签名 helper 独占持久状态和凭据。关闭后台服务不会删除已有状态、凭据、发件箱数据或已接收文件。",
+                    language: language
+                ),
+                isOn: Binding(
+                    get: { agentService.isRequestedEnabled },
+                    set: { enabled in
+                        Task { await agentService.setEnabled(enabled) }
+                    }
+                )
+            )
+            Divider().overlay(Theme.line.opacity(0.5))
+            HStack(spacing: 10) {
+                if agentService.connectionState == .checking {
+                    ProgressView().controlSize(.small)
+                }
+                Text(agentServiceStatusText)
+                    .font(.footnote)
+                    .foregroundStyle(agentServiceStatusColor)
+                Spacer()
+                Button(AppText.value("Refresh", "刷新", language: language)) {
+                    Task { await agentService.refresh() }
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .card(padding: 14)
+        .task {
+            await agentService.refresh()
+        }
+        .accessibilityIdentifier("settings_background_service")
+    }
+
+    private var agentServiceStatusText: String {
+        switch agentService.registrationState {
+        case .unknown:
+            return AppText.value("Checking…", "正在检查…", language: language)
+        case .notRegistered:
+            return AppText.value("Off", "已关闭", language: language)
+        case .requiresApproval:
+            return AppText.value(
+                "Approval required in System Settings > Login Items",
+                "需要在“系统设置 > 登录项”中批准",
+                language: language
+            )
+        case .helperNotFound:
+            return AppText.value(
+                "The embedded helper is missing",
+                "内嵌 helper 缺失",
+                language: language
+            )
+        case .failed:
+            return AppText.value(
+                "Registration failed",
+                "注册失败",
+                language: language
+            )
+        case .enabled:
+            switch agentService.connectionState {
+            case .idle, .checking:
+                return AppText.value("Starting…", "正在启动…", language: language)
+            case let .ready(pairedDevices):
+                let suffix = pairedDevices == 1 ? "device" : "devices"
+                return AppText.value(
+                    "Ready · \(pairedDevices) paired \(suffix)",
+                    "已就绪 · \(pairedDevices) 台已配对设备",
+                    language: language
+                )
+            case .unavailable:
+                return AppText.value(
+                    "Helper unavailable",
+                    "Helper 不可用",
+                    language: language
+                )
+            case .incompatible:
+                return AppText.value(
+                    "Helper version is incompatible",
+                    "Helper 版本不兼容",
+                    language: language
+                )
+            }
+        }
+    }
+
+    private var agentServiceStatusColor: Color {
+        switch agentService.registrationState {
+        case .failed, .helperNotFound:
+            return Theme.danger
+        case .requiresApproval:
+            return Theme.warning
+        case .enabled:
+            switch agentService.connectionState {
+            case .ready:
+                return Theme.success
+            case .unavailable, .incompatible:
+                return Theme.danger
+            case .idle, .checking:
+                return Theme.muted
+            }
+        case .unknown, .notRegistered:
+            return Theme.muted
+        }
+    }
+    #endif
 
     private var transferCacheSection: some View {
         VStack(alignment: .leading, spacing: 10) {
