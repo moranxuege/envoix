@@ -189,7 +189,8 @@ deny = ["100.64.0.0/10"]
 
 See [the Manifest v2 contract](docs/design/manifest-v2-goal0-contract.md) for
 the protocol and persistence boundaries, and [authentication](docs/auth.md) for
-the SPAKE2/channel-binding model.
+the SPAKE2/channel-binding model. [Rendezvous deployment](docs/rendezvous-deployment.md)
+covers running your own broker.
 
 ## Debug build marker
 
