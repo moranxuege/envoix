@@ -29,10 +29,10 @@ use envoix_client::product::{
     AGENT_PROTOCOL_VERSION, AgentControlTransport, AgentCredentialProtection, AgentDiagnostics,
     AgentEvent, AgentEventCursor, AgentEventEnvelope, AgentOfferDecision, AgentPathKind,
     AgentPendingOffer, AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
-    AgentResponseEnvelope, AgentSettings, AgentSnapshot, AgentStatus, AgentTransferPath, InboxItem,
-    InboxRoot, MAX_AGENT_ACTIVE_PATHS, MAX_AGENT_EVENT_BATCH, MAX_AGENT_PENDING_OFFERS,
-    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation, PreparedRememberedDevice,
-    ProductStore, RememberedDeviceRecord, default_agent_control_endpoint,
+    AgentResponseEnvelope, AgentSettings, AgentSnapshot, AgentStatus, AgentTransferPath,
+    DeviceSummary, InboxItem, InboxRoot, MAX_AGENT_ACTIVE_PATHS, MAX_AGENT_EVENT_BATCH,
+    MAX_AGENT_PENDING_OFFERS, MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation,
+    PreparedRememberedDevice, ProductStore, RememberedDeviceRecord, default_agent_control_endpoint,
     default_agent_state_directory, is_valid_agent_request_id,
 };
 #[cfg(windows)]
@@ -53,6 +53,7 @@ const REMEMBERED_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
 const RECEIVER_RETRY_DELAY: Duration = Duration::from_secs(3);
 const RECEIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 const RECEIVER_PARKED_ATTEMPT: Duration = Duration::from_secs(30);
+const INITIAL_PAIRING_RETRY_DELAY: Duration = Duration::from_millis(750);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const MAX_RETAINED_AGENT_EVENTS: usize = 1_024;
 const OUTGOING_PROGRESS_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
@@ -1464,6 +1465,7 @@ async fn handle_request_result(
             diagnostics: runtime.diagnostics()?,
         }),
         AgentRequest::Pair { label } => begin_pairing(runtime, label).await,
+        AgentRequest::JoinPairing { pairing } => join_pairing(runtime, pairing).await,
     }
 }
 
@@ -1617,6 +1619,23 @@ async fn begin_pairing(runtime: Arc<AgentRuntime>, label: String) -> Result<Agen
     Ok(response)
 }
 
+#[derive(Debug)]
+struct RetryableInitialPairingClose {
+    reason: String,
+}
+
+impl std::fmt::Display for RetryableInitialPairingClose {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "peer closed the room before verification: {}",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for RetryableInitialPairingClose {}
+
 async fn run_initial_pairing(
     runtime: Arc<AgentRuntime>,
     prepared: PreparedRememberedDevice,
@@ -1625,7 +1644,37 @@ async fn run_initial_pairing(
 ) {
     let label = prepared.label().to_string();
     let device_id = prepared.id().to_string();
-    let paired = establish_initial_room(&runtime, prepared, invitation, &verification_code).await;
+    // A foreground client may discover the verification request before it can
+    // hand the invitation to its durable Agent owner. Keep the same one-time
+    // invitation alive until its advertised expiry so that the Agent can
+    // reconnect without moving credential bytes through the GUI process.
+    let paired = loop {
+        match establish_initial_room(
+            &runtime,
+            prepared.clone(),
+            invitation.clone(),
+            &verification_code,
+        )
+        .await
+        {
+            Ok(paired) => break Ok(paired),
+            Err(error) if runtime.shutdown.is_cancelled() => break Err(error),
+            Err(error) if error.is::<RetryableInitialPairingClose>() => {
+                let expired = unix_seconds()
+                    .map(|now| now >= invitation.expires_at_unix_secs())
+                    .unwrap_or(true);
+                if expired {
+                    break Err(error);
+                }
+                tracing::debug!(device = %label, %error, "initial pairing peer disconnected; waiting for a durable owner");
+                tokio::select! {
+                    _ = tokio::time::sleep(INITIAL_PAIRING_RETRY_DELAY) => {}
+                    _ = runtime.shutdown.cancelled() => break Err(error),
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
     lock_or_log(&runtime.active_pairings, "active pairings")
         .map(|mut pairings| pairings.remove(&label.to_ascii_lowercase()));
     if let Err(error) = record_agent_event(
@@ -1637,7 +1686,7 @@ async fn run_initial_pairing(
     ) {
         tracing::error!(%error, "pairing completion event could not be recorded");
     }
-    let (session, session_cancel) = match paired {
+    let (session, session_cancel, _device) = match paired {
         Ok(paired) => {
             if let Err(error) = record_agent_event(
                 &runtime,
@@ -1660,6 +1709,85 @@ async fn run_initial_pairing(
             return;
         }
     };
+    continue_initial_room(runtime, session, session_cancel, device_id, label).await;
+}
+
+async fn join_pairing(
+    runtime: Arc<AgentRuntime>,
+    pairing: envoix_client::product::AgentPairingInput,
+) -> Result<AgentResponse> {
+    if runtime.shutdown.is_cancelled() {
+        bail!("Agent is shutting down");
+    }
+    pairing.validate()?;
+    let invitation = RoomControlInvite::parse(
+        &pairing.invitation,
+        runtime.config.broker.clone(),
+        runtime.config.relay.clone(),
+    )?;
+    let prepared = {
+        let store = lock(&runtime.store)?;
+        store.prepare_device(&pairing.label, invitation.broker(), invitation.relay())?
+    };
+    let label = prepared.label().to_string();
+    let device_id = prepared.id().to_string();
+    {
+        let mut pairings = lock(&runtime.active_pairings)?;
+        if !pairings.insert(label.to_ascii_lowercase()) {
+            bail!("a pairing for this device label is already active");
+        }
+    }
+    if let Err(error) = record_agent_event(
+        &runtime,
+        AgentEvent::PairingChanged {
+            label: label.clone(),
+            active: true,
+        },
+    ) {
+        lock(&runtime.active_pairings)?.remove(&label.to_ascii_lowercase());
+        return Err(error);
+    }
+
+    let paired =
+        establish_joined_room(&runtime, prepared, invitation, &pairing.verification_code).await;
+    lock(&runtime.active_pairings)?.remove(&label.to_ascii_lowercase());
+    record_agent_event(
+        &runtime,
+        AgentEvent::PairingChanged {
+            label: label.clone(),
+            active: false,
+        },
+    )?;
+    let (session, session_cancel, device) = paired?;
+    record_agent_event(
+        &runtime,
+        AgentEvent::RelationshipChanged {
+            relationship_id: device_id.clone(),
+            change: AgentRelationshipChange::Trusted,
+        },
+    )?;
+    tracing::info!(device = %label, "device verification completed");
+
+    let task_runtime = runtime.clone();
+    let response_device = device.clone();
+    if let Err(error) = spawn_background_task(&runtime, async move {
+        continue_initial_room(task_runtime, session, session_cancel, device_id, label).await;
+    }) {
+        lock(&runtime.active_receivers)?.remove(&device.id);
+        return Err(error);
+    }
+    Ok(AgentResponse::DevicePaired {
+        device: response_device,
+    })
+}
+
+async fn continue_initial_room(
+    runtime: Arc<AgentRuntime>,
+    session: Arc<RoomControlSession>,
+    session_cancel: TransferCancelToken,
+    device_id: String,
+    label: String,
+) {
     let result = run_room_session(
         &runtime,
         session.clone(),
@@ -1687,20 +1815,21 @@ async fn establish_initial_room(
     prepared: PreparedRememberedDevice,
     invitation: RoomControlInvite,
     verification_code: &str,
-) -> Result<(Arc<RoomControlSession>, TransferCancelToken)> {
+) -> Result<(Arc<RoomControlSession>, TransferCancelToken, DeviceSummary)> {
     let device_id = prepared.id().to_string();
+    let invitation_relay = invitation.relay().map(str::to_string);
     let session = Arc::new(
         api::connect_room_control(
             invitation,
             runtime.config.device_name.clone(),
             true,
             false,
-            runtime.session_config(runtime.config.relay.as_deref()),
+            runtime.session_config(invitation_relay.as_deref()),
             &runtime.shutdown,
         )
         .await?,
     );
-    let pairing = async {
+    let pairing: Result<(TransferCancelToken, DeviceSummary)> = async {
         session.request_verification(verification_code).await?;
         loop {
             match session.next_event().await? {
@@ -1710,20 +1839,93 @@ async fn establish_initial_room(
                     })?;
                     let session_cancel = register_remembered_receiver(runtime, &device_id)?
                         .ok_or_else(|| anyhow!("remembered receiver was already active"))?;
-                    let commit_result = (|| -> Result<()> {
-                        lock(&runtime.store)?.commit_device(
-                            prepared,
-                            &credential.to_opaque(),
-                            0,
-                        )?;
-                        Ok(())
-                    })();
-                    if let Err(error) = commit_result {
-                        lock_or_log(&runtime.active_receivers, "active receivers")
-                            .map(|mut active| active.remove(&device_id));
-                        return Err(error);
+                    let commit_result =
+                        lock(&runtime.store)?.commit_device(prepared, &credential.to_opaque(), 0);
+                    let device = match commit_result {
+                        Ok(device) => device,
+                        Err(error) => {
+                            lock_or_log(&runtime.active_receivers, "active receivers")
+                                .map(|mut active| active.remove(&device_id));
+                            return Err(error.into());
+                        }
+                    };
+                    return Ok((session_cancel, device));
+                }
+                RoomControlEvent::VerificationFailed => {
+                    bail!("the one-time device verification code was rejected");
+                }
+                RoomControlEvent::IncomingOffer(offer) => {
+                    session
+                        .reject_offer(&offer.offer_id, RoomOfferRejection::Invalid)
+                        .await?;
+                }
+                RoomControlEvent::PeerClosed(reason) => {
+                    return Err(RetryableInitialPairingClose {
+                        reason: format!("{reason:?}"),
                     }
-                    return Ok(session_cancel);
+                    .into());
+                }
+                RoomControlEvent::VerificationRequested
+                | RoomControlEvent::LifetimeChanged(_)
+                | RoomControlEvent::Pong { .. } => {}
+                RoomControlEvent::OfferAccepted { .. } | RoomControlEvent::OfferRejected { .. } => {
+                    bail!("peer sent an unexpected offer decision during verification");
+                }
+            }
+        }
+    }
+    .await;
+    match pairing {
+        Ok((session_cancel, device)) => Ok((session, session_cancel, device)),
+        Err(error) => {
+            session.shutdown().await;
+            Err(error)
+        }
+    }
+}
+
+async fn establish_joined_room(
+    runtime: &AgentRuntime,
+    prepared: PreparedRememberedDevice,
+    invitation: RoomControlInvite,
+    verification_code: &str,
+) -> Result<(Arc<RoomControlSession>, TransferCancelToken, DeviceSummary)> {
+    let device_id = prepared.id().to_string();
+    let invitation_relay = invitation.relay().map(str::to_string);
+    let session = Arc::new(
+        api::connect_room_control(
+            invitation,
+            runtime.config.device_name.clone(),
+            false,
+            false,
+            runtime.session_config(invitation_relay.as_deref()),
+            &runtime.shutdown,
+        )
+        .await?,
+    );
+    let pairing: Result<(TransferCancelToken, DeviceSummary)> = async {
+        let mut submitted = false;
+        loop {
+            match session.next_event().await? {
+                RoomControlEvent::VerificationRequested if !submitted => {
+                    session.submit_verification_code(verification_code).await?;
+                    submitted = true;
+                }
+                RoomControlEvent::VerificationSucceeded if submitted => {
+                    let credential = session.pairing_credential().ok_or_else(|| {
+                        anyhow!("verified room did not expose a pairing credential")
+                    })?;
+                    let session_cancel = register_remembered_receiver(runtime, &device_id)?
+                        .ok_or_else(|| anyhow!("remembered receiver was already active"))?;
+                    match lock(&runtime.store)?.commit_device(prepared, &credential.to_opaque(), 0)
+                    {
+                        Ok(device) => return Ok((session_cancel, device)),
+                        Err(error) => {
+                            lock_or_log(&runtime.active_receivers, "active receivers")
+                                .map(|mut active| active.remove(&device_id));
+                            return Err(error.into());
+                        }
+                    }
                 }
                 RoomControlEvent::VerificationFailed => {
                     bail!("the one-time device verification code was rejected");
@@ -1739,6 +1941,9 @@ async fn establish_initial_room(
                 RoomControlEvent::VerificationRequested
                 | RoomControlEvent::LifetimeChanged(_)
                 | RoomControlEvent::Pong { .. } => {}
+                RoomControlEvent::VerificationSucceeded => {
+                    bail!("peer completed device verification before requesting a code");
+                }
                 RoomControlEvent::OfferAccepted { .. } | RoomControlEvent::OfferRejected { .. } => {
                     bail!("peer sent an unexpected offer decision during verification");
                 }
@@ -1747,7 +1952,7 @@ async fn establish_initial_room(
     }
     .await;
     match pairing {
-        Ok(session_cancel) => Ok((session, session_cancel)),
+        Ok((session_cancel, device)) => Ok((session, session_cancel, device)),
         Err(error) => {
             session.shutdown().await;
             Err(error)
@@ -3220,7 +3425,7 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v10_envelope() {
+    fn request_decoder_accepts_a_valid_v11_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -4145,7 +4350,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v10_envelope() {
+    async fn local_socket_round_trips_a_v11_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -4189,7 +4394,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_named_pipe_round_trips_a_v10_envelope_for_its_owner() {
+    async fn windows_named_pipe_round_trips_a_v11_envelope_for_its_owner() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let directory = tempfile::tempdir().unwrap();

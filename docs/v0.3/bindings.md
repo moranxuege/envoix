@@ -51,10 +51,13 @@ may start a host; mobile targets expose the same binding surface but fail with
 UniFFI enums and records and rejects an incompatible Agent protocol version.
 The bounded JSON envelope remains an implementation detail of the owner-only
 Rust IPC transport. Snapshots, events, status, diagnostics, and lifecycle
-records contain no credential or invitation material. The immediate pairing
-response is the explicit exception: it carries ephemeral room and verification
-codes for display/consumption, redacts them from Rust debug output, and must not
-be persisted or logged.
+records contain no credential or invitation material. Pairing has two explicit
+exceptions: the creator response carries ephemeral room and verification codes
+for display, while the Agent-owned join request carries a bounded invitation,
+label, and one-time code into the durable owner. Both redact authentication
+factors from Rust debug output and must not be persisted or logged. The join
+response returns only a non-secret device summary; credential bytes never cross
+the control boundary.
 
 `FfiApplicationEngine` owns one ordered application snapshot. Its no-argument
 constructor is limited to contract tests and transient previews; product hosts

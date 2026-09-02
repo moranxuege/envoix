@@ -156,7 +156,10 @@ final class AppleApplicationRuntime: ObservableObject {
             nearbyCoordinator: NearbyDiscoveryCoordinator(),
             presence: NearbyPresencePreferences(),
             workflow: ConnectionWorkflowState(
-                gateway: RoomControlGatewayFactory.make()
+                gateway: RoomControlGatewayFactory.make(),
+                durablePairingCoordinator: MacOSAgentPairingCoordinator(
+                    controlClient: helperControlClient
+                )
             ),
             rememberedOutbox: RememberedRoomOutboxController(),
             wifiAwareServices: .shared

@@ -34,14 +34,38 @@ network, camera, signing, and Share Extension entitlements.
 
 The macOS application embeds `EnvoixEngineHelper.app` in
 `Contents/Library/LoginItems`. Users explicitly enable it from Settings; the
-GUI then talks to the shared API 23 `FfiAgentControlClient` over the helper's
+GUI then talks to the shared API 24 `FfiAgentControlClient` over the helper's
 owner-only Unix socket. Only the helper starts `FfiAgentHost`, owns the durable
 Engine, and receives the Engine Keychain access group.
 
 Use `scripts/apple-dev.sh macos-build` for certificate-independent compile-only
 builds and `scripts/apple-dev.sh macos-helper-test` for isolated host/control
 tests. These Debug artifacts intentionally omit the production helper Keychain
-entitlement. A distributable build must use `scripts/apple-dev.sh
+entitlement and cannot persist verified pairing credentials. For a locally
+usable Debug app, install an Apple Development identity for Team `6638TTB2SF`
+and run `scripts/apple-dev.sh macos-debug-signed`. Set
+`ENVOIX_MACOS_ALLOW_PROVISIONING_UPDATES=1` only when Xcode is allowed to create
+or download the required development signing assets. If the Mac is not already
+registered with the team, separately set
+`ENVOIX_MACOS_ALLOW_DEVICE_REGISTRATION=1` to permit that external account
+change. The signed Debug command fails closed unless the GUI has no Engine
+Keychain group and the embedded helper has exactly
+`6638TTB2SF.com.envoix.engine.credentials`. Signed Debug uses the isolated
+helper bundle identifier `com.envoix.app.engine-helper.debug`; this prevents
+macOS Background Task Management from reusing an incompatible ad-hoc helper
+registration while the production helper keeps `com.envoix.app.engine-helper`.
+
+This command validates the signed helper host, its Agent control surface, and
+helper-owned Keychain persistence. Agent protocol v11 moves first-contact
+`join_pairing` behind that helper: when a foreground macOS Room receives a
+verification request, the GUI closes its unverified session and sends only the
+bounded invitation, label, and one-time code over the owner-only socket. The
+helper reconnects, verifies, commits the Relationship, and keeps the credential
+inside its Keychain-backed vault. The legacy foreground transfer and
+remembered-Room presentation remain separate pending their full Agent snapshot
+and event migration; they must not reopen or copy the helper credential.
+
+A distributable build must use `scripts/apple-dev.sh
 macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and
 `ENVOIX_MACOS_NOTARY_PROFILE`; the command fails closed unless Developer ID
 signing, nested entitlement checks, notarization, staple validation, and

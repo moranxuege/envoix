@@ -29,14 +29,14 @@ final class AgentHostBoundaryTests: XCTestCase {
         XCTAssertEqual(MacOSAgentBoundary.deviceName(from: " \n "), "Mac")
     }
 
-    func testHostWrapperRequiresAPI23AgentCapability() throws {
+    func testHostWrapperRequiresAPI24AgentCapability() throws {
         let configuration = isolatedConfiguration()
         let core = envoixCoreInfo()
-        XCTAssertEqual(core.ffiApiVersion, 23)
+        XCTAssertEqual(core.ffiApiVersion, 24)
         XCTAssertTrue(core.capabilities.contains(expectedAgentHostControlCapability))
 
         let incompatible = FfiCoreInfo(
-            ffiApiVersion: 23,
+            ffiApiVersion: 24,
             coreVersion: core.coreVersion,
             capabilities: core.capabilities.filter {
                 $0 != expectedAgentHostControlCapability

@@ -734,7 +734,7 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 23)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 24)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
         XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v5")
         XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
@@ -767,7 +767,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             "persistent_application_engine_v1"
         )
         XCTAssertTrue(info.capabilities.contains(expectedAgentHostControlCapability))
-        XCTAssertEqual(expectedAgentHostControlCapability, "agent_host_control_v1")
+        XCTAssertEqual(expectedAgentHostControlCapability, "agent_host_control_v2")
     }
 
     func testTypedRoomControlErrorsDoNotUseDiagnosticTextForDisposition() {
@@ -1089,6 +1089,53 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(gateway.preparedVerification?.endpoint, endpoint)
         XCTAssertEqual(gateway.submittedVerificationCodes, ["012345"])
         XCTAssertFalse(workflow.verificationRequested)
+    }
+
+    func testDurablePairingHandsVerificationToAgentOwner() async {
+        let gateway = RecordingRoomControlGateway()
+        let coordinator = RecordingDurablePairingCoordinator()
+        let workflow = ConnectionWorkflowState(
+            gateway: gateway,
+            durablePairingCoordinator: coordinator
+        )
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: "https://relay.example.test"
+        )
+
+        XCTAssertNil(workflow.joinRoomControl(
+            input: "123456-test-room",
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My Mac",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        ))
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "WSL",
+            creator: false,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        gateway.emit(.verificationRequested)
+        await Task.yield()
+
+        XCTAssertNil(workflow.submitDeviceVerification("012345"))
+        for _ in 0..<4 { await Task.yield() }
+
+        XCTAssertEqual(gateway.submittedVerificationCodes, [])
+        XCTAssertEqual(gateway.preparedVerification?.label, nil)
+        XCTAssertEqual(gateway.closeReasons.last, .userEnded)
+        XCTAssertEqual(coordinator.requests, [
+            RecordingDurablePairingCoordinator.Request(
+                label: "WSL",
+                invitation: "envoix://room/123456-test-room",
+                verificationCode: "012345"
+            ),
+        ])
+        XCTAssertEqual(workflow.durablePairingCompletedLabel, "WSL")
+        XCTAssertEqual(workflow.controlPhase, .ended(.userEnded))
     }
 
     func testHostingInvitationScopeCannotBeReassignedBeforeConnected() async {
@@ -1964,6 +2011,30 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     func finishAcceptance() {
         acceptanceContinuation?.resume()
         acceptanceContinuation = nil
+    }
+}
+
+@MainActor
+private final class RecordingDurablePairingCoordinator: DurablePairingCoordinating {
+    struct Request: Equatable {
+        let label: String
+        let invitation: String
+        let verificationCode: String
+    }
+
+    private(set) var requests: [Request] = []
+
+    func joinPairing(
+        label: String,
+        invitation: String,
+        verificationCode: String
+    ) async throws -> DurablePairedDevice {
+        requests.append(Request(
+            label: label,
+            invitation: invitation,
+            verificationCode: verificationCode
+        ))
+        return DurablePairedDevice(id: "dev_wsl", label: label)
     }
 }
 

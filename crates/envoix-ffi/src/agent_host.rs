@@ -298,6 +298,24 @@ pub enum FfiAgentOfferDecision {
     Reject,
 }
 
+#[derive(Clone, Eq, PartialEq, uniffi::Record)]
+pub struct FfiAgentPairingInput {
+    pub label: String,
+    pub invitation: String,
+    pub verification_code: String,
+}
+
+impl std::fmt::Debug for FfiAgentPairingInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FfiAgentPairingInput")
+            .field("label", &self.label)
+            .field("invitation", &"<redacted>")
+            .field("verification_code", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum FfiAgentRequest {
     Status,
@@ -310,6 +328,9 @@ pub enum FfiAgentRequest {
     },
     Pair {
         label: String,
+    },
+    JoinPairing {
+        pairing: FfiAgentPairingInput,
     },
     ListDevices,
     RevokeDevice {
@@ -513,6 +534,9 @@ pub enum FfiAgentResponse {
     Pairing {
         pairing: FfiAgentPairingInvitation,
     },
+    DevicePaired {
+        device: FfiAgentDeviceSummary,
+    },
     Devices {
         devices: Vec<FfiAgentDeviceSummary>,
     },
@@ -634,6 +658,13 @@ fn core_agent_request(request: FfiAgentRequest) -> Result<AgentRequest, FfiAgent
             limit: bounded_usize(limit, "event limit")?,
         },
         FfiAgentRequest::Pair { label } => AgentRequest::Pair { label },
+        FfiAgentRequest::JoinPairing { pairing } => AgentRequest::JoinPairing {
+            pairing: envoix_client::product::AgentPairingInput {
+                label: pairing.label,
+                invitation: pairing.invitation,
+                verification_code: pairing.verification_code,
+            },
+        },
         FfiAgentRequest::ListDevices => AgentRequest::ListDevices,
         FfiAgentRequest::RevokeDevice { device } => AgentRequest::RevokeDevice { device },
         FfiAgentRequest::CreateTransfer { device, paths } => AgentRequest::CreateTransfer {
@@ -692,6 +723,9 @@ fn ffi_agent_response(response: AgentResponse) -> FfiAgentResponse {
         },
         AgentResponse::Pairing { pairing } => FfiAgentResponse::Pairing {
             pairing: ffi_pairing_invitation(pairing),
+        },
+        AgentResponse::DevicePaired { device } => FfiAgentResponse::DevicePaired {
+            device: ffi_device_summary(device),
         },
         AgentResponse::Devices { devices } => FfiAgentResponse::Devices {
             devices: devices.into_iter().map(ffi_device_summary).collect(),
@@ -1073,18 +1107,29 @@ mod tests {
     }
 
     #[test]
-    fn api_v23_advertises_the_agent_host_control_capability() {
+    fn api_v24_advertises_the_agent_host_control_capability() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 23);
+        assert_eq!(info.ffi_api_version, 24);
         assert!(
             info.capabilities
                 .iter()
-                .any(|capability| capability == "agent_host_control_v1")
+                .any(|capability| capability == "agent_host_control_v2")
         );
     }
 
     #[test]
     fn typed_requests_cover_every_agent_command() {
+        let sensitive = FfiAgentRequest::JoinPairing {
+            pairing: FfiAgentPairingInput {
+                label: "Fixture WSL".into(),
+                invitation: "123456-debug-redaction".into(),
+                verification_code: "654321".into(),
+            },
+        };
+        let debug = format!("{sensitive:?}");
+        assert!(!debug.contains("debug-redaction"));
+        assert!(!debug.contains("654321"));
+
         let requests = vec![
             FfiAgentRequest::Status,
             FfiAgentRequest::Snapshot { inbox_limit: 20 },
@@ -1097,6 +1142,13 @@ mod tests {
             },
             FfiAgentRequest::Pair {
                 label: "Fixture Mac".into(),
+            },
+            FfiAgentRequest::JoinPairing {
+                pairing: FfiAgentPairingInput {
+                    label: "Fixture WSL".into(),
+                    invitation: "123456-fixture-room".into(),
+                    verification_code: "654321".into(),
+                },
             },
             FfiAgentRequest::ListDevices,
             FfiAgentRequest::RevokeDevice {

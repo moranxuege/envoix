@@ -33,7 +33,7 @@ use crate::storage::{
     VaultReference,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 10;
+pub const AGENT_PROTOCOL_VERSION: u16 = 11;
 pub const AGENT_SETTINGS_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
@@ -45,7 +45,9 @@ const MAX_AGENT_REQUEST_ID_BYTES: usize = 64;
 const MAX_AGENT_OFFER_ID_BYTES: usize = 128;
 const MAX_AGENT_OFFER_ROOTS: usize = 3;
 const MAX_AGENT_OFFER_ROOT_NAME_BYTES: usize = 255;
+const MAX_AGENT_ENDPOINT_BYTES: usize = 2_048;
 const MAX_AGENT_PATH_BYTES: usize = 4_096;
+const MAX_AGENT_PAIRING_INVITATION_BYTES: usize = 8 * 1_024;
 const MAX_INBOX_ITEMS: usize = 1_000;
 
 /// User-owned settings loaded by a managed Agent process.
@@ -96,6 +98,9 @@ pub enum AgentRequest {
     Pair {
         label: String,
     },
+    JoinPairing {
+        pairing: AgentPairingInput,
+    },
     ListDevices,
     RevokeDevice {
         device: String,
@@ -130,6 +135,9 @@ pub enum AgentResponse {
     },
     Pairing {
         pairing: PairingInvitation,
+    },
+    DevicePaired {
+        device: DeviceSummary,
     },
     Devices {
         devices: Vec<DeviceSummary>,
@@ -221,6 +229,7 @@ impl AgentRequestEnvelope {
         validate_request_id(self.request_id.clone())?;
         match &self.request {
             AgentRequest::Events { after, .. } => after.validate()?,
+            AgentRequest::JoinPairing { pairing } => pairing.validate()?,
             AgentRequest::CreateTransfer { device, paths } => {
                 validate_device_selector(device)?;
                 if paths.is_empty() || paths.len() > MAX_AGENT_TRANSFER_PATHS {
@@ -360,6 +369,29 @@ impl AgentResponseEnvelope {
             }
             AgentResponse::PendingOfferDecided { offer, .. } => {
                 validate_agent_pending_offer(offer)?;
+            }
+            AgentResponse::DevicePaired { device } | AgentResponse::DeviceRevoked { device } => {
+                validate_agent_device(device)?;
+            }
+            AgentResponse::Devices { devices } => {
+                if devices.len() > MAX_DURABLE_ENTITIES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Agent response contains too many Devices",
+                    ));
+                }
+                let mut ids = BTreeSet::new();
+                let mut labels = BTreeSet::new();
+                for device in devices {
+                    validate_agent_device(device)?;
+                    if !ids.insert(&device.id) || !labels.insert(device.label.to_ascii_lowercase())
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Agent response contains duplicate Devices",
+                        ));
+                    }
+                }
             }
             AgentResponse::Diagnostics { diagnostics } => {
                 diagnostics.validate()?;
@@ -596,13 +628,81 @@ impl AgentEventEnvelope {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairingInvitation {
     pub label: String,
     pub room_code: String,
     pub verification_code: String,
     pub expires_at_unix_seconds: u64,
+}
+
+impl std::fmt::Debug for PairingInvitation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PairingInvitation")
+            .field("label", &self.label)
+            .field("room_code", &"<redacted>")
+            .field("verification_code", &"<redacted>")
+            .field("expires_at_unix_seconds", &self.expires_at_unix_seconds)
+            .finish()
+    }
+}
+
+/// One-time inputs used by the Agent to own first-contact verification.
+///
+/// These values cross only the owner-scoped local control endpoint. The
+/// resulting long-lived credential never leaves the Agent's vault boundary.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPairingInput {
+    pub label: String,
+    pub invitation: String,
+    pub verification_code: String,
+}
+
+impl std::fmt::Debug for AgentPairingInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentPairingInput")
+            .field("label", &self.label)
+            .field("invitation", &"<redacted>")
+            .field("verification_code", &"<redacted>")
+            .finish()
+    }
+}
+
+impl AgentPairingInput {
+    pub fn validate(&self) -> io::Result<()> {
+        if validate_label(&self.label)? != self.label {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "device label cannot have leading or trailing whitespace",
+            ));
+        }
+        if self.invitation.is_empty()
+            || self.invitation.len() > MAX_AGENT_PAIRING_INVITATION_BYTES
+            || self.invitation.trim() != self.invitation
+            || self.invitation.chars().any(char::is_control)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Room invitation must be a bounded, non-empty single-line value",
+            ));
+        }
+        if self.verification_code.len() != 6
+            || !self
+                .verification_code
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "device verification code must contain exactly six digits",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1563,6 +1663,40 @@ fn validate_agent_pending_offers(offers: &[AgentPendingOffer]) -> io::Result<()>
     Ok(())
 }
 
+fn validate_agent_device(device: &DeviceSummary) -> io::Result<()> {
+    DeviceId::parse(device.id.clone())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    if validate_label(&device.label)? != device.label {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent device label cannot have leading or trailing whitespace",
+        ));
+    }
+    if device
+        .previous_generation
+        .is_some_and(|previous| previous >= device.generation)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent Device has an inconsistent credential generation",
+        ));
+    }
+    for (name, endpoint) in std::iter::once(("broker", device.broker.as_str()))
+        .chain(device.relay.as_deref().map(|relay| ("relay", relay)))
+    {
+        if endpoint.trim().is_empty()
+            || endpoint.len() > MAX_AGENT_ENDPOINT_BYTES
+            || endpoint.chars().any(char::is_control)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Agent Device {name} must be a bounded visible endpoint"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_agent_transfer_paths(paths: &[AgentTransferPath]) -> io::Result<()> {
     if paths.len() > MAX_AGENT_ACTIVE_PATHS {
         return Err(io::Error::new(
@@ -2385,7 +2519,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -2410,7 +2544,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 5);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -2430,7 +2564,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 6);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 12);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 15);
         assert!(
@@ -2448,7 +2582,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 7);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 15);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 18);
         assert!(
@@ -2466,7 +2600,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 8);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 16);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 19);
         assert_eq!(
@@ -2483,7 +2617,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 9);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 10);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
 
         let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
         settings.validate().unwrap();
@@ -2745,16 +2879,14 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
-        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+        assert_eq!(fixture["protocol_version"], 10);
 
         let request: AgentRequestEnvelope =
             serde_json::from_value(fixture["request"].clone()).unwrap();
-        request.validate().unwrap();
         assert!(matches!(request.request, AgentRequest::Diagnostics));
 
         let response: AgentResponseEnvelope =
             serde_json::from_value(fixture["response"].clone()).unwrap();
-        response.validate_for(&request.request_id).unwrap();
         let AgentResponse::Diagnostics { diagnostics } = &response.response else {
             panic!("expected Agent diagnostics response")
         };
@@ -2762,6 +2894,35 @@ mod tests {
             diagnostics.credential_protection,
             AgentCredentialProtection::AppleKeychain
         );
+        assert_eq!(serde_json::to_value(response).unwrap(), fixture["response"]);
+    }
+
+    #[test]
+    fn agent_wire_v11_fixture_freezes_agent_owned_pairing() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v11.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+
+        let request: AgentRequestEnvelope =
+            serde_json::from_value(fixture["request"].clone()).unwrap();
+        request.validate().unwrap();
+        let AgentRequest::JoinPairing { pairing } = &request.request else {
+            panic!("expected Agent-owned pairing request")
+        };
+        assert_eq!(pairing.label, "Fixture WSL");
+        assert!(!format!("{request:?}").contains("654321"));
+        assert!(!format!("{request:?}").contains("fixture-room"));
+
+        let response: AgentResponseEnvelope =
+            serde_json::from_value(fixture["response"].clone()).unwrap();
+        response.validate_for(&request.request_id).unwrap();
+        assert!(matches!(
+            response.response,
+            AgentResponse::DevicePaired { .. }
+        ));
         assert_eq!(serde_json::to_value(response).unwrap(), fixture["response"]);
     }
 
@@ -2789,6 +2950,44 @@ mod tests {
         )
         .unwrap();
         assert!(response.validate_for("request_2").is_err());
+    }
+
+    #[test]
+    fn agent_device_responses_reject_malformed_and_duplicate_summaries() {
+        let device = DeviceSummary {
+            id: "dev_fixture".into(),
+            label: "Fixture Mac".into(),
+            generation: 1,
+            previous_generation: Some(0),
+            broker: "127.0.0.1:4000".into(),
+            relay: None,
+        };
+        let paired = AgentResponseEnvelope::new(
+            "request_1",
+            AgentResponse::DevicePaired {
+                device: device.clone(),
+            },
+        )
+        .unwrap();
+        paired.validate_for("request_1").unwrap();
+
+        let mut malformed = device.clone();
+        malformed.previous_generation = Some(malformed.generation);
+        let malformed = AgentResponseEnvelope::new(
+            "request_2",
+            AgentResponse::DevicePaired { device: malformed },
+        )
+        .unwrap();
+        assert!(malformed.validate_for("request_2").is_err());
+
+        let duplicate = AgentResponseEnvelope::new(
+            "request_3",
+            AgentResponse::Devices {
+                devices: vec![device.clone(), device],
+            },
+        )
+        .unwrap();
+        assert!(duplicate.validate_for("request_3").is_err());
     }
 
     #[test]

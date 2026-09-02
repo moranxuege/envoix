@@ -10,7 +10,11 @@ enum MacOSAgentBoundaryError: Error, Equatable {
 }
 
 enum MacOSAgentBoundary {
+#if ENVOIX_SIGNED_DEBUG
+    static let helperBundleIdentifier = "com.envoix.app.engine-helper.debug"
+#else
     static let helperBundleIdentifier = "com.envoix.app.engine-helper"
+#endif
     static let helperKeychainAccessGroup = "6638TTB2SF.com.envoix.engine.credentials"
 
     private static let applicationDirectoryName = "com.envoix.app"

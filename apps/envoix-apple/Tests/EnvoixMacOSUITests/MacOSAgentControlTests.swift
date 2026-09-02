@@ -3,6 +3,32 @@ import XCTest
 @testable import Envoix
 
 final class MacOSAgentControlTests: XCTestCase {
+    func testControlEndpointOpeningIsDeferredAndRetried() async throws {
+        let responseClient = FakeMacOSAgentControlClient(
+            response: .status(status: status())
+        )
+        let factory = SequencedAgentControlFactory(client: responseClient)
+        let client = try MacOSAgentControlClient(
+            controlEndpoint: URL(fileURLWithPath: "/private/tmp/envoix-agent.sock"),
+            clientFactory: factory.make
+        )
+
+        XCTAssertEqual(factory.attemptCount, 0)
+        do {
+            _ = try await client.call(request: .status)
+            XCTFail("the first deferred connection should fail")
+        } catch MacOSAgentControlClientError.unavailable {
+            // The next refresh must construct a fresh control client.
+        }
+
+        let response = try await client.call(request: .status)
+        guard case let .status(actual) = response else {
+            return XCTFail("expected typed Agent status")
+        }
+        XCTAssertEqual(actual.pairedDevices, 3)
+        XCTAssertEqual(factory.attemptCount, 2)
+    }
+
     @MainActor
     func testDisabledServiceDoesNotContactControlEndpoint() async {
         let service = FakeAgentService(registrationState: .notRegistered)
@@ -44,6 +70,26 @@ final class MacOSAgentControlTests: XCTestCase {
         XCTAssertEqual(controller.registrationState, .notRegistered)
         XCTAssertEqual(controller.connectionState, .idle)
         XCTAssertEqual(requestsAfterDisable, [.status])
+    }
+
+    @MainActor
+    func testExplicitEnablementRetriesWhileHelperStarts() async {
+        let service = FakeAgentService(registrationState: .notRegistered)
+        let client = StartingMacOSAgentControlClient(
+            response: .status(status: status())
+        )
+        let controller = MacOSAgentServiceController(
+            service: service,
+            controlClient: client,
+            startupRetryDelaysNanoseconds: [0]
+        )
+
+        await controller.setEnabled(true)
+
+        let callCount = await client.callCount
+        XCTAssertEqual(controller.registrationState, .enabled)
+        XCTAssertEqual(controller.connectionState, .ready(pairedDevices: 3))
+        XCTAssertEqual(callCount, 2)
     }
 
     @MainActor
@@ -95,6 +141,37 @@ final class MacOSAgentControlTests: XCTestCase {
         XCTAssertEqual(controller.connectionState, .incompatible)
     }
 
+    @MainActor
+    func testPairingCoordinatorUsesTypedHelperRequest() async throws {
+        let client = FakeMacOSAgentControlClient(response: .devicePaired(
+            device: FfiAgentDeviceSummary(
+                id: "dev_wsl",
+                label: "WSL",
+                generation: 0,
+                previousGeneration: nil,
+                broker: "fixture-broker",
+                relay: nil
+            )
+        ))
+        let coordinator = MacOSAgentPairingCoordinator(controlClient: client)
+
+        let device = try await coordinator.joinPairing(
+            label: "WSL",
+            invitation: "123456-fixture-room",
+            verificationCode: "654321"
+        )
+
+        XCTAssertEqual(device, DurablePairedDevice(id: "dev_wsl", label: "WSL"))
+        let requests = await client.requests
+        XCTAssertEqual(requests, [
+            .joinPairing(pairing: FfiAgentPairingInput(
+                label: "WSL",
+                invitation: "123456-fixture-room",
+                verificationCode: "654321"
+            )),
+        ])
+    }
+
     private func status() -> FfiAgentStatus {
         FfiAgentStatus(
             protocolVersion: expectedAgentProtocolVersion,
@@ -134,7 +211,9 @@ private final class FakeAgentService: MacOSAgentServiceRegistering {
     }
 }
 
-private actor FakeMacOSAgentControlClient: MacOSHelperControlClient {
+private actor FakeMacOSAgentControlClient:
+    MacOSHelperControlClient, FfiAgentControlClientProtocol
+{
     private let response: FfiAgentResponse?
     private let error: Error?
     private(set) var requests: [FfiAgentRequest] = []
@@ -159,5 +238,48 @@ private actor FakeMacOSAgentControlClient: MacOSHelperControlClient {
             throw error
         }
         return try XCTUnwrap(response)
+    }
+}
+
+private actor StartingMacOSAgentControlClient: MacOSHelperControlClient {
+    private let response: FfiAgentResponse
+    private(set) var callCount = 0
+
+    init(response: FfiAgentResponse) {
+        self.response = response
+    }
+
+    func call(request: FfiAgentRequest) async throws -> FfiAgentResponse {
+        callCount += 1
+        if callCount == 1 {
+            throw MacOSAgentControlClientError.unavailable
+        }
+        return response
+    }
+}
+
+private final class SequencedAgentControlFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private let client: FfiAgentControlClientProtocol
+    private var attempts = 0
+
+    init(client: FfiAgentControlClientProtocol) {
+        self.client = client
+    }
+
+    var attemptCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return attempts
+    }
+
+    func make(controlEndpoint: String) throws -> FfiAgentControlClientProtocol {
+        lock.lock()
+        defer { lock.unlock() }
+        attempts += 1
+        if attempts == 1 {
+            throw MacOSAgentControlClientError.unavailable
+        }
+        return client
     }
 }

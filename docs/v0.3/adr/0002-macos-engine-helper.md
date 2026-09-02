@@ -144,7 +144,7 @@ job. An ad-hoc signature is never a v0.3 distribution or release fallback.
 Mac App Store packaging is not part of the v0.3 path; its sandbox, login-item,
 and review constraints require a separate ADR before that channel is added.
 
-### API 23 host/control integration and deferred legacy migration
+### API 24 host/control integration and deferred legacy migration
 
 API 22 introduced the shared persistent Engine and vault UniFFI binding. API
 23 adds the shared `FfiAgentHost` and `FfiAgentControlClient` boundary with the
@@ -169,7 +169,16 @@ without a Swift-owned parallel protocol:
   the same binding surface but return `UnsupportedPlatform` instead of
   starting a desktop host.
 
-API 23 still does not expose an Engine-store origin, recovery report, or
+API 24 adds `agent_host_control_v2` and the Agent protocol v11 atomic
+`join_pairing` request. Its invitation and one-time verification code are
+bounded, redacted authentication inputs. The helper performs the Room join,
+verification transcript, Engine commit, and Keychain write before returning a
+secret-free device summary. A foreground macOS Room that discovers a remote
+verification request closes its unverified GUI session and reconnects through
+this request; the creator keeps the invitation available until expiry so this
+ownership handoff does not require a credential export.
+
+API 24 still does not expose an Engine-store origin, recovery report, or
 migration report through UniFFI. Apple acceptance tests therefore provide
 external evidence for fresh state opens, current-schema reopen, owner
 exclusion, awaited shutdown, and legacy-state rejection; they must not
@@ -181,7 +190,7 @@ imported v0.2 data. This phase does not read, migrate, or delete
 Any legacy Apple migration is separate future work. It requires explicit
 approval, a versioned import contract, and independent evidence covering the
 source inventory, validated destination, rollback, and retention behavior.
-Until then, legacy data remains retained but outside the API 23 Agent owner.
+Until then, legacy data remains retained but outside the API 24 Agent owner.
 
 The Apple stage-B implementation embeds `EnvoixEngineHelper.app` at
 `Contents/Library/LoginItems`, registers it only after an explicit Settings

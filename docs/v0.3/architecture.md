@@ -395,8 +395,12 @@ records. Snapshots and event polling expose typed `lan`, `direct`, `relay`,
 URLs. Direct-address classification is diagnostic only: it never changes
 Relationship authentication, authorization, or candidate selection. A path is
 removed when its transfer settles and is never written to product state.
-Protocol v9 is current and binds diagnostics to Engine schema v2. Requests are
-limited to 64 KiB and responses to 20 MiB. v3 through v8 requests receive
+Protocol v9 binds diagnostics to Engine schema v2. Protocol v10 adds the
+typed Apple Keychain credential-protection diagnostic. Protocol v11 adds
+Agent-owned first-contact `join_pairing`: the request carries only bounded
+ephemeral authentication inputs, the Agent performs verification and vault
+commit atomically, and the response contains only a device summary. Requests are
+limited to 64 KiB and responses to 20 MiB. v3 through v10 requests receive
 `unsupported_protocol_version`; the Agent does not execute a legacy decoder.
 
 ## 9. Persistence and secret ownership

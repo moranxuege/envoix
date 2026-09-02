@@ -13,23 +13,53 @@ enum MacOSAgentControlClientError: Error, Equatable {
     case invalidEndpoint
 }
 
-final class MacOSAgentControlClient: MacOSHelperControlClient, @unchecked Sendable {
-    private let client: FfiAgentControlClientProtocol
+enum MacOSAgentPairingError: LocalizedError, Equatable {
+    case unexpectedResponse
+    case rejected(code: String, reason: String)
 
-    init(controlEndpoint: URL) throws {
+    var errorDescription: String? {
+        switch self {
+        case .unexpectedResponse:
+            return "The helper returned an incompatible pairing response."
+        case let .rejected(code, reason):
+            return "Agent \(code): \(reason)"
+        }
+    }
+}
+
+typealias MacOSAgentControlClientFactory =
+    @Sendable (String) throws -> FfiAgentControlClientProtocol
+
+final class MacOSAgentControlClient: MacOSHelperControlClient, @unchecked Sendable {
+    private let controlEndpoint: String
+    private let clientFactory: MacOSAgentControlClientFactory
+
+    init(
+        controlEndpoint: URL,
+        clientFactory: @escaping MacOSAgentControlClientFactory = {
+            try FfiAgentControlClient(controlEndpoint: $0)
+        }
+    ) throws {
         guard controlEndpoint.isFileURL,
               controlEndpoint.path.hasPrefix("/") else {
             throw MacOSAgentControlClientError.invalidEndpoint
         }
-        client = try FfiAgentControlClient(controlEndpoint: controlEndpoint.path)
+        self.controlEndpoint = controlEndpoint.path
+        self.clientFactory = clientFactory
     }
 
     init(client: FfiAgentControlClientProtocol) {
-        self.client = client
+        controlEndpoint = ""
+        clientFactory = { _ in client }
     }
 
     func call(request: FfiAgentRequest) async throws -> FfiAgentResponse {
-        try await client.call(request: request)
+        // Opening the Unix socket is deliberately deferred until each call.
+        // The GUI commonly starts before an explicitly enabled helper has
+        // created its socket; caching that initial failure would otherwise
+        // leave the process disconnected until the whole app restarts.
+        let client = try clientFactory(controlEndpoint)
+        return try await client.call(request: request)
     }
 }
 
@@ -38,6 +68,37 @@ final class UnavailableMacOSAgentControlClient:
 {
     func call(request: FfiAgentRequest) async throws -> FfiAgentResponse {
         throw MacOSAgentControlClientError.unavailable
+    }
+}
+
+@MainActor
+final class MacOSAgentPairingCoordinator: DurablePairingCoordinating {
+    private let controlClient: MacOSHelperControlClient
+
+    init(controlClient: MacOSHelperControlClient) {
+        self.controlClient = controlClient
+    }
+
+    func joinPairing(
+        label: String,
+        invitation: String,
+        verificationCode: String
+    ) async throws -> DurablePairedDevice {
+        let response = try await controlClient.call(request: .joinPairing(
+            pairing: FfiAgentPairingInput(
+                label: label,
+                invitation: invitation,
+                verificationCode: verificationCode
+            )
+        ))
+        switch response {
+        case let .devicePaired(device):
+            return DurablePairedDevice(id: device.id, label: device.label)
+        case let .error(code, message):
+            throw MacOSAgentPairingError.rejected(code: code, reason: message)
+        default:
+            throw MacOSAgentPairingError.unexpectedResponse
+        }
     }
 }
 
@@ -56,6 +117,16 @@ enum MacOSAgentConnectionState: Equatable {
     case ready(pairedDevices: UInt64)
     case unavailable(FfiAgentControlErrorCode?)
     case incompatible
+}
+
+private enum MacOSAgentStartupPolicy {
+    static let retryDelaysNanoseconds: [UInt64] = [
+        150_000_000,
+        350_000_000,
+        750_000_000,
+        1_500_000_000,
+        3_000_000_000,
+    ]
 }
 
 @MainActor
@@ -104,14 +175,18 @@ final class MacOSAgentServiceController: ObservableObject {
 
     private let service: MacOSAgentServiceRegistering
     private let controlClient: MacOSHelperControlClient
+    private let startupRetryDelaysNanoseconds: [UInt64]
     private var generation = 0
 
     init(
         service: MacOSAgentServiceRegistering? = nil,
-        controlClient: MacOSHelperControlClient
+        controlClient: MacOSHelperControlClient,
+        startupRetryDelaysNanoseconds: [UInt64] =
+            MacOSAgentStartupPolicy.retryDelaysNanoseconds
     ) {
         self.service = service ?? SystemMacOSAgentService()
         self.controlClient = controlClient
+        self.startupRetryDelaysNanoseconds = startupRetryDelaysNanoseconds
     }
 
     var isRequestedEnabled: Bool {
@@ -132,6 +207,23 @@ final class MacOSAgentServiceController: ObservableObject {
             return
         }
         await refresh()
+        if enabled {
+            await retryHelperStartupIfNeeded()
+        }
+    }
+
+    private func retryHelperStartupIfNeeded() async {
+        for delay in startupRetryDelaysNanoseconds {
+            guard registrationState == .enabled,
+                  case .unavailable = connectionState else { return }
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+            guard registrationState == .enabled else { return }
+            await refresh()
+        }
     }
 
     func refresh() async {

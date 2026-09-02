@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -22,8 +23,8 @@ use envoix_client::api::{
 };
 use envoix_client::model::TransferDirection;
 use envoix_client::product::{
-    AgentEventCursor, AgentOfferDecision, AgentPathKind, AgentRequest, AgentResponse,
-    AgentTransferPath,
+    AgentEventCursor, AgentOfferDecision, AgentPairingInput, AgentPathKind, AgentRequest,
+    AgentResponse, AgentTransferPath,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 
@@ -128,6 +129,23 @@ async fn run(cli: Cli) -> CliResult<()> {
                 call_agent(agent_endpoint, AgentRequest::Pair { label: name }).await?,
                 json,
             ),
+            AgentCommand::JoinPairing { name, room } => {
+                let verification_code = read_verification_code()?;
+                show_paired_device(
+                    call_agent(
+                        agent_endpoint,
+                        AgentRequest::JoinPairing {
+                            pairing: AgentPairingInput {
+                                label: name,
+                                invitation: room,
+                                verification_code,
+                            },
+                        },
+                    )
+                    .await?,
+                    json,
+                )
+            }
         },
         Command::Devices(args) => match args.command {
             DevicesCommand::List => show_devices(
@@ -447,6 +465,27 @@ fn show_pairing(response: AgentResponse, json: bool) -> CliResult<()> {
         "On the Mac, enter the room code in Envoix, then enter the six-digit verification code when prompted."
     );
     eprintln!("Keep envoix-agent running until the device appears in `envoix devices list`.");
+    Ok(())
+}
+
+fn read_verification_code() -> CliResult<String> {
+    eprint!("Verification code: ");
+    io::stderr().flush()?;
+    let mut code = String::new();
+    io::stdin().read_line(&mut code)?;
+    Ok(code.trim().to_string())
+}
+
+fn show_paired_device(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::DevicePaired { device } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Paired device: {} ({})", device.label, device.id);
     Ok(())
 }
 

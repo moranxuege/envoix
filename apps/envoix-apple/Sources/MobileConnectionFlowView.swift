@@ -802,6 +802,18 @@ struct MobileConnectionFlowView: View {
             }
             synchronizeRememberedOutbox()
         }
+        .onChange(of: workflow.durablePairingCompletedLabel) { label in
+            guard let label,
+                  runtime.isPresentationOwner(sceneID) else { return }
+            ToastCenter.shared.show(AppText.value(
+                "\(label) is now paired through the background helper.",
+                "已通过后台 helper 与 \(label) 完成配对。",
+                language: language
+            ))
+            #if os(macOS)
+            Task { await runtime.helperService.refresh() }
+            #endif
+        }
         .onChange(of: workflow.incomingRoomOffer?.id) { offerID in
             if let request = roomDestinationRepair, request.offerID != offerID {
                 roomDestinationRepair = nil

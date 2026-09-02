@@ -53,7 +53,8 @@ target/debug/envoix agent install --inbox "$PWD/inbox" --device-name WSL
 ~/.local/bin/envoix agent pair --name MacBook
 
 # On the Mac, enter the printed Room code, then enter the six-digit code when
-# Envoix asks to verify WSL. No transfer is required to finish pairing.
+# Envoix asks to verify WSL. On macOS the signed helper reconnects and owns the
+# credential commit. No transfer is required to finish pairing.
 ~/.local/bin/envoix devices list
 ~/.local/bin/envoix devices forget MacBook --yes
 ~/.local/bin/envoix transfers create --device MacBook ./photo.jpg ./folder

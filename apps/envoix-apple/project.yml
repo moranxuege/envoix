@@ -75,7 +75,8 @@ targets:
       - package: EnvoixCore
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.engine-helper
+        ENVOIX_ENGINE_HELPER_BUNDLE_IDENTIFIER: com.envoix.app.engine-helper
+        PRODUCT_BUNDLE_IDENTIFIER: "$(ENVOIX_ENGINE_HELPER_BUNDLE_IDENTIFIER)"
         PRODUCT_NAME: EnvoixEngineHelper
         MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "5"
@@ -98,6 +99,8 @@ targets:
           - "-framework"
           - "CoreBluetooth"
       configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Helper/EnvoixEngineHelper.entitlements
         Release:
           CODE_SIGN_ENTITLEMENTS: Helper/EnvoixEngineHelper.entitlements
 

@@ -127,6 +127,15 @@ pub(crate) enum AgentCommand {
         #[arg(long)]
         name: String,
     },
+    /// Join another Agent's one-time room and keep the verified relationship.
+    JoinPairing {
+        /// Name for the remote Agent shown in the remembered device list.
+        #[arg(long)]
+        name: String,
+        /// Room URI or room code printed by the remote Agent.
+        #[arg(long)]
+        room: String,
+    },
 }
 
 #[derive(Args, Debug)]
