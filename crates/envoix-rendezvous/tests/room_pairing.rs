@@ -583,6 +583,72 @@ async fn canceled_remembered_waiter_releases_its_live_locator() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_remembered_waiter_can_park_again_without_serving_out_a_tombstone() {
+    // The default tombstone TTL is far longer than this Room TTL, so a
+    // tombstoned locator would reject both peers for the rest of the test.
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_millis(200)));
+    let room = format!("r1_{}", "E".repeat(43));
+
+    let (mut client, broker) = tokio::io::duplex(4096);
+    let expiring_registry = registry.clone();
+    let serve = tokio::spawn(async move { expiring_registry.serve(broker_conn(broker)).await });
+    let (mut reader, mut writer) = tokio::io::split(&mut client);
+    write_framed(&mut writer, &remembered_creator_join(&room))
+        .await
+        .unwrap();
+    assert!(matches!(
+        serve.await.unwrap(),
+        Err(RendezvousError::Expired)
+    ));
+    let reply: Reply = read_framed(&mut reader).await.unwrap();
+    assert_eq!(reply, Reply::Expired);
+    drop(client);
+
+    // A remembered pair reconnects on the same derived locator, so the peer
+    // that timed out waiting must be able to park again at once.
+    let (responder, responder_serve) = start_peer(registry.clone(), remembered_creator_join(&room));
+    wait_for_creator(&registry).await;
+    let (connector, connector_serve) = start_peer(registry.clone(), remembered_joiner_join(&room));
+    assert!(matches!(responder.await.unwrap(), Reply::Paired(_)));
+    assert!(matches!(connector.await.unwrap(), Reply::Paired(_)));
+    responder_serve.await.unwrap().unwrap();
+    connector_serve.await.unwrap().unwrap();
+    assert_eq!(registry.metrics_snapshot().matches, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_room_code_still_serves_its_tombstone() {
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_millis(200)));
+
+    let (mut client, broker) = tokio::io::duplex(4096);
+    let expiring_registry = registry.clone();
+    let serve = tokio::spawn(async move { expiring_registry.serve(broker_conn(broker)).await });
+    write_framed(&mut client, &creator_join("100002", TransferRole::Receiver))
+        .await
+        .unwrap();
+    assert!(matches!(
+        serve.await.unwrap(),
+        Err(RendezvousError::Expired)
+    ));
+    drop(client);
+
+    // A human Room code must keep explaining that it expired instead of
+    // silently reopening under a later holder of the same digits.
+    let (rejected, rejected_serve) = start_peer(
+        registry.clone(),
+        creator_join("100002", TransferRole::Receiver),
+    );
+    assert_eq!(
+        rejected.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomExpired,
+            retry_after: None,
+        })
+    );
+    rejected_serve.await.unwrap().unwrap_err();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_remembered_match_releases_its_live_locator() {
     let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(30)));
     let room = format!("r1_{}", "D".repeat(43));
