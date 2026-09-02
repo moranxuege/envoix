@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -51,6 +51,8 @@ use tokio::task::JoinHandle;
 
 const REMEMBERED_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
 const RECEIVER_RETRY_DELAY: Duration = Duration::from_secs(3);
+const RECEIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
+const RECEIVER_PARKED_ATTEMPT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const MAX_RETAINED_AGENT_EVENTS: usize = 1_024;
 const OUTGOING_PROGRESS_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
@@ -1816,11 +1818,30 @@ fn register_remembered_receiver(
     Ok(Some(cancel))
 }
 
+/// How long to wait before the next remembered connect attempt, given how long
+/// the attempt that just failed ran and how long the previous wait was.
+///
+/// Attempts that fail fast are refusals, so they back off geometrically and an
+/// unreachable peer settles at one attempt per minute instead of one every few
+/// seconds. An attempt that ran long enough to park at the broker instead
+/// waited out its own Room, which is the ordinary idle state rather than a
+/// failure, so it keeps the base delay and parks again promptly.
+fn receiver_retry_delay(attempt: Duration, previous: Duration) -> Duration {
+    if attempt >= RECEIVER_PARKED_ATTEMPT {
+        return RECEIVER_RETRY_DELAY;
+    }
+    previous
+        .saturating_mul(2)
+        .min(RECEIVER_RETRY_MAX_DELAY)
+        .max(RECEIVER_RETRY_DELAY)
+}
+
 async fn remembered_receiver_loop(
     runtime: Arc<AgentRuntime>,
     device_id: &str,
     receiver_cancel: &TransferCancelToken,
 ) {
+    let mut retry_delay = Duration::ZERO;
     while !runtime.shutdown.is_cancelled() && !receiver_cancel.is_cancelled() {
         let loaded = (|| -> Result<_> {
             let store = lock(&runtime.store)?;
@@ -1837,8 +1858,10 @@ async fn remembered_receiver_loop(
                 return;
             }
         };
+        let attempt_started = Instant::now();
         match connect_remembered_room(&runtime, &record, opaque.expose(), receiver_cancel).await {
             Ok((session, next_generation)) => {
+                retry_delay = Duration::ZERO;
                 if let Err(error) = lock(&runtime.store).and_then(|mut store| {
                     store
                         .rotate_device(record.id(), opaque.expose(), next_generation)
@@ -1882,9 +1905,15 @@ async fn remembered_receiver_loop(
                 if runtime.shutdown.is_cancelled() || receiver_cancel.is_cancelled() {
                     return;
                 }
-                tracing::warn!(device = %record.label(), %error, "remembered receiver retrying");
+                retry_delay = receiver_retry_delay(attempt_started.elapsed(), retry_delay);
+                tracing::warn!(
+                    device = %record.label(),
+                    %error,
+                    retry_in_secs = retry_delay.as_secs(),
+                    "remembered receiver retrying"
+                );
                 tokio::select! {
-                    _ = tokio::time::sleep(RECEIVER_RETRY_DELAY) => {}
+                    _ = tokio::time::sleep(retry_delay) => {}
                     _ = runtime.shutdown.cancelled() => return,
                     _ = receiver_cancel.cancelled() => return,
                 }
@@ -4363,5 +4392,37 @@ mod tests {
         }
         let oversized = format!(r"\\.\pipe\{}", "a".repeat(250));
         assert!(validate_windows_pipe_endpoint(Path::new(&oversized)).is_err());
+    }
+
+    #[test]
+    fn refused_receiver_attempts_back_off_to_a_bounded_delay() {
+        let refused = Duration::from_millis(200);
+        assert_eq!(
+            receiver_retry_delay(refused, Duration::ZERO),
+            RECEIVER_RETRY_DELAY
+        );
+        assert_eq!(
+            receiver_retry_delay(refused, RECEIVER_RETRY_DELAY),
+            RECEIVER_RETRY_DELAY * 2
+        );
+        let mut delay = Duration::ZERO;
+        for _ in 0..16 {
+            delay = receiver_retry_delay(refused, delay);
+        }
+        assert_eq!(delay, RECEIVER_RETRY_MAX_DELAY);
+    }
+
+    #[test]
+    fn a_parked_receiver_attempt_keeps_the_base_delay() {
+        // Waiting out a Room is the ordinary idle state, so the responder must
+        // park again promptly instead of inheriting a refusal backoff.
+        assert_eq!(
+            receiver_retry_delay(RECEIVER_PARKED_ATTEMPT, RECEIVER_RETRY_MAX_DELAY),
+            RECEIVER_RETRY_DELAY
+        );
+        assert_eq!(
+            receiver_retry_delay(Duration::from_secs(300), RECEIVER_RETRY_MAX_DELAY),
+            RECEIVER_RETRY_DELAY
+        );
     }
 }
