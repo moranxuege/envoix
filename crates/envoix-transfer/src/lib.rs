@@ -94,10 +94,14 @@ impl TransferCancelToken {
     }
 
     pub async fn cancelled(&self) {
+        // Create the waiter before checking the flag. `notify_waiters` tracks
+        // notifications from a Notified future's creation, which closes the
+        // check-then-subscribe race that could otherwise strand shutdown.
+        let notified = self.inner.notify.notified();
         if self.is_cancelled() {
             return;
         }
-        self.inner.notify.notified().await;
+        notified.await;
     }
 }
 
@@ -320,6 +324,37 @@ pub enum TransferEvent {
         elapsed_us: u64,
         delta_us: u64,
     },
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use std::time::Duration;
+
+    use super::TransferCancelToken;
+
+    #[tokio::test]
+    async fn cancellation_wakes_every_registered_waiter_and_remains_sticky() {
+        let token = TransferCancelToken::new();
+        let waiters = (0..32)
+            .map(|_| {
+                let token = token.clone();
+                tokio::spawn(async move { token.cancelled().await })
+            })
+            .collect::<Vec<_>>();
+
+        tokio::task::yield_now().await;
+        token.cancel();
+
+        for waiter in waiters {
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("registered cancellation waiter timed out")
+                .expect("registered cancellation waiter panicked");
+        }
+        tokio::time::timeout(Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("late cancellation waiter timed out");
+    }
 }
 
 #[cfg(test)]

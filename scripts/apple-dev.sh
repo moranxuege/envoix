@@ -52,6 +52,7 @@ macos_release_cache="$cache_root/macos-release"
 ios_sim_destination="${ENVOIX_IOS_SIM_DESTINATION:-}"
 macos_release_team_id="6638TTB2SF"
 macos_development_identity="Apple Development"
+macos_hosted_test_bundle_id="com.envoix.app.hosted-tests"
 macos_helper_bundle_id="com.envoix.app.engine-helper"
 macos_debug_helper_bundle_id="$macos_helper_bundle_id.debug"
 macos_helper_keychain_group="$macos_release_team_id.com.envoix.engine.credentials"
@@ -722,6 +723,7 @@ case "$command_name" in
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_test_cache" \
       CODE_SIGN_ENTITLEMENTS= \
+      ENVOIX_APPLICATION_BUNDLE_IDENTIFIER="$macos_hosted_test_bundle_id" \
       ENVOIX_BUILD_TIMESTAMP="$envoix_build_timestamp" \
       COMPILER_INDEX_STORE_ENABLE=NO \
       ${result_args[@]+"${result_args[@]}"} \
@@ -738,6 +740,7 @@ case "$command_name" in
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_test_cache" \
       CODE_SIGN_ENTITLEMENTS= \
+      ENVOIX_APPLICATION_BUNDLE_IDENTIFIER="$macos_hosted_test_bundle_id" \
       ENVOIX_BUILD_TIMESTAMP="$envoix_build_timestamp" \
       COMPILER_INDEX_STORE_ENABLE=NO \
       build-for-testing \
@@ -754,6 +757,7 @@ case "$command_name" in
       -configuration "$apple_build_configuration" \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_test_cache" \
+      ENVOIX_APPLICATION_BUNDLE_IDENTIFIER="$macos_hosted_test_bundle_id" \
       COMPILER_INDEX_STORE_ENABLE=NO \
       ${result_args[@]+"${result_args[@]}"} \
       test-without-building \

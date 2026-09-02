@@ -31,7 +31,8 @@ targets:
           subpath: Contents/Library/LoginItems
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app
+        ENVOIX_APPLICATION_BUNDLE_IDENTIFIER: com.envoix.app
+        PRODUCT_BUNDLE_IDENTIFIER: "$(ENVOIX_APPLICATION_BUNDLE_IDENTIFIER)"
         MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "5"
         ENVOIX_BUILD_TIMESTAMP: "unavailable"
