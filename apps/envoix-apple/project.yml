@@ -296,6 +296,7 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - Helper/AgentHostRuntime.swift
+      - Helper/AgentHostShutdownCoordinator.swift
       - Sources/AppleApplicationVault.swift
       - Sources/AppleKeychainAccess.swift
       - Sources/EnvoixCoreContract.swift

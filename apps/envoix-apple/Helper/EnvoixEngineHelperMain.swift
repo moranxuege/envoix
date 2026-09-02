@@ -59,23 +59,31 @@ private final class EnvoixEngineHelperDelegate: NSObject, NSApplicationDelegate 
             return .terminateNow
         }
         guard shutdownTask == nil else {
-            return .terminateLater
+            return .terminateCancel
         }
 
         logger.info("event=host_shutdown_requested")
-        shutdownTask = Task { @MainActor [weak self] in
-            do {
-                let state = try await host.shutdown()
-                self?.logger.info(
+        shutdownTask = EnvoixEngineHelperShutdownCoordinator.begin(
+            host: host
+        ) { [weak self] outcome in
+            guard let self else { return }
+            if let state = outcome.state {
+                logger.info(
                     "event=host_shutdown_completed state=\(state.logValue, privacy: .public)"
                 )
-            } catch {
-                self?.logFailure(event: "host_shutdown_failed", error: error)
+            } else if outcome.timedOut {
+                logger.error("event=host_shutdown_timed_out")
+            } else if let error = outcome.error {
+                logFailure(event: "host_shutdown_failed", error: error)
             }
-            self?.host = nil
-            sender.reply(toApplicationShouldTerminate: true)
+            self.host = nil
+            NSApp.terminate(nil)
         }
-        return .terminateLater
+        // `terminateLater` enters an AppKit nested event loop that does not
+        // reliably service Swift tasks or main-queue watchdogs. Cancel this
+        // attempt, keep the ordinary run loop alive during bounded shutdown,
+        // then terminate again after `host` has been cleared above.
+        return .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {

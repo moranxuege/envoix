@@ -6,6 +6,7 @@ use std::net::IpAddr;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -50,6 +51,7 @@ use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
 const REMEMBERED_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
+const REMEMBERED_CONNECT_CANCEL_GRACE_PERIOD: Duration = Duration::from_secs(1);
 const RECEIVER_RETRY_DELAY: Duration = Duration::from_secs(3);
 const RECEIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 const RECEIVER_PARKED_ATTEMPT: Duration = Duration::from_secs(30);
@@ -2161,21 +2163,30 @@ async fn connect_remembered_room(
             tokio::select! {
                 result = &mut connect => result,
                 _ = tokio::time::sleep(REMEMBERED_FALLBACK_TIMEOUT) => {
-                    attempt_cancel.cancel();
-                    let _ = (&mut connect).await;
+                    cancel_and_drain_remembered_connect(
+                        &attempt_cancel,
+                        connect.as_mut(),
+                        REMEMBERED_CONNECT_CANCEL_GRACE_PERIOD,
+                    ).await;
                     last_error = Some(anyhow!(
                         "current remembered generation did not find the peer"
                     ));
                     continue;
                 }
                 _ = receiver_cancel.cancelled() => {
-                    attempt_cancel.cancel();
-                    let _ = (&mut connect).await;
+                    cancel_and_drain_remembered_connect(
+                        &attempt_cancel,
+                        connect.as_mut(),
+                        REMEMBERED_CONNECT_CANCEL_GRACE_PERIOD,
+                    ).await;
                     return Err(anyhow!("remembered room connection cancelled"));
                 }
                 _ = runtime.shutdown.cancelled() => {
-                    attempt_cancel.cancel();
-                    let _ = (&mut connect).await;
+                    cancel_and_drain_remembered_connect(
+                        &attempt_cancel,
+                        connect.as_mut(),
+                        REMEMBERED_CONNECT_CANCEL_GRACE_PERIOD,
+                    ).await;
                     return Err(anyhow!("remembered room connection cancelled"));
                 }
             }
@@ -2183,13 +2194,19 @@ async fn connect_remembered_room(
             tokio::select! {
                 result = &mut connect => result,
                 _ = receiver_cancel.cancelled() => {
-                    attempt_cancel.cancel();
-                    let _ = (&mut connect).await;
+                    cancel_and_drain_remembered_connect(
+                        &attempt_cancel,
+                        connect.as_mut(),
+                        REMEMBERED_CONNECT_CANCEL_GRACE_PERIOD,
+                    ).await;
                     return Err(anyhow!("remembered room connection cancelled"));
                 }
                 _ = runtime.shutdown.cancelled() => {
-                    attempt_cancel.cancel();
-                    let _ = (&mut connect).await;
+                    cancel_and_drain_remembered_connect(
+                        &attempt_cancel,
+                        connect.as_mut(),
+                        REMEMBERED_CONNECT_CANCEL_GRACE_PERIOD,
+                    ).await;
                     return Err(anyhow!("remembered room connection cancelled"));
                 }
             }
@@ -2210,6 +2227,17 @@ async fn connect_remembered_room(
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow!("remembered device has no usable generation")))
+}
+
+async fn cancel_and_drain_remembered_connect<F>(
+    cancel: &TransferCancelToken,
+    connect: Pin<&mut F>,
+    grace_period: Duration,
+) where
+    F: Future,
+{
+    cancel.cancel();
+    let _ = tokio::time::timeout(grace_period, connect).await;
 }
 
 enum RoomSessionInput {
@@ -4629,5 +4657,25 @@ mod tests {
             receiver_retry_delay(Duration::from_secs(300), RECEIVER_RETRY_MAX_DELAY),
             RECEIVER_RETRY_DELAY
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_remembered_connect_drain_is_bounded() {
+        let cancel = TransferCancelToken::new();
+        let connect = std::future::pending::<()>();
+        tokio::pin!(connect);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            cancel_and_drain_remembered_connect(
+                &cancel,
+                connect.as_mut(),
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .expect("cancelled remembered connect drain exceeded its grace period");
+
+        assert!(cancel.is_cancelled());
     }
 }

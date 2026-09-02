@@ -105,7 +105,10 @@ where
     }
     bytes.push(b'\n');
     write.write_all(&bytes).await?;
-    write.shutdown().await?;
+    // The newline delimits the complete request. Do not half-close the socket:
+    // a fast Agent can read the line, respond, and close before SHUT_WR runs,
+    // which macOS reports as ENOTCONN even though the request was delivered.
+    write.flush().await?;
 
     let mut response_bytes = Vec::new();
     let mut limited = BufReader::new(read).take(MAX_AGENT_RESPONSE_BYTES + 1);
@@ -141,7 +144,44 @@ fn invalid_control_data(error: serde_json::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use tokio::io::ReadBuf;
+
     use super::*;
+
+    struct ShutdownFailsStream {
+        inner: tokio::io::DuplexStream,
+    }
+
+    impl AsyncRead for ShutdownFailsStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(context, buffer)
+        }
+    }
+
+    impl AsyncWrite for ShutdownFailsStream {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(context, bytes)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(context)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)))
+        }
+    }
 
     async fn respond(stream: tokio::io::DuplexStream, request_id: impl FnOnce(&str) -> String) {
         let (read, mut write) = tokio::io::split(stream);
@@ -163,6 +203,20 @@ mod tests {
     async fn stream_round_trips_a_valid_envelope() {
         let (client, server) = tokio::io::duplex(4_096);
         let server = tokio::spawn(respond(server, str::to_owned));
+
+        let response = call_agent_stream(client, AgentRequest::Status)
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        assert_eq!(response, AgentResponse::error("test", "response"));
+    }
+
+    #[tokio::test]
+    async fn stream_does_not_require_half_close_before_reading_the_response() {
+        let (client, server) = tokio::io::duplex(4_096);
+        let server = tokio::spawn(respond(server, str::to_owned));
+        let client = ShutdownFailsStream { inner: client };
 
         let response = call_agent_stream(client, AgentRequest::Status)
             .await
