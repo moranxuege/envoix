@@ -53,7 +53,7 @@ job receives `contents: write`.
 | macOS application + helper | Apple owner | Developer ID, hardened runtime, stable Team/access groups, notarization, staple, SHA-256 | signed application replacement retaining helper-owned state | path implemented; notarization evidence open |
 | iOS/iPadOS application | Apple owner | App Store/TestFlight distribution signing and archive validation | TestFlight/App Store update retaining Engine schema 2 | signing evidence open |
 | Android application | Android owner | production keystore signing, `apksigner` verification, version check, artifact digest/SBOM/provenance | package-manager update with stable application id/key | tag path and local test-key rehearsal pass; production key custody and signed evidence remain open |
-| Broker | service owner | pinned Rust/Bullseye builder, ELF/glibc check, SHA-256, source manifest, CycloneDX, GitHub provenance/SBOM attestations | preserve endpoint key across binary rollback/update | integrated workflow implemented; new rehearsal evidence required |
+| Broker | service owner | pinned Rust/Bullseye builder, ELF/glibc check, SHA-256, source manifest, CycloneDX, GitHub provenance/SBOM attestations | preserve endpoint key across binary rollback/update | automated; broker-integrated rehearsal and independent verification passed |
 | Relay | service owner | pinned upstream iroh-relay version and verified package origin | preserve TLS/ACME configuration | operated separately from Envoix release |
 
 An artifact listed as open is not converted into a release artifact by renaming

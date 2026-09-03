@@ -5,6 +5,37 @@ Status: active evidence registry
 This registry records reproducible release-path checks without treating a
 development or test signature as a production release approval.
 
+## Desktop and broker bundle rehearsal 33792965105
+
+| Field | Evidence |
+| --- | --- |
+| Workflow | manual `release` run [33792965105](https://github.com/moranxuege/envoix/actions/runs/33792965105) |
+| Immutable source | `89b216ab13e89e932ce3da426318e585cd660852` |
+| Result | contract, four platform CLI/Agent build jobs, the reusable broker build, bundle validation, build provenance, and three SBOM attestations passed; Android was intentionally excluded and tag-only publication skipped |
+| Bundle | seven binaries, CLI/Agent/broker CycloneDX 1.5 SBOMs, `release-manifest.json`, and `SHA256SUMS` |
+| Independent check | downloaded the single `envoix-release-0.3.0` artifact into a new temporary directory; all eleven checksum entries passed |
+| Identity check | manifest repository was `moranxuege/envoix`, version was `0.3.0`, revision exactly matched the source above, and its ten input artifacts were the seven expected binaries plus three expected SBOMs |
+| Provenance policy | all seven binaries passed GitHub attestation verification with the exact repository, source digest, denial of self-hosted runners, and their expected signer: `release.yml` for CLI/Agent and the reusable `rendezvous-server-artifact.yml` for broker |
+| SBOM policy | all seven binaries passed a separate `https://cyclonedx.org/bom` attestation check with the exact repository, `release.yml` signer, source digest, and runner restriction |
+| Workflow hygiene | every effective job had an empty warning/failure annotation set; checkout, setup, cache, upload, and download Actions used their pinned Node 24 generations |
+
+The CLI SBOM described `envoix 0.3.0` with 464 components and 465 dependency
+relationships. The Agent SBOM described `envoix-agent 0.3.0` with 462
+components and 463 relationships. The broker SBOM described
+`envoix-rendezvous-server 0.3.0` with 432 components and 433 relationships.
+All three used deterministic UUIDv5 serials bound to the repository, revision,
+and root component.
+
+The broker job ran Rust 1.96.0 in the digest-pinned Debian 11/Bullseye image.
+The builder provided glibc 2.31, while the staged x86-64 ELF requested the
+expected `/lib64/ld-linux-x86-64.so.2` interpreter and required at most glibc
+2.30. This independently downloaded rehearsal bundle was deleted after
+verification.
+
+This rehearsal closes the broker-integrated desktop bundle automation gap. It
+does not prove production Android signing, Apple Developer ID notarization,
+iOS/TestFlight distribution signing, or real-host platform behavior.
+
 ## Desktop bundle rehearsal 33782619684
 
 | Field | Evidence |
