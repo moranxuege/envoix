@@ -23,8 +23,9 @@ use crate::decision::decide;
 use crate::effect::EngineEffect;
 use crate::event::{EngineEvent, EventEnvelope};
 use crate::model::{
-    CommandId, ContentId, DeviceId, RelationshipId, RelationshipState, Transfer, TransferDirection,
-    TransferFailure, TransferId, TransferRejection, TransferState,
+    CommandId, ContentId, DeviceId, FailureCode, FailurePhase, RecoveryAction, RelationshipId,
+    RelationshipState, Transfer, TransferDirection, TransferFailure, TransferId, TransferRejection,
+    TransferState,
 };
 use crate::ports::{PlatformPortError, SecretBytes, SecureVaultPort};
 use crate::snapshot::{ApplyOutcome, EngineSnapshot};
@@ -1162,6 +1163,7 @@ impl ProductStore {
         let relationship_id =
             RelationshipId::parse(record.id.clone()).expect("stored device ID was validated");
         let mut state = self.engine.state().clone();
+        settle_transfers_for_revoked_relationship(&mut state, &relationship_id)?;
         apply_product_event(
             &mut state,
             EngineEvent::RelationshipRevoked {
@@ -1560,6 +1562,49 @@ fn apply_product_event(
             event,
         })
         .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+    Ok(())
+}
+
+fn settle_transfers_for_revoked_relationship(
+    state: &mut EngineState,
+    relationship_id: &RelationshipId,
+) -> Result<(), EngineStoreError> {
+    let transfers = state
+        .snapshot
+        .transfers
+        .values()
+        .filter(|transfer| {
+            &transfer.relationship_id == relationship_id && !transfer.state.is_terminal()
+        })
+        .map(|transfer| (transfer.id.clone(), transfer.state))
+        .collect::<Vec<_>>();
+
+    for (transfer_id, transfer_state) in transfers {
+        let event = match transfer_state {
+            TransferState::Offered => EngineEvent::TransferRejected {
+                transfer_id,
+                reason: TransferRejection::UserDeclined,
+            },
+            TransferState::Queued
+            | TransferState::Connecting
+            | TransferState::Transferring
+            | TransferState::Paused => EngineEvent::TransferCanceled { transfer_id },
+            TransferState::AwaitingDeliveryProof => EngineEvent::TransferFailed {
+                transfer_id,
+                failure: TransferFailure {
+                    code: FailureCode::ReceiverFinalizationOutcomeUnknown,
+                    phase: FailurePhase::Committing,
+                    retryable: false,
+                    recovery_action: RecoveryAction::None,
+                },
+            },
+            TransferState::Delivered
+            | TransferState::Rejected
+            | TransferState::Failed
+            | TransferState::Canceled => continue,
+        };
+        apply_product_event(state, event)?;
+    }
     Ok(())
 }
 
@@ -2426,6 +2471,15 @@ mod tests {
             .join(&pending.credential_reference);
         store.commit_device(pending, &credential, 0).unwrap();
         store.append_inbox(inbox_item("received", 1)).unwrap();
+        let transfer_id = TransferId::parse("transfer_to_forgotten_device").unwrap();
+        store
+            .create_transfer(
+                &id,
+                transfer_id.clone(),
+                ContentId::parse("content_to_forgotten_device").unwrap(),
+                42,
+            )
+            .unwrap();
 
         let forgotten = store.forget_device("macbook").unwrap();
 
@@ -2433,12 +2487,24 @@ mod tests {
         assert_eq!(forgotten.label, "MacBook");
         assert!(store.devices().is_empty());
         assert!(!credential_path.exists());
+        assert_eq!(
+            store.transfer(transfer_id.as_str()).unwrap().unwrap().state,
+            crate::model::TransferState::Canceled
+        );
         assert_eq!(store.latest_inbox().unwrap().id, "received");
         assert!(store.prepare_device("MacBook", "broker", None).is_ok());
 
         drop(store);
         let reopened = ProductStore::open(directory.path()).unwrap();
         assert!(reopened.devices().is_empty());
+        assert_eq!(
+            reopened
+                .transfer(transfer_id.as_str())
+                .unwrap()
+                .unwrap()
+                .state,
+            crate::model::TransferState::Canceled
+        );
         assert_eq!(reopened.latest_inbox().unwrap().id, "received");
     }
 

@@ -4508,6 +4508,15 @@ mod tests {
         store
             .commit_device(pending, &opaque_credential(), 0)
             .unwrap();
+        let queued_transfer_id = TransferId::parse("transfer_queued_before_revoke").unwrap();
+        store
+            .create_transfer(
+                &device_id,
+                queued_transfer_id.clone(),
+                ContentId::parse("content_queued_before_revoke").unwrap(),
+                42,
+            )
+            .unwrap();
         let receiver_cancel = TransferCancelToken::new();
         let outgoing_cancel = TransferCancelToken::new();
         let runtime = Arc::new(AgentRuntime {
@@ -4557,6 +4566,15 @@ mod tests {
         assert!(receiver_cancel.is_cancelled());
         assert!(outgoing_cancel.is_cancelled());
         assert!(lock(&runtime.store).unwrap().devices().is_empty());
+        assert_eq!(
+            lock(&runtime.store)
+                .unwrap()
+                .transfer(queued_transfer_id.as_str())
+                .unwrap()
+                .unwrap()
+                .state,
+            envoix_client::model::TransferState::Canceled
+        );
         let events = lock(&runtime.events).unwrap();
         assert!(matches!(
             events.events.back(),
