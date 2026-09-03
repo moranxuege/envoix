@@ -121,7 +121,7 @@ cache before entering the same Manifest v2 and remembered-room queue used by
 ordinary files.
 
 See [the Agent MVP design](docs/design/agent-mvp.md) for trust, persistence,
-network-path behavior, and the current WSL NAT limitation.
+network-path behavior, and the WSL networking modes.
 
 ### QR/direct invite
 
