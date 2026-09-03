@@ -707,6 +707,102 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输文件" } }
       }
     },
+    "menu_bar.action.open" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Envoix" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开 Envoix" } }
+      }
+    },
+    "menu_bar.action.quit" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Quit Envoix" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "退出 Envoix" } }
+      }
+    },
+    "menu_bar.status.canceled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Canceled" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已取消" } }
+      }
+    },
+    "menu_bar.status.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connecting…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接中…" } }
+      }
+    },
+    "menu_bar.status.delivered" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Delivered" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已送达" } }
+      }
+    },
+    "menu_bar.status.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "失败" } }
+      }
+    },
+    "menu_bar.status.finalizing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finalizing…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "确认送达中…" } }
+      }
+    },
+    "menu_bar.status.idle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Idle" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "空闲" } }
+      }
+    },
+    "menu_bar.status.pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对中…" } }
+      }
+    },
+    "menu_bar.status.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paused" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已暂停" } }
+      }
+    },
+    "menu_bar.status.preparing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "准备中…" } }
+      }
+    },
+    "menu_bar.status.receiver_saving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receiver saving…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收端保存中…" } }
+      }
+    },
+    "menu_bar.status.review" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Review" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "待确认" } }
+      }
+    },
+    "menu_bar.status.saving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saving…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存中…" } }
+      }
+    },
+    "menu_bar.status.verifying" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verifying…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "校验中…" } }
+      }
+    },
+    "menu_bar.status.waiting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待中…" } }
+      }
+    },
     "receive.action.accepting_offer" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Accepting offer…" } },
