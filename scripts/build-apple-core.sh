@@ -64,7 +64,10 @@ apple_core_input_digest() {
     while IFS= read -r input; do
       printf '%s\n' "${input#$repo_root/}"
       shasum -a 256 "$input" | cut -d ' ' -f 1
-    done < <(find "$repo_root/crates" "$repo_root/vendor" \
+    done < <(find \
+      "$repo_root/apps/envoix-agent" \
+      "$repo_root/crates" \
+      "$repo_root/vendor" \
       -path "$package_dir" -prune -o \
       -type f \( \
         -name '*.rs' -o \
