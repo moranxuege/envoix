@@ -31,10 +31,10 @@ struct SettingsStageView: View {
                 #endif
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Language", "语言", language: language))
+                    Text(AppText.localized("settings.language.title", language: language))
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(Theme.muted)
-                    Picker("Language", selection: $language) {
+                    Picker(AppText.localized("settings.language.title", language: language), selection: $language) {
                         Text("English").tag("en")
                         Text("简体中文").tag("zh-Hans")
                     }
@@ -44,21 +44,17 @@ struct SettingsStageView: View {
                 .card(padding: 14)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Compression", "压缩", language: language))
+                    Text(AppText.localized("settings.compression.title", language: language))
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(Theme.muted)
-                    Picker("Compression", selection: $compressionPolicy) {
-                        Text(AppText.value("Never", "从不", language: language)).tag("never")
-                        Text(AppText.value("Always", "始终", language: language)).tag("always")
-                        Text(AppText.value("Smart", "智能", language: language)).tag("smart")
+                    Picker(AppText.localized("settings.compression.title", language: language), selection: $compressionPolicy) {
+                        Text(AppText.localized("settings.compression.never", language: language)).tag("never")
+                        Text(AppText.localized("settings.compression.always", language: language)).tag("always")
+                        Text(AppText.localized("settings.compression.smart", language: language)).tag("smart")
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    Text(AppText.value(
-                        "Smart uses a conservative, case-insensitive final file-extension list. It does not read a sample or probe the network. “Never” keeps the original bytes; “Always” applies Zstandard. The selected policy is fixed when a new transfer job is created.",
-                        "智能模式仅按大小写不敏感的最终文件后缀白名单判断，不读取样本，也不探测网络。从不模式发送原始字节；始终模式应用 Zstandard。新建传输任务时会固定当前策略。",
-                        language: language
-                    ))
+                    Text(AppText.localized("settings.compression.detail", language: language))
                         .font(.footnote)
                         .foregroundStyle(Theme.muted)
                 }
@@ -70,41 +66,41 @@ struct SettingsStageView: View {
 
                 if showAdvanced {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(AppText.value("Pairing and network", "配对与网络", language: language))
+                        Text(AppText.localized("settings.network.title", language: language))
                             .font(.title3.weight(.semibold))
                             .foregroundStyle(Theme.muted)
                         settingToggle(
-                            AppText.value("Avoid Tailscale addresses", "避开 Tailscale 地址", language: language),
-                            subtitle: AppText.value("Prefer the real WAN or relay path instead of 100.x candidates.", "不广播 100.x 候选地址，优先使用真实网络或中继。", language: language),
+                            AppText.localized("settings.network.avoid_tailscale", language: language),
+                            subtitle: AppText.localized("settings.network.avoid_tailscale_detail", language: language),
                             isOn: avoidTailscaleBinding
                         )
                     }
                     .card(padding: 14)
 
                     settingField(
-                        AppText.value("Rendezvous broker", "配对服务器", language: language),
+                        AppText.localized("settings.network.broker", language: language),
                         text: $serverURL,
                         placeholder: defaultRendezvousBroker,
-                        helper: AppText.value("Leave empty to use the built-in Envoix broker.", "留空则使用内置 Envoix 配对服务器。", language: language),
+                        helper: AppText.localized("settings.network.broker_detail", language: language),
                         isURL: true
                     )
                     settingField(
-                        AppText.value("Relay URL", "中继 URL", language: language),
+                        AppText.localized("settings.network.relay", language: language),
                         text: $relayURL,
                         placeholder: defaultRelayURL,
-                        helper: AppText.value("Leave empty to use the built-in relay for Room pairing.", "留空则使用内置中继服务。", language: language),
+                        helper: AppText.localized("settings.network.relay_detail", language: language),
                         isURL: true
                     )
 
                     settingMultilineField(
-                        AppText.value("Candidate allow", "候选地址 allow", language: language),
+                        AppText.localized("settings.network.candidate_allow", language: language),
                         text: $candidatesAllow,
-                        helper: AppText.value("One CIDR per line. Empty means allow all.", "每行一个 CIDR；留空表示全部允许。", language: language)
+                        helper: AppText.localized("settings.network.candidate_allow_detail", language: language)
                     )
                     settingMultilineField(
-                        AppText.value("Candidate deny", "候选地址 deny", language: language),
+                        AppText.localized("settings.network.candidate_deny", language: language),
                         text: $candidatesDeny,
-                        helper: AppText.value("One CIDR per line. Avoid Tailscale edits this list.", "每行一个 CIDR；避开 Tailscale 会修改此列表。", language: language)
+                        helper: AppText.localized("settings.network.candidate_deny_detail", language: language)
                     )
                     developerToolsSection
                     coreBuildInfo
@@ -134,45 +130,33 @@ struct SettingsStageView: View {
 
     private var developerToolsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(AppText.value("Developer tools", "开发者工具", language: language))
+            Text(AppText.localized("settings.developer.title", language: language))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
             settingToggle(
-                AppText.value("Enable developer mode", "开启开发者模式", language: language),
-                subtitle: AppText.value(
-                    "Reveal path selection, IDs, failure details, live logs and diagnostic reports.",
-                    "显示链路选择、ID、失败详情、实时日志和诊断报告。",
-                    language: language
-                ),
+                AppText.localized("settings.developer.enable", language: language),
+                subtitle: AppText.localized("settings.developer.enable_detail", language: language),
                 isOn: $developerMode
             )
             .accessibilityIdentifier("settings_developer_mode")
             if developerMode {
                 Divider().overlay(Theme.line.opacity(0.5))
                 settingToggle(
-                    AppText.value("Verbose logging", "详细日志", language: language),
-                    subtitle: AppText.value(
-                        "Capture path selection and hole-punching internals. High volume.",
-                        "记录链路选择和打洞内部信息；日志量较大。",
-                        language: language
-                    ),
+                    AppText.localized("settings.developer.verbose_logging", language: language),
+                    subtitle: AppText.localized("settings.developer.verbose_logging_detail", language: language),
                     isOn: $verboseLog
                 )
                 #if DEBUG
                 Divider().overlay(Theme.line.opacity(0.5))
                 VStack(alignment: .leading, spacing: 8) {
-                    let title = AppText.value("Remote log server", "远程日志服务器", language: language)
+                    let title = AppText.localized("settings.developer.log_server", language: language)
                     settingInput(
                         title: title,
                         text: $logServer,
                         placeholder: defaultLogServer,
                         isURL: true
                     )
-                    Text(AppText.value(
-                        "Redacted reports only. HTTPS and a developer upload token are required.",
-                        "只上传脱敏报告；必须使用 HTTPS 和开发者上传令牌。",
-                        language: language
-                    ))
+                    Text(AppText.localized("settings.developer.log_server_detail", language: language))
                         .font(.footnote)
                         .foregroundStyle(Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
@@ -199,24 +183,12 @@ struct SettingsStageView: View {
     #if os(macOS)
     private var agentServiceSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value(
-                "Background service",
-                "后台服务",
-                language: language
-            ))
+            Text(AppText.localized("settings.background.title", language: language))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
             settingToggle(
-                AppText.value(
-                    "Keep Envoix ready in the background",
-                    "让 Envoix 在后台保持就绪",
-                    language: language
-                ),
-                subtitle: AppText.value(
-                    "The signed helper owns persistent state and credentials. Turning it off keeps existing state, credentials, Outbox data, and received files.",
-                    "签名 helper 独占持久状态和凭据。关闭后台服务不会删除已有状态、凭据、发件箱数据或已接收文件。",
-                    language: language
-                ),
+                AppText.localized("settings.background.enable", language: language),
+                subtitle: AppText.localized("settings.background.enable_detail", language: language),
                 isOn: Binding(
                     get: { agentService.isRequestedEnabled },
                     set: { enabled in
@@ -233,7 +205,7 @@ struct SettingsStageView: View {
                     .font(.footnote)
                     .foregroundStyle(agentServiceStatusColor)
                 Spacer()
-                Button(AppText.value("Refresh", "刷新", language: language)) {
+                Button(AppText.localized("settings.background.refresh", language: language)) {
                     Task { await agentService.refresh() }
                 }
                 .buttonStyle(.borderless)
@@ -249,50 +221,29 @@ struct SettingsStageView: View {
     private var agentServiceStatusText: String {
         switch agentService.registrationState {
         case .unknown:
-            return AppText.value("Checking…", "正在检查…", language: language)
+            return AppText.localized("settings.background.status.checking", language: language)
         case .notRegistered:
-            return AppText.value("Off", "已关闭", language: language)
+            return AppText.localized("settings.background.status.off", language: language)
         case .requiresApproval:
-            return AppText.value(
-                "Approval required in System Settings > Login Items",
-                "需要在“系统设置 > 登录项”中批准",
-                language: language
-            )
+            return AppText.localized("settings.background.status.approval_required", language: language)
         case .helperNotFound:
-            return AppText.value(
-                "The embedded helper is missing",
-                "内嵌 helper 缺失",
-                language: language
-            )
+            return AppText.localized("settings.background.status.helper_missing", language: language)
         case .failed:
-            return AppText.value(
-                "Registration failed",
-                "注册失败",
-                language: language
-            )
+            return AppText.localized("settings.background.status.registration_failed", language: language)
         case .enabled:
             switch agentService.connectionState {
             case .idle, .checking:
-                return AppText.value("Starting…", "正在启动…", language: language)
+                return AppText.localized("settings.background.status.starting", language: language)
             case let .ready(pairedDevices):
-                let suffix = pairedDevices == 1 ? "device" : "devices"
-                return AppText.value(
-                    "Ready · \(pairedDevices) paired \(suffix)",
-                    "已就绪 · \(pairedDevices) 台已配对设备",
+                return AppText.localized(
+                    "settings.background.status.ready",
+                    defaultValue: "Ready · \(Int64(max(pairedDevices, 0))) paired devices",
                     language: language
                 )
             case .unavailable:
-                return AppText.value(
-                    "Helper unavailable",
-                    "Helper 不可用",
-                    language: language
-                )
+                return AppText.localized("settings.background.status.unavailable", language: language)
             case .incompatible:
-                return AppText.value(
-                    "Helper version is incompatible",
-                    "Helper 版本不兼容",
-                    language: language
-                )
+                return AppText.localized("settings.background.status.incompatible", language: language)
             }
         }
     }
@@ -320,7 +271,7 @@ struct SettingsStageView: View {
 
     private var transferCacheSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value("Transfer cache", "传输缓存", language: language))
+            Text(AppText.localized("settings.cache.title", language: language))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
             Text(ByteCountFormatter.string(
@@ -329,18 +280,14 @@ struct SettingsStageView: View {
             ))
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(Theme.text)
-            Text(AppText.value(
-                "Temporary Share and receive data. Active, paused, and resumable transfers are always protected.",
-                "用于分享和接收的临时数据；活动中、已暂停和可续传的任务始终会被保护。",
-                language: language
-            ))
+            Text(AppText.localized("settings.cache.detail", language: language))
                 .font(.body)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
             if model.transferCacheSummary.protectedBytes > 0 {
-                Text(AppText.value(
-                    "Protected: \(cacheByteString(model.transferCacheSummary.protectedBytes))",
-                    "受保护：\(cacheByteString(model.transferCacheSummary.protectedBytes))",
+                Text(AppText.localized(
+                    "settings.cache.protected",
+                    defaultValue: "Protected: \(cacheByteString(model.transferCacheSummary.protectedBytes))",
                     language: language
                 ))
                     .font(.footnote)
@@ -358,7 +305,7 @@ struct SettingsStageView: View {
                     if model.isCleaningTransferCache {
                         ProgressView().controlSize(.small)
                     }
-                    Text(AppText.value("Clean Up", "清理缓存", language: language))
+                    Text(AppText.localized("settings.cache.clean_up", language: language))
                 }
                 .frame(maxWidth: .infinity, minHeight: 40)
             }
@@ -379,7 +326,7 @@ struct SettingsStageView: View {
 
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(AppText.value("Appearance", "外观", language: language))
+            Text(AppText.localized("settings.appearance.title", language: language))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
@@ -395,7 +342,7 @@ struct SettingsStageView: View {
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(Theme.text)
                     Spacer()
-                    Text(AppText.value("System / Light / Dark", "跟随系统 / 浅色 / 深色", language: language))
+                    Text(AppText.localized("settings.appearance.options", language: language))
                         .font(.body)
                         .foregroundStyle(Theme.muted)
                 }
@@ -410,11 +357,11 @@ struct SettingsStageView: View {
     private var appearanceTitle: String {
         switch appearance {
         case .system:
-            return AppText.value("System", "跟随系统", language: language)
+            return AppText.localized("settings.appearance.system", language: language)
         case .light:
-            return AppText.value("Light", "浅色", language: language)
+            return AppText.localized("settings.appearance.light", language: language)
         case .dark:
-            return AppText.value("Dark", "深色", language: language)
+            return AppText.localized("settings.appearance.dark", language: language)
         }
     }
 
@@ -425,7 +372,7 @@ struct SettingsStageView: View {
             }
         } label: {
             HStack {
-                Text(AppText.value("Advanced", "高级", language: language))
+                Text(AppText.localized("settings.advanced", language: language))
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(Theme.text)
                 Spacer()
@@ -436,11 +383,11 @@ struct SettingsStageView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(AppText.value("Advanced", "高级", language: language))
+        .accessibilityLabel(AppText.localized("settings.advanced", language: language))
         .accessibilityValue(
             showAdvanced
-                ? AppText.value("Expanded", "已展开", language: language)
-                : AppText.value("Collapsed", "已收起", language: language)
+                ? AppText.localized("accessibility.expanded", language: language)
+                : AppText.localized("accessibility.collapsed", language: language)
         )
         .accessibilityIdentifier("settings_advanced_toggle")
     }

@@ -1664,6 +1664,301 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "要发送的项目" } }
       }
     },
+    "settings.advanced" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Advanced" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "高级" } }
+      }
+    },
+    "settings.appearance.dark" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Dark" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "深色" } }
+      }
+    },
+    "settings.appearance.light" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Light" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "浅色" } }
+      }
+    },
+    "settings.appearance.options" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "System / Light / Dark" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "跟随系统 / 浅色 / 深色" } }
+      }
+    },
+    "settings.appearance.system" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "System" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "跟随系统" } }
+      }
+    },
+    "settings.appearance.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Appearance" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "外观" } }
+      }
+    },
+    "settings.background.enable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keep Envoix ready in the background" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "让 Envoix 在后台保持就绪" } }
+      }
+    },
+    "settings.background.enable_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The signed helper owns persistent state and credentials. Turning it off keeps existing state, credentials, Outbox data, and received files." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "签名 helper 独占持久状态和凭据。关闭后台服务不会删除已有状态、凭据、发件箱数据或已接收文件。" } }
+      }
+    },
+    "settings.background.refresh" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Refresh" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "刷新" } }
+      }
+    },
+    "settings.background.status.approval_required" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Approval required in System Settings > Login Items" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要在“系统设置 > 登录项”中批准" } }
+      }
+    },
+    "settings.background.status.checking" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Checking…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在检查…" } }
+      }
+    },
+    "settings.background.status.helper_missing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The embedded helper is missing" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内嵌 helper 缺失" } }
+      }
+    },
+    "settings.background.status.incompatible" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Helper version is incompatible" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Helper 版本不兼容" } }
+      }
+    },
+    "settings.background.status.off" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Off" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已关闭" } }
+      }
+    },
+    "settings.background.status.ready" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "Ready · %lld paired device" } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "Ready · %lld paired devices" } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "已就绪 · %lld 台已配对设备" } }
+            }
+          }
+        }
+      }
+    },
+    "settings.background.status.registration_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Registration failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "注册失败" } }
+      }
+    },
+    "settings.background.status.starting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在启动…" } }
+      }
+    },
+    "settings.background.status.unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Helper unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Helper 不可用" } }
+      }
+    },
+    "settings.background.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Background service" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后台服务" } }
+      }
+    },
+    "settings.cache.clean_up" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Clean Up" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "清理缓存" } }
+      }
+    },
+    "settings.cache.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Temporary Share and receive data. Active, paused, and resumable transfers are always protected." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "用于分享和接收的临时数据；活动中、已暂停和可续传的任务始终会被保护。" } }
+      }
+    },
+    "settings.cache.protected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Protected: %@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "受保护：%@" } }
+      }
+    },
+    "settings.cache.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer cache" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输缓存" } }
+      }
+    },
+    "settings.compression.always" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Always" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "始终" } }
+      }
+    },
+    "settings.compression.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Smart uses a conservative, case-insensitive final file-extension list. It does not read a sample or probe the network. “Never” keeps the original bytes; “Always” applies Zstandard. The selected policy is fixed when a new transfer job is created." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "智能模式仅按大小写不敏感的最终文件后缀白名单判断，不读取样本，也不探测网络。从不模式发送原始字节；始终模式应用 Zstandard。新建传输任务时会固定当前策略。" } }
+      }
+    },
+    "settings.compression.never" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Never" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "从不" } }
+      }
+    },
+    "settings.compression.smart" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Smart" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "智能" } }
+      }
+    },
+    "settings.compression.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Compression" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "压缩" } }
+      }
+    },
+    "settings.developer.enable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enable developer mode" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开启开发者模式" } }
+      }
+    },
+    "settings.developer.enable_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reveal path selection, IDs, failure details, live logs and diagnostic reports." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示链路选择、ID、失败详情、实时日志和诊断报告。" } }
+      }
+    },
+    "settings.developer.log_server" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Remote log server" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "远程日志服务器" } }
+      }
+    },
+    "settings.developer.log_server_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Redacted reports only. HTTPS and a developer upload token are required." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "只上传脱敏报告；必须使用 HTTPS 和开发者上传令牌。" } }
+      }
+    },
+    "settings.developer.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Developer tools" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开发者工具" } }
+      }
+    },
+    "settings.developer.verbose_logging" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verbose logging" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "详细日志" } }
+      }
+    },
+    "settings.developer.verbose_logging_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Capture path selection and hole-punching internals. High volume." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "记录链路选择和打洞内部信息；日志量较大。" } }
+      }
+    },
+    "settings.language.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Language" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "语言" } }
+      }
+    },
+    "settings.network.avoid_tailscale" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Avoid Tailscale addresses" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "避开 Tailscale 地址" } }
+      }
+    },
+    "settings.network.avoid_tailscale_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Prefer the real WAN or relay path instead of 100.x candidates." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不广播 100.x 候选地址，优先使用真实网络或中继。" } }
+      }
+    },
+    "settings.network.broker" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Rendezvous broker" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对服务器" } }
+      }
+    },
+    "settings.network.broker_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Leave empty to use the built-in Envoix broker." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "留空则使用内置 Envoix 配对服务器。" } }
+      }
+    },
+    "settings.network.candidate_allow" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Candidate allow" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "候选地址 allow" } }
+      }
+    },
+    "settings.network.candidate_allow_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "One CIDR per line. Empty means allow all." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每行一个 CIDR；留空表示全部允许。" } }
+      }
+    },
+    "settings.network.candidate_deny" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Candidate deny" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "候选地址 deny" } }
+      }
+    },
+    "settings.network.candidate_deny_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "One CIDR per line. Avoid Tailscale edits this list." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每行一个 CIDR；避开 Tailscale 会修改此列表。" } }
+      }
+    },
+    "settings.network.relay" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Relay URL" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "中继 URL" } }
+      }
+    },
+    "settings.network.relay_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Leave empty to use the built-in relay for Room pairing." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "留空则使用内置中继服务。" } }
+      }
+    },
+    "settings.network.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing and network" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对与网络" } }
+      }
+    },
     "transfer.failure.authentication_failed.detail" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing authentication failed." } },
