@@ -688,7 +688,12 @@ class ConnectionWorkflowViewModelTest {
                 directoryCount = 0,
                 totalBytes = 42,
             )
-        val TEST_SETTINGS = Settings(nearbyDisplayName = "Android phone")
+        val TEST_SETTINGS =
+            Settings(
+                broker = TEST_ROOM_ENDPOINT.broker,
+                relay = TEST_ROOM_ENDPOINT.relay,
+                nearbyDisplayName = "Android phone",
+            )
     }
 }
 

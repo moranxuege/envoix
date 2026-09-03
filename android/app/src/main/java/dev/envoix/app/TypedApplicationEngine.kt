@@ -80,7 +80,7 @@ internal class TypedApplicationEngine private constructor(
                 check(!closed.get()) { "application Engine is closed" }
                 operation()
             }
-    }
+        }
 
     companion object {
         internal fun forTesting(

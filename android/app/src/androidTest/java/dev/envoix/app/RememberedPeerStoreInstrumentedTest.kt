@@ -241,11 +241,9 @@ private class TestEnvironment(
     val vaultDirectory = File(root, "vault")
     val keyAlias = "dev.envoix.application-vault.test.${UUID.randomUUID()}"
 
-    fun open(): RememberedPeerStore =
-        RememberedPeerStore.openForTesting(stateDirectory, vaultDirectory, keyAlias)
+    fun open(): RememberedPeerStore = RememberedPeerStore.openForTesting(stateDirectory, vaultDirectory, keyAlias)
 
-    fun credentialFiles(): List<File> =
-        vaultDirectory.listFiles()?.filter { it.isFile && it.extension == "bin" }.orEmpty()
+    fun credentialFiles(): List<File> = vaultDirectory.listFiles()?.filter { it.isFile && it.extension == "bin" }.orEmpty()
 
     fun cleanup() {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

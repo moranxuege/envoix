@@ -209,8 +209,7 @@ internal class RememberedPeerStore private constructor(
             stateDirectory: File,
             vaultDirectory: File,
             keyAlias: String,
-        ): RememberedPeerStore =
-            open(stateDirectory, AndroidApplicationVault(vaultDirectory, keyAlias))
+        ): RememberedPeerStore = open(stateDirectory, AndroidApplicationVault(vaultDirectory, keyAlias))
 
         private fun open(
             stateDirectory: File,
@@ -363,8 +362,7 @@ internal class AndroidApplicationVault(
         return File(directory, "$reference.bin")
     }
 
-    private fun aad(reference: String): ByteArray =
-        "$AAD_SCHEMA\u0000$reference".toByteArray(Charsets.UTF_8)
+    private fun aad(reference: String): ByteArray = "$AAD_SCHEMA\u0000$reference".toByteArray(Charsets.UTF_8)
 
     private fun atomicWrite(
         target: File,
