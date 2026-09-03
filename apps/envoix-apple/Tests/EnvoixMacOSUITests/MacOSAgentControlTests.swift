@@ -10,7 +10,9 @@ final class MacOSAgentControlTests: XCTestCase {
         let factory = SequencedAgentControlFactory(client: responseClient)
         let client = try MacOSAgentControlClient(
             controlEndpoint: URL(fileURLWithPath: "/private/tmp/envoix-agent.sock"),
-            clientFactory: factory.make
+            clientFactory: { endpoint in
+                try factory.make(controlEndpoint: endpoint)
+            }
         )
 
         XCTAssertEqual(factory.attemptCount, 0)
@@ -70,6 +72,48 @@ final class MacOSAgentControlTests: XCTestCase {
         XCTAssertEqual(controller.registrationState, .notRegistered)
         XCTAssertEqual(controller.connectionState, .idle)
         XCTAssertEqual(requestsAfterDisable, [.status])
+    }
+
+    @MainActor
+    func testRegistrationFailureDoesNotContactHelper() async {
+        let service = FakeAgentService(
+            registrationState: .notRegistered,
+            registerError: FakeAgentServiceError.registration
+        )
+        let client = FakeMacOSAgentControlClient(response: .status(status: status()))
+        let controller = MacOSAgentServiceController(
+            service: service,
+            controlClient: client
+        )
+
+        await controller.setEnabled(true)
+
+        let callCount = await client.callCount
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertEqual(controller.registrationState, .failed)
+        XCTAssertEqual(controller.connectionState, .unavailable(nil))
+        XCTAssertEqual(callCount, 0)
+    }
+
+    @MainActor
+    func testUnregistrationFailureDoesNotContactHelper() async {
+        let service = FakeAgentService(
+            registrationState: .enabled,
+            unregisterError: FakeAgentServiceError.unregistration
+        )
+        let client = FakeMacOSAgentControlClient(response: .status(status: status()))
+        let controller = MacOSAgentServiceController(
+            service: service,
+            controlClient: client
+        )
+
+        await controller.setEnabled(false)
+
+        let callCount = await client.callCount
+        XCTAssertEqual(service.unregisterCallCount, 1)
+        XCTAssertEqual(controller.registrationState, .failed)
+        XCTAssertEqual(controller.connectionState, .unavailable(nil))
+        XCTAssertEqual(callCount, 0)
     }
 
     @MainActor
@@ -392,20 +436,35 @@ private final class FakeAgentService: MacOSAgentServiceRegistering {
     var registrationState: MacOSAgentRegistrationState
     private(set) var registerCallCount = 0
     private(set) var unregisterCallCount = 0
+    private let registerError: Error?
+    private let unregisterError: Error?
 
-    init(registrationState: MacOSAgentRegistrationState) {
+    init(
+        registrationState: MacOSAgentRegistrationState,
+        registerError: Error? = nil,
+        unregisterError: Error? = nil
+    ) {
         self.registrationState = registrationState
+        self.registerError = registerError
+        self.unregisterError = unregisterError
     }
 
     func register() throws {
         registerCallCount += 1
+        if let registerError { throw registerError }
         registrationState = .enabled
     }
 
     func unregister() throws {
         unregisterCallCount += 1
+        if let unregisterError { throw unregisterError }
         registrationState = .notRegistered
     }
+}
+
+private enum FakeAgentServiceError: Error {
+    case registration
+    case unregistration
 }
 
 private actor FakeMacOSAgentControlClient:
