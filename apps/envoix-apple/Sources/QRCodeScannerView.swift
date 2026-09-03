@@ -3,6 +3,30 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
+enum QRCodeScannerMessageKind: CaseIterable {
+    case cameraAccessDenied
+    case cameraPermissionRequired
+    case cameraUnavailable
+}
+
+enum QRCodeScannerPresentationText {
+    static func title(for kind: QRCodeScannerMessageKind, language: String) -> String {
+        AppText.localized("scanner.camera.\(key(for: kind)).title", language: language)
+    }
+
+    static func detail(for kind: QRCodeScannerMessageKind, language: String) -> String {
+        AppText.localized("scanner.camera.\(key(for: kind)).detail", language: language)
+    }
+
+    private static func key(for kind: QRCodeScannerMessageKind) -> String {
+        switch kind {
+        case .cameraAccessDenied: "denied"
+        case .cameraPermissionRequired: "permission_required"
+        case .cameraUnavailable: "unavailable"
+        }
+    }
+}
+
 struct QRCodeScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
@@ -16,25 +40,20 @@ struct QRCodeScannerSheet: View {
             ZStack {
                 switch cameraStatus {
                 case .authorized:
-                    QRCodeScannerCameraView { value in
-                        acceptScannedValue(value)
-                    }
+                    QRCodeScannerCameraView(
+                        unavailableText: QRCodeScannerPresentationText.title(
+                            for: .cameraUnavailable,
+                            language: language
+                        ),
+                        onScan: { value in acceptScannedValue(value) }
+                    )
                     .ignoresSafeArea()
                 case .denied, .restricted:
-                    scannerMessage(
-                        title: AppText.value("Camera access is off", "相机权限未开启", language: language),
-                        detail: AppText.value("Allow camera access in Settings to scan an Envoix pairing QR code.", "请在系统设置中允许相机访问，然后扫描 Envoix 配对二维码。", language: language)
-                    )
+                    scannerMessage(.cameraAccessDenied)
                 case .notDetermined:
-                    scannerMessage(
-                        title: AppText.value("Camera permission needed", "需要相机权限", language: language),
-                        detail: AppText.value("Envoix uses the camera only to scan pairing QR codes.", "Envoix 仅使用相机扫描配对二维码。", language: language)
-                    )
+                    scannerMessage(.cameraPermissionRequired)
                 @unknown default:
-                    scannerMessage(
-                        title: AppText.value("Camera unavailable", "相机不可用", language: language),
-                        detail: AppText.value("This device cannot start QR scanning.", "当前设备无法启动二维码扫描。", language: language)
-                    )
+                    scannerMessage(.cameraUnavailable)
                 }
 
                 if cameraStatus == .authorized {
@@ -47,7 +66,7 @@ struct QRCodeScannerSheet: View {
 
                 #if DEBUG
                 if let testValue = scannerUITestValue {
-                    Button("Use test QR") {
+                    Button(AppText.localized("scanner.action.use_test_qr", language: language)) {
                         _ = acceptScannedValue(testValue)
                     }
                     .buttonStyle(.borderedProminent)
@@ -57,11 +76,11 @@ struct QRCodeScannerSheet: View {
                 }
                 #endif
             }
-            .navigationTitle(AppText.value("Scan pairing QR", "扫描配对二维码", language: language))
+            .navigationTitle(AppText.localized("scanner.title", language: language))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(AppText.value("Close", "关闭", language: language)) {
+                    Button(AppText.localized("common.close", language: language)) {
                         dismiss()
                     }
                 }
@@ -83,15 +102,15 @@ struct QRCodeScannerSheet: View {
             .allowsHitTesting(false)
     }
 
-    private func scannerMessage(title: String, detail: String) -> some View {
+    private func scannerMessage(_ kind: QRCodeScannerMessageKind) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "camera.viewfinder")
                 .font(.system(size: 42, weight: .semibold))
                 .foregroundStyle(Theme.accentStrong)
-            Text(title)
+            Text(QRCodeScannerPresentationText.title(for: kind, language: language))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.text)
-            Text(detail)
+            Text(QRCodeScannerPresentationText.detail(for: kind, language: language))
                 .font(.body)
                 .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
@@ -144,15 +163,18 @@ struct QRCodeScannerSheet: View {
 }
 
 private struct QRCodeScannerCameraView: UIViewControllerRepresentable {
+    let unavailableText: String
     let onScan: (String) -> Bool
 
     func makeUIViewController(context: Context) -> QRCodeScannerViewController {
         let controller = QRCodeScannerViewController()
+        controller.unavailableText = unavailableText
         controller.onScan = onScan
         return controller
     }
 
     func updateUIViewController(_ uiViewController: QRCodeScannerViewController, context: Context) {
+        uiViewController.unavailableText = unavailableText
         uiViewController.onScan = onScan
     }
 }
@@ -164,6 +186,7 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var didScan = false
 
+    var unavailableText = ""
     var onScan: ((String) -> Bool)?
 
     override func viewDidLoad() {
@@ -231,7 +254,7 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
 
     private func showUnavailableMessage() {
         let label = UILabel()
-        label.text = "Camera unavailable"
+        label.text = unavailableText
         label.textColor = .white
         label.textAlignment = .center
         label.font = .preferredFont(forTextStyle: .headline)

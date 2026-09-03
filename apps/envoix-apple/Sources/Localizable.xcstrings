@@ -196,6 +196,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
       }
     },
+    "common.close" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Close" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭" } }
+      }
+    },
     "common.copy" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy" } },
@@ -1194,6 +1200,54 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Unverified" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未经验证" } }
+      }
+    },
+    "scanner.action.use_test_qr" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Use test QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "使用测试二维码" } }
+      }
+    },
+    "scanner.camera.denied.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Allow camera access in Settings to scan an Envoix pairing QR code." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请在系统设置中允许相机访问，然后扫描 Envoix 配对二维码。" } }
+      }
+    },
+    "scanner.camera.denied.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera access is off" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "相机权限未开启" } }
+      }
+    },
+    "scanner.camera.permission_required.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix uses the camera only to scan pairing QR codes." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 仅使用相机扫描配对二维码。" } }
+      }
+    },
+    "scanner.camera.permission_required.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera permission needed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要相机权限" } }
+      }
+    },
+    "scanner.camera.unavailable.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This device cannot start QR scanning." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前设备无法启动二维码扫描。" } }
+      }
+    },
+    "scanner.camera.unavailable.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "相机不可用" } }
+      }
+    },
+    "scanner.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Scan pairing QR" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "扫描配对二维码" } }
       }
     },
     "send.action.add_to_room" : {
