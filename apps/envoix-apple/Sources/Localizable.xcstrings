@@ -3053,6 +3053,96 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for receiver to save" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待接收方完成保存" } }
       }
+    },
+    "transfer.workflow.finalizing_delivery" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saved; finalizing delivery" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已保存，正在完成交付确认" } }
+      }
+    },
+    "transfer.workflow.paused_retained" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paused; progress is retained" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已暂停；进度已保留" } }
+      }
+    },
+    "transfer.workflow.preparing_selection" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing selected items…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备所选项目…" } }
+      }
+    },
+    "transfer.workflow.previous_send_active" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Wait for the previous send to finish." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请等待上一次发送结束。" } }
+      }
+    },
+    "transfer.workflow.queued_for_room" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Queued for this room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已加入此房间的发送队列" } }
+      }
+    },
+    "transfer.workflow.ready_to_send" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready to send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已准备发送" } }
+      }
+    },
+    "transfer.workflow.restoring_interrupted" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Restoring interrupted transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在恢复中断的传输" } }
+      }
+    },
+    "transfer.workflow.review_exceptional" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Review this unusually large transfer before receiving" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先确认这个异常大的传输" } }
+      }
+    },
+    "transfer.workflow.saving_selected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saving to the selected location" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在保存到所选位置" } }
+      }
+    },
+    "transfer.workflow.source_decision_required" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Some items need your decision" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "部分项目需要你的决定" } }
+      }
+    },
+    "transfer.workflow.source_required" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose at least one file or folder" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请至少选择一个文件或文件夹" } }
+      }
+    },
+    "transfer.workflow.source_warnings" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Resolve source warnings before sending" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先处理来源警告" } }
+      }
+    },
+    "transfer.workflow.transferring" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transferring" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在传输" } }
+      }
+    },
+    "transfer.workflow.verifying_received" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verifying received content" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在校验接收内容" } }
+      }
+    },
+    "transfer.workflow.waiting_for_sender" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for sender" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待发送方" } }
+      }
     }
   },
   "version" : "1.0"

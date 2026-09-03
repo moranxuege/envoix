@@ -919,7 +919,7 @@ final class TransferViewModel: ObservableObject {
         pendingSourceSelections = []
         isManifestSelectionReady = false
         isPreparingManifest = true
-        statusText = localized("Preparing selected items…", "正在准备所选项目…")
+        statusText = workflowText(.preparingSelection)
         presentationState = .preparing
         failure = nil
         let expected = UUID()
@@ -1038,9 +1038,7 @@ final class TransferViewModel: ObservableObject {
         observedTotal = 0
         lastProgressPublishAt = .distantPast
         resetRateTracking()
-        fileName = stored.itemCount == 1
-            ? localized("1 item", "1 个项目")
-            : localized("\(stored.itemCount) items", "\(stored.itemCount) 个项目")
+        fileName = TransferWorkflowText.itemCount(stored.itemCount, language: displayLanguage)
         transferActivity = TransferActivityRecord(
             activityId: stored.activityID,
             direction: direction,
@@ -1050,7 +1048,7 @@ final class TransferViewModel: ObservableObject {
             totalBytes: stored.totalBytes,
             bytesTransferred: 0,
             state: direction == .send ? .connecting : .waitingForPeer,
-            diagnosticMessage: localized("Restoring interrupted transfer", "正在恢复中断的传输"),
+            diagnosticMessage: workflowText(.restoringInterrupted),
             failure: nil,
             savedPaths: [],
             roomID: stored.roomID,
@@ -1060,7 +1058,7 @@ final class TransferViewModel: ObservableObject {
             activityGroupLabel: stored.activityGroupLabel
         )
         presentationState = transferActivity?.state
-        statusText = localized("Restoring interrupted transfer", "正在恢复中断的传输")
+        statusText = workflowText(.restoringInterrupted)
         if let transferActivity { appModel?.upsert(transferActivity) }
 
         let expected = operationID
@@ -1129,7 +1127,7 @@ final class TransferViewModel: ObservableObject {
         pendingSourceSelections = []
         isPreparingManifest = false
         isManifestSelectionReady = false
-        statusText = localized("Canceled", "已取消")
+        statusText = workflowText(.canceled)
         if transferActivity == nil {
             presentationState = .canceled
         } else {
@@ -1316,7 +1314,7 @@ final class TransferViewModel: ObservableObject {
         isManifestSelectionReady = false
         isPreparingManifest = false
         presentationState = nil
-        statusText = localized("Queued for this room", "已加入此房间的发送队列")
+        statusText = workflowText(.queuedForRoom)
         return entry
     }
 
@@ -1638,7 +1636,7 @@ final class TransferViewModel: ObservableObject {
         publishObservedProgress(finalizeRate: true)
         pendingReceive = nil
         presentationState = .paused
-        updateActivity(state: .paused, diagnostic: localized("Paused; progress is retained", "已暂停；进度已保留"))
+        updateActivity(state: .paused, diagnostic: workflowText(.pausedRetained))
         return true
     }
 
@@ -1691,7 +1689,7 @@ final class TransferViewModel: ObservableObject {
         pendingReceive = nil
         requiresExceptionalTransferApproval = false
         presentationState = .canceled
-        updateActivity(state: .canceled, diagnostic: localized("Canceled", "已取消"))
+        updateActivity(state: .canceled, diagnostic: workflowText(.canceled))
         if let direction = transferActivity?.direction {
             clearStoredManifestSession(direction: direction)
             if direction == .send {
@@ -1770,15 +1768,15 @@ final class TransferViewModel: ObservableObject {
     fileprivate func handleInvite(_ value: String) {
         invite = value
         if value.contains("@") { peerAddress = value }
-        updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for sender", "等待发送方"))
+        updateActivity(state: .waitingForPeer, diagnostic: workflowText(.waitingForSender))
     }
 
     fileprivate func handleStarted(itemCount: UInt32, totalBytes: UInt64) {
-        fileName = itemCount == 1 ? localized("1 item", "1 个项目") : localized("\(itemCount) items", "\(itemCount) 个项目")
+        fileName = TransferWorkflowText.itemCount(itemCount, language: displayLanguage)
         total = totalBytes
         transferActivity?.itemCount = itemCount
         transferActivity?.totalBytes = totalBytes
-        updateActivity(state: .transferring, diagnostic: localized("Transferring", "正在传输"))
+        updateActivity(state: .transferring, diagnostic: workflowText(.transferring))
     }
 
     fileprivate func handleConnectionPath(_ event: FfiConnectionPathEvent) {
@@ -1810,23 +1808,23 @@ final class TransferViewModel: ObservableObject {
         let text: String
         switch next {
         case .waitingForPeer:
-            state = .waitingForPeer; text = localized("Waiting for peer", "正在等待对端")
+            state = .waitingForPeer; text = workflowText(.waitingForPeer)
         case .pairing:
-            state = .pairing; text = localized("Pairing", "正在配对")
+            state = .pairing; text = workflowText(.pairing)
         case .connecting:
-            state = .connecting; text = localized("Connecting", "正在连接")
+            state = .connecting; text = workflowText(.connecting)
         case .transferring:
-            state = .transferring; text = localized("Transferring", "正在传输")
+            state = .transferring; text = workflowText(.transferring)
         case .verifying:
-            state = .verifying; text = localized("Verifying received content", "正在校验接收内容")
+            state = .verifying; text = workflowText(.verifyingReceived)
         case .saving:
-            state = .saving; text = localized("Saving to the selected location", "正在保存到所选位置")
+            state = .saving; text = workflowText(.savingSelected)
         case .waitingForReceiverSave:
-            state = .waitingForReceiverSave; text = localized("Waiting for receiver to finish saving", "等待接收方完成保存")
+            state = .waitingForReceiverSave; text = workflowText(.waitingForReceiverSave)
         case .finalizingDelivery:
-            state = .finalizingDelivery; text = localized("Saved; finalizing delivery", "已保存，正在完成交付确认")
+            state = .finalizingDelivery; text = workflowText(.finalizingDelivery)
         case .delivered:
-            state = .delivered; text = localized("Delivered", "已送达")
+            state = .delivered; text = workflowText(.delivered)
         }
         if TransferPresentationPolicy.progress(for: state) == .complete {
             observedTransferred = max(max(observedTransferred, observedTotal), total)
@@ -1870,7 +1868,7 @@ final class TransferViewModel: ObservableObject {
             activeReceive = nil
         }
         resourceAccess = nil
-        statusText = localized("Delivered", "已送达")
+        statusText = workflowText(.delivered)
         updateActivity(state: .delivered, diagnostic: statusText)
     }
 
@@ -1948,15 +1946,12 @@ final class TransferViewModel: ObservableObject {
         rememberPersistence: RememberPersistenceContext? = nil
     ) {
         guard nativeSendOperationActivityID == nil else {
-            statusText = localized(
-                "Wait for the previous send to finish.",
-                "请等待上一次发送结束。"
-            )
+            statusText = workflowText(.previousSendActive)
             return
         }
         let paths = normalizedPaths(selectedPaths)
         guard !paths.isEmpty else {
-            handleFailed(localized("Choose at least one file or folder", "请至少选择一个文件或文件夹"))
+            handleFailed(workflowText(.sourceRequired))
             return
         }
         displayLanguage = settings.language
@@ -1987,7 +1982,7 @@ final class TransferViewModel: ObservableObject {
             return
         }
         guard isManifestSelectionReady else {
-            statusText = localized("Resolve source warnings before sending", "请先处理来源警告")
+            statusText = workflowText(.sourceWarnings)
             return
         }
         launchSend(SendOperation(
@@ -2016,9 +2011,9 @@ final class TransferViewModel: ObservableObject {
         cancellation = token
         pausedByUser = false
         if operation.request.mode == .room {
-            updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for peer", "正在等待对端"))
+            updateActivity(state: .waitingForPeer, diagnostic: workflowText(.waitingForPeer))
         } else {
-            updateActivity(state: .connecting, diagnostic: localized("Connecting", "正在连接"))
+            updateActivity(state: .connecting, diagnostic: workflowText(.connecting))
         }
         let expectedOperationID = operationID
         nativeSendOperationActivityID = activityID
@@ -2146,7 +2141,7 @@ final class TransferViewModel: ObservableObject {
         let token = FfiManifestV2Cancellation()
         cancellation = token
         pausedByUser = false
-        updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for sender", "等待发送方"))
+        updateActivity(state: .waitingForPeer, diagnostic: workflowText(.waitingForSender))
         let expectedOperationID = operationID
         let activityID = transferActivity?.activityId
         let observer = makeTransferObserver(
@@ -2305,10 +2300,7 @@ final class TransferViewModel: ObservableObject {
         let exceptional = summary.exceptionalOffer || total > available / 2
         if exceptional {
             requiresExceptionalTransferApproval = true
-            statusText = localized(
-                "Review this unusually large transfer before receiving",
-                "请先确认这个异常大的传输"
-            )
+            statusText = workflowText(.reviewExceptional)
             updateActivity(state: .awaitingDecision, diagnostic: statusText)
         }
         return exceptional
@@ -2452,9 +2444,9 @@ final class TransferViewModel: ObservableObject {
         preparedInventoryRoots = roots
         pendingSourceSelections = snapshot.selections.filter { $0.state == .needsDecision }
         isManifestSelectionReady = snapshot.state == .readyToSend
-        statusText = isManifestSelectionReady
-            ? localized("Ready to send", "已准备发送")
-            : localized("Some items need your decision", "部分项目需要你的决定")
+        statusText = workflowText(
+            isManifestSelectionReady ? .readyToSend : .sourceDecisionRequired
+        )
         if transferActivity == nil {
             presentationState = nil
         }
@@ -2936,8 +2928,8 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    private func localized(_ english: String, _ chinese: String) -> String {
-        AppText.value(english, chinese, language: displayLanguage)
+    private func workflowText(_ status: TransferWorkflowStatus) -> String {
+        TransferWorkflowText.status(status, language: displayLanguage)
     }
 }
 

@@ -190,6 +190,64 @@ enum TransferContentText {
     }
 }
 
+enum TransferWorkflowStatus: CaseIterable {
+    case preparingSelection
+    case restoringInterrupted
+    case canceled
+    case queuedForRoom
+    case pausedRetained
+    case waitingForSender
+    case waitingForPeer
+    case pairing
+    case connecting
+    case transferring
+    case verifyingReceived
+    case savingSelected
+    case waitingForReceiverSave
+    case finalizingDelivery
+    case delivered
+    case previousSendActive
+    case sourceRequired
+    case sourceWarnings
+    case reviewExceptional
+    case readyToSend
+    case sourceDecisionRequired
+}
+
+enum TransferWorkflowText {
+    static func status(_ status: TransferWorkflowStatus, language: String) -> String {
+        let key: String
+        switch status {
+        case .preparingSelection: key = "transfer.workflow.preparing_selection"
+        case .restoringInterrupted: key = "transfer.workflow.restoring_interrupted"
+        case .canceled: key = "transfer.state.canceled"
+        case .queuedForRoom: key = "transfer.workflow.queued_for_room"
+        case .pausedRetained: key = "transfer.workflow.paused_retained"
+        case .waitingForSender: key = "transfer.workflow.waiting_for_sender"
+        case .waitingForPeer: key = "transfer.state.waiting_for_peer"
+        case .pairing: key = "transfer.state.pairing"
+        case .connecting: key = "transfer.state.connecting"
+        case .transferring: key = "transfer.workflow.transferring"
+        case .verifyingReceived: key = "transfer.workflow.verifying_received"
+        case .savingSelected: key = "transfer.workflow.saving_selected"
+        case .waitingForReceiverSave: key = "transfer.state.waiting_for_receiver_save"
+        case .finalizingDelivery: key = "transfer.workflow.finalizing_delivery"
+        case .delivered: key = "transfer.state.delivered"
+        case .previousSendActive: key = "transfer.workflow.previous_send_active"
+        case .sourceRequired: key = "transfer.workflow.source_required"
+        case .sourceWarnings: key = "transfer.workflow.source_warnings"
+        case .reviewExceptional: key = "transfer.workflow.review_exceptional"
+        case .readyToSend: key = "transfer.workflow.ready_to_send"
+        case .sourceDecisionRequired: key = "transfer.workflow.source_decision_required"
+        }
+        return AppText.localized(key, language: language)
+    }
+
+    static func itemCount(_ count: UInt32, language: String) -> String {
+        TransferActivityText.itemCount(UInt64(count), language: language)
+    }
+}
+
 enum TransferPairingText {
     static func guidance(
         direction: FfiTransferDirection,
