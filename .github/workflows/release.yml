@@ -26,8 +26,26 @@ env:
   ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
 
 jobs:
+  contract:
+    name: validate immutable release contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+      - name: Validate version, tag, and pinned actions
+        env:
+          ENVOIX_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          args=()
+          if [ -n "$ENVOIX_RELEASE_TAG" ]; then
+            args+=(--tag "$ENVOIX_RELEASE_TAG")
+          fi
+          python3 scripts/release_contract.py "${args[@]}"
+
   cli:
     name: build desktop binaries ${{ matrix.artifact }}
+    needs: [contract]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -58,7 +76,7 @@ jobs:
             agent_package: -p envoix-agent
             agent_name: envoix-agent-windows-x86_64.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
 
@@ -92,7 +110,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
@@ -104,12 +122,12 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
