@@ -48,17 +48,24 @@ scripts/with-build-cache-guard.sh \
 
 The binary lands at `target/release/envoix-rendezvous-server`.
 
-For a host whose glibc is older than the build machine's, dispatch the
-`rendezvous server artifact` workflow instead. It builds in a Debian 11
-container and publishes `envoix-rendezvous-server-linux-x86_64-glibc231`. The
-workflow is `workflow_dispatch` only, so it never runs on push.
+For a host whose glibc is older than the build machine's, use
+`envoix-broker-linux-x86_64` from the verified release bundle or manually
+dispatch the `rendezvous server artifact` workflow. The reusable workflow
+builds in an immutable Rust 1.96.0/Bullseye container, rejects binaries that
+require glibc newer than 2.31, and attaches GitHub build provenance. The main
+release workflow calls the same implementation and adds the broker SBOM,
+source manifest, and aggregate checksums.
 
 ## Install
 
 ```bash
-sudo install -m 0755 envoix-rendezvous-server /usr/local/bin/
+sudo install -m 0755 envoix-broker-linux-x86_64 \
+  /usr/local/bin/envoix-rendezvous-server
 sudo useradd --system --home /var/lib/envoix-rendezvous --create-home envoix
 ```
+
+For a local source build, replace `envoix-broker-linux-x86_64` above with
+`target/release/envoix-rendezvous-server`.
 
 ### The secret key is the server's identity
 
