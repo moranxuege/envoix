@@ -143,6 +143,8 @@ struct Cli {
     geoip_asn: Option<PathBuf>,
     /// HTTP address for the per-room log-collection endpoint
     /// (`POST /logs/<room_id>?side=…`, `GET /logs/<room_id>`). Omit to disable.
+    /// A non-loopback bind requires `--tls-cert` and `--tls-key`; plain HTTP is
+    /// accepted only on loopback for local development or TLS proxying.
     #[arg(long)]
     log_bind: Option<SocketAddr>,
     /// How long (seconds) collected logs are kept after their last update.
@@ -187,6 +189,7 @@ enum LogFormat {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let broker_config = cli.broker_config()?;
+    cli.validate_log_transport()?;
 
     // Pin the process-level rustls provider before anything touches TLS; with
     // both iroh and axum-server in the tree the automatic choice is ambiguous.
@@ -258,7 +261,9 @@ async fn main() -> Result<()> {
     // Optional per-room log-collection endpoint on its own HTTP(S) port. Off
     // unless --log-bind is given; a separate task that never touches the
     // pairing endpoint. With --tls-cert/--tls-key it terminates TLS itself
-    // (there is no proxy in front of this port).
+    // itself. A loopback-only HTTP listener may instead sit behind a TLS proxy;
+    // source rate limits then see the proxy as the peer and must also be applied
+    // at that proxy.
     if let Some(addr) = cli.log_bind {
         let upload_auth = match &cli.log_upload_token_file {
             Some(path) => {
@@ -317,7 +322,7 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 tracing::info!(%addr, "log endpoint listening (https)");
                 if let Err(error) = axum_server::bind_rustls(addr, config)
-                    .serve(router.into_make_service())
+                    .serve(router.into_make_service_with_connect_info::<SocketAddr>())
                     .await
                 {
                     tracing::error!(%error, "log endpoint failed");
@@ -328,7 +333,12 @@ async fn main() -> Result<()> {
                 match tokio::net::TcpListener::bind(addr).await {
                     Ok(listener) => {
                         tracing::info!(%addr, "log endpoint listening (http)");
-                        if let Err(error) = axum::serve(listener, router).await {
+                        if let Err(error) = axum::serve(
+                            listener,
+                            router.into_make_service_with_connect_info::<SocketAddr>(),
+                        )
+                        .await
+                        {
                             tracing::error!(%error, "log endpoint failed");
                         }
                     }
@@ -366,6 +376,18 @@ fn load_bearer_token(path: &Path, option: &str) -> Result<Arc<str>> {
 }
 
 impl Cli {
+    fn validate_log_transport(&self) -> Result<()> {
+        let Some(address) = self.log_bind else {
+            return Ok(());
+        };
+        if self.tls_cert.is_none() && !address.ip().is_loopback() {
+            anyhow::bail!(
+                "a non-loopback --log-bind requires --tls-cert and --tls-key; plain HTTP is local-only"
+            );
+        }
+        Ok(())
+    }
+
     fn broker_config(&self) -> Result<BrokerConfig> {
         let config = BrokerConfig {
             room_ttl: Duration::from_secs(self.room_ttl),

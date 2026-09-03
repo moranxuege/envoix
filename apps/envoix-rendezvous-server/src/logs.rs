@@ -1,19 +1,23 @@
 //! Per-room log collection for holistic debugging: peers POST their transfer log,
 //! an operator GETs the merged view — the rdz's own room events plus both peers'
 //! logs, one page. Keyed by room id (the code's first segment, the same id the
-//! broker matches on). In-memory with a TTL; auth is possession of the room id
-//! (it's the URL). Runs on a separate HTTP port from the pairing endpoint, so it
-//! never touches the SPAKE2 wire protocol.
+//! broker matches on). In-memory with a TTL; the room id is only a correlation
+//! key and is never accepted as authorization. Runs on a separate HTTPS port
+//! from the pairing endpoint, so it never touches the SPAKE2 wire protocol.
+//! Loopback HTTP is reserved for local development or a TLS reverse proxy.
 
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::to_bytes;
-use axum::extract::{Path, RawQuery, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{ConnectInfo, Path, RawQuery, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -33,6 +37,92 @@ const MAX_ROOM_KEY: usize = 64;
 const MAX_ROOMS: usize = 1024;
 const MAX_CLIENTS_PER_ROOM: usize = 4;
 const MAX_CLIENT_BYTES: usize = 256 * 1024 * 1024;
+/// Per-source limits are intentionally separate: a diagnostic upload must not
+/// consume an operator's report-view budget.
+const UPLOAD_RATE_EVENTS: u32 = 3;
+const UPLOAD_RATE_PERIOD: Duration = Duration::from_secs(60);
+const UPLOAD_RATE_BURST: u32 = 5;
+const VIEW_RATE_EVENTS: u32 = 60;
+const VIEW_RATE_PERIOD: Duration = Duration::from_secs(60);
+const VIEW_RATE_BURST: u32 = 120;
+const MAX_RATE_LIMIT_STATES: usize = 4096;
+const RATE_LIMIT_STATE_TTL: Duration = Duration::from_secs(600);
+const RATE_LIMIT_STATE_CAP_RETRY_SECS: u64 = 60;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum LogOperation {
+    Upload,
+    View,
+}
+
+#[derive(Clone, Copy)]
+struct RatePolicy {
+    events: u32,
+    period: Duration,
+    burst: u32,
+}
+
+impl LogOperation {
+    const fn policy(self) -> RatePolicy {
+        match self {
+            Self::Upload => RatePolicy {
+                events: UPLOAD_RATE_EVENTS,
+                period: UPLOAD_RATE_PERIOD,
+                burst: UPLOAD_RATE_BURST,
+            },
+            Self::View => RatePolicy {
+                events: VIEW_RATE_EVENTS,
+                period: VIEW_RATE_PERIOD,
+                burst: VIEW_RATE_BURST,
+            },
+        }
+    }
+}
+
+struct RateBucket {
+    tokens: f64,
+    updated: Instant,
+    last_seen: Instant,
+}
+
+#[derive(Default)]
+struct LogRateLimits {
+    buckets: Mutex<HashMap<(IpAddr, LogOperation), RateBucket>>,
+}
+
+impl LogRateLimits {
+    fn allow(&self, source: IpAddr, operation: LogOperation) -> Result<(), u64> {
+        self.allow_at(source, operation, Instant::now())
+    }
+
+    fn allow_at(&self, source: IpAddr, operation: LogOperation, now: Instant) -> Result<(), u64> {
+        let policy = operation.policy();
+        let mut buckets = self.buckets.lock().unwrap();
+        buckets.retain(|_, bucket| {
+            now.saturating_duration_since(bucket.last_seen) < RATE_LIMIT_STATE_TTL
+        });
+        let key = (source, operation);
+        if !buckets.contains_key(&key) && buckets.len() >= MAX_RATE_LIMIT_STATES {
+            return Err(RATE_LIMIT_STATE_CAP_RETRY_SECS);
+        }
+        let bucket = buckets.entry(key).or_insert_with(|| RateBucket {
+            tokens: f64::from(policy.burst),
+            updated: now,
+            last_seen: now,
+        });
+        let elapsed = now.saturating_duration_since(bucket.updated).as_secs_f64();
+        let refill_per_second = f64::from(policy.events) / policy.period.as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * refill_per_second).min(f64::from(policy.burst));
+        bucket.updated = now;
+        bucket.last_seen = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            return Ok(());
+        }
+        let retry_after = ((1.0 - bucket.tokens) / refill_per_second).ceil().max(1.0) as u64;
+        Err(retry_after)
+    }
+}
 
 /// Collected logs for one room.
 #[derive(Default)]
@@ -230,12 +320,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Router state: the store, plus the optional operator token that gates report
-/// RETRIEVAL (GET). Uploads (POST) stay open — peers cannot hold an operator
-/// secret and must still be able to upload.
+/// Router state: bounded source limits plus separate upload and report-view
+/// authorization policies. Neither operation treats a Room identifier as a
+/// credential.
 #[derive(Clone)]
 pub struct LogState {
     store: Arc<RoomLogs>,
+    rate_limits: Arc<LogRateLimits>,
     upload_auth: UploadAuth,
     view_auth: ViewAuth,
 }
@@ -266,6 +357,7 @@ pub fn router(store: Arc<RoomLogs>, upload_auth: UploadAuth, view_auth: ViewAuth
         .route("/logs/{room}", post(upload).get(view))
         .with_state(LogState {
             store,
+            rate_limits: Arc::new(LogRateLimits::default()),
             upload_auth,
             view_auth,
         })
@@ -275,26 +367,31 @@ async fn upload(
     Path(room): Path<String>,
     RawQuery(query): RawQuery,
     State(state): State<LogState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
-) -> StatusCode {
+) -> Response {
     if let Err(status) = authorize_upload(request.headers(), &state.upload_auth) {
-        return status;
+        return status.into_response();
+    }
+    if let Err(retry_after) = state.rate_limits.allow(peer.ip(), LogOperation::Upload) {
+        return rate_limited_response(retry_after);
     }
     if room.len() > MAX_ROOM_KEY {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
     let body = match to_bytes(request.into_body(), MAX_BODY).await {
         Ok(body) => match String::from_utf8(body.to_vec()) {
             Ok(body) => body,
-            Err(_) => return StatusCode::BAD_REQUEST,
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
         },
-        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE,
+        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
-    if state.store.upload(&room, &side_of(query.as_deref()), body) {
+    let status = if state.store.upload(&room, &side_of(query.as_deref()), body) {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::INSUFFICIENT_STORAGE
-    }
+    };
+    status.into_response()
 }
 
 fn authorize_upload(headers: &HeaderMap, auth: &UploadAuth) -> Result<(), StatusCode> {
@@ -318,7 +415,8 @@ async fn view(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     State(state): State<LogState>,
-) -> (StatusCode, String) {
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Response {
     // A room id is a low-entropy correlation key, NOT authorization.
     match &state.view_auth {
         ViewAuth::Token(expected) => {
@@ -326,7 +424,8 @@ async fn view(
                 return (
                     StatusCode::UNAUTHORIZED,
                     "operator token required\n".to_string(),
-                );
+                )
+                    .into_response();
             }
         }
         ViewAuth::Open => {}
@@ -336,8 +435,12 @@ async fn view(
                 "report retrieval disabled; set --log-view-token-file or \
                  --unsafe-open-log-view on the server\n"
                     .to_string(),
-            );
+            )
+                .into_response();
         }
+    }
+    if let Err(retry_after) = state.rate_limits.allow(peer.ip(), LogOperation::View) {
+        return rate_limited_response(retry_after);
     }
     // Default is the canonical per-source lanes; `?merge=time` is the secondary
     // skew-sensitive interleave.
@@ -353,6 +456,15 @@ async fn view(
         Some(text) => (StatusCode::OK, text),
         None => (StatusCode::NOT_FOUND, "no logs for this room\n".to_string()),
     }
+    .into_response()
+}
+
+fn rate_limited_response(retry_after: u64) -> Response {
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, "rate limited\n").into_response();
+    let value = HeaderValue::from_str(&retry_after.to_string())
+        .expect("positive integer retry-after is a valid header value");
+    response.headers_mut().insert(header::RETRY_AFTER, value);
+    response
 }
 
 /// Extract a sanitized `side` from the raw query string; default "peer".

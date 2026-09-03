@@ -69,3 +69,29 @@ fn invalid_zero_rate_is_rejected() {
         Cli::try_parse_from(["envoix-rendezvous-server", "--endpoint-rate-events", "0"]).unwrap();
     assert!(cli.broker_config().is_err());
 }
+
+#[test]
+fn diagnostic_transport_rejects_public_plain_http() {
+    let cli =
+        Cli::try_parse_from(["envoix-rendezvous-server", "--log-bind", "0.0.0.0:8460"]).unwrap();
+    assert!(cli.validate_log_transport().is_err());
+}
+
+#[test]
+fn diagnostic_transport_allows_loopback_http_and_public_tls() {
+    let loopback =
+        Cli::try_parse_from(["envoix-rendezvous-server", "--log-bind", "127.0.0.1:8460"]).unwrap();
+    assert!(loopback.validate_log_transport().is_ok());
+
+    let tls = Cli::try_parse_from([
+        "envoix-rendezvous-server",
+        "--log-bind",
+        "0.0.0.0:8460",
+        "--tls-cert",
+        "cert.pem",
+        "--tls-key",
+        "key.pem",
+    ])
+    .unwrap();
+    assert!(tls.validate_log_transport().is_ok());
+}
