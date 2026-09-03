@@ -137,33 +137,44 @@ server listening` line. Substitute the public IP to get the value clients need.
 
 ## Point clients at the broker
 
-The broker and relay defaults are compiled in, and the same pair is currently
-written in three places:
+The compiled broker and relay defaults have one source:
+`crates/envoix-client/src/configuration.rs`. UniFFI exports that pair through
+`envoixDeploymentEndpoints()`, so Apple and Android must not duplicate it.
+Changing those two Rust constants and rebuilding the clients is sufficient for
+a future default deployment change.
 
-| Consumer | Location |
-| --- | --- |
-| Rust, CLI, Agent, FFI | `crates/envoix-client/src/configuration.rs` |
-| Apple apps | `apps/envoix-apple/Sources/EnvoixDefaults.swift` |
-| Android app | `android/app/src/main/java/dev/envoix/app/TransferRepository.kt` |
+The current deployment is:
 
-All three must change together. `docs/design/ssot-audit-2026-07.md` already
-records this duplication.
-
-Ad-hoc CLI runs take `--rendezvous` and `--relay` without a rebuild.
-
-An installed Agent is the exception worth knowing about. Its settings file
-holds only the schema version, device name, and Inbox directory, and the
-generated systemd unit passes just `--settings`, so the Agent runs on the
-compiled-in defaults. To repoint an installed Agent without rebuilding, add the
-flags to its unit:
-
-```
-ExecStart="/home/<user>/.local/bin/envoix-agent" --settings "<settings>" \
-  --broker "<endpoint-id>@<ip>:8445" --relay "<relay-url>"
+```text
+broker: 6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@47.237.15.48:8445
+relay:  https://relay.envoix.cc:8444
 ```
 
-Then `systemctl --user daemon-reload && systemctl --user restart envoix-agent`.
-Use `--relay none` to run without a relay.
+Ad-hoc CLI runs can still override the defaults with `--rendezvous` and
+`--relay`. Managed Agent settings persist their own validated route, so an
+installed Agent can move without editing its service definition or rebuilding:
+
+```bash
+envoix agent configure \
+  --broker '<endpoint-id>@<ip>:8445' \
+  --relay '<relay-url>'
+```
+
+Use `--relay none` to disable relay use. The command writes settings atomically
+and restarts the per-user service.
+
+A remembered Relationship also contains the authenticated route used to find
+that specific peer. Move it in place, without re-pairing or touching the
+credential, on both peers:
+
+```bash
+envoix devices set-route '<device-id-or-exact-label>' \
+  --broker '<endpoint-id>@<ip>:8445' \
+  --relay '<relay-url>'
+```
+
+The Agent rejects a route change while the Relationship has an active Transfer
+or pending offer. User-entered custom routes are never silently overwritten.
 
 ## Verify
 

@@ -34,7 +34,7 @@ network, camera, signing, and Share Extension entitlements.
 
 The macOS application embeds `EnvoixEngineHelper.app` in
 `Contents/Library/LoginItems`. Users explicitly enable it from Settings; the
-GUI then talks to the shared API 24 `FfiAgentControlClient` over the helper's
+GUI then talks to the shared API 25 `FfiAgentControlClient` over the helper's
 owner-only Unix socket. Only the helper starts `FfiAgentHost`, owns the durable
 Engine, and receives the Engine Keychain access group.
 
@@ -56,7 +56,7 @@ macOS Background Task Management from reusing an incompatible ad-hoc helper
 registration while the production helper keeps `com.envoix.app.engine-helper`.
 
 This command validates the signed helper host, its Agent control surface, and
-helper-owned Keychain persistence. Agent protocol v11 moves first-contact
+helper-owned Keychain persistence. Agent protocol v12 keeps first-contact
 `join_pairing` behind that helper: when a foreground macOS Room receives a
 verification request, the GUI closes its unverified session and sends only the
 bounded invitation, label, and one-time code over the owner-only socket. The
@@ -67,6 +67,10 @@ the GUI receives only non-secret device summaries and transfer identifiers. The
 legacy active-Room presentation and helper transfer Activity/event projection
 remain separate pending their full Agent snapshot and event migration; they
 must not reopen or copy the helper credential.
+
+API 25 also exposes the Rust-owned deployment defaults to both Apple targets.
+Agent protocol v12 can update the broker and relay stored on an existing
+Relationship without exporting or rotating its credential.
 
 A distributable build must use `scripts/apple-dev.sh
 macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and

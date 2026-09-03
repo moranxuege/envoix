@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use envoix_client::api;
 use envoix_client::api::TransferError;
-use envoix_client::{BindAddrs, IdentityConfig, PeerDescriptor};
+use envoix_client::{
+    BindAddrs, DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, IdentityConfig, PeerDescriptor,
+};
 use envoix_qr::render_terminal_qr;
 
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
@@ -99,6 +101,20 @@ pub(crate) enum AgentCommand {
         /// Prebuilt envoix-agent binary; defaults to the CLI's directory or PATH.
         #[arg(long)]
         agent_binary: Option<PathBuf>,
+        /// Broker persisted in the managed Agent settings.
+        #[arg(long, default_value = DEFAULT_RENDEZVOUS_BROKER)]
+        broker: String,
+        /// Relay persisted in settings; use `none` to disable it.
+        #[arg(long, default_value = DEFAULT_RELAY_URL)]
+        relay: String,
+    },
+    /// Replace the managed Agent's broker and relay, then restart it.
+    Configure {
+        #[arg(long)]
+        broker: String,
+        /// Relay URL, or `none` to disable relay use.
+        #[arg(long)]
+        relay: String,
     },
     /// Start the installed Agent service.
     Start,
@@ -155,6 +171,16 @@ pub(crate) enum DevicesCommand {
         /// Confirm Relationship revocation and credential deletion.
         #[arg(long, required = true)]
         yes: bool,
+    },
+    /// Move one existing trusted relationship to another broker and relay.
+    SetRoute {
+        /// Device ID or exact label shown by `devices list`.
+        device: String,
+        #[arg(long)]
+        broker: String,
+        /// Relay URL, or `none` to disable relay use.
+        #[arg(long)]
+        relay: String,
     },
 }
 
@@ -645,6 +671,18 @@ mod tests {
         assert!(Cli::try_parse_from(["envoix", "agent", "start"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "agent", "stop"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "agent", "restart"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "agent",
+                "configure",
+                "--broker",
+                "fixture@127.0.0.1:8445",
+                "--relay",
+                "none",
+            ])
+            .is_ok()
+        );
         assert!(Cli::try_parse_from(["envoix", "agent", "update"]).is_ok());
         assert!(
             Cli::try_parse_from([
@@ -667,6 +705,19 @@ mod tests {
         assert!(Cli::try_parse_from(["envoix", "devices", "list"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook", "--yes"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "devices",
+                "set-route",
+                "MacBook",
+                "--broker",
+                "fixture@127.0.0.1:8445",
+                "--relay",
+                "https://relay.example.test",
+            ])
+            .is_ok()
+        );
         assert!(
             Cli::try_parse_from([
                 "envoix",

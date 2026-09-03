@@ -40,7 +40,7 @@ pub use room_control::*;
 #[cfg(feature = "android-jni")]
 mod android_jni;
 
-const ENVOIX_FFI_API_VERSION: u32 = 24;
+const ENVOIX_FFI_API_VERSION: u32 = 25;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), PeerSource>>> =
@@ -488,6 +488,40 @@ pub struct FfiCoreInfo {
     pub capabilities: Vec<String>,
 }
 
+/// Public deployment defaults consumed by every platform binding. Keeping
+/// this pair in Rust makes a future infrastructure move a one-file change.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiDeploymentEndpoints {
+    pub broker: String,
+    pub relay: String,
+}
+
+#[uniffi::export]
+pub fn envoix_deployment_endpoints() -> FfiDeploymentEndpoints {
+    FfiDeploymentEndpoints {
+        broker: DEFAULT_RENDEZVOUS_BROKER.to_string(),
+        relay: DEFAULT_RELAY_URL.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod deployment_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn ffi_exports_the_rust_owned_deployment_defaults() {
+        let endpoints = envoix_deployment_endpoints();
+        assert_eq!(endpoints.broker, DEFAULT_RENDEZVOUS_BROKER);
+        assert_eq!(endpoints.relay, DEFAULT_RELAY_URL);
+        assert!(
+            envoix_core_info()
+                .capabilities
+                .iter()
+                .any(|capability| capability == "deployment_endpoints_v1")
+        );
+    }
+}
+
 #[uniffi::export]
 pub fn envoix_core_info() -> FfiCoreInfo {
     FfiCoreInfo {
@@ -517,6 +551,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "persistent_application_engine_v1".into(),
             "agent_host_control_v1".into(),
             "agent_host_control_v2".into(),
+            "deployment_endpoints_v1".into(),
         ],
     }
 }

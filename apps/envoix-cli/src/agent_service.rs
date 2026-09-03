@@ -76,6 +76,13 @@ pub(crate) struct InstallOptions {
     pub(crate) inbox: Option<PathBuf>,
     pub(crate) device_name: String,
     pub(crate) agent_binary: Option<PathBuf>,
+    pub(crate) broker: String,
+    pub(crate) relay: Option<String>,
+}
+
+pub(crate) struct ConfigureOptions {
+    pub(crate) broker: String,
+    pub(crate) relay: Option<String>,
 }
 
 pub(crate) struct UpdateOptions {
@@ -103,6 +110,23 @@ pub(crate) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
     linux::install(options)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn configure(options: ConfigureOptions) -> io::Result<InstalledAgent> {
+    linux::configure(options)
+}
+
+#[cfg(windows)]
+pub(crate) fn configure(options: ConfigureOptions) -> io::Result<InstalledAgent> {
+    windows::configure(options)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub(crate) fn configure(options: ConfigureOptions) -> io::Result<InstalledAgent> {
+    let ConfigureOptions { broker, relay } = options;
+    let _ = (broker, relay);
+    Err(unsupported())
+}
+
 #[cfg(windows)]
 pub(crate) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
     windows::install(options)
@@ -114,8 +138,10 @@ pub(crate) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
         inbox,
         device_name,
         agent_binary,
+        broker,
+        relay,
     } = options;
-    let _ = (inbox, device_name, agent_binary);
+    let _ = (inbox, device_name, agent_binary, broker, relay);
     Err(unsupported())
 }
 
@@ -221,8 +247,8 @@ mod linux {
     };
 
     use super::{
-        InstallOptions, InstalledAgent, UninstallOptions, UninstalledAgent, UpdateOptions,
-        clear_managed_state, remove_file_if_exists, require_file,
+        ConfigureOptions, InstallOptions, InstalledAgent, UninstallOptions, UninstalledAgent,
+        UpdateOptions, clear_managed_state, remove_file_if_exists, require_file,
     };
 
     pub(super) const SERVICE_NAME: &str = "envoix-agent.service";
@@ -277,6 +303,8 @@ mod linux {
             version: AGENT_SETTINGS_VERSION,
             device_name: options.device_name,
             inbox_directory,
+            broker: options.broker,
+            relay: options.relay,
         };
         settings.validate()?;
 
@@ -305,6 +333,24 @@ mod linux {
             ))
         })?;
 
+        Ok(layout.installed())
+    }
+
+    pub(super) fn configure(options: ConfigureOptions) -> io::Result<InstalledAgent> {
+        let layout = ServiceLayout::discover()?;
+        require_file(&layout.settings_file, "Agent settings")?;
+        require_file(&layout.unit_file, "Agent systemd unit")?;
+        let bytes = fs::read(&layout.settings_file)?;
+        let mut settings: AgentSettings = serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        settings.version = AGENT_SETTINGS_VERSION;
+        settings.broker = options.broker;
+        settings.relay = options.relay;
+        settings.validate()?;
+        let settings_bytes = serde_json::to_vec_pretty(&settings)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        write_file(&layout.settings_file, &settings_bytes, 0o600)?;
+        systemctl(&["restart", SERVICE_NAME])?;
         Ok(layout.installed())
     }
 

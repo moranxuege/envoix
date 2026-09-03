@@ -17,13 +17,14 @@ typealias PlatformImage = UIImage
 
 /// Minimum length of a shared pairing token, matching the core requirement.
 let minTokenLength = 12
-let defaultLogServer = "https://rdz.chkxwlyh.us:8460"
+let defaultLogServer = ""
 let inviteV2URLPrefix = "envoix://invite/v2/"
 let roomControlURLPrefix = "envoix://room/"
 let deprecatedLogServers: Set<String> = [
     "http://67.230.187.238:8460",
     "https://envoix.chkxwlyh.us:8460",
     "http://envoix.chkxwlyh.us:8460",
+    "https://rdz.chkxwlyh.us:8460",
 ]
 
 /// Generates a short, memorable, easy-to-type pairing token of the form

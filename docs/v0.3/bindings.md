@@ -6,7 +6,7 @@ Status: normative for M5 and later platform migrations.
 
 The native library exposes two independent versions:
 
-- UniFFI API `23` identifies the complete native symbol/type surface;
+- UniFFI API `25` identifies the complete native symbol/type surface;
 - application binding `1` projects application contract `6`.
 
 Callers must check both `envoixCoreInfo()` and
@@ -15,8 +15,9 @@ An unsupported version fails closed; a frontend must not guess field or state
 semantics.
 
 API 22 introduced dedicated trusted boundaries for credential delivery and
-durable credential storage; API 23 retains those boundaries and adds the
-desktop Agent host/control projection.
+durable credential storage; API 23 added the desktop Agent host/control
+projection, API 24 added Agent-owned pairing, and API 25 adds shared deployment
+defaults plus authenticated Relationship route migration.
 `FfiRememberedCredentialVault` is the only Room/Transfer-session callback that
 receives a newly paired or rotated opaque credential. `FfiRoomControlSnapshot`
 and the general `TransferObserver` contain no credential bytes. Room pairing
@@ -58,6 +59,12 @@ label, and one-time code into the durable owner. Both redact authentication
 factors from Rust debug output and must not be persisted or logged. The join
 response returns only a non-secret device summary; credential bytes never cross
 the control boundary.
+
+`envoixDeploymentEndpoints()` is the only platform binding source for the
+compiled broker and relay defaults. Agent protocol v12 projects
+`UpdateDeviceRoute` so an existing Relationship can move to a new broker and
+relay without exposing, replacing, or re-pairing its credential. The Agent
+rejects route changes while that Relationship owns active transfer work.
 
 `FfiApplicationEngine` owns one ordered application snapshot. Its no-argument
 constructor is limited to contract tests and transient previews; product hosts

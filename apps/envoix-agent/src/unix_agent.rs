@@ -82,12 +82,12 @@ struct Cli {
     /// Human-readable name for this Agent host.
     #[arg(long)]
     device_name: Option<String>,
-    /// Rendezvous broker shared with the Mac app.
-    #[arg(long, default_value = DEFAULT_RENDEZVOUS_BROKER)]
-    broker: String,
-    /// Relay URL; use `none` to run without a relay.
-    #[arg(long, default_value = DEFAULT_RELAY_URL)]
-    relay: String,
+    /// Rendezvous broker; overrides the managed settings file.
+    #[arg(long)]
+    broker: Option<String>,
+    /// Relay URL; overrides managed settings. Use `none` to disable it.
+    #[arg(long)]
+    relay: Option<String>,
     /// Optional transport-only runtime TOML.
     #[arg(long)]
     config: Option<PathBuf>,
@@ -916,6 +916,30 @@ fn cancel_outgoing_for_relationship(runtime: &AgentRuntime, relationship_id: &st
     Ok(())
 }
 
+fn relationship_has_active_transfer(runtime: &AgentRuntime, relationship_id: &str) -> Result<bool> {
+    if relationship_has_active_outgoing(runtime, relationship_id)?
+        || lock(&runtime.pending_offers)?
+            .values()
+            .any(|pending| pending.offer.from_device_id == relationship_id)
+    {
+        return Ok(true);
+    }
+    let transfer_ids = lock(&runtime.active_paths)?
+        .iter()
+        .map(|path| path.transfer_id.clone())
+        .collect::<Vec<_>>();
+    let store = lock(&runtime.store)?;
+    for transfer_id in transfer_ids {
+        if store
+            .transfer(&transfer_id)?
+            .is_some_and(|transfer| transfer.relationship_id.as_str() == relationship_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
@@ -948,9 +972,16 @@ pub async fn run_cli() -> Result<()> {
         .control_endpoint
         .map(Ok)
         .unwrap_or_else(default_agent_control_endpoint)?;
-    let relay = match cli.relay.trim() {
-        "" | "none" | "off" => None,
-        value => Some(value.to_string()),
+    let broker = cli
+        .broker
+        .or_else(|| settings.as_ref().map(|settings| settings.broker.clone()))
+        .unwrap_or_else(|| DEFAULT_RENDEZVOUS_BROKER.to_string());
+    let relay = match cli.relay {
+        Some(value) => parse_relay_override(&value),
+        None => settings
+            .as_ref()
+            .map(|settings| settings.relay.clone())
+            .unwrap_or_else(|| Some(DEFAULT_RELAY_URL.to_string())),
     };
 
     let client = agent_client(cli.config.as_deref())?;
@@ -960,7 +991,7 @@ pub async fn run_cli() -> Result<()> {
             inbox_directory,
             control_endpoint,
             device_name,
-            broker: cli.broker,
+            broker,
             relay,
         },
         client,
@@ -983,6 +1014,13 @@ pub async fn run_cli() -> Result<()> {
                 }
             }
         }
+    }
+}
+
+fn parse_relay_override(value: &str) -> Option<String> {
+    match value.trim() {
+        "" | "none" | "off" => None,
+        value => Some(value.to_string()),
     }
 }
 
@@ -1439,6 +1477,42 @@ async fn handle_request_result(
                 },
             )?;
             Ok(AgentResponse::DeviceRevoked { device: forgotten })
+        }
+        AgentRequest::UpdateDeviceRoute {
+            device,
+            broker,
+            relay,
+        } => {
+            let current = lock(&runtime.store)?.resolve_device(&device)?;
+            if relationship_has_active_transfer(&runtime, current.id())? {
+                bail!(
+                    "device route cannot change while it has an active transfer or pending offer"
+                );
+            }
+            let unchanged = current.broker() == broker && current.relay() == relay.as_deref();
+            let updated = lock(&runtime.store)?.update_device_route(
+                current.id(),
+                &broker,
+                relay.as_deref(),
+            )?;
+            tracing::info!(
+                relationship_id = %updated.id,
+                device = %updated.label,
+                broker = %updated.broker,
+                relay = updated.relay.as_deref().unwrap_or("disabled"),
+                "remembered device route updated"
+            );
+            if !unchanged {
+                restart_remembered_receiver(runtime.clone(), updated.id.clone())?;
+                record_agent_event(
+                    &runtime,
+                    AgentEvent::RelationshipChanged {
+                        relationship_id: updated.id.clone(),
+                        change: AgentRelationshipChange::RouteUpdated,
+                    },
+                )?;
+            }
+            Ok(AgentResponse::DeviceRouteUpdated { device: updated })
         }
         AgentRequest::CreateTransfer { device, paths } => {
             create_agent_transfer(runtime, device, paths).await
@@ -2015,6 +2089,30 @@ fn spawn_remembered_receiver(runtime: Arc<AgentRuntime>, device_id: String) {
             .map(|mut active| active.remove(&device_id));
         tracing::error!(device_id, %error, "remembered receiver task could not start");
     }
+}
+
+fn restart_remembered_receiver(runtime: Arc<AgentRuntime>, device_id: String) -> Result<()> {
+    let cancel = lock(&runtime.active_receivers)?.get(&device_id).cloned();
+    let Some(cancel) = cancel else {
+        spawn_remembered_receiver(runtime, device_id);
+        return Ok(());
+    };
+    cancel.cancel();
+    let restart_runtime = runtime.clone();
+    spawn_background_task(&runtime, async move {
+        loop {
+            if restart_runtime.shutdown.is_cancelled() {
+                return;
+            }
+            let still_active = lock_or_log(&restart_runtime.active_receivers, "active receivers")
+                .is_some_and(|active| active.contains_key(&device_id));
+            if !still_active {
+                spawn_remembered_receiver(restart_runtime, device_id);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
 }
 
 fn register_remembered_receiver(
@@ -3458,7 +3556,7 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v11_envelope() {
+    fn request_decoder_accepts_a_valid_v12_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -4383,7 +4481,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v11_envelope() {
+    async fn local_socket_round_trips_a_v12_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -4427,7 +4525,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_named_pipe_round_trips_a_v11_envelope_for_its_owner() {
+    async fn windows_named_pipe_round_trips_a_v12_envelope_for_its_owner() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let directory = tempfile::tempdir().unwrap();
@@ -4582,6 +4680,79 @@ mod tests {
                 event: AgentEvent::RelationshipChanged {
                     relationship_id,
                     change: AgentRelationshipChange::Revoked,
+                },
+                ..
+            }) if relationship_id == &device_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn route_update_is_persisted_and_emits_a_typed_event() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let mut store = ProductStore::open(&state_directory).unwrap();
+        let old_broker = format!(
+            "{}@127.0.0.1:8555",
+            DEFAULT_RENDEZVOUS_BROKER.split('@').next().unwrap()
+        );
+        let pending = store
+            .prepare_device(
+                "MacBook",
+                &old_broker,
+                Some("https://old-relay.example.test"),
+            )
+            .unwrap();
+        let device_id = pending.id().to_string();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+        let shutdown = TransferCancelToken::new();
+        shutdown.cancel();
+        let runtime = Arc::new(AgentRuntime {
+            config: AgentHostConfiguration {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: state_directory.join("agent.sock"),
+                device_name: "test-wsl".into(),
+                broker: DEFAULT_RENDEZVOUS_BROKER.into(),
+                relay: Some(DEFAULT_RELAY_URL.into()),
+            },
+            client: api::Client::default(),
+            store: Mutex::new(store),
+            credential_protection: desktop_credential_protection(),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::new()),
+            active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
+            shutdown,
+            background_tasks: Mutex::new(Vec::new()),
+        });
+
+        let response = handle_request(
+            runtime.clone(),
+            AgentRequest::UpdateDeviceRoute {
+                device: "macbook".into(),
+                broker: DEFAULT_RENDEZVOUS_BROKER.into(),
+                relay: Some(DEFAULT_RELAY_URL.into()),
+            },
+        )
+        .await;
+
+        let AgentResponse::DeviceRouteUpdated { device } = response else {
+            panic!("unexpected response")
+        };
+        assert_eq!(device.id, device_id);
+        assert_eq!(device.broker, DEFAULT_RENDEZVOUS_BROKER);
+        assert_eq!(device.relay.as_deref(), Some(DEFAULT_RELAY_URL));
+        assert!(matches!(
+            lock(&runtime.events).unwrap().events.back(),
+            Some(AgentEventEnvelope {
+                event: AgentEvent::RelationshipChanged {
+                    relationship_id,
+                    change: AgentRelationshipChange::RouteUpdated,
                 },
                 ..
             }) if relationship_id == &device_id

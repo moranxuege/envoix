@@ -114,7 +114,10 @@ async fn run(cli: Cli) -> CliResult<()> {
                 inbox,
                 device_name,
                 agent_binary,
-            } => install_agent(inbox, device_name, agent_binary, json),
+                broker,
+                relay,
+            } => install_agent(inbox, device_name, agent_binary, broker, relay, json),
+            AgentCommand::Configure { broker, relay } => configure_agent(broker, relay, json),
             AgentCommand::Start => manage_agent_service("started", agent_service::start, json),
             AgentCommand::Stop => manage_agent_service("stopped", agent_service::stop, json),
             AgentCommand::Restart => {
@@ -154,6 +157,22 @@ async fn run(cli: Cli) -> CliResult<()> {
             ),
             DevicesCommand::Forget { device, yes: _ } => show_revoked_device(
                 call_agent(agent_endpoint, AgentRequest::RevokeDevice { device }).await?,
+                json,
+            ),
+            DevicesCommand::SetRoute {
+                device,
+                broker,
+                relay,
+            } => show_updated_device_route(
+                call_agent(
+                    agent_endpoint,
+                    AgentRequest::UpdateDeviceRoute {
+                        device,
+                        broker,
+                        relay: parse_relay_argument(&relay),
+                    },
+                )
+                .await?,
                 json,
             ),
         },
@@ -246,12 +265,16 @@ fn install_agent(
     inbox: Option<PathBuf>,
     device_name: String,
     agent_binary: Option<PathBuf>,
+    broker: String,
+    relay: String,
     json: bool,
 ) -> CliResult<()> {
     let installed = agent_service::install(agent_service::InstallOptions {
         inbox,
         device_name,
         agent_binary,
+        broker,
+        relay: parse_relay_argument(&relay),
     })?;
     if json {
         println!(
@@ -272,6 +295,33 @@ fn install_agent(
         println!("service: {}", installed.service_definition.display());
     }
     Ok(())
+}
+
+fn configure_agent(broker: String, relay: String, json: bool) -> CliResult<()> {
+    let configured = agent_service::configure(agent_service::ConfigureOptions {
+        broker,
+        relay: parse_relay_argument(&relay),
+    })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_configured",
+                "settings_file": configured.settings_file,
+            })
+        );
+    } else {
+        println!("Agent broker and relay updated; service restarted.");
+        println!("settings: {}", configured.settings_file.display());
+    }
+    Ok(())
+}
+
+fn parse_relay_argument(value: &str) -> Option<String> {
+    match value.trim() {
+        "" | "none" | "off" => None,
+        value => Some(value.to_string()),
+    }
 }
 
 fn update_agent(agent_binary: Option<PathBuf>, json: bool) -> CliResult<()> {
@@ -521,6 +571,21 @@ fn show_revoked_device(response: AgentResponse, json: bool) -> CliResult<()> {
         return Err("Agent returned an unexpected response".into());
     };
     println!("Revoked device: {} ({})", device.label, device.id);
+    Ok(())
+}
+
+fn show_updated_device_route(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::DeviceRouteUpdated { device } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Updated route: {} ({})", device.label, device.id);
+    println!("broker: {}", device.broker);
+    println!("relay: {}", device.relay.as_deref().unwrap_or("disabled"));
     Ok(())
 }
 

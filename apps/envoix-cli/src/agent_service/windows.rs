@@ -25,8 +25,8 @@ use envoix_client::product::{
 
 #[cfg(windows)]
 use super::{
-    InstallOptions, InstalledAgent, UninstallOptions, UninstalledAgent, UpdateOptions,
-    clear_managed_state, remove_file_if_exists, require_file,
+    ConfigureOptions, InstallOptions, InstalledAgent, UninstallOptions, UninstalledAgent,
+    UpdateOptions, clear_managed_state, remove_file_if_exists, require_file,
 };
 
 #[cfg(windows)]
@@ -191,6 +191,8 @@ pub(super) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
         version: AGENT_SETTINGS_VERSION,
         device_name: options.device_name,
         inbox_directory,
+        broker: options.broker,
+        relay: options.relay,
     };
     settings.validate()?;
 
@@ -210,6 +212,26 @@ pub(super) fn install(options: InstallOptions) -> io::Result<InstalledAgent> {
     )?;
     write_file(&layout.task_definition, task.as_bytes())?;
     register_task(&layout)?;
+    run_task(&layout)?;
+    Ok(layout.installed())
+}
+
+#[cfg(windows)]
+pub(super) fn configure(options: ConfigureOptions) -> io::Result<InstalledAgent> {
+    let layout = ServiceLayout::discover()?;
+    require_file(&layout.settings_file, "Agent settings")?;
+    require_file(&layout.task_definition, "Agent scheduled task")?;
+    let bytes = fs::read(&layout.settings_file)?;
+    let mut settings: AgentSettings = serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    settings.version = AGENT_SETTINGS_VERSION;
+    settings.broker = options.broker;
+    settings.relay = options.relay;
+    settings.validate()?;
+    let settings_bytes = serde_json::to_vec_pretty(&settings)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    write_file(&layout.settings_file, &settings_bytes)?;
+    end_task(&layout).ok();
     run_task(&layout)?;
     Ok(layout.installed())
 }

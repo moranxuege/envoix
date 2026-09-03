@@ -11,12 +11,13 @@ use envoix_agent::{
     AgentHostLifecycleHandle, AgentHostLifecycleState, AgentShutdownHandle,
 };
 use envoix_client::agent_control::AgentControlClient;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use envoix_client::product::AGENT_PROTOCOL_VERSION;
 use envoix_client::product::{
-    AGENT_PROTOCOL_VERSION, AgentControlTransport, AgentCredentialProtection, AgentDiagnostics,
-    AgentEvent, AgentEventCursor, AgentEventEnvelope, AgentOfferDecision, AgentPathKind,
-    AgentPendingOffer, AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
-    AgentSnapshot, AgentStatus, AgentTransferPath, DeviceSummary, InboxItem, InboxRoot,
-    PairingInvitation,
+    AgentControlTransport, AgentCredentialProtection, AgentDiagnostics, AgentEvent,
+    AgentEventCursor, AgentEventEnvelope, AgentOfferDecision, AgentPathKind, AgentPendingOffer,
+    AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse, AgentSnapshot,
+    AgentStatus, AgentTransferPath, DeviceSummary, InboxItem, InboxRoot, PairingInvitation,
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -336,6 +337,11 @@ pub enum FfiAgentRequest {
     RevokeDevice {
         device: String,
     },
+    UpdateDeviceRoute {
+        device: String,
+        broker: String,
+        relay: Option<String>,
+    },
     CreateTransfer {
         device: String,
         paths: Vec<String>,
@@ -475,6 +481,7 @@ pub struct FfiAgentInboxItem {
 pub enum FfiAgentRelationshipChange {
     Trusted,
     Rotated,
+    RouteUpdated,
     Revoked,
 }
 
@@ -541,6 +548,9 @@ pub enum FfiAgentResponse {
         devices: Vec<FfiAgentDeviceSummary>,
     },
     DeviceRevoked {
+        device: FfiAgentDeviceSummary,
+    },
+    DeviceRouteUpdated {
         device: FfiAgentDeviceSummary,
     },
     TransferCreated {
@@ -667,6 +677,15 @@ fn core_agent_request(request: FfiAgentRequest) -> Result<AgentRequest, FfiAgent
         },
         FfiAgentRequest::ListDevices => AgentRequest::ListDevices,
         FfiAgentRequest::RevokeDevice { device } => AgentRequest::RevokeDevice { device },
+        FfiAgentRequest::UpdateDeviceRoute {
+            device,
+            broker,
+            relay,
+        } => AgentRequest::UpdateDeviceRoute {
+            device,
+            broker,
+            relay,
+        },
         FfiAgentRequest::CreateTransfer { device, paths } => AgentRequest::CreateTransfer {
             device,
             paths: paths.into_iter().map(PathBuf::from).collect(),
@@ -731,6 +750,9 @@ fn ffi_agent_response(response: AgentResponse) -> FfiAgentResponse {
             devices: devices.into_iter().map(ffi_device_summary).collect(),
         },
         AgentResponse::DeviceRevoked { device } => FfiAgentResponse::DeviceRevoked {
+            device: ffi_device_summary(device),
+        },
+        AgentResponse::DeviceRouteUpdated { device } => FfiAgentResponse::DeviceRouteUpdated {
             device: ffi_device_summary(device),
         },
         AgentResponse::TransferCreated { transfer } => FfiAgentResponse::TransferCreated {
@@ -916,6 +938,7 @@ fn ffi_relationship_change(change: AgentRelationshipChange) -> FfiAgentRelations
     match change {
         AgentRelationshipChange::Trusted => FfiAgentRelationshipChange::Trusted,
         AgentRelationshipChange::Rotated => FfiAgentRelationshipChange::Rotated,
+        AgentRelationshipChange::RouteUpdated => FfiAgentRelationshipChange::RouteUpdated,
         AgentRelationshipChange::Revoked => FfiAgentRelationshipChange::Revoked,
     }
 }
@@ -1107,9 +1130,9 @@ mod tests {
     }
 
     #[test]
-    fn api_v24_advertises_the_agent_host_control_capability() {
+    fn api_v25_advertises_the_agent_host_control_capability() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 24);
+        assert_eq!(info.ffi_api_version, 25);
         assert!(
             info.capabilities
                 .iter()
@@ -1153,6 +1176,11 @@ mod tests {
             FfiAgentRequest::ListDevices,
             FfiAgentRequest::RevokeDevice {
                 device: "relationship_fixture".into(),
+            },
+            FfiAgentRequest::UpdateDeviceRoute {
+                device: "relationship_fixture".into(),
+                broker: envoix_client::DEFAULT_RENDEZVOUS_BROKER.into(),
+                relay: Some(envoix_client::DEFAULT_RELAY_URL.into()),
             },
             FfiAgentRequest::CreateTransfer {
                 device: "relationship_fixture".into(),

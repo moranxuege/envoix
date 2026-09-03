@@ -144,7 +144,7 @@ job. An ad-hoc signature is never a v0.3 distribution or release fallback.
 Mac App Store packaging is not part of the v0.3 path; its sandbox, login-item,
 and review constraints require a separate ADR before that channel is added.
 
-### API 24 host/control integration and deferred legacy migration
+### API 24-25 host/control integration and deferred legacy migration
 
 API 22 introduced the shared persistent Engine and vault UniFFI binding. API
 23 adds the shared `FfiAgentHost` and `FfiAgentControlClient` boundary with the
@@ -185,7 +185,13 @@ seals the content before returning a non-secret transfer identifier. The GUI
 does not open the Engine or copy a Relationship credential. Active transfer
 progress remains a separate snapshot/event projection milestone.
 
-API 24 still does not expose an Engine-store origin, recovery report, or
+API 25 centralizes the compiled deployment endpoints in Rust and exposes them
+through `deployment_endpoints_v1`. Agent protocol v12 adds an atomic
+`update_device_route` request. The helper validates and persists the new broker
+and relay on an existing Relationship while leaving its credential reference
+and generation unchanged; active Transfers cannot be rerouted mid-flight.
+
+API 25 still does not expose an Engine-store origin, recovery report, or
 migration report through UniFFI. Apple acceptance tests therefore provide
 external evidence for fresh state opens, current-schema reopen, owner
 exclusion, awaited shutdown, and legacy-state rejection; they must not
@@ -197,7 +203,7 @@ imported v0.2 data. This phase does not read, migrate, or delete
 Any legacy Apple migration is separate future work. It requires explicit
 approval, a versioned import contract, and independent evidence covering the
 source inventory, validated destination, rollback, and retention behavior.
-Until then, legacy data remains retained but outside the API 24 Agent owner.
+Until then, legacy data remains retained but outside the API 25 Agent owner.
 
 The Apple stage-B implementation embeds `EnvoixEngineHelper.app` at
 `Contents/Library/LoginItems`, registers it only after an explicit Settings

@@ -14,6 +14,8 @@ final class AgentHostBoundaryTests: XCTestCase {
         XCTAssertEqual(configuration.controlEndpoint, configuration.stateDirectory + "/agent.sock")
         XCTAssertEqual(configuration.deviceName, "Test Mac")
         XCTAssertEqual(configuration.credentialProtection, .appleKeychain)
+        XCTAssertEqual(configuration.broker, envoixDeploymentEndpoints().broker)
+        XCTAssertEqual(configuration.relay, envoixDeploymentEndpoints().relay)
         XCTAssertEqual(
             MacOSAgentBoundary.helperKeychainAccessGroup,
             AppleApplicationVault.helperAccessGroup
@@ -29,14 +31,14 @@ final class AgentHostBoundaryTests: XCTestCase {
         XCTAssertEqual(MacOSAgentBoundary.deviceName(from: " \n "), "Mac")
     }
 
-    func testHostWrapperRequiresAPI24AgentCapability() throws {
+    func testHostWrapperRequiresAPI25AgentCapability() throws {
         let configuration = isolatedConfiguration()
         let core = envoixCoreInfo()
-        XCTAssertEqual(core.ffiApiVersion, 24)
+        XCTAssertEqual(core.ffiApiVersion, 25)
         XCTAssertTrue(core.capabilities.contains(expectedAgentHostControlCapability))
 
         let incompatible = FfiCoreInfo(
-            ffiApiVersion: 24,
+            ffiApiVersion: 25,
             coreVersion: core.coreVersion,
             capabilities: core.capabilities.filter {
                 $0 != expectedAgentHostControlCapability

@@ -34,8 +34,8 @@ use crate::storage::{
     VaultReference,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 11;
-pub const AGENT_SETTINGS_VERSION: u16 = 1;
+pub const AGENT_PROTOCOL_VERSION: u16 = 12;
+pub const AGENT_SETTINGS_VERSION: u16 = 2;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_AGENT_EVENT_BATCH: usize = 256;
@@ -58,11 +58,23 @@ pub struct AgentSettings {
     pub version: u16,
     pub device_name: String,
     pub inbox_directory: PathBuf,
+    #[serde(default = "default_agent_broker")]
+    pub broker: String,
+    #[serde(default = "default_agent_relay")]
+    pub relay: Option<String>,
+}
+
+pub fn default_agent_broker() -> String {
+    crate::DEFAULT_RENDEZVOUS_BROKER.to_string()
+}
+
+pub fn default_agent_relay() -> Option<String> {
+    Some(crate::DEFAULT_RELAY_URL.to_string())
 }
 
 impl AgentSettings {
     pub fn validate(&self) -> io::Result<()> {
-        if self.version != AGENT_SETTINGS_VERSION {
+        if self.version == 0 || self.version > AGENT_SETTINGS_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported Agent settings version {}", self.version),
@@ -80,6 +92,8 @@ impl AgentSettings {
                 "Agent Inbox directory must be an absolute path",
             ));
         }
+        crate::api::parse_broker_addr(&self.broker, self.relay.as_deref())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
         Ok(())
     }
 }
@@ -105,6 +119,11 @@ pub enum AgentRequest {
     ListDevices,
     RevokeDevice {
         device: String,
+    },
+    UpdateDeviceRoute {
+        device: String,
+        broker: String,
+        relay: Option<String>,
     },
     CreateTransfer {
         device: String,
@@ -144,6 +163,9 @@ pub enum AgentResponse {
         devices: Vec<DeviceSummary>,
     },
     DeviceRevoked {
+        device: DeviceSummary,
+    },
+    DeviceRouteUpdated {
         device: DeviceSummary,
     },
     TransferCreated {
@@ -231,6 +253,16 @@ impl AgentRequestEnvelope {
         match &self.request {
             AgentRequest::Events { after, .. } => after.validate()?,
             AgentRequest::JoinPairing { pairing } => pairing.validate()?,
+            AgentRequest::UpdateDeviceRoute {
+                device,
+                broker,
+                relay,
+            } => {
+                validate_device_selector(device)?;
+                crate::api::parse_broker_addr(broker, relay.as_deref()).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
+                })?;
+            }
             AgentRequest::CreateTransfer { device, paths } => {
                 validate_device_selector(device)?;
                 if paths.is_empty() || paths.len() > MAX_AGENT_TRANSFER_PATHS {
@@ -371,7 +403,9 @@ impl AgentResponseEnvelope {
             AgentResponse::PendingOfferDecided { offer, .. } => {
                 validate_agent_pending_offer(offer)?;
             }
-            AgentResponse::DevicePaired { device } | AgentResponse::DeviceRevoked { device } => {
+            AgentResponse::DevicePaired { device }
+            | AgentResponse::DeviceRevoked { device }
+            | AgentResponse::DeviceRouteUpdated { device } => {
                 validate_agent_device(device)?;
             }
             AgentResponse::Devices { devices } => {
@@ -510,6 +544,7 @@ impl AgentEventCursor {
 pub enum AgentRelationshipChange {
     Trusted,
     Rotated,
+    RouteUpdated,
     Revoked,
 }
 
@@ -1188,6 +1223,33 @@ impl ProductStore {
             return Err(error);
         }
         Ok(record.summary())
+    }
+
+    pub fn update_device_route(
+        &mut self,
+        selector: &str,
+        broker: &str,
+        relay: Option<&str>,
+    ) -> Result<DeviceSummary, EngineStoreError> {
+        crate::api::parse_broker_addr(broker, relay)
+            .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        let record = self.resolve_device(selector)?;
+        if record.broker == broker && record.relay() == relay {
+            return Ok(record.summary());
+        }
+        let relationship_id =
+            RelationshipId::parse(record.id.clone()).expect("stored device ID was validated");
+        let mut state = self.engine.state().clone();
+        let durable = state
+            .durable_relationships
+            .get_mut(&relationship_id)
+            .ok_or_else(|| EngineStoreError::InvalidState("device route is missing".into()))?;
+        durable.broker = broker.to_string();
+        durable.relay = relay.map(str::to_string);
+        self.engine.replace(state)?;
+        self.device_record(&record.id)
+            .ok_or_else(|| EngineStoreError::InvalidState("updated device is missing".into()))
+            .map(|device| device.summary())
     }
 
     pub fn resolve_device(
@@ -2240,6 +2302,51 @@ mod tests {
     }
 
     #[test]
+    fn device_route_update_preserves_credential_and_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let credential = opaque_credential();
+        let old_broker = format!(
+            "{}@127.0.0.1:8555",
+            crate::DEFAULT_RENDEZVOUS_BROKER.split('@').next().unwrap()
+        );
+        let pending = store
+            .prepare_device(
+                "MacBook",
+                &old_broker,
+                Some("https://old-relay.example.test"),
+            )
+            .unwrap();
+        let id = pending.id().to_string();
+        store.commit_device(pending, &credential, 7).unwrap();
+
+        let updated = store
+            .update_device_route(
+                &id,
+                crate::DEFAULT_RENDEZVOUS_BROKER,
+                Some(crate::DEFAULT_RELAY_URL),
+            )
+            .unwrap();
+
+        assert_eq!(updated.generation, 7);
+        assert_eq!(updated.previous_generation, None);
+        assert_eq!(updated.broker, crate::DEFAULT_RENDEZVOUS_BROKER);
+        assert_eq!(updated.relay.as_deref(), Some(crate::DEFAULT_RELAY_URL));
+        assert_eq!(store.device_credential(&id).unwrap().expose(), credential);
+        assert!(store.update_device_route(&id, "invalid", None).is_err());
+        drop(store);
+
+        let reopened = ProductStore::open(directory.path()).unwrap();
+        let device = reopened.device_record(&id).unwrap();
+        assert_eq!(device.broker(), crate::DEFAULT_RENDEZVOUS_BROKER);
+        assert_eq!(device.relay(), Some(crate::DEFAULT_RELAY_URL));
+        assert_eq!(
+            reopened.device_credential(&id).unwrap().expose(),
+            credential
+        );
+    }
+
+    #[test]
     fn product_store_uses_an_injected_vault_without_serializing_secrets() {
         let directory = tempfile::tempdir().unwrap();
         let vault = Arc::new(MemoryVault::default());
@@ -2585,7 +2692,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -2610,7 +2717,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 5);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -2630,7 +2737,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 6);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 12);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 15);
         assert!(
@@ -2648,7 +2755,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 7);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 15);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 18);
         assert!(
@@ -2666,7 +2773,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 8);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 16);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 19);
         assert_eq!(
@@ -2683,11 +2790,13 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 9);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 11);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
 
         let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
         settings.validate().unwrap();
-        assert_eq!(serde_json::to_value(settings).unwrap(), fixture["settings"]);
+        assert_eq!(settings.version, 1);
+        assert_eq!(settings.broker, crate::DEFAULT_RENDEZVOUS_BROKER);
+        assert_eq!(settings.relay.as_deref(), Some(crate::DEFAULT_RELAY_URL));
 
         let request_values = fixture["requests"].as_array().unwrap();
         let requests = request_values
@@ -2970,11 +3079,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
-        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+        assert_eq!(fixture["protocol_version"], 11);
 
         let request: AgentRequestEnvelope =
             serde_json::from_value(fixture["request"].clone()).unwrap();
-        request.validate().unwrap();
         let AgentRequest::JoinPairing { pairing } = &request.request else {
             panic!("expected Agent-owned pairing request")
         };
@@ -2984,12 +3092,51 @@ mod tests {
 
         let response: AgentResponseEnvelope =
             serde_json::from_value(fixture["response"].clone()).unwrap();
-        response.validate_for(&request.request_id).unwrap();
         assert!(matches!(
             response.response,
             AgentResponse::DevicePaired { .. }
         ));
         assert_eq!(serde_json::to_value(response).unwrap(), fixture["response"]);
+    }
+
+    #[test]
+    fn agent_wire_v12_fixture_freezes_route_migration() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v12.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+
+        let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
+        settings.validate().unwrap();
+        assert_eq!(serde_json::to_value(settings).unwrap(), fixture["settings"]);
+
+        let request: AgentRequestEnvelope =
+            serde_json::from_value(fixture["request"].clone()).unwrap();
+        request.validate().unwrap();
+        assert!(matches!(
+            request.request,
+            AgentRequest::UpdateDeviceRoute { .. }
+        ));
+
+        let response: AgentResponseEnvelope =
+            serde_json::from_value(fixture["response"].clone()).unwrap();
+        response.validate_for(&request.request_id).unwrap();
+        assert!(matches!(
+            response.response,
+            AgentResponse::DeviceRouteUpdated { .. }
+        ));
+
+        let event: AgentEventEnvelope = serde_json::from_value(fixture["event"].clone()).unwrap();
+        event.validate().unwrap();
+        assert!(matches!(
+            event.event,
+            AgentEvent::RelationshipChanged {
+                change: AgentRelationshipChange::RouteUpdated,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3205,6 +3352,8 @@ mod tests {
             version: AGENT_SETTINGS_VERSION,
             device_name: "WSL".into(),
             inbox_directory: PathBuf::from("/tmp/inbox"),
+            broker: crate::DEFAULT_RENDEZVOUS_BROKER.into(),
+            relay: Some(crate::DEFAULT_RELAY_URL.into()),
         };
         settings.validate().unwrap();
 

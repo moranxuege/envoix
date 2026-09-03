@@ -10,8 +10,8 @@ use serde::Deserialize;
 /// Deployed defaults shared by native apps, the CLI Agent, and FFI adapters.
 /// A configured relay still allows iroh to select a direct LAN path.
 pub const DEFAULT_RENDEZVOUS_BROKER: &str =
-    "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
-pub const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
+    "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@47.237.15.48:8445";
+pub const DEFAULT_RELAY_URL: &str = "https://relay.envoix.cc:8444";
 
 /// Optional transport tuning loaded by the compatibility client.
 #[derive(Debug, Default, Deserialize)]

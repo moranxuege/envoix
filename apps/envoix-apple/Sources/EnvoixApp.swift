@@ -10,6 +10,7 @@ struct EnvoixApp: App {
     #endif
 
     init() {
+        migrateRetiredDeploymentDefaults()
         UserDefaults.standard.removeObject(forKey: "envoix.token")
     }
 

@@ -308,10 +308,10 @@ run_test() {
         wait_for_validation "$SERIAL_B" no
     else
         "$adb" -s "$SERIAL_A" shell \
-            'nc -w 10 67.230.187.238 8445 </dev/null' ||
+            'nc -w 10 relay.envoix.cc 8444 </dev/null' ||
             die "$SERIAL_A cannot reach the internet"
         "$adb" -s "$SERIAL_B" shell \
-            'nc -w 10 67.230.187.238 8445 </dev/null' ||
+            'nc -w 10 relay.envoix.cc 8444 </dev/null' ||
             die "$SERIAL_B cannot reach the internet"
     fi
 

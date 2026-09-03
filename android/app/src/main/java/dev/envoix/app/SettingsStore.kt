@@ -63,6 +63,7 @@ object SettingsStore {
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("envoix.settings", Context.MODE_PRIVATE)
+        migrateRetiredDeploymentDefaults()
         _settings.value =
             Settings(
                 language =
@@ -95,6 +96,24 @@ object SettingsStore {
                 traceIroh = prefs.getBoolean("traceIroh", false),
                 logServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!,
             )
+    }
+
+    private fun migrateRetiredDeploymentDefaults() {
+        val editor = prefs.edit()
+        var changed = false
+        if (prefs.getString("broker", null) == RETIRED_BROKER) {
+            editor.putString("broker", Endpoints.BROKER)
+            changed = true
+        }
+        if (prefs.getString("relay", null) == RETIRED_RELAY) {
+            editor.putString("relay", Endpoints.RELAY)
+            changed = true
+        }
+        if (prefs.getString("logServer", null) in RETIRED_LOG_SERVERS) {
+            editor.putString("logServer", Endpoints.LOG_SERVER)
+            changed = true
+        }
+        if (changed) editor.apply()
     }
 
     private fun readList(key: String): List<String> =
@@ -155,6 +174,16 @@ object SettingsStore {
     private const val LOG_BASELINE = "envoix=debug,iroh=info,warn"
     private const val LOG_VERBOSE = "envoix=trace,iroh=debug,warn"
     private const val LOG_TRACE_IROH = "envoix=trace,iroh=trace,iroh_relay=debug,netwatch=debug,warn"
+    private const val RETIRED_BROKER =
+        "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
+    private const val RETIRED_RELAY = "https://envoix.chkxwlyh.us:8444"
+    private val RETIRED_LOG_SERVERS =
+        setOf(
+            "http://67.230.187.238:8460",
+            "http://envoix.chkxwlyh.us:8460",
+            "https://envoix.chkxwlyh.us:8460",
+            "https://rdz.chkxwlyh.us:8460",
+        )
 
     /** Push the current verbosity down to the native reloadable filter. -vvv (trace
      *  iroh internals) wins over -vv (verbose) wins over the baseline. */
