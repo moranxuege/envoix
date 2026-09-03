@@ -401,6 +401,30 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "感知" } }
       }
     },
+    "connection.nearby.context.delivering" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Delivering invitation…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在发送邀请码…" } }
+      }
+    },
+    "connection.nearby.context.receiver_help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The accepted invitation is loaded below. The nearby device name remains unverified." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已接受的邀请码载入下方；附近设备名称仍未经验证。" } }
+      }
+    },
+    "connection.nearby.context.sender_help" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose the transfer details first. The BLE invitation is sent only after you tap Start." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先完成传输设置；只有点击开始后才会发送 BLE 邀请。" } }
+      }
+    },
+    "connection.nearby.context.unverified" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unverified" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未经验证" } }
+      }
+    },
     "connection.nearby.empty.paused" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby is paused." } },
@@ -621,6 +645,24 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Room" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间" } }
+      }
+    },
+    "folder_picker.choose" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose Folder" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择文件夹" } }
+      }
+    },
+    "folder_picker.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix needs access to a folder before accepting these files." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接受这些文件前，Envoix 需要访问一个保存文件夹。" } }
+      }
+    },
+    "folder_picker.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose a save folder" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择保存文件夹" } }
       }
     },
     "home.choose_action" : {

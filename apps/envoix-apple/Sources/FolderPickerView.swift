@@ -1,5 +1,19 @@
 import Foundation
 
+enum FolderPickerPresentationText {
+    static func title(language: String) -> String {
+        AppText.localized("folder_picker.title", language: language)
+    }
+
+    static func detail(language: String) -> String {
+        AppText.localized("folder_picker.detail", language: language)
+    }
+
+    static func chooseAction(language: String) -> String {
+        AppText.localized("folder_picker.choose", language: language)
+    }
+}
+
 #if os(iOS)
 import SwiftUI
 import UIKit
@@ -327,22 +341,18 @@ struct FolderPickerSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(AppText.value("Choose a save folder", "选择保存文件夹", language: language))
+            Text(FolderPickerPresentationText.title(language: language))
                 .font(.title2.weight(.semibold))
-            Text(AppText.value(
-                "Envoix needs access to a folder before accepting these files.",
-                "接受这些文件前，Envoix 需要访问一个保存文件夹。",
-                language: language
-            ))
+            Text(FolderPickerPresentationText.detail(language: language))
                 .foregroundStyle(.secondary)
 
             HStack {
                 Spacer()
-                Button(AppText.value("Cancel", "取消", language: language)) {
+                Button(AppText.localized("common.cancel", language: language)) {
                     onCancel()
                     dismiss()
                 }
-                Button(AppText.value("Choose Folder", "选择文件夹", language: language)) {
+                Button(FolderPickerPresentationText.chooseAction(language: language)) {
                     chooseFolder()
                 }
                 .keyboardShortcut(.defaultAction)
