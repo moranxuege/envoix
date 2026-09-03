@@ -145,6 +145,26 @@ jobs:
           sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
       - name: Check Android JNI compatibility
         run: scripts/check-android-jni-transfer-surface.sh
+      - name: Test Android production-signing guard
+        working-directory: android
+        run: |
+          partial_log="$RUNNER_TEMP/android-signing-partial.log"
+          if ENVOIX_ANDROID_KEY_ALIAS=incomplete \
+            ../scripts/with-build-cache-guard.sh ./gradlew help --no-daemon \
+            >"$partial_log" 2>&1; then
+            echo 'partial Android signing configuration was accepted' >&2
+            exit 1
+          fi
+          grep -F 'Android production signing configuration is incomplete' "$partial_log"
+
+          required_log="$RUNNER_TEMP/android-signing-required.log"
+          if ../scripts/with-build-cache-guard.sh ./gradlew help \
+            -Penvoix.requireProductionSigning=true --no-daemon \
+            >"$required_log" 2>&1; then
+            echo 'required Android production signing was accepted without credentials' >&2
+            exit 1
+          fi
+          grep -F 'Android production signing is required' "$required_log"
       - name: Lint, test, and build Android
         working-directory: android
         env:

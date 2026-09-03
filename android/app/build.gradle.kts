@@ -38,6 +38,47 @@ val envoixRustTargets =
     )
 
 val envoixAndroidApiLevel = 26
+val androidReleaseSigningVariables =
+    listOf(
+        "ENVOIX_ANDROID_KEYSTORE_PATH",
+        "ENVOIX_ANDROID_KEYSTORE_PASSWORD",
+        "ENVOIX_ANDROID_KEY_ALIAS",
+        "ENVOIX_ANDROID_KEY_PASSWORD",
+    )
+val androidReleaseSigningValues =
+    androidReleaseSigningVariables.associateWith { name ->
+        providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() }
+    }
+val configuredAndroidReleaseSigningVariables =
+    androidReleaseSigningValues.filterValues { it != null }.keys
+val requireAndroidReleaseSigning =
+    providers.gradleProperty("envoix.requireProductionSigning").orNull?.let { value ->
+        value.toBooleanStrictOrNull()
+            ?: throw GradleException(
+                "envoix.requireProductionSigning must be exactly true or false",
+            )
+    } ?: false
+val hasCompleteAndroidReleaseSigning =
+    configuredAndroidReleaseSigningVariables.size == androidReleaseSigningVariables.size
+
+if (configuredAndroidReleaseSigningVariables.isNotEmpty() && !hasCompleteAndroidReleaseSigning) {
+    val missing = androidReleaseSigningVariables - configuredAndroidReleaseSigningVariables
+    throw GradleException(
+        "Android production signing configuration is incomplete; missing: ${missing.joinToString()}",
+    )
+}
+if (requireAndroidReleaseSigning && !hasCompleteAndroidReleaseSigning) {
+    throw GradleException(
+        "Android production signing is required; set: ${androidReleaseSigningVariables.joinToString()}",
+    )
+}
+
+val androidReleaseKeystore =
+    androidReleaseSigningValues.getValue("ENVOIX_ANDROID_KEYSTORE_PATH")?.let(rootProject::file)
+if (androidReleaseKeystore != null && !androidReleaseKeystore.isFile) {
+    throw GradleException("Android production keystore is not a regular file")
+}
+
 val generatedJniLibsDir = layout.buildDirectory.dir("generated/envoix/jniLibs")
 val generatedUniFfiKotlinDir = layout.buildDirectory.dir("generated/envoix/uniffiKotlin")
 val hostExecutableSuffix = if (System.getProperty("os.name").startsWith("Windows")) ".exe" else ""
@@ -187,6 +228,18 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasCompleteAndroidReleaseSigning) {
+            create("production") {
+                storeFile = androidReleaseKeystore
+                storePassword =
+                    androidReleaseSigningValues.getValue("ENVOIX_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = androidReleaseSigningValues.getValue("ENVOIX_ANDROID_KEY_ALIAS")
+                keyPassword = androidReleaseSigningValues.getValue("ENVOIX_ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -194,8 +247,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Production signing is injected by the release pipeline in M8.
-            // Source-built release APKs stay unsigned until that gate exists.
+            signingConfig = signingConfigs.findByName("production")
         }
     }
 
