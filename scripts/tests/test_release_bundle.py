@@ -65,6 +65,25 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertIn(
             f"{expected_manifest_digest}  release-manifest.json", checksum_lines
         )
+        cli_sbom = json.loads(
+            (self.directory / "envoix-cli.cdx.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            cli_sbom["serialNumber"],
+            release_bundle.sbom_serial(REPOSITORY, REVISION, "envoix"),
+        )
+
+    def test_prepare_is_repeatable(self) -> None:
+        release_bundle.prepare(self.directory, VERSION, REPOSITORY, REVISION)
+        first_manifest = (self.directory / "release-manifest.json").read_bytes()
+        first_checksums = (self.directory / "SHA256SUMS").read_bytes()
+
+        release_bundle.prepare(self.directory, VERSION, REPOSITORY, REVISION)
+
+        self.assertEqual(
+            (self.directory / "release-manifest.json").read_bytes(), first_manifest
+        )
+        self.assertEqual((self.directory / "SHA256SUMS").read_bytes(), first_checksums)
 
     def test_missing_binary_is_rejected(self) -> None:
         (self.directory / "envoix-cli-linux-x86_64").unlink()
@@ -91,6 +110,15 @@ class ReleaseBundleTests(unittest.TestCase):
         path.write_text(json.dumps(document), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "describes 'envoix'"):
+            release_bundle.prepare(self.directory, VERSION, REPOSITORY, REVISION)
+
+    def test_foreign_sbom_serial_is_rejected(self) -> None:
+        path = self.directory / "envoix-agent.cdx.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["serialNumber"] = "urn:uuid:00000000-0000-4000-8000-000000000000"
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "unexpected serialNumber"):
             release_bundle.prepare(self.directory, VERSION, REPOSITORY, REVISION)
 
     def test_revision_must_be_a_commit(self) -> None:

@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,7 @@ SBOM_COMPONENTS = {
     "envoix-agent.cdx.json": "envoix-agent",
 }
 GENERATED_FILES = ("release-manifest.json", "SHA256SUMS")
+MAX_SBOM_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -77,7 +79,36 @@ def validate_binary(path: Path, accepted_magic: tuple[bytes, ...]) -> None:
         raise ValueError(f"release binary is implausibly small: {path.name}")
 
 
-def validate_sbom(path: Path, component_name: str, version: str) -> None:
+def sbom_serial(repository: str, revision: str, component_name: str) -> str:
+    identity = f"https://github.com/{repository}/commit/{revision}#{component_name}"
+    return f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, identity)}"
+
+
+def stamp_sbom_serial(
+    path: Path, component_name: str, repository: str, revision: str
+) -> str:
+    size = validate_regular_file(path)
+    if size > MAX_SBOM_BYTES:
+        raise ValueError(f"{path.name} exceeds the 16 MiB attestation limit")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid SBOM JSON in {path.name}: {error}") from error
+    expected = sbom_serial(repository, revision, component_name)
+    existing = document.get("serialNumber")
+    if existing not in (None, expected):
+        raise ValueError(f"{path.name} has an unexpected serialNumber")
+    if existing is None:
+        document["serialNumber"] = expected
+        path.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    return expected
+
+
+def validate_sbom(
+    path: Path, component_name: str, version: str, expected_serial: str
+) -> None:
     validate_regular_file(path)
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -89,6 +120,8 @@ def validate_sbom(path: Path, component_name: str, version: str) -> None:
         raise ValueError(f"{path.name} must use CycloneDX 1.5")
     if document.get("version") != 1:
         raise ValueError(f"{path.name} must have document version 1")
+    if document.get("serialNumber") != expected_serial:
+        raise ValueError(f"{path.name} has an invalid release serialNumber")
     component = document.get("metadata", {}).get("component", {})
     if component.get("name") != component_name:
         raise ValueError(
@@ -126,7 +159,11 @@ def validate_inputs(
     for name, accepted_magic in BINARY_FORMATS.items():
         validate_binary(directory / name, accepted_magic)
     for name, component_name in SBOM_COMPONENTS.items():
-        validate_sbom(directory / name, component_name, version)
+        path = directory / name
+        expected_serial = stamp_sbom_serial(
+            path, component_name, repository, revision
+        )
+        validate_sbom(path, component_name, version, expected_serial)
 
     artifacts = []
     for name in sorted(expected):
