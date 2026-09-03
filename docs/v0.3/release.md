@@ -18,8 +18,10 @@ attestation names another is not acceptable.
 
 ## Desktop bundle pipeline
 
-A manual `release` workflow run is a non-publishing rehearsal. A `v*` tag runs
-the same gates and then creates the GitHub Release.
+A manual `release` workflow run is a non-publishing rehearsal. It always builds
+the desktop bundle and includes signed Android packages only when
+`include_android` is selected. A `v*` tag requires both paths and then creates
+the GitHub Release.
 
 1. Validate versions, build numbers, tag, and pinned actions.
 2. Build CLI/Agent on Linux and Windows plus the standalone CLI on macOS arm64
@@ -49,7 +51,7 @@ job receives `contents: write`.
 | Windows CLI + Agent | desktop owner | SHA-256, source manifest, CycloneDX, GitHub provenance/SBOM attestations; document any SmartScreen limitation | per-user Task Scheduler install; paired atomic update | automated CI; real Windows host evidence still required |
 | macOS application + helper | Apple owner | Developer ID, hardened runtime, stable Team/access groups, notarization, staple, SHA-256 | signed application replacement retaining helper-owned state | path implemented; notarization evidence open |
 | iOS/iPadOS application | Apple owner | App Store/TestFlight distribution signing and archive validation | TestFlight/App Store update retaining Engine schema 2 | signing evidence open |
-| Android application | Android owner | production keystore signing, `apksigner` verification, version check, artifact digest/SBOM/provenance | package-manager update with stable application id/key | Gradle injection is fail-closed; key custody, tag workflow, and signed evidence remain open |
+| Android application | Android owner | production keystore signing, `apksigner` verification, version check, artifact digest/SBOM/provenance | package-manager update with stable application id/key | tag path and local test-key rehearsal pass; production key custody and signed evidence remain open |
 | Broker | service owner | pinned source revision, checksum/SBOM/provenance or locally recorded equivalent | preserve endpoint key across binary rollback/update | deployment works; release artifact integration open |
 | Relay | service owner | pinned upstream iroh-relay version and verified package origin | preserve TLS/ACME configuration | operated separately from Envoix release |
 
@@ -84,6 +86,12 @@ gh attestation verify envoix-cli-linux-x86_64 --repo moranxuege/envoix
 gh attestation verify envoix-agent-linux-x86_64 --repo moranxuege/envoix
 ```
 
+On macOS, use `shasum -a 256 -c SHA256SUMS` instead. Require the signer
+workflow, source digest, and GitHub-hosted runner policy in the final
+attestation command; the repository-only examples above are the minimum
+interactive check. The current rehearsal record is in
+[Release evidence](release-evidence.md).
+
 Repeat attestation verification for every desktop binary. Inspect
 `release-manifest.json` and require its revision to equal the intended commit.
 Parse both SBOM JSON files and archive the current cargo-audit result and
@@ -111,16 +119,29 @@ export ENVOIX_ANDROID_KEYSTORE_PATH='<absolute-keystore-path>'
 export ENVOIX_ANDROID_KEYSTORE_PASSWORD='<store-password>'
 export ENVOIX_ANDROID_KEY_ALIAS='<key-alias>'
 export ENVOIX_ANDROID_KEY_PASSWORD='<key-password>'
-android/gradlew -p android :app:bundleRelease \
+android/gradlew -p android :app:assembleRelease :app:bundleRelease \
   -Penvoix.requireProductionSigning=true --no-daemon
 ```
 
 The build rejects a partial set, an invalid keystore path, or a required signed
 build with no set. Passwords must come from a protected CI secret or an
 operator's environment, never a Gradle property, command line, checked-in
-file, workflow artifact, or log. This input boundary alone is not release
-evidence: the tag workflow must still verify the resulting signing-certificate
-digest, APK/AAB identity and version, provenance, and SBOM before publication.
+file, workflow artifact, or log.
+
+The tag workflow expects four repository Secrets named after the password,
+alias, and base64-encoded keystore inputs (`ENVOIX_ANDROID_KEYSTORE_BASE64`,
+`ENVOIX_ANDROID_KEYSTORE_PASSWORD`, `ENVOIX_ANDROID_KEY_ALIAS`, and
+`ENVOIX_ANDROID_KEY_PASSWORD`). It separately requires the public repository
+Variable `ENVOIX_ANDROID_SIGNING_CERT_SHA256`. This digest is policy, not a
+secret: the workflow compares it with the single APK signer and AAB signer so
+replacing all four Secrets cannot silently replace the product identity.
+
+Tag builds produce both `arm64-v8a` and `x86_64`, verify application id
+`dev.envoix.app` and the contract version/build, reject the retired JNI library,
+and attach two SBOMs to both packages: CycloneDX 1.6 for the Android runtime and
+CycloneDX 1.5 for the embedded Rust FFI graph. The checked bundle also contains
+`android-release-manifest.json` and `SHA256SUMS.android`. Local test-key
+evidence proves the path but is not production release evidence.
 
 ## Tag checklist
 

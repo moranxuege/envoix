@@ -1,8 +1,12 @@
+import org.cyclonedx.gradle.CyclonedxDirectTask
+import org.cyclonedx.model.Component
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jlleitschuh.gradle.ktlint")
+    id("org.cyclonedx.bom")
 }
 
 // Short git SHA embedded into BuildConfig, so any uploaded log identifies exactly
@@ -286,6 +290,17 @@ tasks.configureEach {
 
 tasks.matching { it.name == "runKtlintCheckOverMainSourceSet" }.configureEach {
     mustRunAfter(generateEnvoixUniFfiKotlin)
+}
+
+tasks.named<CyclonedxDirectTask>("cyclonedxDirectBom") {
+    componentGroup = "dev.envoix"
+    componentName = "envoix-android"
+    componentVersion = requireNotNull(android.defaultConfig.versionName)
+    projectType = Component.Type.APPLICATION
+    includeConfigs = listOf("releaseRuntimeClasspath")
+    includeBomSerialNumber = false
+    includeBuildSystem = false
+    jsonOutput = layout.buildDirectory.file("reports/cyclonedx-direct/envoix-android.cdx.json")
 }
 
 ktlint {

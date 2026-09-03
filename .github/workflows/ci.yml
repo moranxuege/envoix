@@ -8,6 +8,7 @@ on:
       - '**'
     paths:
       - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
@@ -22,6 +23,7 @@ on:
       - 'scripts/matrix_contract.py'
       - 'scripts/windows-agent-lifecycle-test.ps1'
       - 'scripts/tests/**'
+      - 'scripts/*.py'
       - 'scripts/with-build-cache-guard.sh'
       - 'scripts/build-cache-guard.sh'
       - 'tests/e2e/matrix/**'

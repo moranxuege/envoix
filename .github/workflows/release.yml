@@ -1,16 +1,22 @@
 name: release
 
 # Builds the paired CLI and Agent for Linux/Windows, plus the standalone CLI for
-# macOS arm64+x86_64. Android is intentionally absent until M8 provides
-# production signing and verification.
+# macOS arm64+x86_64. Tag builds additionally require the protected Android
+# production key and publish verified APK/AAB artifacts.
 #   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
 #   - run manually (Actions -> release -> Run workflow) -> builds, attests, and
-#     uploads the complete bundle without publishing a release
+#     uploads rehearsal artifacts without publishing a release
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      include_android:
+        description: Build Android with the protected production key
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -27,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.release_contract.outputs.version }}
+      build_number: ${{ steps.release_contract.outputs.build_number }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Validate version, tag, and pinned actions
@@ -121,6 +128,196 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  android:
+    name: build signed Android packages
+    needs: [contract]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.include_android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      ENVOIX_ANDROID_ABIS: arm64-v8a,x86_64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Set up pinned Rust and Android targets
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" \
+            aarch64-linux-android x86_64-linux-android
+          rustc --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Install pinned Android build components
+        shell: bash
+        run: |
+          scripts/with-build-cache-guard.sh \
+            cargo install cargo-ndk --version 4.1.2 --locked
+          scripts/with-build-cache-guard.sh \
+            cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install \
+            "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Load protected Android signing key
+        env:
+          ENVOIX_ANDROID_KEYSTORE_BASE64: ${{ secrets.ENVOIX_ANDROID_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          if [ -z "$ENVOIX_ANDROID_KEYSTORE_BASE64" ]; then
+            echo 'required Android release setting is missing: ENVOIX_ANDROID_KEYSTORE_BASE64' >&2
+            exit 1
+          fi
+          keystore="$RUNNER_TEMP/envoix-android-release.keystore"
+          umask 077
+          printf '%s' "$ENVOIX_ANDROID_KEYSTORE_BASE64" | base64 --decode >"$keystore"
+          test -s "$keystore"
+          echo "ENVOIX_ANDROID_KEYSTORE_PATH=$keystore" >>"$GITHUB_ENV"
+
+      - name: Build signed APK, AAB, and Android dependency SBOM
+        working-directory: android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
+          ENVOIX_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ENVOIX_ANDROID_KEYSTORE_PASSWORD }}
+          ENVOIX_ANDROID_KEY_ALIAS: ${{ secrets.ENVOIX_ANDROID_KEY_ALIAS }}
+          ENVOIX_ANDROID_KEY_PASSWORD: ${{ secrets.ENVOIX_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: >-
+          ../scripts/with-build-cache-guard.sh
+          ./gradlew
+          :app:assembleRelease
+          :app:bundleRelease
+          :app:cyclonedxDirectBom
+          -Penvoix.requireProductionSigning=true
+          --no-daemon
+          --stacktrace
+
+      - name: Remove decoded Android signing key
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${ENVOIX_ANDROID_KEYSTORE_PATH:-}" ]; then
+            rm -f -- "$ENVOIX_ANDROID_KEYSTORE_PATH"
+          fi
+
+      - name: Stage and verify Android packages
+        env:
+          ENVOIX_RELEASE_VERSION: ${{ needs.contract.outputs.version }}
+          ENVOIX_RELEASE_BUILD_NUMBER: ${{ needs.contract.outputs.build_number }}
+          ENVOIX_ANDROID_SIGNING_CERT_SHA256: ${{ vars.ENVOIX_ANDROID_SIGNING_CERT_SHA256 }}
+        shell: bash
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          cargo cyclonedx \
+            --manifest-path crates/envoix-ffi/Cargo.toml \
+            --format json --all --all-features --target all --spec-version 1.5
+          git diff --exit-code -- Cargo.lock
+
+          mkdir -p dist-android
+          cp android/app/build/outputs/apk/release/app-release.apk \
+            dist-android/envoix-android.apk
+          cp android/app/build/outputs/bundle/release/app-release.aab \
+            dist-android/envoix-android.aab
+          cp android/app/build/reports/cyclonedx-direct/envoix-android.cdx.json \
+            dist-android/envoix-android.cdx.json
+          cp crates/envoix-ffi/envoix-ffi.cdx.json \
+            dist-android/envoix-android-rust.cdx.json
+
+          apk=dist-android/envoix-android.apk
+          aab=dist-android/envoix-android.aab
+          apksigner_output="$RUNNER_TEMP/envoix-apksigner.txt"
+          apksigner verify --verbose --print-certs "$apk" >"$apksigner_output"
+          mapfile -t apk_certificates < <(
+            sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$apksigner_output"
+          )
+          if [ "${#apk_certificates[@]}" -ne 1 ]; then
+            echo 'expected exactly one Android APK signer' >&2
+            exit 1
+          fi
+          apk_certificate="$(printf '%s' "${apk_certificates[0]}" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          expected_certificate="$(printf '%s' "$ENVOIX_ANDROID_SIGNING_CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          if ! [[ "$expected_certificate" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'ENVOIX_ANDROID_SIGNING_CERT_SHA256 must contain 64 hex digits' >&2
+            exit 1
+          fi
+          if [ "$apk_certificate" != "$expected_certificate" ]; then
+            echo 'Android APK signing certificate does not match the release policy' >&2
+            exit 1
+          fi
+
+          jarsigner -verify "$aab" >/dev/null
+          aab_certificate="$(
+            keytool -J-Duser.language=en -printcert -jarfile "$aab" \
+              | sed -n 's/^[[:space:]]*SHA256: //p' \
+              | tr -d ':' \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+          if [ "$aab_certificate" != "$expected_certificate" ]; then
+            echo 'Android AAB signing certificate does not match the release policy' >&2
+            exit 1
+          fi
+
+          if [ "$(apkanalyzer manifest application-id "$apk")" != 'dev.envoix.app' ] \
+            || [ "$(apkanalyzer manifest version-code "$apk")" != "$ENVOIX_RELEASE_BUILD_NUMBER" ] \
+            || [ "$(apkanalyzer manifest version-name "$apk")" != "$ENVOIX_RELEASE_VERSION" ]; then
+            echo 'Android package identity or version does not match the release contract' >&2
+            exit 1
+          fi
+
+          python3 scripts/android_release_bundle.py \
+            --directory dist-android \
+            --version "$ENVOIX_RELEASE_VERSION" \
+            --build-number "$ENVOIX_RELEASE_BUILD_NUMBER" \
+            --repository "$GITHUB_REPOSITORY" \
+            --revision "$GITHUB_SHA" \
+            --certificate-sha256 "$expected_certificate"
+
+      - name: Attest Android build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist-android/envoix-android.apk
+            dist-android/envoix-android.aab
+
+      - name: Attest Android runtime SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist-android/envoix-android.apk
+            dist-android/envoix-android.aab
+          sbom-path: dist-android/envoix-android.cdx.json
+
+      - name: Attest embedded Rust SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist-android/envoix-android.apk
+            dist-android/envoix-android.aab
+          sbom-path: dist-android/envoix-android-rust.cdx.json
+
+      - name: Upload verified Android bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: envoix-android-${{ needs.contract.outputs.version }}
+          path: dist-android/*
+          if-no-files-found: error
+
   metadata:
     name: validate and attest release bundle
     needs: [contract, cli]
@@ -191,7 +388,7 @@ jobs:
 
   release:
     name: publish release
-    needs: [contract, metadata]
+    needs: [contract, metadata, android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -203,6 +400,12 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: envoix-release-${{ needs.contract.outputs.version }}
+          path: dist
+
+      - name: Download verified Android bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: envoix-android-${{ needs.contract.outputs.version }}
           path: dist
 
       - name: Publish GitHub Release
