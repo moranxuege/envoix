@@ -149,23 +149,23 @@ on a primary flow.
 Formatting, pluralization, and accessibility phrases belong to the native
 catalog. Error codes and Engine state remain locale-independent.
 
-Apple migration is incremental. The shared connection-path projection now
-resolves semantic keys from `Localizable.xcstrings`. Activity direction,
+The Apple primary presentation surface now resolves user-facing copy through
+`Localizable.xcstrings`. The shared connection-path projection resolves
+semantic keys from the same catalog. Activity direction,
 lifecycle-state, and transfer-stage projections use the same catalog-backed
 pure mapper. Activity static actions, empty states, diagnostics labels, and
 accessibility phrases are catalog-backed as well. Activity count, relative-time,
 and destination formats use explicit-locale catalog interpolation and native
 plural variations, so `TransferStageView` no longer uses inline bilingual
-values. Other SwiftUI feature text still using inline bilingual values keeps M6
-open. The one-time Room timeline reuses Activity direction, item-count, and
+values. The one-time Room timeline reuses Activity direction, item-count, and
 lifecycle-state projections instead of defining conflicting labels in its View.
 Its static sections, actions, and accessibility labels are covered by a
 dedicated Room catalog contract. Control-phase/origin status, trust, and close
 reason text live in the tested `RoomPresentationText` projection rather than in
 `OneTimeRoomView`. Lifetime countdowns, offer summaries, and file/folder counts
 use explicit-locale catalog formats and native plural variations, leaving the
-one-time Room screen without inline bilingual values. Connection Hub migration
-has started with its Room invitation card: static labels are catalog-backed,
+one-time Room screen without inline bilingual values. The Connection Hub Room
+invitation card uses catalog-backed static labels,
 while invitation action and availability status come from the tested
 `ConnectionHubPresentationText` projection. Remembered-device counts, pending
 item pluralization, connection states, name editing, and drag-and-drop feedback
@@ -199,15 +199,21 @@ The macOS path controls and receiver-invite input now use the same catalog,
 including the shared paste and direction-specific QR scan contracts.
 Send primary-action copy and its state priority are now a tested
 `SendPresentationText` projection that reuses shared transfer labels.
+QR scanning, Settings, nearby-transfer context and folder controls, the macOS
+menu-bar surface, support controls, transfer-workflow copy, Wi-Fi Aware state,
+mobile connection flow, and remembered Room/Agent state use the same typed
+catalog boundary. A source scan for direct `AppText.value` calls under
+`apps/envoix-apple/Sources` is empty, so Apple no longer has a source-inline
+bilingual presentation path.
 
-Android migration is incremental and M6 remains open until the primary flows
-are complete. The NFC invitation overlay, QR scanner, Room, Connection Hub,
+The Android primary presentation migration is complete. The NFC invitation
+overlay, QR scanner, Room, Connection Hub,
 Settings, remembered Rooms, and the existing shared transfer-setup labels use
 `values` / `values-b+zh+Hans` resources. Activity components resolve typed
 status, stage, and connection-path projections through those resources; the
-transfer-setup sheet and destination adapter also use native resources. The
-primary Android presentation flow is migrated; background service and workflow
-errors are tracked separately from screen presentation before M6 closes.
+transfer-setup sheet and destination adapter also use native resources.
+Background service and workflow errors are tracked separately from screen
+presentation.
 Workflow-owned local validation now carries typed resource messages while
 gateway and engine failures remain dynamic text. Foreground-service validation,
 failure, and notification messages use the same locale-aware Android resource
