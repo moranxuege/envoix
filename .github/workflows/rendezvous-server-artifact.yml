@@ -2,6 +2,7 @@ name: rendezvous server artifact
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -15,35 +16,35 @@ jobs:
   build:
     name: build glibc-compatible Linux broker
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     container:
-      image: debian:11-slim
+      image: rust:1.96.0-bullseye@sha256:5ebdedce38fc37fb279c5b35b2832298e769ccf3385240846ab4fc983f00fa0f
     steps:
       - name: Install build tools
         run: |
           apt-get update
           apt-get install -y \
             binutils \
-            build-essential \
-            ca-certificates \
-            curl \
             file \
-            git \
             pkg-config
 
-      - name: Set up Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf \
-            https://sh.rustup.rs \
-            -o /tmp/rustup-init.sh
-          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain "$RUST_VERSION"
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustc" --version
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Record build ABI
+      - name: Verify pinned toolchain and build ABI
         run: |
-          rustc --version
+          rustc_version="$(rustc --version)"
+          case "$rustc_version" in
+            "rustc $RUST_VERSION "*) ;;
+            *)
+              echo "container Rust version does not match $RUST_VERSION: $rustc_version" >&2
+              exit 1
+              ;;
+          esac
+          printf '%s\n' "$rustc_version"
           ldd --version | head -n 1
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -56,7 +57,7 @@ jobs:
       - name: Stage and verify artifact
         run: |
           mkdir -p dist
-          server="dist/envoix-rendezvous-server-linux-x86_64-glibc231"
+          server="dist/envoix-broker-linux-x86_64"
           cp target/release/envoix-rendezvous-server "$server"
           file "$server"
           if ! readelf -l "$server" | grep -q \
@@ -76,17 +77,16 @@ jobs:
             exit 1
           fi
           printf 'maximum required glibc: %s\n' "$max_glibc"
-          ldd "$server" | tee "$server.ldd.txt"
-          readelf --version-info "$server" > "$server.versions.txt"
-          sha256sum "$server" > "$server.sha256"
+          ldd "$server"
+
+      - name: Attest broker build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/envoix-broker-linux-x86_64
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: envoix-rendezvous-server-linux-x86_64-glibc231
-          path: |
-            dist/envoix-rendezvous-server-linux-x86_64-glibc231
-            dist/envoix-rendezvous-server-linux-x86_64-glibc231.sha256
-            dist/envoix-rendezvous-server-linux-x86_64-glibc231.ldd.txt
-            dist/envoix-rendezvous-server-linux-x86_64-glibc231.versions.txt
+          name: envoix-broker-linux-x86_64
+          path: dist/envoix-broker-linux-x86_64
           if-no-files-found: error

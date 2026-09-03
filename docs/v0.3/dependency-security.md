@@ -4,7 +4,12 @@ Status: active release gate
 
 Baseline date: 2026-09-04
 
-Tool: `cargo-audit 0.22.2` with the current official RustSec advisory database.
+Tools:
+
+- `cargo-audit 0.22.2` with the current official RustSec advisory database;
+- `cargo-deny 0.20.2` for Rust license and dependency-source policy;
+- Gitleaks Action `v3.0.0` pinned by commit, with a local full-history
+  cross-check using Gitleaks `8.30.1`.
 
 Reference audit: advisory database revision
 `5a0ebedfe8bdd2e295b171f4162f8c977bcad9a5` (2026-09-02), 508 locked
@@ -29,6 +34,45 @@ CI command:
 ```bash
 cargo audit --deny unsound
 ```
+
+## License and dependency-source policy
+
+[`deny.toml`](../../deny.toml) is the executable Rust policy. It checks the
+all-feature workspace graph, permits only reviewed SPDX identifiers present in
+the current lock graph, denies unknown registries, and denies every Git source.
+The only permitted registry is the crates.io index. Workspace and the patched
+`vendor/noq-udp` path remain visible in the graph rather than being pruned.
+
+License alternatives are evaluated as choices. A dual-licensed dependency is
+accepted only when at least one of its choices is in the policy; this does not
+globally approve an unlisted copyleft license. The policy passed against the
+locked 508-package graph with no license or source finding on 2026-09-04.
+
+Android has a separate JVM/Android dependency graph. CI generates the direct
+CycloneDX 1.6 SBOM and runs
+[`check_sbom_licenses.py`](../../scripts/check_sbom_licenses.py). Every
+component must declare at least one audited `Apache-2.0` or `BSD-3-Clause`
+choice. A missing identifier, a license outside the policy with no approved
+alternative, an unknown component shape, duplicate component identity, or an
+unaudited SPDX expression is a hard failure. The refreshed baseline contains
+105 components; JNA is accepted under its Apache-2.0 choice, not by approving
+LGPL globally.
+
+## Secret scanning policy
+
+CI uses an immutable `gitleaks/gitleaks-action` commit and a full Git checkout
+so push ranges can be evaluated without shallow-history gaps. Findings are not
+uploaded as artifacts and are not copied into workflow comments because those
+surfaces can amplify an exposed value. GitHub secret scanning and push
+protection are also enabled on `moranxuege/envoix`; the two controls are
+defense in depth, not substitutes for credential rotation.
+
+A local redacted Gitleaks 8.30.1 scan of the complete repository history found
+nine deterministic test/protocol strings and public Keychain namespace values,
+then passed after each was reviewed and recorded by its exact fingerprint in
+`.gitleaksignore`. The policy does not ignore a file tree, filename pattern, or
+detector rule. A new finding must be treated as a credential incident until its
+value and use are reviewed; merely adding another fingerprint is not closure.
 
 ## Remediated baseline findings
 

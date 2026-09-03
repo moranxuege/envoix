@@ -24,7 +24,29 @@ components and 463 relationships. Both had deterministic UUIDv5 serials.
 
 This rehearsal proves the desktop workflow behavior at its recorded commit. It
 does not prove macOS Developer ID/notarization, Windows clean-host behavior,
-mobile distribution signing, or the later Android tag path.
+mobile distribution signing, or the later Android tag path. It predates the
+broker-integrated bundle and must not be used as evidence for that newer path.
+
+## Supply-chain CI 33791001252
+
+CI run [33791001252](https://github.com/moranxuege/envoix/actions/runs/33791001252)
+completed successfully for immutable source
+`90283fee7531646df3e6e967237db52f53cf40a7`. Its five independent jobs passed:
+
+- Rust formatting, Clippy, all-feature workspace tests, and the pinned RustSec
+  audit;
+- Windows CLI/Agent lint, tests, paired build, and lifecycle test;
+- Android signing-negative tests, lint, unit tests, Debug package/JNI check,
+  regenerated 105-component SBOM, and license policy;
+- Rust license and source policy through pinned `cargo-deny 0.20.2`;
+- pushed-history secret scanning through the immutable Gitleaks Action.
+
+Before the CI run, a redacted local Gitleaks 8.30.1 scan of the complete Git
+history passed after nine exact, reviewed test/namespace fingerprints were
+recorded. The Rust license/source policy also passed locally in locked offline
+mode. This evidence closes the automated dependency-license/source and secret
+scan implementation gap; it does not close production signing or the physical
+platform matrix.
 
 ## Android test-key rehearsal
 

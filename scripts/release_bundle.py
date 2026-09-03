@@ -31,6 +31,7 @@ WINDOWS_MAGIC = (b"MZ",)
 BINARY_FORMATS = {
     "envoix-cli-linux-x86_64": LINUX_MAGIC,
     "envoix-agent-linux-x86_64": LINUX_MAGIC,
+    "envoix-broker-linux-x86_64": LINUX_MAGIC,
     "envoix-cli-macos-aarch64": MACOS_MAGIC,
     "envoix-cli-macos-x86_64": MACOS_MAGIC,
     "envoix-cli-windows-x86_64.exe": WINDOWS_MAGIC,
@@ -39,6 +40,7 @@ BINARY_FORMATS = {
 SBOM_COMPONENTS = {
     "envoix-cli.cdx.json": "envoix",
     "envoix-agent.cdx.json": "envoix-agent",
+    "envoix-broker.cdx.json": "envoix-rendezvous-server",
 }
 GENERATED_FILES = ("release-manifest.json", "SHA256SUMS")
 MAX_SBOM_BYTES = 16 * 1024 * 1024

@@ -145,9 +145,22 @@ The tunable values and semantics are in
 - CI rejects RustSec vulnerabilities and unsound advisories. The accepted
   warning paths and exit criteria are in
   [Dependency security](dependency-security.md).
-- The desktop packaging workflow produces sorted SHA-256 checksums, a source
-  revision manifest, CycloneDX 1.5 SBOMs for CLI and Agent, build provenance
-  from each platform build job, and signed SBOM attestations.
+- `cargo-deny 0.20.2` rejects Rust dependencies without a reviewed SPDX
+  license choice and rejects unknown registry or Git sources. The current lock
+  graph contains only crates.io registry dependencies plus workspace/vendored
+  paths; it contains no Git dependency.
+- Android CI regenerates the direct runtime CycloneDX 1.6 SBOM and fails when a
+  component lacks an audited Apache-2.0 or BSD-3-Clause choice. Unknown license
+  names and previously unaudited SPDX expressions fail closed.
+- Gitleaks runs on pushed Git history with a full checkout and with findings
+  artifacts/comments disabled. The repository also has GitHub secret scanning
+  and push protection enabled. Historical false positives are accepted only by
+  exact finding fingerprint in `.gitleaksignore`, never by directory or rule.
+- The desktop/broker packaging workflow produces sorted SHA-256 checksums, a
+  source revision manifest, CycloneDX 1.5 SBOMs for CLI, Agent, and broker,
+  build provenance from each platform build job, and signed SBOM attestations.
+  The broker is compiled in an immutable Rust 1.96.0/Bullseye container and
+  rejected if its ELF interpreter or maximum required glibc exceeds policy.
 - Android production signing is process-injected and all-or-none. Tag builds
   fail without the protected keystore inputs and independently pinned public
   certificate digest; APK/AAB provenance and Android plus embedded-Rust SBOM

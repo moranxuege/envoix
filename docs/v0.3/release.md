@@ -16,26 +16,27 @@ The release workflow always checks out the event's immutable revision. It has
 no independent `source_ref` override, because building one revision while the
 attestation names another is not acceptable.
 
-## Desktop bundle pipeline
+## Desktop and broker bundle pipeline
 
 A manual `release` workflow run is a non-publishing rehearsal. It always builds
-the desktop bundle and includes signed Android packages only when
+the desktop and broker bundle and includes signed Android packages only when
 `include_android` is selected. A `v*` tag requires both paths and then creates
 the GitHub Release.
 
 1. Validate versions, build numbers, tag, and pinned actions.
-2. Build CLI/Agent on Linux and Windows plus the standalone CLI on macOS arm64
-   and x86_64.
+2. Build CLI/Agent on Linux and Windows, the standalone CLI on macOS arm64 and
+   x86_64, and the Linux broker in the immutable Rust 1.96.0/Bullseye image.
 3. In each platform build job, sign GitHub/Sigstore build provenance over the
    staged binaries before upload.
 4. Download all binaries into one metadata job and generate reproducible
-   CycloneDX 1.5 CLI and Agent SBOMs with pinned `cargo-cyclonedx 0.5.9`.
+   CycloneDX 1.5 CLI, Agent, and broker SBOMs with pinned
+   `cargo-cyclonedx 0.5.9`.
 5. Reject missing, extra, empty, undersized, wrong-format, wrong-component, or
    wrong-version artifacts.
 6. Write `release-manifest.json` with the exact repository revision and sorted
    artifact digests, then write `SHA256SUMS` over every binary, SBOM, and the
    manifest.
-7. Sign SBOM attestations for the matching CLI and Agent binaries.
+7. Sign SBOM attestations for the matching CLI, Agent, and broker binaries.
 8. Upload exactly one verified bundle. The tag-only publish job downloads only
    that named bundle and never reconstructs checksums.
 
@@ -52,7 +53,7 @@ job receives `contents: write`.
 | macOS application + helper | Apple owner | Developer ID, hardened runtime, stable Team/access groups, notarization, staple, SHA-256 | signed application replacement retaining helper-owned state | path implemented; notarization evidence open |
 | iOS/iPadOS application | Apple owner | App Store/TestFlight distribution signing and archive validation | TestFlight/App Store update retaining Engine schema 2 | signing evidence open |
 | Android application | Android owner | production keystore signing, `apksigner` verification, version check, artifact digest/SBOM/provenance | package-manager update with stable application id/key | tag path and local test-key rehearsal pass; production key custody and signed evidence remain open |
-| Broker | service owner | pinned source revision, checksum/SBOM/provenance or locally recorded equivalent | preserve endpoint key across binary rollback/update | deployment works; release artifact integration open |
+| Broker | service owner | pinned Rust/Bullseye builder, ELF/glibc check, SHA-256, source manifest, CycloneDX, GitHub provenance/SBOM attestations | preserve endpoint key across binary rollback/update | integrated workflow implemented; new rehearsal evidence required |
 | Relay | service owner | pinned upstream iroh-relay version and verified package origin | preserve TLS/ACME configuration | operated separately from Envoix release |
 
 An artifact listed as open is not converted into a release artifact by renaming
@@ -84,6 +85,7 @@ directory, then verify checksums and attestations:
 sha256sum -c SHA256SUMS
 gh attestation verify envoix-cli-linux-x86_64 --repo moranxuege/envoix
 gh attestation verify envoix-agent-linux-x86_64 --repo moranxuege/envoix
+gh attestation verify envoix-broker-linux-x86_64 --repo moranxuege/envoix
 ```
 
 On macOS, use `shasum -a 256 -c SHA256SUMS` instead. Require the signer
@@ -94,7 +96,7 @@ interactive check. The current rehearsal record is in
 
 Repeat attestation verification for every desktop binary. Inspect
 `release-manifest.json` and require its revision to equal the intended commit.
-Parse both SBOM JSON files and archive the current cargo-audit result and
+Parse all three SBOM JSON files and archive the current cargo-audit result and
 RustSec database revision alongside the test evidence.
 
 Platform app verification is additional, not replaced by GitHub attestations:
