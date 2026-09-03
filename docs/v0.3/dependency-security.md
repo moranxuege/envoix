@@ -2,9 +2,14 @@
 
 Status: active release gate
 
-Baseline date: 2026-08-18
+Baseline date: 2026-09-04
 
 Tool: `cargo-audit 0.22.2` with the current official RustSec advisory database.
+
+Reference audit: advisory database revision
+`5a0ebedfe8bdd2e295b171f4162f8c977bcad9a5` (2026-09-02), 508 locked
+dependencies, zero vulnerabilities, zero unsound advisories, and two accepted
+warnings described below.
 
 ## Policy
 
@@ -33,6 +38,8 @@ cargo audit --deny unsound
 | `quick-xml` | 0.39.4 | 0.41.0 through `plist` 1.10.0 | RUSTSEC-2026-0194 and RUSTSEC-2026-0195 |
 | `lru` | 0.18.0 | 0.18.2 | RUSTSEC-2026-0253 unsoundness |
 | `h2` | 0.4.15 | 0.4.16 | RUSTSEC-2026-0258 |
+| `chacha20` | 0.10.1 | 0.10.2 | Removed a yanked transitive release selected through `rand` and iroh. |
+| `rustls-pemfile` | 2.2.0 | removed through `axum-server` 0.8.0 | Removed the unmaintained PEM parser from the rendezvous-server TLS path. |
 
 These are targeted lockfile updates. They do not change Envoix's direct API
 surface.
@@ -44,23 +51,15 @@ surface.
 Path:
 
 ```text
-paste -> netlink-packet-core -> netdev/netwatch -> iroh
+paste -> netlink-packet-core 0.8 -> netdev 0.45 -> netwatch 0.19.3 -> iroh
 ```
 
-There is no reported vulnerability in the locked package. M8 must re-evaluate
-the iroh/netwatch dependency line and either remove the path or record an
-explicit release acceptance.
-
-### `rustls-pemfile 2.2.0` — unmaintained
-
-Path:
-
-```text
-rustls-pemfile -> axum-server -> envoix-rendezvous-server
-```
-
-M1/M8 evaluates an `axum-server` update or replacement. The warning cannot be
-considered closed merely because PEM input is operator-controlled.
+There is no reported vulnerability in the locked package. Updating from
+`netwatch` 0.19.1 to 0.19.3 introduced the newer `netdev` line where supported,
+but its Linux graph still retains `netdev` 0.45 and `paste`. The compatible
+iroh 1.0 dependency line does not currently remove it. Release acceptance is
+limited to this unmaintained proc-macro warning and must be rechecked before
+the tag; an Envoix-maintained fork only to hide the warning is not justified.
 
 ### `spin 0.10.0` — yanked
 
@@ -70,11 +69,11 @@ Path:
 spin -> futures-buffered -> n0-future -> iroh/envoix-session
 ```
 
-At baseline time, `futures-buffered 0.2.13` is the current compatible upstream
-release and still selects the yanked package. No RustSec vulnerability is
-reported for this package. M8 must recheck upstream and remove the yanked lock
-entry when a compatible release exists; introducing an Envoix-maintained fork
-only to hide a yanked warning is not justified.
+At the 2026-09-04 refresh, `futures-buffered 0.2.13` remains the current
+upstream release and still selects the yanked package. No RustSec vulnerability
+is reported for this package. Release acceptance is limited to this yanked
+transitive release and must be rechecked before the tag; introducing an
+Envoix-maintained fork only to hide a yanked warning is not justified.
 
 ## Audit evidence requirements
 
