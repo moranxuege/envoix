@@ -1487,6 +1487,456 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请在活动中管理" } }
       }
     },
+    "remembered_room.action.disconnect" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Disconnect for now" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时断开连接" } }
+      }
+    },
+    "remembered_room.action.retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "remembered_room.activity.empty.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Either member can offer files after the room reconnects." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间重新连接后，任意一方都可以发送文件。" } }
+      }
+    },
+    "remembered_room.activity.empty.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No transfers yet" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无传输" } }
+      }
+    },
+    "remembered_room.activity.state.canceled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Canceled" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已取消" } }
+      }
+    },
+    "remembered_room.activity.state.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connecting" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在连接" } }
+      }
+    },
+    "remembered_room.activity.state.delivered" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Delivered" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已送达" } }
+      }
+    },
+    "remembered_room.activity.state.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "失败" } }
+      }
+    },
+    "remembered_room.activity.state.finalizing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finalizing" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在完成" } }
+      }
+    },
+    "remembered_room.activity.state.needs_attention" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Needs attention" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要处理" } }
+      }
+    },
+    "remembered_room.activity.state.pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在配对" } }
+      }
+    },
+    "remembered_room.activity.state.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paused" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已暂停" } }
+      }
+    },
+    "remembered_room.activity.state.preparing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备" } }
+      }
+    },
+    "remembered_room.activity.state.saving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saving" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在保存" } }
+      }
+    },
+    "remembered_room.activity.state.transferring" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transferring" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在传输" } }
+      }
+    },
+    "remembered_room.activity.state.verifying" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verifying" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在校验" } }
+      }
+    },
+    "remembered_room.activity.state.waiting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待" } }
+      }
+    },
+    "remembered_room.activity.view_all" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "View all" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "查看全部" } }
+      }
+    },
+    "remembered_room.agent.activity.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfers sent to paired devices will appear here." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送到已配对设备的传输会显示在这里。" } }
+      }
+    },
+    "remembered_room.agent.activity.empty" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No helper transfers yet" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无 helper 传输" } }
+      }
+    },
+    "remembered_room.agent.activity.loading" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Loading helper activity…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在载入 helper 活动…" } }
+      }
+    },
+    "remembered_room.agent.connection.preparing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing files in the background helper…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在后台 helper 中准备文件…" } }
+      }
+    },
+    "remembered_room.agent.connection.ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready · files will queue until the other device is online" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "就绪 · 另一台设备上线前文件会保留在队列中" } }
+      }
+    },
+    "remembered_room.agent.connection.transferring" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected · transferring securely" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已连接 · 正在安全传输" } }
+      }
+    },
+    "remembered_room.agent.connection.waiting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for the paired device · retrying in the background" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待已配对设备 · 后台持续重试" } }
+      }
+    },
+    "remembered_room.agent.helper_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The helper is temporarily unavailable. Showing the last known status." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "helper 暂时不可用，当前显示上次已知状态。" } }
+      }
+    },
+    "remembered_room.agent.keeps_room" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The helper keeps this secure room available when the window closes." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "窗口关闭后，helper 仍会维护这个安全房间。" } }
+      }
+    },
+    "remembered_room.agent.paired_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paired device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已配对设备" } }
+      }
+    },
+    "remembered_room.agent.preparing_files" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing files…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备文件…" } }
+      }
+    },
+    "remembered_room.agent.refresh_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not refresh the helper. Showing the last known status." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法刷新 helper，当前显示上次已知状态。" } }
+      }
+    },
+    "remembered_room.agent.room.empty" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No transfers yet. Files added here are owned by the background helper and remain queued while the other device is offline." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无传输。在这里添加的文件由后台 helper 管理；另一台设备离线时会保留在队列中。" } }
+      }
+    },
+    "remembered_room.agent.transfer.detail.awaiting_delivery_proof" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "All bytes were sent. Waiting for the receiver to confirm a durable save." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件数据已发完，正在等待接收端确认已安全保存。" } }
+      }
+    },
+    "remembered_room.agent.transfer.detail.busy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiving device is busy. Send the files again later." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收设备正忙，请稍后重新发送。" } }
+      }
+    },
+    "remembered_room.agent.transfer.detail.insufficient_space" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiving device does not have enough free space." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收设备没有足够的可用空间。" } }
+      }
+    },
+    "remembered_room.agent.transfer.detail.invalid_offer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiving device could not validate this offer." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收设备无法验证此发送邀请。" } }
+      }
+    },
+    "remembered_room.agent.transfer.detail.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This transfer is paused and remains in the helper queue." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此传输已暂停，并保留在 helper 队列中。" } }
+      }
+    },
+    "remembered_room.agent.transfer.detail.queued" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for the paired device. The helper will retry in the background." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待已配对设备；helper 会在后台继续重试。" } }
+      }
+    },
+    "remembered_room.agent.transfer.detail.unsupported_content" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiving device does not support this content." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收设备不支持此内容。" } }
+      }
+    },
+    "remembered_room.agent.transfer.detail.user_declined" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The receiving device declined this transfer." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收设备拒绝了此传输。" } }
+      }
+    },
+    "remembered_room.agent.transfer.path.direct" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Direct connection" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "直连" } }
+      }
+    },
+    "remembered_room.agent.transfer.path.lan" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local network" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "局域网" } }
+      }
+    },
+    "remembered_room.agent.transfer.path.other" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Network connection" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "网络连接" } }
+      }
+    },
+    "remembered_room.agent.transfer.path.relay" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Relay" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "中继" } }
+      }
+    },
+    "remembered_room.agent.transfer.path.wifi_aware" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Wi-Fi Aware" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Wi-Fi Aware" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.awaiting_approval" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Awaiting approval" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待接收确认" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.canceled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Canceled" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已取消" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connecting" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在连接" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.delivered" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Delivered" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已送达" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "失败" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paused" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已暂停" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.queued" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Queued" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待发送" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.received" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Received" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已接收" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.receiving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receiving" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在接收" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.rejected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Rejected" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已拒绝" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.sending" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sending" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在发送" } }
+      }
+    },
+    "remembered_room.agent.transfer.state.verifying_delivery" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verifying delivery" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在确认送达" } }
+      }
+    },
+    "remembered_room.connection.available" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready to send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可发送" } }
+      }
+    },
+    "remembered_room.connection.connected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected · either member can send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已连接 · 双方均可发送" } }
+      }
+    },
+    "remembered_room.connection.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reconnecting securely…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在安全重连…" } }
+      }
+    },
+    "remembered_room.connection.offline" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Offline · waiting for the other app" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "离线 · 等待另一台设备打开应用" } }
+      }
+    },
+    "remembered_room.connection.waiting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready for the other device…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待另一台设备…" } }
+      }
+    },
+    "remembered_room.forget.action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Forget room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "忘记房间" } }
+      }
+    },
+    "remembered_room.forget.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "You will need to pair with this device again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "之后需要与此设备重新配对。" } }
+      }
+    },
+    "remembered_room.forget.detail_with_queue" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Queued files for this room will be removed. You will need to pair again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间的待发送文件会被移除，之后需要重新配对。" } }
+      }
+    },
+    "remembered_room.forget.question" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Forget this room?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "忘记这个房间？" } }
+      }
+    },
+    "remembered_room.outbox.prepared_files" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Prepared files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已准备文件" } }
+      }
+    },
+    "remembered_room.outbox.state.check" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Check" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需处理" } }
+      }
+    },
+    "remembered_room.outbox.state.offering" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Offering" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在邀请" } }
+      }
+    },
+    "remembered_room.outbox.state.queued" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Queued" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待发送" } }
+      }
+    },
+    "remembered_room.outbox.state.sending" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sending" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在发送" } }
+      }
+    },
+    "remembered_room.outbox.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Files for this room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间的文件" } }
+      }
+    },
+    "remembered_room.reconnect.automatic" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reconnects automatically while both apps are open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "双方打开应用时会自动重新连接" } }
+      }
+    },
+    "remembered_room.transfer.file_transfer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "File transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件传输" } }
+      }
+    },
+    "remembered_room.transfer.received_files" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Received files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收文件" } }
+      }
+    },
+    "remembered_room.transfer.sent_files" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sent files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送文件" } }
+      }
+    },
     "room.action.add_files" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Add files" } },

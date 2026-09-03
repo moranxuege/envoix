@@ -48,21 +48,16 @@ struct RememberedRoomView: View {
         .background(Theme.bg)
         .accessibilityIdentifier("remembered_room")
         .alert(
-            AppText.value("Forget this room?", "忘记这个房间？", language: language),
+            roomText(.forgetQuestion),
             isPresented: $isForgetConfirmationPresented
         ) {
-            Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {}
-            Button(AppText.value("Forget room", "忘记房间", language: language), role: .destructive) {
+            Button(roomText(.cancel), role: .cancel) {}
+            Button(roomText(.forgetRoom), role: .destructive) {
                 onForget()
             }
         } message: {
-            Text(AppText.value(
-                outboxEntries.isEmpty
-                    ? "You will need to pair with this device again."
-                    : "Queued files for this room will be removed. You will need to pair again.",
-                outboxEntries.isEmpty
-                    ? "之后需要与此设备重新配对。"
-                    : "此房间的待发送文件会被移除，之后需要重新配对。",
+            Text(RememberedRoomPresentationText.forgetDetail(
+                hasQueuedFiles: !outboxEntries.isEmpty,
                 language: language
             ))
         }
@@ -105,7 +100,7 @@ struct RememberedRoomView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(
-                AppText.value("Incoming files", "收到文件邀请", language: language),
+                roomText(.incomingFiles),
                 systemImage: "arrow.down.doc.fill"
             )
             .font(.headline.weight(.semibold))
@@ -117,7 +112,7 @@ struct RememberedRoomView: View {
 
             HStack(spacing: 10) {
                 Button(role: .cancel, action: onRejectOffer) {
-                    Text(AppText.value("Decline", "拒绝", language: language))
+                    Text(roomText(.decline))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -127,26 +122,20 @@ struct RememberedRoomView: View {
                     if isAcceptingOffer {
                         HStack(spacing: 8) {
                             ProgressView()
-                            Text(AppText.value(
-                                "Preparing receiver…",
-                                "正在准备接收…",
-                                language: language
-                            ))
+                            Text(roomText(.preparingReceiver))
                         }
                         .frame(maxWidth: .infinity)
                     } else {
-                        Text(AppText.value("Receive", "接收", language: language))
+                        Text(roomText(.receive))
                             .frame(maxWidth: .infinity)
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.accentStrong)
                 .disabled(isAcceptingOffer)
-                .accessibilityLabel(AppText.value(
-                    isAcceptingOffer ? "Preparing receiver…" : "Receive",
-                    isAcceptingOffer ? "正在准备接收…" : "接收",
-                    language: language
-                ))
+                .accessibilityLabel(
+                    roomText(isAcceptingOffer ? .preparingReceiver : .receive)
+                )
             }
         }
         .card(raised: true, padding: 16)
@@ -157,7 +146,7 @@ struct RememberedRoomView: View {
     private var outboxSection: some View {
         if !outboxEntries.isEmpty || outboxError != nil {
             VStack(alignment: .leading, spacing: 10) {
-                Text(AppText.value("Files for this room", "此房间的文件", language: language))
+                Text(roomText(.filesForRoom))
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(Theme.text)
 
@@ -196,14 +185,14 @@ struct RememberedRoomView: View {
 
                         if entry.state == .needsAttention {
                             HStack(spacing: 10) {
-                                Button(AppText.value("Retry", "重试", language: language)) {
+                                Button(roomText(.retry)) {
                                     onRetryOutboxEntry(entry.id)
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .tint(Theme.accentStrong)
 
                                 Button(
-                                    AppText.value("Remove", "移除", language: language),
+                                    roomText(.remove),
                                     role: .destructive
                                 ) {
                                     onRemoveOutboxEntry(entry)
@@ -212,7 +201,7 @@ struct RememberedRoomView: View {
                             }
                         } else if entry.state == .queued {
                             Button(
-                                AppText.value("Remove", "移除", language: language),
+                                roomText(.remove),
                                 role: .destructive
                             ) {
                                 onRemoveOutboxEntry(entry)
@@ -236,14 +225,10 @@ struct RememberedRoomView: View {
     private var activitySection: some View {
         if records.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                Text(AppText.value("No transfers yet", "暂无传输", language: language))
+                Text(roomText(.noTransfers))
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value(
-                    "Either member can offer files after the room reconnects.",
-                    "房间重新连接后，任意一方都可以发送文件。",
-                    language: language
-                ))
+                Text(roomText(.noTransfersDetail))
                 .font(.subheadline)
                 .foregroundStyle(Theme.muted)
             }
@@ -251,10 +236,10 @@ struct RememberedRoomView: View {
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text(AppText.value("Room activity", "房间活动", language: language))
+                    Text(roomText(.roomActivity))
                         .font(.headline.weight(.semibold))
                     Spacer()
-                    Button(AppText.value("View all", "查看全部", language: language), action: onShowActivity)
+                    Button(roomText(.viewAll), action: onShowActivity)
                         .font(.subheadline.weight(.semibold))
                 }
                 ForEach(records.prefix(4), id: \.activityId) { record in
@@ -264,8 +249,8 @@ struct RememberedRoomView: View {
                         HStack {
                             Label(
                                 record.direction == .send
-                                    ? AppText.value("Sent files", "发送文件", language: language)
-                                    : AppText.value("Received files", "接收文件", language: language),
+                                    ? roomText(.sentFiles)
+                                    : roomText(.receivedFiles),
                                 systemImage: record.direction == .send
                                     ? "arrow.up.circle.fill"
                                     : "arrow.down.circle.fill"
@@ -327,7 +312,7 @@ struct RememberedRoomView: View {
                                 Button {
                                     openReceivedItems(urls)
                                 } label: {
-                                    Text(AppText.value("Open", "打开", language: language))
+                                    Text(roomText(.open))
                                         .font(.caption.weight(.semibold))
                                 }
                                 .buttonStyle(.bordered)
@@ -336,7 +321,7 @@ struct RememberedRoomView: View {
                                 )
 
                                 ShareLink(items: urls) {
-                                    Text(AppText.value("Share", "分享", language: language))
+                                    Text(roomText(.share))
                                         .font(.caption.weight(.semibold))
                                 }
                                 .buttonStyle(.bordered)
@@ -366,7 +351,7 @@ struct RememberedRoomView: View {
         VStack(spacing: 9) {
             Button(action: onAddFiles) {
                 Label(
-                    AppText.value("Add files", "添加文件", language: language),
+                    roomText(.addFiles),
                     systemImage: "plus"
                 )
                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -377,21 +362,13 @@ struct RememberedRoomView: View {
 
             if status == .connected || isConnecting {
                 Button(role: .destructive, action: onDisconnect) {
-                    Text(AppText.value(
-                        "Disconnect for now",
-                        "暂时断开连接",
-                        language: language
-                    ))
+                    Text(roomText(.disconnect))
                     .frame(maxWidth: .infinity, minHeight: 40)
                 }
                 .buttonStyle(.bordered)
             } else {
                 Label(
-                    AppText.value(
-                        "Reconnects automatically while both apps are open",
-                        "双方打开应用时会自动重新连接",
-                        language: language
-                    ),
+                    roomText(.reconnectsAutomatically),
                     systemImage: "info.circle"
                 )
                 .font(.caption)
@@ -402,7 +379,7 @@ struct RememberedRoomView: View {
             Button(role: .destructive) {
                 isForgetConfirmationPresented = true
             } label: {
-                Text(AppText.value("Forget room", "忘记房间", language: language))
+                Text(roomText(.forgetRoom))
                     .font(.footnote.weight(.semibold))
             }
         }
@@ -422,32 +399,7 @@ struct RememberedRoomView: View {
     }
 
     private var statusText: String {
-        switch status {
-        case .offline:
-            return AppText.value(
-                "Offline · waiting for the other app",
-                "离线 · 等待另一台设备打开应用",
-                language: language
-            )
-        case .available:
-            return AppText.value("Ready to send", "可发送", language: language)
-        case .connecting:
-            return AppText.value("Reconnecting securely…", "正在安全重连…", language: language)
-        case .waiting:
-            return AppText.value(
-                "Ready for the other device…",
-                "正在等待另一台设备…",
-                language: language
-            )
-        case .connected:
-            return AppText.value(
-                "Connected · either member can send",
-                "已连接 · 双方均可发送",
-                language: language
-            )
-        case .needsRepair(let message):
-            return message
-        }
+        RememberedRoomPresentationText.connectionStatus(status, language: language)
     }
 
     private var statusIcon: String {
@@ -472,61 +424,42 @@ struct RememberedRoomView: View {
 
     private func offerSummary(_ offer: RoomControlTransferOffer) -> String {
         let names = offer.rootNames.prefix(3).joined(separator: ", ")
-        let count = AppText.value(
-            "\(offer.itemCount) items",
-            "\(offer.itemCount) 个项目",
+        let count = RememberedRoomPresentationText.itemCount(
+            offer.itemCount,
             language: language
         )
         return names.isEmpty ? count : "\(names) · \(count)"
     }
 
     private func activityStateText(_ state: TransferActivityState) -> String {
-        switch state {
-        case .preparing: return AppText.value("Preparing", "正在准备", language: language)
-        case .pairing: return AppText.value("Pairing", "正在配对", language: language)
-        case .connecting: return AppText.value("Connecting", "正在连接", language: language)
-        case .waitingForPeer: return AppText.value("Waiting", "正在等待", language: language)
-        case .transferring: return AppText.value("Transferring", "正在传输", language: language)
-        case .verifying: return AppText.value("Verifying", "正在校验", language: language)
-        case .saving: return AppText.value("Saving", "正在保存", language: language)
-        case .waitingForReceiverSave: return AppText.value("Finalizing", "正在完成", language: language)
-        case .finalizingDelivery: return AppText.value("Finalizing", "正在完成", language: language)
-        case .awaitingDecision: return AppText.value("Needs attention", "需要处理", language: language)
-        case .paused: return AppText.value("Paused", "已暂停", language: language)
-        case .delivered: return AppText.value("Delivered", "已送达", language: language)
-        case .failed: return AppText.value("Failed", "失败", language: language)
-        case .canceled: return AppText.value("Canceled", "已取消", language: language)
-        }
+        RememberedRoomPresentationText.activityState(state, language: language)
     }
 
     private func outboxTitle(_ entry: RememberedRoomOutboxEntry) -> String {
         if !entry.rootNames.isEmpty {
             return entry.rootNames.joined(separator: ", ")
         }
-        return AppText.value("Prepared files", "已准备文件", language: language)
+        return roomText(.preparedFiles)
     }
 
     private func savedDestination(_ record: TransferActivityRecord) -> String {
         let urls = record.savedPaths.map { URL(fileURLWithPath: $0) }
         let parentPaths = Set(urls.map { $0.deletingLastPathComponent().path })
         if parentPaths.count == 1, let parent = urls.first?.deletingLastPathComponent() {
-            return AppText.value(
-                "Saved in \(parent.lastPathComponent)",
-                "已保存到 \(parent.lastPathComponent)",
+            return RememberedRoomPresentationText.savedIn(
+                parent.lastPathComponent,
                 language: language
             )
         }
-        return AppText.value(
-            "Saved \(urls.count) items",
-            "已保存 \(urls.count) 个项目",
+        return RememberedRoomPresentationText.savedItems(
+            urls.count,
             language: language
         )
     }
 
     private func outboxSummary(_ entry: RememberedRoomOutboxEntry) -> String {
-        let itemText = AppText.value(
-            "\(entry.itemCount) items",
-            "\(entry.itemCount) 个项目",
+        let itemText = RememberedRoomPresentationText.itemCount(
+            entry.itemCount,
             language: language
         )
         guard entry.totalBytes > 0 else { return itemText }
@@ -538,16 +471,7 @@ struct RememberedRoomView: View {
     }
 
     private func outboxStateText(_ state: RememberedRoomOutboxState) -> String {
-        switch state {
-        case .queued:
-            return AppText.value("Queued", "等待发送", language: language)
-        case .offering:
-            return AppText.value("Offering", "正在邀请", language: language)
-        case .transferring:
-            return AppText.value("Sending", "正在发送", language: language)
-        case .needsAttention:
-            return AppText.value("Check", "需处理", language: language)
-        }
+        RememberedRoomPresentationText.outboxState(state, language: language)
     }
 
     private func outboxIcon(_ state: RememberedRoomOutboxState) -> String {
@@ -565,6 +489,10 @@ struct RememberedRoomView: View {
         case .offering, .transferring: return Theme.accentStrong
         case .needsAttention: return Theme.danger
         }
+    }
+
+    private func roomText(_ copy: RememberedRoomCopy) -> String {
+        RememberedRoomPresentationText.value(copy, language: language)
     }
 }
 
@@ -593,32 +521,30 @@ enum MacOSAgentTransferPresentationPolicy {
         _ transfer: FfiApplicationTransfer,
         language: String
     ) -> String {
+        let copy: AgentTransferStateCopy
         switch transfer.state {
         case .offered:
-            return AppText.value("Awaiting approval", "等待接收确认", language: language)
+            copy = .awaitingApproval
         case .queued:
-            return AppText.value("Queued", "等待发送", language: language)
+            copy = .queued
         case .connecting:
-            return AppText.value("Connecting", "正在连接", language: language)
+            copy = .connecting
         case .transferring:
-            return transfer.direction == .send
-                ? AppText.value("Sending", "正在发送", language: language)
-                : AppText.value("Receiving", "正在接收", language: language)
+            copy = transfer.direction == .send ? .sending : .receiving
         case .paused:
-            return AppText.value("Paused", "已暂停", language: language)
+            copy = .paused
         case .awaitingDeliveryProof:
-            return AppText.value("Verifying delivery", "正在确认送达", language: language)
+            copy = .verifyingDelivery
         case .delivered:
-            return transfer.direction == .send
-                ? AppText.value("Delivered", "已送达", language: language)
-                : AppText.value("Received", "已接收", language: language)
+            copy = transfer.direction == .send ? .delivered : .received
         case .rejected:
-            return AppText.value("Rejected", "已拒绝", language: language)
+            copy = .rejected
         case .failed:
-            return AppText.value("Failed", "失败", language: language)
+            copy = .failed
         case .canceled:
-            return AppText.value("Canceled", "已取消", language: language)
+            copy = .canceled
         }
+        return AgentTransferPresentationText.state(copy, language: language)
     }
 
     static func detail(
@@ -633,76 +559,51 @@ enum MacOSAgentTransferPresentationPolicy {
             )
         }
         if let rejection = transfer.rejection {
+            let copy: AgentTransferDetailCopy
             switch rejection {
             case .userDeclined:
-                return AppText.value(
-                    "The receiving device declined this transfer.",
-                    "接收设备拒绝了此传输。",
-                    language: language
-                )
+                copy = .userDeclined
             case .busy:
-                return AppText.value(
-                    "The receiving device is busy. Send the files again later.",
-                    "接收设备正忙，请稍后重新发送。",
-                    language: language
-                )
+                copy = .busy
             case .insufficientSpace:
-                return AppText.value(
-                    "The receiving device does not have enough free space.",
-                    "接收设备没有足够的可用空间。",
-                    language: language
-                )
+                copy = .insufficientSpace
             case .unsupportedContent:
-                return AppText.value(
-                    "The receiving device does not support this content.",
-                    "接收设备不支持此内容。",
-                    language: language
-                )
+                copy = .unsupportedContent
             case .invalidOffer:
-                return AppText.value(
-                    "The receiving device could not validate this offer.",
-                    "接收设备无法验证此发送邀请。",
-                    language: language
-                )
+                copy = .invalidOffer
             }
+            return AgentTransferPresentationText.detail(copy, language: language)
         }
         switch transfer.state {
         case .queued:
-            return AppText.value(
-                "Waiting for the paired device. The helper will retry in the background.",
-                "正在等待已配对设备；helper 会在后台继续重试。",
-                language: language
-            )
+            return AgentTransferPresentationText.detail(.queued, language: language)
         case .awaitingDeliveryProof:
-            return AppText.value(
-                "All bytes were sent. Waiting for the receiver to confirm a durable save.",
-                "文件数据已发完，正在等待接收端确认已安全保存。",
+            return AgentTransferPresentationText.detail(
+                .awaitingDeliveryProof,
                 language: language
             )
         case .paused:
-            return AppText.value(
-                "This transfer is paused and remains in the helper queue.",
-                "此传输已暂停，并保留在 helper 队列中。",
-                language: language
-            )
+            return AgentTransferPresentationText.detail(.paused, language: language)
         default:
             return nil
         }
     }
 
     static func pathText(_ path: FfiAgentPathKind, language: String) -> String {
+        let copy: AgentTransferPathCopy
         switch path {
         case .lan:
-            return AppText.value("Local network", "局域网", language: language)
+            copy = .lan
         case .direct:
-            return AppText.value("Direct connection", "直连", language: language)
+            copy = .direct
         case .relay:
-            return AppText.value("Relay", "中继", language: language)
+            copy = .relay
         case .wifiAware:
-            return AppText.value("Wi-Fi Aware", "Wi-Fi Aware", language: language)
+            copy = .wifiAware
         case .other:
-            return AppText.value("Network connection", "网络连接", language: language)
+            copy = .other
         }
+        return AgentTransferPresentationText.path(copy, language: language)
     }
 }
 
@@ -765,11 +666,7 @@ struct MacOSAgentRoomView: View {
     private var staleSnapshotWarning: some View {
         if loadError != nil {
             Label(
-                AppText.value(
-                    "The helper is temporarily unavailable. Showing the last known status.",
-                    "helper 暂时不可用，当前显示上次已知状态。",
-                    language: language
-                ),
+                agentRoomText(.helperUnavailable),
                 systemImage: "exclamationmark.triangle.fill"
             )
             .font(.footnote)
@@ -782,12 +679,12 @@ struct MacOSAgentRoomView: View {
     private var transferSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(AppText.value("Room activity", "房间活动", language: language))
+                Text(agentRoomText(.roomActivity))
                     .font(.headline.weight(.semibold))
                 Spacer()
                 if !transfers.isEmpty {
                     Button(
-                        AppText.value("View all", "查看全部", language: language),
+                        agentRoomText(.viewAll),
                         action: onShowActivity
                     )
                     .font(.subheadline.weight(.semibold))
@@ -795,11 +692,7 @@ struct MacOSAgentRoomView: View {
             }
 
             if transfers.isEmpty {
-                Text(AppText.value(
-                    "No transfers yet. Files added here are owned by the background helper and remain queued while the other device is offline.",
-                    "暂无传输。在这里添加的文件由后台 helper 管理；另一台设备离线时会保留在队列中。",
-                    language: language
-                ))
+                Text(agentRoomText(.agentRoomEmpty))
                 .font(.subheadline)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -826,16 +719,12 @@ struct MacOSAgentRoomView: View {
                 if isPreparing {
                     HStack(spacing: 8) {
                         ProgressView()
-                        Text(AppText.value(
-                            "Preparing files…",
-                            "正在准备文件…",
-                            language: language
-                        ))
+                        Text(agentRoomText(.preparingFiles))
                     }
                     .frame(maxWidth: .infinity, minHeight: 44)
                 } else {
                     Label(
-                        AppText.value("Add files", "添加文件", language: language),
+                        agentRoomText(.addFiles),
                         systemImage: "plus"
                     )
                     .frame(maxWidth: .infinity, minHeight: 44)
@@ -846,11 +735,7 @@ struct MacOSAgentRoomView: View {
             .accessibilityIdentifier("agent_room_add_files")
 
             Label(
-                AppText.value(
-                    "The helper keeps this secure room available when the window closes.",
-                    "窗口关闭后，helper 仍会维护这个安全房间。",
-                    language: language
-                ),
+                agentRoomText(.helperKeepsRoom),
                 systemImage: "lock.shield"
             )
             .font(.caption)
@@ -881,31 +766,15 @@ struct MacOSAgentRoomView: View {
 
     private var connectionText: String {
         if isPreparing {
-            return AppText.value(
-                "Preparing files in the background helper…",
-                "正在后台 helper 中准备文件…",
-                language: language
-            )
+            return agentConnectionText(.preparing)
         }
         if hasActivePath {
-            return AppText.value(
-                "Connected · transferring securely",
-                "已连接 · 正在安全传输",
-                language: language
-            )
+            return agentConnectionText(.transferring)
         }
         if hasPendingTransfer {
-            return AppText.value(
-                "Waiting for the paired device · retrying in the background",
-                "正在等待已配对设备 · 后台持续重试",
-                language: language
-            )
+            return agentConnectionText(.waiting)
         }
-        return AppText.value(
-            "Ready · files will queue until the other device is online",
-            "就绪 · 另一台设备上线前文件会保留在队列中",
-            language: language
-        )
+        return agentConnectionText(.ready)
     }
 
     private var connectionIcon: String {
@@ -923,6 +792,14 @@ struct MacOSAgentRoomView: View {
     private func path(for transferID: String) -> FfiAgentPathKind? {
         activePaths.first { $0.transferId == transferID }?.path
     }
+
+    private func agentRoomText(_ copy: RememberedRoomCopy) -> String {
+        RememberedRoomPresentationText.value(copy, language: language)
+    }
+
+    private func agentConnectionText(_ copy: AgentRoomConnectionCopy) -> String {
+        RememberedRoomPresentationText.agentRoomConnection(copy, language: language)
+    }
 }
 
 struct MacOSAgentActivityView: View {
@@ -939,11 +816,7 @@ struct MacOSAgentActivityView: View {
             LazyVStack(alignment: .leading, spacing: 12) {
                 if let loadError, !loadError.isEmpty {
                     Label(
-                        AppText.value(
-                            "Could not refresh the helper. Showing the last known status.",
-                            "无法刷新 helper，当前显示上次已知状态。",
-                            language: language
-                        ),
+                        activityText(.helperRefreshUnavailable),
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .font(.footnote)
@@ -979,19 +852,14 @@ struct MacOSAgentActivityView: View {
                     .font(.system(size: 36, weight: .medium))
                     .foregroundStyle(Theme.muted)
             }
-            Text(AppText.value(
-                hasLoadedSnapshot ? "No helper transfers yet" : "Loading helper activity…",
-                hasLoadedSnapshot ? "暂无 helper 传输" : "正在载入 helper 活动…",
+            Text(RememberedRoomPresentationText.agentActivityTitle(
+                hasLoadedSnapshot: hasLoadedSnapshot,
                 language: language
             ))
             .font(.headline)
             .foregroundStyle(Theme.text)
             if hasLoadedSnapshot {
-                Text(AppText.value(
-                    "Transfers sent to paired devices will appear here.",
-                    "发送到已配对设备的传输会显示在这里。",
-                    language: language
-                ))
+                Text(activityText(.helperActivityDetail))
                 .font(.subheadline)
                 .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
@@ -1003,11 +871,15 @@ struct MacOSAgentActivityView: View {
 
     private func deviceLabel(for relationshipID: String) -> String {
         devices.first { $0.id == relationshipID }?.label
-            ?? AppText.value("Paired device", "已配对设备", language: language)
+            ?? activityText(.pairedDevice)
     }
 
     private func path(for transferID: String) -> FfiAgentPathKind? {
         activePaths.first { $0.transferId == transferID }?.path
+    }
+
+    private func activityText(_ copy: RememberedRoomCopy) -> String {
+        RememberedRoomPresentationText.value(copy, language: language)
     }
 }
 
@@ -1088,20 +960,16 @@ private struct MacOSAgentTransferCard: View {
     }
 
     private var title: String {
-        let action = transfer.direction == .send
-            ? AppText.value("Send", "发送", language: language)
-            : AppText.value("Receive", "接收", language: language)
-        guard let deviceLabel else {
-            return transfer.direction == .send
-                ? AppText.value("Sent files", "发送文件", language: language)
-                : AppText.value("Received files", "接收文件", language: language)
-        }
-        return "\(action) · \(deviceLabel)"
+        RememberedRoomPresentationText.agentTransferTitle(
+            direction: transfer.direction,
+            deviceLabel: deviceLabel,
+            language: language
+        )
     }
 
     private var summary: String {
         guard transfer.totalBytes > 0 else {
-            return AppText.value("File transfer", "文件传输", language: language)
+            return RememberedRoomPresentationText.value(.fileTransfer, language: language)
         }
         return byteString(transfer.totalBytes)
     }
