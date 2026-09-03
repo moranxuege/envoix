@@ -765,8 +765,11 @@ mod tests {
     };
 
     const HYBRID_TEST_ALPN: &[u8] = b"envoix/test/wifi-aware-hybrid/1";
-    const HYBRID_TEST_PATH_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+    // iroh validates an idle backup path asynchronously. Busy shared CI runners
+    // can take longer than one keepalive interval even though both paths are
+    // healthy, so this gate allows the same budget as the migration assertion.
     const HYBRID_TEST_MIGRATION_TIMEOUT: Duration = Duration::from_secs(12);
+    const HYBRID_TEST_PATH_DISCOVERY_TIMEOUT: Duration = HYBRID_TEST_MIGRATION_TIMEOUT;
 
     struct MemoryDatagramTransport {
         outbound: mpsc::Sender<Vec<u8>>,
