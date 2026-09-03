@@ -217,6 +217,10 @@ Two notes for an upgrade from a v0.2.2-era build:
   `--log-bind`, uploads require `--log-upload-token-file` and retrieval requires
   `--log-view-token-file`, or the explicit `--unsafe-open-log-view` opt-in.
   Deployments that leave `--log-bind` unset are unaffected.
+- A non-loopback `--log-bind` now also requires `--tls-cert` and `--tls-key`.
+  Plain HTTP is accepted only on loopback for local development or a TLS reverse
+  proxy. A reverse proxy must apply client-source rate limits because the
+  application sees the proxy as its socket peer.
 
 ## Tuning
 
@@ -232,10 +236,13 @@ again immediately rather than waiting out a tombstone.
 ## Optional diagnostics endpoint
 
 `--log-bind` enables a per-room log collection endpoint. It is off by default
-and should stay off unless it is needed. When enabled, supply `--tls-cert` and
-`--tls-key` so it serves HTTPS, and supply the bearer token files described
-above. The PEM pair is re-read periodically, so certificate renewal does not
-require a restart and live Rooms survive it.
+and should stay off unless it is needed. A public bind requires `--tls-cert` and
+`--tls-key`; loopback HTTP is permitted for a local TLS reverse proxy. Supply
+the separate bearer token files described above. Authenticated uploads are
+limited per socket source to 3/minute with burst 5; report views use 60/minute
+with burst 120. Rejections return 429 plus `Retry-After`. The PEM pair is
+re-read periodically, so certificate renewal does not require a restart and
+live Rooms survive it.
 
 ## Relay
 
@@ -243,7 +250,7 @@ The relay is not Envoix code. The deployment currently uses an unmodified
 upstream `iroh-relay`, installed with:
 
 ```bash
-cargo install --version 1.0.0 --features server iroh-relay
+cargo install --locked --version 1.0.3 --features server iroh-relay
 ```
 
 It forwards encrypted QUIC between endpoints that cannot reach each other
