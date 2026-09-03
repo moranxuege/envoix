@@ -326,8 +326,7 @@ mod linux {
         let settings_bytes = serde_json::to_vec_pretty(&settings)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         write_file(&layout.settings_file, &settings_bytes, 0o600)?;
-        let unit = render_unit(&layout.agent_binary, &layout.settings_file)?;
-        write_file(&layout.unit_file, unit.as_bytes(), 0o644)?;
+        write_current_unit(&layout)?;
 
         let activation = systemctl(&["daemon-reload"])
             .and_then(|()| systemctl(&["enable", SERVICE_NAME]))
@@ -358,6 +357,8 @@ mod linux {
         let settings_bytes = serde_json::to_vec_pretty(&settings)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         write_file(&layout.settings_file, &settings_bytes, 0o600)?;
+        write_current_unit(&layout)?;
+        systemctl(&["daemon-reload"])?;
         systemctl(&["restart", SERVICE_NAME])?;
         Ok(layout.installed())
     }
@@ -371,6 +372,8 @@ mod linux {
 
         install_executable(&agent_source, &layout.agent_binary)?;
         install_executable(&cli_source, &layout.cli_binary)?;
+        write_current_unit(&layout)?;
+        systemctl(&["daemon-reload"])?;
         systemctl(&["restart", SERVICE_NAME])?;
         Ok(layout.installed())
     }
@@ -502,7 +505,8 @@ mod linux {
              Description=Envoix persistent receiver\n\
              \n\
              [Service]\n\
-             Type=simple\n\
+             Type=notify\n\
+             NotifyAccess=main\n\
              ExecStart={} --settings {}\n\
              Restart=on-failure\n\
              RestartSec=3s\n\
@@ -513,6 +517,11 @@ mod linux {
             systemd_argument(agent_binary)?,
             systemd_argument(settings_file)?
         ))
+    }
+
+    fn write_current_unit(layout: &ServiceLayout) -> io::Result<()> {
+        let unit = render_unit(&layout.agent_binary, &layout.settings_file)?;
+        write_file(&layout.unit_file, unit.as_bytes(), 0o644)
     }
 
     fn systemd_argument(path: &Path) -> io::Result<String> {
@@ -575,6 +584,8 @@ mod linux {
                 "ExecStart=\"/home/Test User/$$bin/envoix-agent\" --settings \
                  \"/home/Test User/100%%/agent.json\""
             ));
+            assert!(unit.contains("Type=notify"));
+            assert!(unit.contains("NotifyAccess=main"));
             assert!(unit.contains("Restart=on-failure"));
             assert!(unit.contains("WantedBy=default.target"));
         }

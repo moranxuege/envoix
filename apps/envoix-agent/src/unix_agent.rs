@@ -997,25 +997,104 @@ pub async fn run_cli() -> Result<()> {
         },
         client,
     );
+    let mut lifecycle = host.lifecycle_handle();
     let shutdown = host.shutdown_handle();
     let running = host.run();
     tokio::pin!(running);
-    tokio::select! {
-        result = &mut running => result.map_err(Into::into),
-        signal = termination_signal() => {
-            shutdown.shutdown();
-            match signal {
-                Ok(()) => {
-                    tracing::info!("shutting down");
-                    running.await.map_err(Into::into)
+    let termination = termination_signal();
+    tokio::pin!(termination);
+    let mut readiness_reported = false;
+    loop {
+        tokio::select! {
+            result = &mut running => return result.map_err(Into::into),
+            state = lifecycle.changed(), if !readiness_reported => {
+                match state {
+                    Some(AgentHostLifecycleState::Ready) => {
+                        if let Err(error) = notify_service_manager_ready() {
+                            shutdown.shutdown();
+                            let _ = running.await;
+                            return Err(error);
+                        }
+                        readiness_reported = true;
+                    }
+                    Some(AgentHostLifecycleState::Failed { .. } | AgentHostLifecycleState::Stopped) | None => {
+                        readiness_reported = true;
+                    }
+                    Some(AgentHostLifecycleState::Starting | AgentHostLifecycleState::Stopping) => {}
                 }
-                Err(error) => {
-                    let _ = running.await;
-                    Err(error.into())
+            }
+            signal = &mut termination => {
+                shutdown.shutdown();
+                return match signal {
+                    Ok(()) => {
+                        tracing::info!("shutting down");
+                        running.await.map_err(Into::into)
+                    }
+                    Err(error) => {
+                        let _ = running.await;
+                        Err(error.into())
+                    }
                 }
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+const SYSTEMD_READY_NOTIFICATION: &[u8] = b"READY=1";
+
+#[cfg(target_os = "linux")]
+fn notify_service_manager_ready() -> Result<()> {
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET").filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    send_service_manager_notification(&socket, SYSTEMD_READY_NOTIFICATION)
+        .context("notify the service manager that Envoix Agent is ready")
+}
+
+#[cfg(target_os = "linux")]
+fn send_service_manager_notification(socket: &std::ffi::OsStr, message: &[u8]) -> io::Result<()> {
+    use std::os::linux::net::SocketAddrExt as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+
+    if message.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "service-manager notification must not be empty",
+        ));
+    }
+    let socket_bytes = socket.as_bytes();
+    let address = match socket_bytes.first() {
+        Some(b'@') if socket_bytes.len() > 1 => SocketAddr::from_abstract_name(&socket_bytes[1..])?,
+        Some(b'@') => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "abstract NOTIFY_SOCKET name must not be empty",
+            ));
+        }
+        Some(_) => SocketAddr::from_pathname(Path::new(socket))?,
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "NOTIFY_SOCKET must not be empty",
+            ));
+        }
+    };
+    let datagram = UnixDatagram::unbound()?;
+    let sent = datagram.send_to_addr(message, &address)?;
+    if sent != message.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "service-manager notification was truncated",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn notify_service_manager_ready() -> Result<()> {
+    Ok(())
 }
 
 fn parse_relay_override(value: &str) -> Option<String> {
@@ -4817,6 +4896,32 @@ mod tests {
 
         assert!(error.to_string().contains("refusing to remove"));
         assert_eq!(fs::read(path).unwrap(), b"keep me");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_manager_notification_reaches_a_path_socket() {
+        use std::os::unix::net::UnixDatagram;
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("notify.sock");
+        let receiver = UnixDatagram::bind(&socket).unwrap();
+
+        send_service_manager_notification(socket.as_os_str(), SYSTEMD_READY_NOTIFICATION).unwrap();
+
+        let mut message = [0_u8; 32];
+        let received = receiver.recv(&mut message).unwrap();
+        assert_eq!(&message[..received], SYSTEMD_READY_NOTIFICATION);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_manager_notification_rejects_empty_inputs() {
+        assert!(send_service_manager_notification(std::ffi::OsStr::new(""), b"ready").is_err());
+        assert!(send_service_manager_notification(std::ffi::OsStr::new("@"), b"ready").is_err());
+        assert!(
+            send_service_manager_notification(std::ffi::OsStr::new("/tmp/notify"), b"").is_err()
+        );
     }
 
     #[cfg(unix)]

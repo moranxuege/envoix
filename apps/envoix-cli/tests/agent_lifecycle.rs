@@ -121,6 +121,11 @@ fn managed_lifecycle_updates_in_place_and_never_removes_inbox() {
         "agent-v1"
     );
     assert!(harness.unit().is_file());
+    assert!(
+        fs::read_to_string(harness.unit())
+            .unwrap()
+            .contains("Type=notify\nNotifyAccess=main")
+    );
     let settings = fs::read(harness.settings()).unwrap();
 
     let state = harness.state();
@@ -132,6 +137,7 @@ fn managed_lifecycle_updates_in_place_and_never_removes_inbox() {
     write(state.join("user-note.txt"), "not lifecycle-owned");
 
     write(&source_agent, "agent-v2");
+    write(harness.unit(), "[Service]\nType=simple\n");
     harness.assert_success(&[
         "agent",
         "update",
@@ -143,6 +149,11 @@ fn managed_lifecycle_updates_in_place_and_never_removes_inbox() {
         "agent-v2"
     );
     assert_eq!(fs::read(harness.settings()).unwrap(), settings);
+    assert!(
+        fs::read_to_string(harness.unit())
+            .unwrap()
+            .contains("Type=notify\nNotifyAccess=main")
+    );
     assert!(state.join("engine-state-v2.json").is_file());
     assert!(state.join("vault/credential").is_file());
     assert!(state.join("inbox/received.txt").is_file());
