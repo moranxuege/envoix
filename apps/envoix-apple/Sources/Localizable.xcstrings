@@ -3143,6 +3143,163 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for sender" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待发送方" } }
       }
+    },
+    "wifi_aware.pairing.build_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby pairing is unavailable in this build." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此版本无法使用附近设备配对。" } }
+      }
+    },
+    "wifi_aware.pairing.checking" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Checking Apple paired devices…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在检查 Apple 配对设备…" } }
+      }
+    },
+    "wifi_aware.pairing.device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设备" } }
+      }
+    },
+    "wifi_aware.pairing.existing_pairs" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : { "stringUnit" : { "state" : "translated", "value" : "%lld Apple-paired device already available. Existing pairs do not show another six-digit code; tap Done to resume automatic discovery. Use the controls below only to add a new device." } },
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "%lld Apple-paired devices already available. Existing pairs do not show another six-digit code; tap Done to resume automatic discovery. Use the controls below only to add a new device." } }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : { "stringUnit" : { "state" : "translated", "value" : "已有 %lld 台 Apple 系统配对设备。已有配对不会再次显示六位码；点“完成”即可恢复自动发现。仅在添加新设备时使用下方按钮。" } }
+            }
+          }
+        }
+      }
+    },
+    "wifi_aware.pairing.find_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Find the other device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "查找另一台设备" } }
+      }
+    },
+    "wifi_aware.pairing.first_pair_guidance" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "For the first pair, tap “Show this device and code” on one device. On the other, tap “Find the other device”, select it, then enter or confirm the six-digit code. The two devices must use opposite buttons." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "首次配对时，请在一台设备上点“显示本机与验证码”；在另一台设备上点“查找另一台设备”，选择前一台设备，再输入或确认六位码。两台设备必须使用不同的按钮。" } }
+      }
+    },
+    "wifi_aware.pairing.new_pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "New pairing detected · %lld total" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已检测到新配对 · 共 %lld 台" } }
+      }
+    },
+    "wifi_aware.pairing.observation_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix could not read Apple's paired-device list. No pairing record was changed." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 无法读取 Apple 的配对设备列表；现有配对记录未被更改。" } }
+      }
+    },
+    "wifi_aware.pairing.picker_ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ is paired and ready" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%@ 已配对并可使用" } }
+      }
+    },
+    "wifi_aware.pairing.picker_waiting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ selected; waiting for Apple's pairing list" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已选择 %@；正在等待 Apple 配对列表更新" } }
+      }
+    },
+    "wifi_aware.pairing.retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "wifi_aware.pairing.show_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Show this device and code" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示本机与验证码" } }
+      }
+    },
+    "wifi_aware.pairing.unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对不可用" } }
+      }
+    },
+    "wifi_aware.probe.add_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加设备" } }
+      }
+    },
+    "wifi_aware.probe.allow_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Allow device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "允许设备" } }
+      }
+    },
+    "wifi_aware.probe.picker_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Picker unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择器不可用" } }
+      }
+    },
+    "wifi_aware.probe.receive" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive probe" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收探针" } }
+      }
+    },
+    "wifi_aware.probe.select_first" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pair and select one device before starting a probe." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开始探针前，请先配对并选择一台设备。" } }
+      }
+    },
+    "wifi_aware.probe.send" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send probe" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送探针" } }
+      }
+    },
+    "wifi_aware.probe.service_missing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The TCP probe service is missing from Info.plist." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Info.plist 中缺少 TCP 探针服务。" } }
+      }
+    },
+    "wifi_aware.probe.stop" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Stop" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止" } }
+      }
+    },
+    "wifi_aware.probe.target" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Probe target" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "探针目标" } }
+      }
+    },
+    "wifi_aware.probe.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Wi-Fi Aware connection probe" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Wi-Fi Aware 连接探针" } }
+      }
+    },
+    "wifi_aware.probe.waiting_access" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for Wi-Fi Aware access…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待 Wi-Fi Aware 访问权限…" } }
+      }
     }
   },
   "version" : "1.0"
