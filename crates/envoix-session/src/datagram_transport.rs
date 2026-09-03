@@ -757,7 +757,10 @@ mod tests {
     use tokio::sync::Mutex as AsyncMutex;
 
     use super::*;
-    use crate::endpoint::{HYBRID_DATA_MTU, PreferWifiAwarePath, hybrid_data_transport_config};
+    use crate::endpoint::{
+        HYBRID_DATA_MTU, HYBRID_PATH_MAX_IDLE_TIMEOUT, PreferWifiAwarePath,
+        hybrid_data_transport_config,
+    };
     use crate::{
         DEFAULT_DATA_STREAM_WINDOW, PairingConfig,
         receive_manifest_v2_offer_over_datagram_transport,
@@ -765,11 +768,12 @@ mod tests {
     };
 
     const HYBRID_TEST_ALPN: &[u8] = b"envoix/test/wifi-aware-hybrid/1";
-    // iroh validates an idle backup path asynchronously. Busy shared CI runners
-    // can take longer than one keepalive interval even though both paths are
-    // healthy, so this gate allows the same budget as the migration assertion.
     const HYBRID_TEST_MIGRATION_TIMEOUT: Duration = Duration::from_secs(12);
-    const HYBRID_TEST_PATH_DISCOVERY_TIMEOUT: Duration = HYBRID_TEST_MIGRATION_TIMEOUT;
+    // iroh validates an idle backup path asynchronously. Discovery is driven by
+    // idle probes, so leave five complete retirement windows for a heavily
+    // scheduled runner without weakening the later migration assertion.
+    const HYBRID_TEST_PATH_DISCOVERY_TIMEOUT: Duration =
+        HYBRID_PATH_MAX_IDLE_TIMEOUT.saturating_mul(5);
 
     struct MemoryDatagramTransport {
         outbound: mpsc::Sender<Vec<u8>>,

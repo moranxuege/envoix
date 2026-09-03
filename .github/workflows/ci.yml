@@ -9,8 +9,10 @@ on:
     paths:
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
+      - '.gitleaksignore'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - 'deny.toml'
       - 'rust-toolchain.toml'
       - 'apps/envoix-agent/**'
       - 'apps/envoix-cli/**'
@@ -43,6 +45,36 @@ env:
   ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
 
 jobs:
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan pushed Git history for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+
+  dependency-policy:
+    name: Rust license + source policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check Rust licenses and dependency sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --locked
+          command-arguments: licenses sources
+          rust-version: ${{ env.RUST_VERSION }}
+
   core:
     name: contracts + Rust + security
     runs-on: ubuntu-latest
@@ -179,8 +211,13 @@ jobs:
           :app:lintDebug
           :app:testDebugUnitTest
           :app:assembleDebug
+          :app:cyclonedxDirectBom
           --no-daemon
           --stacktrace
+      - name: Check Android dependency licenses
+        run: >-
+          python3 scripts/check_sbom_licenses.py
+          android/app/build/reports/cyclonedx-direct/envoix-android.cdx.json
       - name: Verify packaged JNI library
         run: |
           test -s android/app/build/outputs/apk/debug/app-debug.apk
