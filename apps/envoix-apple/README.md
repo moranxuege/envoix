@@ -61,9 +61,12 @@ helper-owned Keychain persistence. Agent protocol v11 moves first-contact
 verification request, the GUI closes its unverified session and sends only the
 bounded invitation, label, and one-time code over the owner-only socket. The
 helper reconnects, verifies, commits the Relationship, and keeps the credential
-inside its Keychain-backed vault. The legacy foreground transfer and
-remembered-Room presentation remain separate pending their full Agent snapshot
-and event migration; they must not reopen or copy the helper credential.
+inside its Keychain-backed vault. The macOS paired-device list and its Send/drop
+entry points use the helper's typed `ListDevices` and `CreateTransfer` requests;
+the GUI receives only non-secret device summaries and transfer identifiers. The
+legacy active-Room presentation and helper transfer Activity/event projection
+remain separate pending their full Agent snapshot and event migration; they
+must not reopen or copy the helper credential.
 
 A distributable build must use `scripts/apple-dev.sh
 macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and
@@ -109,13 +112,14 @@ macOS supports mixed multi-file/folder selection and drag/drop through the same
 job preparation API. Security-scoped source and destination access is retained
 for the lifetime of the active job.
 
-Remembered peers are presented as devices on macOS. A device's **Send** button
-opens the selection screen, while dropping files or folders onto that device
-opens the same screen with those roots preselected. The app also advertises a
-Finder service named **Send with Envoix**. It imports all selected Finder URLs,
-brings the main window forward, and waits for device selection and the explicit
-final **Send** action; invoking the service never starts network transfer by
-itself.
+Helper-owned paired peers are presented as devices on macOS. A device's
+**Send** button opens the native multi-item picker, while dropping files or
+folders onto that device submits those roots directly to the helper. The helper
+validates and seals the sources before `CreateTransfer` succeeds. The app also
+advertises a Finder service named **Send with Envoix**. It imports all selected
+Finder URLs and brings the main window forward; choosing a paired helper device
+then queues that selection. Invoking the Finder service by itself never starts
+network transfer.
 
 ## Invitations
 

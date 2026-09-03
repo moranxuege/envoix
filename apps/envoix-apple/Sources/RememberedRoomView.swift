@@ -428,6 +428,8 @@ struct RememberedRoomView: View {
                 "离线 · 等待另一台设备打开应用",
                 language: language
             )
+        case .available:
+            return AppText.value("Ready to send", "可发送", language: language)
         case .connecting:
             return AppText.value("Reconnecting securely…", "正在安全重连…", language: language)
         case .waiting:
@@ -450,6 +452,7 @@ struct RememberedRoomView: View {
     private var statusIcon: String {
         switch status {
         case .offline: return "wifi.slash"
+        case .available: return "paperplane.circle.fill"
         case .connecting: return "arrow.triangle.2.circlepath"
         case .waiting: return "antenna.radiowaves.left.and.right"
         case .connected: return "checkmark.circle.fill"
@@ -459,7 +462,7 @@ struct RememberedRoomView: View {
 
     private var statusTint: Color {
         switch status {
-        case .connected: return Theme.success
+        case .available, .connected: return Theme.success
         case .connecting, .waiting: return Theme.accentStrong
         case .needsRepair: return Theme.danger
         case .offline: return Theme.muted

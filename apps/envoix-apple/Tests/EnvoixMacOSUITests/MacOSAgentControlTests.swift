@@ -172,6 +172,91 @@ final class MacOSAgentControlTests: XCTestCase {
         ])
     }
 
+    @MainActor
+    func testTransferControllerLoadsSortedHelperDevices() async {
+        let client = FakeMacOSAgentControlClient(response: .devices(devices: [
+            device(id: "dev_wsl", label: "WSL"),
+            device(id: "dev_alpha", label: "Alpha"),
+        ]))
+        let controller = MacOSAgentTransferController(controlClient: client)
+
+        await controller.refreshDevices()
+
+        XCTAssertEqual(controller.devices, [
+            MacOSAgentDevice(id: "dev_alpha", label: "Alpha"),
+            MacOSAgentDevice(id: "dev_wsl", label: "WSL"),
+        ])
+        XCTAssertNil(controller.loadError)
+        let requests = await client.requests
+        XCTAssertEqual(requests, [.listDevices])
+    }
+
+    @MainActor
+    func testTransferControllerCreatesTransferThroughHelper() async throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("envoix-agent-ui-\(UUID().uuidString).txt")
+        try Data("helper transfer".utf8).write(to: source, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let transfer = FfiApplicationTransfer(
+            id: "transfer_fixture",
+            relationshipId: "dev_wsl",
+            roomId: nil,
+            contentId: "content_fixture",
+            direction: .send,
+            state: .queued,
+            transferredBytes: 0,
+            totalBytes: 15,
+            failure: nil,
+            rejection: nil
+        )
+        let client = FakeMacOSAgentControlClient(
+            response: .transferCreated(transfer: transfer)
+        )
+        let controller = MacOSAgentTransferController(controlClient: client)
+
+        let transferID = try await controller.createTransfer(
+            deviceID: "dev_wsl",
+            urls: [source]
+        )
+
+        XCTAssertEqual(transferID, "transfer_fixture")
+        XCTAssertFalse(controller.isPreparing(deviceID: "dev_wsl"))
+        let requests = await client.requests
+        XCTAssertEqual(requests, [
+            .createTransfer(device: "dev_wsl", paths: [source.standardizedFileURL.path]),
+        ])
+    }
+
+    @MainActor
+    func testTransferControllerRejectsEmptySelectionBeforeCallingHelper() async {
+        let client = FakeMacOSAgentControlClient(response: .devices(devices: []))
+        let controller = MacOSAgentTransferController(controlClient: client)
+
+        do {
+            _ = try await controller.createTransfer(deviceID: "dev_wsl", urls: [])
+            XCTFail("an empty transfer selection must fail")
+        } catch OpenedSendFileError.unsupportedItem {
+            // Expected: the helper must never see an empty CreateTransfer request.
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertFalse(controller.isPreparing(deviceID: "dev_wsl"))
+        let requests = await client.requests
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    private func device(id: String, label: String) -> FfiAgentDeviceSummary {
+        FfiAgentDeviceSummary(
+            id: id,
+            label: label,
+            generation: 0,
+            previousGeneration: nil,
+            broker: "fixture-broker",
+            relay: nil
+        )
+    }
+
     private func status() -> FfiAgentStatus {
         FfiAgentStatus(
             protocolVersion: expectedAgentProtocolVersion,

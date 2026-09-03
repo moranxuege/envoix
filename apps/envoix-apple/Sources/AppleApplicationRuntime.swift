@@ -112,6 +112,10 @@ final class AppleApplicationRuntime: ObservableObject {
     lazy var helperService = MacOSAgentServiceController(
         controlClient: helperControlClient
     )
+
+    lazy var helperTransfers = MacOSAgentTransferController(
+        controlClient: helperControlClient
+    )
     #endif
 
     convenience init() {

@@ -1,4 +1,9 @@
 #if os(iOS) || os(macOS)
+struct PairedDevicePresentation: Equatable, Identifiable {
+    let id: String
+    let label: String
+}
+
 enum ConnectionHubPresentationText {
     static func rememberedDeviceCount(_ count: Int, language: String) -> String {
         let displayCount = Int64(max(count, 0))
@@ -25,6 +30,8 @@ enum ConnectionHubPresentationText {
         let key: String
         switch status {
         case .offline: key = "connection.devices.status.offline"
+        case .available:
+            return AppText.value("Ready to send", "可发送", language: language)
         case .connecting: key = "connection.devices.status.connecting"
         case .waiting: key = "connection.devices.status.waiting"
         case .connected: key = "connection.devices.status.connected"

@@ -106,6 +106,7 @@ final class ConnectionHubPresentationTests: XCTestCase {
 
         let statuses: [(RememberedRoomConnectionStatus, String, String)] = [
             (.offline, "Available when both apps are open", "双方打开应用时可连接"),
+            (.available, "Ready to send", "可发送"),
             (.connecting, "Connecting…", "正在连接…"),
             (.waiting, "Available to the other device…", "正在等待另一台设备…"),
             (.connected, "Connected", "已连接"),
@@ -121,6 +122,20 @@ final class ConnectionHubPresentationTests: XCTestCase {
                 chinese
             )
         }
+    }
+
+    func testRememberedDeviceSendEntryRemainsAvailableDuringReconnect() {
+        XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .offline))
+        XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .available))
+        XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .connecting))
+        XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .waiting))
+        XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .connected))
+        XCTAssertFalse(RememberedDeviceSendPolicy.canSend(status: .needsRepair("expired")))
+
+        XCTAssertEqual(
+            PairedDevicePresentation(id: "relationship_wsl", label: "WSL"),
+            PairedDevicePresentation(id: "relationship_wsl", label: "WSL")
+        )
     }
 
     func testNearbyCatalogKeysPreserveEnglishAndChineseLabels() {

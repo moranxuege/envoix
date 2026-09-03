@@ -86,6 +86,7 @@ struct RememberedRoomSession: Equatable, Identifiable {
 
 enum RememberedRoomConnectionStatus: Equatable {
     case offline
+    case available
     case connecting
     case waiting
     case connected

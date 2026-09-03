@@ -26,6 +26,7 @@ final class ConnectionHubPresentationTests: XCTestCase {
 
     func testRememberedDeviceSendRequiresAUsableRelationship() {
         XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .offline))
+        XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .available))
         XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .connecting))
         XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .waiting))
         XCTAssertTrue(RememberedDeviceSendPolicy.canSend(status: .connected))

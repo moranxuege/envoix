@@ -334,6 +334,10 @@ struct MobileConnectionFlowView: View {
     @ObservedObject private var workflow = AppleApplicationRuntime.shared.workflow
     @ObservedObject private var rememberedOutbox =
         AppleApplicationRuntime.shared.rememberedOutbox
+    #if os(macOS)
+    @ObservedObject private var helperTransfers =
+        AppleApplicationRuntime.shared.helperTransfers
+    #endif
     @StateObject private var navigation = MobileSceneNavigationState(
         initialPage: {
             #if DEBUG
@@ -384,6 +388,10 @@ struct MobileConnectionFlowView: View {
     @State private var isRoomReplacementPresented = false
     @State private var acceptingRoomOfferID: String?
     @State private var roomDestinationRepair: RoomDestinationRepairRequest?
+    #if os(macOS)
+    @State private var helperFileImporterIsPresented = false
+    @State private var helperFileImporterDeviceID: String?
+    #endif
     #if DEBUG && os(iOS)
     @State private var didStageBackgroundShareFixture = false
     @State private var openInUITestFixtureURL: URL?
@@ -475,6 +483,14 @@ struct MobileConnectionFlowView: View {
                 return error
             }
         }
+        #if os(macOS)
+        .fileImporter(
+            isPresented: $helperFileImporterIsPresented,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true,
+            onCompletion: handleHelperFileImport
+        )
+        #endif
         .alert(
             AppText.value("Verify nearby device", "验证附近设备", language: language),
             isPresented: Binding(
@@ -649,6 +665,9 @@ struct MobileConnectionFlowView: View {
         .onAppear {
             prepareUITestFixtures()
             workflow.refreshRememberedRooms()
+            #if os(macOS)
+            Task { await helperTransfers.refreshDevices() }
+            #endif
             rememberedOutbox.start()
             updateRuntimeRequest()
             presentPendingSendSelection()
@@ -717,6 +736,11 @@ struct MobileConnectionFlowView: View {
                 beginOfferGatedNFCReadIfNeeded()
             } else {
                 nfcInvitationExchange.cancelReading()
+            }
+            #endif
+            #if os(macOS)
+            if phase == .active {
+                Task { await helperTransfers.refreshDevices() }
             }
             #endif
         }
@@ -811,7 +835,10 @@ struct MobileConnectionFlowView: View {
                 language: language
             ))
             #if os(macOS)
-            Task { await runtime.helperService.refresh() }
+            Task {
+                await runtime.helperService.refresh()
+                await helperTransfers.refreshDevices()
+            }
             #endif
         }
         .onChange(of: workflow.incomingRoomOffer?.id) { offerID in
@@ -933,6 +960,116 @@ struct MobileConnectionFlowView: View {
     }
     #endif
 
+    private var pairedDevices: [PairedDevicePresentation] {
+        #if os(macOS)
+        return helperTransfers.devices.map {
+            PairedDevicePresentation(id: $0.id, label: $0.label)
+        }
+        #else
+        return workflow.rememberedPeers.map {
+            PairedDevicePresentation(id: $0.relationshipID, label: $0.label)
+        }
+        #endif
+    }
+
+    private var incomingPairedDeviceID: String? {
+        #if os(macOS)
+        return nil
+        #else
+        return workflow.incomingRoomOffer == nil
+            ? nil
+            : workflow.activeRememberedRelationshipID
+        #endif
+    }
+
+    private func pairedDeviceStatus(_ deviceID: String) -> RememberedRoomConnectionStatus {
+        #if os(macOS)
+        return helperTransfers.isPreparing(deviceID: deviceID) ? .connecting : .available
+        #else
+        return workflow.rememberedRoomStatus(relationshipID: deviceID)
+        #endif
+    }
+
+    private func selectPairedDevice(_ deviceID: String) {
+        #if os(macOS)
+        sendToPairedDevice(deviceID)
+        #else
+        openRememberedRoom(deviceID)
+        #endif
+    }
+
+    private func sendToPairedDevice(_ deviceID: String) {
+        #if os(macOS)
+        if let selection = model.pendingSendSelection,
+           !selection.fileURLs.isEmpty {
+            queueHelperTransfer(
+                deviceID: deviceID,
+                urls: selection.fileURLs,
+                pendingSelectionID: selection.id
+            )
+            return
+        }
+        helperFileImporterDeviceID = deviceID
+        helperFileImporterIsPresented = true
+        #else
+        offerFilesToRememberedRoom(deviceID)
+        #endif
+    }
+
+    private func sendDroppedItemsToPairedDevice(_ deviceID: String, _ urls: [URL]) {
+        #if os(macOS)
+        queueHelperTransfer(deviceID: deviceID, urls: urls, pendingSelectionID: nil)
+        #else
+        offerDroppedItemsToRememberedRoom(deviceID, urls)
+        #endif
+    }
+
+    #if os(macOS)
+    private func handleHelperFileImport(_ result: Result<[URL], Error>) {
+        guard let deviceID = helperFileImporterDeviceID else { return }
+        helperFileImporterDeviceID = nil
+        switch result {
+        case let .success(urls):
+            guard !urls.isEmpty else { return }
+            queueHelperTransfer(deviceID: deviceID, urls: urls, pendingSelectionID: nil)
+        case let .failure(error):
+            if (error as? CocoaError)?.code != .userCancelled {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        }
+    }
+
+    private func queueHelperTransfer(
+        deviceID: String,
+        urls: [URL],
+        pendingSelectionID: UUID?
+    ) {
+        guard let device = helperTransfers.devices.first(where: { $0.id == deviceID }) else {
+            ToastCenter.shared.show(AppText.value(
+                "Refresh paired devices and try again.",
+                "请刷新已配对设备后重试。",
+                language: language
+            ))
+            return
+        }
+        Task { @MainActor in
+            do {
+                _ = try await helperTransfers.createTransfer(deviceID: deviceID, urls: urls)
+                if let pendingSelectionID {
+                    model.consumePendingSendSelection(id: pendingSelectionID)
+                }
+                ToastCenter.shared.show(AppText.value(
+                    "Queued for \(device.label).",
+                    "已加入发送队列：\(device.label)。",
+                    language: language
+                ))
+            } catch {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        }
+    }
+    #endif
+
     @ViewBuilder
     private var pageContent: some View {
         switch navigation.page {
@@ -944,12 +1081,10 @@ struct MobileConnectionFlowView: View {
                 roomInvitation: workflow.roomInvitation,
                 roomInvitationIsRevealed: roomInvitationIsRevealed,
                 roomInvitationIsStarting: workflow.controlPhase == .joining,
-                rememberedRooms: workflow.rememberedPeers,
+                rememberedRooms: pairedDevices,
                 pendingSendItemCount: model.pendingSendSelection?.fileURLs.count ?? 0,
-                rememberedRoomStatus: workflow.rememberedRoomStatus,
-                incomingRememberedRelationshipID: workflow.incomingRoomOffer == nil
-                    ? nil
-                    : workflow.activeRememberedRelationshipID,
+                rememberedRoomStatus: pairedDeviceStatus,
+                incomingRememberedRelationshipID: incomingPairedDeviceID,
                 onScanQRCode: {
                     guardRoomReplacement {
                         scannerIsPresented = true
@@ -970,9 +1105,9 @@ struct MobileConnectionFlowView: View {
                 onCancelRoomInvitation: requestCloseRoom,
                 onSetVisibility: { presence.setVisibility($0) },
                 onRename: updateDisplayName,
-                onSelectRememberedRoom: openRememberedRoom,
-                onSendToRememberedRoom: offerFilesToRememberedRoom,
-                onSendDroppedItems: offerDroppedItemsToRememberedRoom,
+                onSelectRememberedRoom: selectPairedDevice,
+                onSendToRememberedRoom: sendToPairedDevice,
+                onSendDroppedItems: sendDroppedItemsToPairedDevice,
                 onPrepareNearbyPairing: {
                     await runtime.beginSystemPairing(for: sceneID)
                 },

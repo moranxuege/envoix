@@ -102,6 +102,92 @@ final class MacOSAgentPairingCoordinator: DurablePairingCoordinating {
     }
 }
 
+struct MacOSAgentDevice: Equatable, Identifiable {
+    let id: String
+    let label: String
+}
+
+enum MacOSAgentTransferError: LocalizedError, Equatable {
+    case alreadyPreparing
+    case unexpectedResponse
+    case rejected(code: String, reason: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .alreadyPreparing:
+            return "A transfer for this device is already being prepared."
+        case .unexpectedResponse:
+            return "The helper returned an incompatible transfer response."
+        case let .rejected(code, reason):
+            return "Agent \(code): \(reason)"
+        }
+    }
+}
+
+@MainActor
+final class MacOSAgentTransferController: ObservableObject {
+    @Published private(set) var devices: [MacOSAgentDevice] = []
+    @Published private(set) var preparingDeviceIDs = Set<String>()
+    @Published private(set) var loadError: String?
+
+    private let controlClient: MacOSHelperControlClient
+
+    init(controlClient: MacOSHelperControlClient) {
+        self.controlClient = controlClient
+    }
+
+    func isPreparing(deviceID: String) -> Bool {
+        preparingDeviceIDs.contains(deviceID)
+    }
+
+    func refreshDevices() async {
+        do {
+            let response = try await controlClient.call(request: .listDevices)
+            guard case let .devices(agentDevices) = response else {
+                throw MacOSAgentTransferError.unexpectedResponse
+            }
+            devices = agentDevices
+                .map { MacOSAgentDevice(id: $0.id, label: $0.label) }
+                .sorted {
+                    $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+                }
+            loadError = nil
+        } catch {
+            // Preserve the last good list while the helper is temporarily unavailable.
+            loadError = error.localizedDescription
+        }
+    }
+
+    func createTransfer(deviceID: String, urls: [URL]) async throws -> String {
+        guard preparingDeviceIDs.insert(deviceID).inserted else {
+            throw MacOSAgentTransferError.alreadyPreparing
+        }
+        defer { preparingDeviceIDs.remove(deviceID) }
+
+        let accesses = urls.map(SecurityScopedResourceAccess.init)
+        defer { withExtendedLifetime(accesses) {} }
+        for access in accesses {
+            guard access.isActive
+                    || FileManager.default.isReadableFile(atPath: access.url.path) else {
+                throw OpenedSendFileError.inaccessible
+            }
+        }
+        let paths = try validatedOpenedSendURLs(urls).map(\.path)
+        let response = try await controlClient.call(request: .createTransfer(
+            device: deviceID,
+            paths: paths
+        ))
+        switch response {
+        case let .transferCreated(transfer):
+            return transfer.id
+        case let .error(code, message):
+            throw MacOSAgentTransferError.rejected(code: code, reason: message)
+        default:
+            throw MacOSAgentTransferError.unexpectedResponse
+        }
+    }
+}
+
 enum MacOSAgentRegistrationState: Equatable {
     case unknown
     case notRegistered

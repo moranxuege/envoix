@@ -55,7 +55,7 @@ struct ConnectionHubView: View {
     let roomInvitation: RoomControlInvitation?
     let roomInvitationIsRevealed: Bool
     let roomInvitationIsStarting: Bool
-    let rememberedRooms: [RememberedPeerSummary]
+    let rememberedRooms: [PairedDevicePresentation]
     let pendingSendItemCount: Int
     let rememberedRoomStatus: (String) -> RememberedRoomConnectionStatus
     let incomingRememberedRelationshipID: String?
@@ -258,13 +258,13 @@ struct ConnectionHubView: View {
                 }
 
                 ForEach(rememberedRooms) { room in
-                    let status = rememberedRoomStatus(room.relationshipID)
+                    let status = rememberedRoomStatus(room.id)
                     let hasIncomingOffer =
-                        incomingRememberedRelationshipID == room.relationshipID
+                        incomingRememberedRelationshipID == room.id
                     let canSend = RememberedDeviceSendPolicy.canSend(status: status)
                     HStack(spacing: 10) {
                         Button {
-                            onSelectRememberedRoom(room.relationshipID)
+                            onSelectRememberedRoom(room.id)
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: rememberedRoomIcon(status))
@@ -323,7 +323,7 @@ struct ConnectionHubView: View {
                             ))
 
                         Button {
-                            onSendToRememberedRoom(room.relationshipID)
+                            onSendToRememberedRoom(room.id)
                         } label: {
                             Label(
                                 AppText.localized("home.send.title", language: language),
@@ -333,11 +333,11 @@ struct ConnectionHubView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.accentStrong)
                         .disabled(!canSend)
-                        .accessibilityIdentifier("remembered_device_send_\(room.relationshipID)")
+                        .accessibilityIdentifier("remembered_device_send_\(room.id)")
                     }
                     .padding(10)
                     .background(
-                        rememberedDropTargetID == room.relationshipID
+                        rememberedDropTargetID == room.id
                             ? Theme.accentSoft
                             : Theme.surfaceRaised,
                         in: RoundedRectangle(cornerRadius: 12)
@@ -345,15 +345,15 @@ struct ConnectionHubView: View {
                     .overlay {
                         RoundedRectangle(cornerRadius: 12)
                             .strokeBorder(
-                                rememberedDropTargetID == room.relationshipID
+                                rememberedDropTargetID == room.id
                                     ? Theme.accentStrong
                                     : Theme.line.opacity(0.55),
-                                lineWidth: rememberedDropTargetID == room.relationshipID ? 2 : 0.5
+                                lineWidth: rememberedDropTargetID == room.id ? 2 : 0.5
                             )
                     }
                     .onDrop(
                         of: [.fileURL],
-                        isTargeted: rememberedDropBinding(for: room.relationshipID)
+                        isTargeted: rememberedDropBinding(for: room.id)
                     ) { providers in
                         guard RememberedDeviceSendPolicy.acceptsDrop(
                             providerCount: providers.count,
@@ -361,11 +361,11 @@ struct ConnectionHubView: View {
                         ) else { return false }
                         loadRememberedDeviceDrop(
                             providers,
-                            relationshipID: room.relationshipID
+                            relationshipID: room.id
                         )
                         return true
                     }
-                    .accessibilityIdentifier("remembered_room_\(room.relationshipID)")
+                    .accessibilityIdentifier("remembered_room_\(room.id)")
                 }
 
                 #if os(macOS)
@@ -429,6 +429,7 @@ struct ConnectionHubView: View {
     ) -> String {
         switch status {
         case .offline: return "bubble.left.and.bubble.right"
+        case .available: return "paperplane.circle.fill"
         case .connecting: return "arrow.triangle.2.circlepath"
         case .waiting: return "antenna.radiowaves.left.and.right"
         case .connected: return "checkmark.circle.fill"
@@ -440,7 +441,7 @@ struct ConnectionHubView: View {
         _ status: RememberedRoomConnectionStatus
     ) -> Color {
         switch status {
-        case .connected: return Theme.success
+        case .available, .connected: return Theme.success
         case .connecting, .waiting: return Theme.accentStrong
         case .needsRepair: return Theme.danger
         case .offline: return Theme.muted

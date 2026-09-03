@@ -178,6 +178,13 @@ verification request closes its unverified GUI session and reconnects through
 this request; the creator keeps the invitation available until expiry so this
 ownership handoff does not require a credential export.
 
+The macOS connection hub also projects helper-owned devices through the typed
+`ListDevices` response. Its Send picker, pending Finder selection, and device
+drop target submit validated local paths through `CreateTransfer`; the helper
+seals the content before returning a non-secret transfer identifier. The GUI
+does not open the Engine or copy a Relationship credential. Active transfer
+progress remains a separate snapshot/event projection milestone.
+
 API 24 still does not expose an Engine-store origin, recovery report, or
 migration report through UniFFI. Apple acceptance tests therefore provide
 external evidence for fresh state opens, current-schema reopen, owner
