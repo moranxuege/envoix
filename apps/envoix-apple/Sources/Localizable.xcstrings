@@ -1031,6 +1031,30 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "InviteV2 已验证" } }
       }
     },
+    "received_items.empty_folder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This folder is empty or unavailable." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此文件夹为空或当前无法访问。" } }
+      }
+    },
+    "received_items.open_file" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open File" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开文件" } }
+      }
+    },
+    "received_items.reveal_finder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reveal in Finder" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "在 Finder 中显示" } }
+      }
+    },
+    "received_items.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Received Items" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已接收项目" } }
+      }
+    },
     "transfer.action.delivering_invitation" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Delivering Invitation…" } },
@@ -2101,6 +2125,48 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing and network" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对与网络" } }
+      }
+    },
+    "token.shared.copied" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Token copied" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "口令已复制" } }
+      }
+    },
+    "token.shared.copy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy Token" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制口令" } }
+      }
+    },
+    "token.shared.generate" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Generate" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "生成" } }
+      }
+    },
+    "token.shared.generated" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Token generated" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "口令已生成" } }
+      }
+    },
+    "token.shared.minimum_length" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Shared token (same on both devices, %lld+ characters)" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "共享口令（两台设备相同，至少 %lld 个字符）" } }
+      }
+    },
+    "token.shared.placeholder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "e.g. envoix-lan-2026" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "例如 envoix-lan-2026" } }
+      }
+    },
+    "token.shared.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Shared token" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "共享口令" } }
       }
     },
     "transfer.failure.authentication_failed.detail" : {

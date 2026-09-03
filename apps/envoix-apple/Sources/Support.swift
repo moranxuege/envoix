@@ -295,6 +295,41 @@ extension EnvironmentValues {
     }
 }
 
+enum TokenFieldPresentationText {
+    static func desktopTitle(minimumLength: Int, language: String) -> String {
+        let displayMinimum = Int64(max(minimumLength, 0))
+        return AppText.localized(
+            "token.shared.minimum_length",
+            defaultValue: "Shared token (same on both devices, \(displayMinimum)+ characters)",
+            language: language
+        )
+    }
+
+    static func title(language: String) -> String {
+        AppText.localized("token.shared.title", language: language)
+    }
+
+    static func placeholder(language: String) -> String {
+        AppText.localized("token.shared.placeholder", language: language)
+    }
+
+    static func generated(language: String) -> String {
+        AppText.localized("token.shared.generated", language: language)
+    }
+
+    static func generateAction(language: String) -> String {
+        AppText.localized("token.shared.generate", language: language)
+    }
+
+    static func copied(language: String) -> String {
+        AppText.localized("token.shared.copied", language: language)
+    }
+
+    static func copyAction(language: String) -> String {
+        AppText.localized("token.shared.copy", language: language)
+    }
+}
+
 /// A labeled field for entering the shared pairing token, with a one-tap
 /// generator (and copy) so users don't have to invent one.
 struct TokenField: View {
@@ -312,26 +347,39 @@ struct TokenField: View {
 
     private var desktopBody: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value("Shared token (same on both devices, \(minTokenLength)+ characters)", "共享口令（两台设备相同，至少 \(minTokenLength) 个字符）", language: language))
+            Text(TokenFieldPresentationText.desktopTitle(
+                minimumLength: minTokenLength,
+                language: language
+            ))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
             HStack(spacing: 8) {
-                TextField("e.g. envoix-lan-2026", text: $token)
+                TextField(TokenFieldPresentationText.placeholder(language: language), text: $token)
                     .textFieldStyle(.plain)
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)
                 Button {
                     token = friendlyToken()
-                    ToastCenter.shared.show(AppText.value("Token generated", "口令已生成", language: language))
+                    ToastCenter.shared.show(TokenFieldPresentationText.generated(language: language))
                 } label: {
-                    Label(AppText.value("Generate", "生成", language: language), systemImage: "wand.and.stars")
+                    Label(
+                        TokenFieldPresentationText.generateAction(language: language),
+                        systemImage: "wand.and.stars"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
                 Button {
-                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language), language: language)
+                    copyWithToast(
+                        token,
+                        TokenFieldPresentationText.copied(language: language),
+                        language: language
+                    )
                 } label: {
-                    Label(AppText.value("Copy Token", "复制口令", language: language), systemImage: "doc.on.doc")
+                    Label(
+                        TokenFieldPresentationText.copyAction(language: language),
+                        systemImage: "doc.on.doc"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -352,11 +400,11 @@ struct TokenField: View {
     #if os(iOS)
     private var mobileBody: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value("Shared token", "共享口令", language: language))
+            Text(TokenFieldPresentationText.title(language: language))
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
-            TextField("e.g. envoix-lan-2026", text: $token)
+            TextField(TokenFieldPresentationText.placeholder(language: language), text: $token)
                 .textFieldStyle(.plain)
                 .font(.body.monospaced())
                 .foregroundStyle(Theme.text)
@@ -375,17 +423,24 @@ struct TokenField: View {
             HStack(spacing: 8) {
                 Button {
                     token = friendlyToken()
-                    ToastCenter.shared.show(AppText.value("Token generated", "口令已生成", language: language))
+                    ToastCenter.shared.show(TokenFieldPresentationText.generated(language: language))
                 } label: {
-                    Label(AppText.value("Generate", "生成", language: language), systemImage: "wand.and.stars")
+                    Label(
+                        TokenFieldPresentationText.generateAction(language: language),
+                        systemImage: "wand.and.stars"
+                    )
                         .frame(maxWidth: .infinity, minHeight: 36)
                 }
                 .disabled(disabled)
 
                 Button {
-                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language), language: language)
+                    copyWithToast(
+                        token,
+                        TokenFieldPresentationText.copied(language: language),
+                        language: language
+                    )
                 } label: {
-                    Label(AppText.value("Copy", "复制", language: language), systemImage: "doc.on.doc")
+                    Label(AppText.localized("common.copy", language: language), systemImage: "doc.on.doc")
                         .frame(maxWidth: .infinity, minHeight: 36)
                 }
                 .disabled(token.trimmed.isEmpty)
@@ -436,7 +491,7 @@ struct RoomCodeField: View {
                 if let pasteAction {
                     Button(action: pasteAction) {
                         Label(
-                            AppText.value("Paste", "粘贴", language: language),
+                            AppText.localized("common.paste", language: language),
                             systemImage: "doc.on.clipboard"
                         )
                         .frame(minHeight: 34)
@@ -488,7 +543,10 @@ struct RoomCodeField: View {
 
                 if let pasteAction {
                     Button(action: pasteAction) {
-                        Label(AppText.value("Paste", "粘贴", language: language), systemImage: "doc.on.clipboard")
+                        Label(
+                            AppText.localized("common.paste", language: language),
+                            systemImage: "doc.on.clipboard"
+                        )
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(disabled ? Theme.text : Theme.accentStrong)
                             .padding(.horizontal, 12)
@@ -635,11 +693,35 @@ func availableReceivedDirectoryItemURLs(
     }.map(\.url)
 }
 
+enum ReceivedItemsPresentationText {
+    enum RevealTarget: CaseIterable {
+        case finder
+        case file
+    }
+
+    static func title(language: String) -> String {
+        AppText.localized("received_items.title", language: language)
+    }
+
+    static func emptyFolder(language: String) -> String {
+        AppText.localized("received_items.empty_folder", language: language)
+    }
+
+    static func revealAction(for target: RevealTarget, language: String) -> String {
+        AppText.localized(
+            target == .finder
+                ? "received_items.reveal_finder"
+                : "received_items.open_file",
+            language: language
+        )
+    }
+}
+
 func platformRevealTitle(language: String) -> String {
     #if os(macOS)
-    return AppText.value("Reveal in Finder", "在 Finder 中显示", language: language)
+    return ReceivedItemsPresentationText.revealAction(for: .finder, language: language)
     #else
-    return AppText.value("Open File", "打开文件", language: language)
+    return ReceivedItemsPresentationText.revealAction(for: .file, language: language)
     #endif
 }
 
@@ -681,7 +763,7 @@ private struct ReceivedItemsList: View {
                     Image(systemName: "square.and.arrow.up")
                         .frame(width: 36, height: 36)
                 }
-                .accessibilityLabel(AppText.value("Share", "分享", language: language))
+                .accessibilityLabel(AppText.localized("common.share", language: language))
                 .accessibilityIdentifier("received_item_share_\(url.lastPathComponent)")
             }
         }
@@ -710,11 +792,7 @@ struct ReceivedItemsSheet: View {
                 previewFileURL: $previewFileURL,
                 openDirectory: { directoryPath.append($0) }
             )
-            .navigationTitle(AppText.value(
-                "Received Items",
-                "已接收项目",
-                language: language
-            ))
+            .navigationTitle(ReceivedItemsPresentationText.title(language: language))
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: URL.self) { directory in
                 let children = availableReceivedDirectoryItemURLs(directory: directory)
@@ -728,11 +806,7 @@ struct ReceivedItemsSheet: View {
                     .overlay {
                         if children.isEmpty {
                             Label(
-                                AppText.value(
-                                    "This folder is empty or unavailable.",
-                                    "此文件夹为空或当前无法访问。",
-                                    language: language
-                                ),
+                                ReceivedItemsPresentationText.emptyFolder(language: language),
                                 systemImage: "folder"
                             )
                             .font(.callout)
@@ -743,7 +817,7 @@ struct ReceivedItemsSheet: View {
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(AppText.value("Done", "完成", language: language)) { dismiss() }
+                    Button(AppText.localized("common.done", language: language)) { dismiss() }
                 }
             }
         }
@@ -767,10 +841,10 @@ struct ReceivedItemsSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text(AppText.value("Received Items", "已接收项目", language: language))
+                Text(ReceivedItemsPresentationText.title(language: language))
                     .font(.title2.weight(.semibold))
                 Spacer()
-                Button(AppText.value("Done", "完成", language: language)) {
+                Button(AppText.localized("common.done", language: language)) {
                     dismiss()
                 }
             }
