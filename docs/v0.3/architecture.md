@@ -247,8 +247,17 @@ has temporarily quiesced it.
 The target topology is a signed application bundle containing a
 background-capable per-user helper. The helper owns durable Engine state and
 credentials; the SwiftUI app and CLI use an owner-only local control channel.
-The exact helper packaging and Mac App Store policy require a milestone ADR,
-but ad-hoc signing is not a supported v0.3 release mode.
+Helper packaging and the Developer ID distribution policy are fixed by
+[ADR-0002](adr/0002-macos-engine-helper.md); ad-hoc signing is not a supported
+v0.3 release mode.
+
+On macOS, the CLI's default control endpoint is the signed helper socket at
+`~/Library/Application Support/com.envoix.app/agent-v1/agent.sock`; it does not
+use the Linux/WSL `~/.local/state/envoix` default. Explicit
+`--agent-endpoint`, `ENVOIX_AGENT_ENDPOINT`, and the compatibility
+`ENVOIX_AGENT_SOCKET` override remain available for isolated tests. Helper
+registration and lifecycle stay in the signed app's Settings surface rather
+than the Linux/Windows managed-service subcommands.
 
 ### Android
 

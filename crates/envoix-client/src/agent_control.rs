@@ -41,8 +41,9 @@ impl AgentControlClient {
                 io::Error::new(
                     error.kind(),
                     format!(
-                        "cannot connect to Envoix Agent at {}: {error}; run `envoix agent start` or start envoix-agent in a foreground shell",
-                        self.endpoint.display()
+                        "cannot connect to Envoix Agent at {}: {error}; {}",
+                        self.endpoint.display(),
+                        agent_connection_recovery()
                     ),
                 )
             })?;
@@ -87,6 +88,16 @@ impl AgentControlClient {
             "the local Envoix Agent control transport is unsupported on this platform",
         ))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn agent_connection_recovery() -> &'static str {
+    "enable Envoix Agent in the macOS app Settings"
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn agent_connection_recovery() -> &'static str {
+    "run `envoix agent start` or start envoix-agent in a foreground shell"
 }
 
 async fn call_agent_stream<S>(stream: S, request: AgentRequest) -> io::Result<AgentResponse>

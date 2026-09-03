@@ -1,10 +1,14 @@
+#[cfg(any(target_os = "linux", windows))]
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", windows))]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(any(windows, test))]
 mod windows;
 
+#[cfg(any(target_os = "linux", windows))]
 const MANAGED_STATE_ENTRIES: &[&str] = &[
     "agent.sock",
     "identity.key",
@@ -20,6 +24,7 @@ const MANAGED_STATE_ENTRIES: &[&str] = &[
     "transfer-state-v2",
 ];
 
+#[cfg(any(target_os = "linux", windows))]
 fn require_file(path: &Path, label: &str) -> io::Result<()> {
     if path.is_file() {
         return Ok(());
@@ -33,6 +38,7 @@ fn require_file(path: &Path, label: &str) -> io::Result<()> {
     ))
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn remove_file_if_exists(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -41,6 +47,7 @@ fn remove_file_if_exists(path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn clear_managed_state(directory: &Path) -> io::Result<()> {
     for entry in MANAGED_STATE_ENTRIES {
         remove_managed_path(&directory.join(entry))?;
@@ -59,6 +66,7 @@ fn clear_managed_state(directory: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn remove_managed_path(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,

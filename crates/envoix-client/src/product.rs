@@ -50,6 +50,10 @@ const MAX_AGENT_ENDPOINT_BYTES: usize = 2_048;
 const MAX_AGENT_PATH_BYTES: usize = 4_096;
 const MAX_AGENT_PAIRING_INVITATION_BYTES: usize = 8 * 1_024;
 const MAX_INBOX_ITEMS: usize = 1_000;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_AGENT_STATE_RELATIVE_PATH: &str = "Library/Application Support/com.envoix.app/agent-v1";
+#[cfg(any(target_os = "macos", test))]
+const AGENT_CONTROL_SOCKET_NAME: &str = "agent.sock";
 
 /// User-owned settings loaded by a managed Agent process.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1897,7 +1901,20 @@ pub fn default_agent_control_endpoint() -> io::Result<PathBuf> {
     if let Some(value) = env::var_os("ENVOIX_AGENT_SOCKET").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value));
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        let home = env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "cannot locate the macOS Envoix helper; set HOME or ENVOIX_AGENT_ENDPOINT",
+                )
+            })?;
+        macos_agent_control_endpoint(&home)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         Ok(default_agent_state_directory()?.join("agent.sock"))
     }
@@ -1912,6 +1929,19 @@ pub fn default_agent_control_endpoint() -> io::Result<PathBuf> {
             "the local Agent control transport is unsupported on this platform",
         ))
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_agent_control_endpoint(home: &Path) -> io::Result<PathBuf> {
+    if !home.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "macOS home directory must be absolute",
+        ));
+    }
+    Ok(home
+        .join(MACOS_AGENT_STATE_RELATIVE_PATH)
+        .join(AGENT_CONTROL_SOCKET_NAME))
 }
 
 #[cfg(any(windows, test))]
@@ -3397,6 +3427,22 @@ mod tests {
         ] {
             assert!(windows_agent_pipe_name(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn macos_agent_control_endpoint_matches_the_signed_helper_boundary() {
+        assert_eq!(
+            macos_agent_control_endpoint(Path::new("/Users/Test User")).unwrap(),
+            PathBuf::from(
+                "/Users/Test User/Library/Application Support/com.envoix.app/agent-v1/agent.sock"
+            )
+        );
+        assert_eq!(
+            macos_agent_control_endpoint(Path::new("relative-home"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[cfg(windows)]
