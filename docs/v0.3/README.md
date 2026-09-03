@@ -49,8 +49,10 @@ as typed capabilities, not inferred by a frontend.
 - [Engineering standard](engineering.md)
 - [Native presentation contract](presentation.md)
 - [Typed binding contract](bindings.md)
+- [Desktop host evidence](desktop-host-evidence.md)
 - [Dependency security baseline](dependency-security.md)
 - [ADR 0001: Engine storage](adr/0001-engine-storage.md)
+- [ADR 0002: macOS Engine helper](adr/0002-macos-engine-helper.md)
 
 When an older design document conflicts with these documents, the v0.3
 documents take precedence. Older documents remain historical evidence until a
