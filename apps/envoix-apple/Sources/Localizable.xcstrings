@@ -335,6 +335,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已记住 %lld 台" } }
       }
     },
+    "connection.devices.status.available" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready to send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可发送" } }
+      }
+    },
     "connection.devices.status.connected" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected" } },

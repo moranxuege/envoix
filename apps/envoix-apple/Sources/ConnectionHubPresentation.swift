@@ -30,8 +30,7 @@ enum ConnectionHubPresentationText {
         let key: String
         switch status {
         case .offline: key = "connection.devices.status.offline"
-        case .available:
-            return AppText.value("Ready to send", "可发送", language: language)
+        case .available: key = "connection.devices.status.available"
         case .connecting: key = "connection.devices.status.connecting"
         case .waiting: key = "connection.devices.status.waiting"
         case .connected: key = "connection.devices.status.connected"
