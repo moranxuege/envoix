@@ -149,15 +149,23 @@ list. All three entry points stop at the same explicit **Send** seal boundary.
 
 ## Network behavior on the current WSL host
 
-The current machine uses ordinary WSL NAT. Windows owns the Tailscale adapter;
-WSL can make outbound Tailnet connections, but a Mac cannot initiate Envoix
-UDP/QUIC directly to WSL through the Windows Tailscale address. This does not
-block the MVP because the configured relay provides fallback and same-LAN
-direct paths can still form where reachability permits.
+The reference machine now runs WSL in mirrored networking mode, set in the
+Windows `.wslconfig`. WSL presents the Windows interfaces directly rather than
+a NAT'd private address, so the Agent binds the same addresses Windows holds,
+including the Tailscale one.
 
-WSL mirrored networking is an optional later optimization. Enabling it requires
-changing Windows `.wslconfig` and restarting WSL, so it is intentionally not an
-Agent installation side effect.
+This supersedes the earlier NAT description, under which Windows owned the
+Tailscale adapter and a Mac could not initiate Envoix UDP/QUIC to WSL through
+the Windows Tailscale address. That constraint was a property of NAT mode and
+does not describe the host as configured. Inbound reachability from a separate
+peer has not been re-measured since the switch, so treat the improvement as
+expected rather than demonstrated; a same-host CLI pair does select a direct
+LAN path over the mirrored interface.
+
+Mirrored mode remains a deliberate operator choice, not an Agent installation
+side effect. Enabling it edits Windows `.wslconfig` and requires a WSL restart,
+so the installer still never sets it. An Agent on a NAT-mode host stays
+supported and falls back to the configured relay.
 
 The Agent projects the transfer layer's selected-path events into bounded,
 in-memory telemetry. `lan` means a private or link-local direct address except
