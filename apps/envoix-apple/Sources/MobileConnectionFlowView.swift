@@ -236,14 +236,17 @@ private struct ExternalInvitationConfirmationOverlay: View {
                 HStack(spacing: 10) {
                     Spacer(minLength: 0)
                     Button(
-                        AppText.value("Cancel", "取消", language: language),
+                        MobileConnectionFlowPresentationText.value(.cancel, language: language),
                         action: onCancel
                     )
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("external_invitation_cancel")
 
                     Button(
-                        AppText.value("Continue", "继续", language: language),
+                        MobileConnectionFlowPresentationText.value(
+                            .continueAction,
+                            language: language
+                        ),
                         action: onContinue
                     )
                     .buttonStyle(.borderedProminent)
@@ -270,39 +273,17 @@ private struct ExternalInvitationConfirmationOverlay: View {
     }
 
     private var confirmationTitle: String {
-        if origin == .nfc {
-            return AppText.value(
-                isRoomInvitation
-                    ? "Nearby Envoix room found"
-                    : "Nearby Envoix invitation found",
-                isRoomInvitation
-                    ? "发现附近的 Envoix 房间"
-                    : "发现附近的 Envoix 邀请",
-                language: language
-            )
-        }
-        return AppText.value(
-            isRoomInvitation ? "Join this room?" : "Open invitation?",
-            isRoomInvitation ? "加入此房间？" : "打开邀请？",
+        MobileConnectionFlowPresentationText.externalInvitationTitle(
+            isRoomInvitation: isRoomInvitation,
+            isNFC: origin == .nfc,
             language: language
         )
     }
 
     private var confirmationMessage: String {
-        if origin == .nfc {
-            return AppText.value(
-                "NFC confirms touch-range proximity, not the other phone's identity. Continue to validate this one-time invitation and connect.",
-                "NFC 仅确认另一台手机处于触碰距离内，并不代表其身份已经验证。继续后将验证此一次性邀请并连接。",
-                language: language
-            )
-        }
-        return AppText.value(
-            isRoomInvitation
-                ? "This external room invitation is untrusted. Continue to validate it and connect; it does not authenticate the other device."
-                : "This external invitation is untrusted. Continue to validate it and choose the normal transfer action; it does not authenticate the other device.",
-            isRoomInvitation
-                ? "此房间邀请来自外部且未经信任。继续后将验证并连接；它不会认证另一台设备。"
-                : "此外部邀请未经信任。继续后仍需验证并选择常规传输操作；它不会认证另一台设备。",
+        MobileConnectionFlowPresentationText.externalInvitationMessage(
+            isRoomInvitation: isRoomInvitation,
+            isNFC: origin == .nfc,
             language: language
         )
     }
@@ -445,7 +426,7 @@ struct MobileConnectionFlowView: View {
                             }
                             .tint(Theme.accentStrong)
                             .disabled(transferSheetDismissalBlocked)
-                            .accessibilityLabel(AppText.value("Close", "关闭", language: language))
+                            .accessibilityLabel(flowText(.close))
                             .accessibilityIdentifier("mobile_sheet_done")
                         }
                     }
@@ -494,7 +475,7 @@ struct MobileConnectionFlowView: View {
         )
         #endif
         .alert(
-            AppText.value("Verify nearby device", "验证附近设备", language: language),
+            flowText(.verifyNearbyDevice),
             isPresented: Binding(
                 get: { outgoingBleVerification != nil },
                 set: {
@@ -505,20 +486,19 @@ struct MobileConnectionFlowView: View {
                 }
             )
         ) {
-            Button(AppText.value("Cancel verification", "取消验证", language: language), role: .destructive) {
+            Button(flowText(.cancelVerification), role: .destructive) {
                 outgoingBleVerification = nil
                 closeRoomNow()
             }
         } message: {
-            Text(AppText.value(
-                "Enter \(outgoingBleVerification?.verificationCode ?? "") on the other device. The code is never sent over Bluetooth.",
-                "请在另一台设备上输入 \(outgoingBleVerification?.verificationCode ?? "")。验证码不会通过蓝牙发送。",
+            Text(MobileConnectionFlowPresentationText.outgoingVerification(
+                code: outgoingBleVerification?.verificationCode ?? "",
                 language: language
             ))
             .privacySensitive()
         }
         .alert(
-            AppText.value("Enter verification code", "输入验证码", language: language),
+            flowText(.enterVerificationCode),
             isPresented: Binding(
                 get: { pendingBleVerificationOffer != nil },
                 set: { if !$0 { pendingBleVerificationOffer = nil } }
@@ -529,7 +509,7 @@ struct MobileConnectionFlowView: View {
                 set: { bleVerificationInput = String($0.filter { $0.isASCII && $0.isNumber }.prefix(6)) }
             ))
             .privacySensitive()
-            Button(AppText.value("Verify and connect", "验证并连接", language: language)) {
+            Button(flowText(.verifyAndConnect)) {
                 guard let offer = pendingBleVerificationOffer else { return }
                 if let error = acceptBleVerificationOffer(offer, code: bleVerificationInput) {
                     ToastCenter.shared.show(error)
@@ -537,19 +517,15 @@ struct MobileConnectionFlowView: View {
                 bleVerificationInput = ""
             }
             .disabled(bleVerificationInput.count != 6)
-            Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {
+            Button(flowText(.cancel), role: .cancel) {
                 pendingBleVerificationOffer = nil
                 bleVerificationInput = ""
             }
         } message: {
-            Text(AppText.value(
-                "Ask the other person for the six-digit code shown in Envoix.",
-                "请向对方确认 Envoix 中显示的六位验证码。",
-                language: language
-            ))
+            Text(flowText(.verificationInstruction))
         }
         .alert(
-            AppText.value("Verify this device", "验证此设备", language: language),
+            flowText(.verifyThisDevice),
             isPresented: Binding(
                 get: {
                     runtime.isPresentationOwner(sceneID)
@@ -574,7 +550,7 @@ struct MobileConnectionFlowView: View {
                 }
             ))
             .privacySensitive()
-            Button(AppText.value("Verify device", "验证设备", language: language)) {
+            Button(flowText(.verifyDevice)) {
                 if let error = workflow.submitDeviceVerification(roomVerificationInput) {
                     ToastCenter.shared.show(error)
                 }
@@ -582,14 +558,13 @@ struct MobileConnectionFlowView: View {
             }
             .disabled(roomVerificationInput.count != 6)
             .accessibilityIdentifier("room_device_verification_submit")
-            Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {
+            Button(flowText(.cancel), role: .cancel) {
                 workflow.cancelDeviceVerification()
                 roomVerificationInput = ""
             }
         } message: {
-            Text(AppText.value(
-                "Enter the six-digit code shown by \(workflow.peerDisplayName ?? "the other device"). A successful match saves this device for future rooms.",
-                "请输入 \(workflow.peerDisplayName ?? "另一台设备") 显示的六位验证码。匹配成功后会保存此设备，以便以后自动连接。",
+            Text(MobileConnectionFlowPresentationText.deviceVerification(
+                peerDisplayName: workflow.peerDisplayName,
                 language: language
             ))
         }
@@ -599,70 +574,55 @@ struct MobileConnectionFlowView: View {
                 allowBareRoomControl: false
             ) == .roomControl
             return Alert(
-                title: Text(AppText.value(
-                    isRoomInvite
-                        ? "Unverified nearby room invitation"
-                        : "Unverified nearby invitation",
-                    isRoomInvite ? "未经验证的附近房间邀请" : "未经验证的附近设备邀请",
+                title: Text(MobileConnectionFlowPresentationText.nearbyOfferTitle(
+                    isRoomInvitation: isRoomInvite,
                     language: language
                 )),
-                message: Text(AppText.value(
-                    isRoomInvite
-                        ? "\(pending.offer.senderDisplayName ?? "A nearby device") wants to open a room. Confirm on the other device before accepting."
-                        : "\(pending.offer.senderDisplayName ?? "A nearby device") wants to start a one-time transfer. Confirm on the other device before accepting.",
-                    isRoomInvite
-                        ? "\(pending.offer.senderDisplayName ?? "附近设备") 希望打开一个房间。接受前，请在另一台设备上确认。"
-                        : "\(pending.offer.senderDisplayName ?? "附近设备") 希望开始一次性传输。接受前，请在另一台设备上确认。",
+                message: Text(MobileConnectionFlowPresentationText.nearbyOfferMessage(
+                    senderDisplayName: pending.offer.senderDisplayName,
+                    isRoomInvitation: isRoomInvite,
                     language: language
                 )),
-                primaryButton: .default(Text(AppText.value("Accept", "接受", language: language))) {
+                primaryButton: .default(Text(flowText(.acceptNearbyOffer))) {
                     acceptPendingOffer(pending)
                 },
-                secondaryButton: .cancel(Text(AppText.value("Reject", "拒绝", language: language))) {
+                secondaryButton: .cancel(Text(flowText(.rejectNearbyOffer))) {
                     workflow.discardPendingOffer(id: pending.id)
                 }
             )
         }
         .alert(
-            AppText.value("End this room?", "结束这个房间？", language: language),
+            flowText(.endRoomQuestion),
             isPresented: $isCloseRoomConfirmationPresented
         ) {
-            Button(AppText.value("Keep room", "保留房间", language: language), role: .cancel) {}
-            Button(AppText.value("End room", "结束房间", language: language), role: .destructive) {
+            Button(flowText(.keepRoom), role: .cancel) {}
+            Button(flowText(.endRoom), role: .destructive) {
                 closeRoomNow()
             }
         } message: {
-            Text(AppText.value(
-                "New file offers will stop. Transfers already in progress will continue in Activity.",
-                "结束后将无法发送新文件。已经开始的传输会继续显示在“活动”中。",
-                language: language
-            ))
+            Text(flowText(.endRoomDetail))
         }
         .alert(
-            AppText.value("A room is already open", "已有一个房间", language: language),
+            flowText(.roomAlreadyOpen),
             isPresented: $isRoomReplacementPresented
         ) {
-            Button(AppText.value("Return to room", "返回房间", language: language)) {
+            Button(flowText(.returnToRoom)) {
                 pendingRoomReplacement = nil
                 if workflow.activeRoomID != nil {
                     navigation.page = .room
                 }
             }
-            Button(AppText.value("End and replace", "结束并替换", language: language), role: .destructive) {
+            Button(flowText(.endAndReplace), role: .destructive) {
                 let action = pendingRoomReplacement
                 pendingRoomReplacement = nil
                 closeRoomNow()
                 action?()
             }
-            Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {
+            Button(flowText(.cancel), role: .cancel) {
                 pendingRoomReplacement = nil
             }
         } message: {
-            Text(AppText.value(
-                "Envoix can keep one room at a time.",
-                "Envoix 一次只能保留一个房间。",
-                language: language
-            ))
+            Text(flowText(.oneRoomAtATime))
         }
         .onAppear {
             prepareUITestFixtures()
@@ -844,9 +804,8 @@ struct MobileConnectionFlowView: View {
         .onChange(of: workflow.durablePairingCompletedLabel) { label in
             guard let label,
                   runtime.isPresentationOwner(sceneID) else { return }
-            ToastCenter.shared.show(AppText.value(
-                "\(label) is now paired through the background helper.",
-                "已通过后台 helper 与 \(label) 完成配对。",
+            ToastCenter.shared.show(MobileConnectionFlowPresentationText.durablePairingCompleted(
+                label: label,
                 language: language
             ))
             #if os(macOS)
@@ -946,7 +905,7 @@ struct MobileConnectionFlowView: View {
                     openWindow(id: "main")
                 } label: {
                     Label(
-                        AppText.value("New Window", "新建窗口", language: language),
+                        flowText(.newWindow),
                         systemImage: "plus.rectangle.on.rectangle"
                     )
                 }
@@ -1008,11 +967,7 @@ struct MobileConnectionFlowView: View {
     private func selectPairedDevice(_ deviceID: String) {
         #if os(macOS)
         guard helperTransfers.devices.contains(where: { $0.id == deviceID }) else {
-            ToastCenter.shared.show(AppText.value(
-                "Refresh paired devices and try again.",
-                "请刷新已配对设备后重试。",
-                language: language
-            ))
+            ToastCenter.shared.show(flowText(.refreshPairedDevices))
             return
         }
         selectedHelperDeviceID = deviceID
@@ -1070,11 +1025,7 @@ struct MobileConnectionFlowView: View {
         pendingSelectionID: UUID?
     ) {
         guard let device = helperTransfers.devices.first(where: { $0.id == deviceID }) else {
-            ToastCenter.shared.show(AppText.value(
-                "Refresh paired devices and try again.",
-                "请刷新已配对设备后重试。",
-                language: language
-            ))
+            ToastCenter.shared.show(flowText(.refreshPairedDevices))
             return
         }
         Task { @MainActor in
@@ -1086,9 +1037,8 @@ struct MobileConnectionFlowView: View {
                 selectedHelperDeviceID = deviceID
                 navigation.show(.room)
                 await helperTransfers.refreshSnapshot()
-                ToastCenter.shared.show(AppText.value(
-                    "Queued for \(device.label).",
-                    "已加入发送队列：\(device.label)。",
+                ToastCenter.shared.show(MobileConnectionFlowPresentationText.queuedForDevice(
+                    label: device.label,
                     language: language
                 ))
             } catch {
@@ -1249,17 +1199,9 @@ struct MobileConnectionFlowView: View {
         VStack(spacing: 8) {
             if !model.activities.isEmpty {
                 Picker("", selection: $macActivityShowsLegacyTransfers) {
-                    Text(AppText.value(
-                        "Background helper",
-                        "后台 helper",
-                        language: language
-                    ))
+                    Text(flowText(.backgroundHelper))
                     .tag(false)
-                    Text(AppText.value(
-                        "One-time transfers",
-                        "一次性传输",
-                        language: language
-                    ))
+                    Text(flowText(.oneTimeTransfers))
                     .tag(true)
                 }
                 .pickerStyle(.segmented)
@@ -1320,7 +1262,7 @@ struct MobileConnectionFlowView: View {
                         .font(.body.weight(.semibold))
                         .frame(width: 40, height: 40)
                 }
-                .accessibilityLabel(AppText.value("Activity", "活动", language: language))
+                .accessibilityLabel(flowText(.activity))
                 .accessibilityIdentifier("open_activity")
             }
         } else {
@@ -1330,7 +1272,7 @@ struct MobileConnectionFlowView: View {
                         .font(.body.weight(.semibold))
                         .frame(width: 40, height: 40)
                 }
-                .accessibilityLabel(AppText.value("Back", "返回", language: language))
+                .accessibilityLabel(flowText(.back))
                 .accessibilityIdentifier("mobile_page_back")
             }
         }
@@ -1344,7 +1286,7 @@ struct MobileConnectionFlowView: View {
                     Image(systemName: "clock.arrow.circlepath")
                         .font(.body.weight(.semibold))
                 }
-                .accessibilityLabel(AppText.value("Activity", "活动", language: language))
+                .accessibilityLabel(flowText(.activity))
                 .accessibilityIdentifier("open_activity")
                 }
             }
@@ -1358,7 +1300,7 @@ struct MobileConnectionFlowView: View {
                     Image(systemName: "gearshape")
                         .font(.body.weight(.semibold))
                 }
-                .accessibilityLabel(AppText.value("Settings", "设置", language: language))
+                .accessibilityLabel(flowText(.settings))
                 .accessibilityIdentifier("open_settings")
             }
         }
@@ -1454,17 +1396,21 @@ struct MobileConnectionFlowView: View {
     private func pageTitle(_ page: MobilePage) -> String {
         switch page {
         case .connect: return "Envoix"
-        case .room: return AppText.value("Room", "房间", language: language)
-        case .activity: return AppText.value("Activity", "活动", language: language)
-        case .settings: return AppText.value("Settings", "设置", language: language)
+        case .room: return flowText(.room)
+        case .activity: return flowText(.activity)
+        case .settings: return flowText(.settings)
         }
     }
 
     private func transferTitle(_ route: MobileTransferRoute) -> String {
         switch route {
-        case .send: return AppText.value("Offer files", "发送文件", language: language)
-        case .receive: return AppText.value("Receive files", "接收文件", language: language)
+        case .send: return flowText(.offerFiles)
+        case .receive: return flowText(.receiveFiles)
         }
+    }
+
+    private func flowText(_ copy: MobileConnectionFlowCopy) -> String {
+        MobileConnectionFlowPresentationText.value(copy, language: language)
     }
 
     private var pendingOfferBinding: Binding<PendingNearbyInvitation?> {
@@ -1562,11 +1508,7 @@ struct MobileConnectionFlowView: View {
     private func openPairingRoom(input: String) -> String? {
         let pairingInput = input.trimmed
         guard !pairingInput.isEmpty else {
-            return AppText.value(
-                "Enter an Envoix InviteV2 link, Room link, or Room code.",
-                "请输入 Envoix InviteV2 链接、房间链接或房间码。",
-                language: language
-            )
+            return flowText(.connectionInputRequired)
         }
 
         let classified: ClassifiedConnectionInput
@@ -1578,27 +1520,15 @@ struct MobileConnectionFlowView: View {
                 allowBareRoomControl: true
             )
         } catch {
-            return AppText.value(
-                "This is not a valid Envoix InviteV2 link, Room link, or current Room code.",
-                "这不是有效的 Envoix InviteV2 链接、房间链接或当前房间码。",
-                language: language
-            )
+            return flowText(.connectionInputInvalid)
         }
 
         if classified.kind == .roomControl {
             guard !isRoomOccupied else {
-                return AppText.value(
-                    "End the current room before joining another one.",
-                    "请先结束当前房间，再加入另一个房间。",
-                    language: language
-                )
+                return flowText(.roomOccupied)
             }
             guard let identityPath = roomIdentityPath else {
-                return AppText.value(
-                    "Application Support is unavailable.",
-                    "无法访问应用支持目录。",
-                    language: language
-                )
+                return flowText(.applicationSupportUnavailable)
             }
             let error = workflow.joinRoomControl(
                 input: classified.normalizedInput,
@@ -1616,11 +1546,7 @@ struct MobileConnectionFlowView: View {
 
         let action: OneTimeRoomAction
         guard let invitation = classified.pairingInvite else {
-            return AppText.value(
-                "This InviteV2 link could not be opened.",
-                "无法打开此 InviteV2 链接。",
-                language: language
-            )
+            return flowText(.inviteV2Unavailable)
         }
         action = ConnectionWorkflowPolicy.localAction(
             forLocalRole: invitation.joinerRole
@@ -1687,11 +1613,7 @@ struct MobileConnectionFlowView: View {
             case .imported:
                 offerFilesToRememberedRoom(relationshipID)
             case .queued:
-                ToastCenter.shared.show(AppText.value(
-                    "Finish the current send, then drop the items again.",
-                    "请先完成当前发送，再重新拖入这些项目。",
-                    language: language
-                ))
+                ToastCenter.shared.show(flowText(.droppedItemsSendBusy))
             }
         } catch let error as OpenedSendFileError {
             ToastCenter.shared.show(openedSendFileErrorMessage(error))
@@ -1702,11 +1624,7 @@ struct MobileConnectionFlowView: View {
 
     private func canPresentRememberedRoomSend() -> Bool {
         guard transferRoute == nil, !model.send.isBusy else {
-            ToastCenter.shared.show(AppText.value(
-                "Finish the current send before starting another one.",
-                "请先完成当前发送，再开始新的发送。",
-                language: language
-            ))
+            ToastCenter.shared.show(flowText(.anotherSendBusy))
             return false
         }
         return true
@@ -1785,11 +1703,7 @@ struct MobileConnectionFlowView: View {
         rememberedOutbox.refresh()
         synchronizeRememberedOutbox()
         transferRoute = nil
-        ToastCenter.shared.show(AppText.value(
-            "Files added. Envoix will send when the room reconnects.",
-            "文件已加入；房间重连后会自动发送。",
-            language: language
-        ))
+        ToastCenter.shared.show(flowText(.queuedForReconnect))
     }
 
     private func retryRememberedOutboxEntry(_ id: String) {
@@ -2059,11 +1973,7 @@ struct MobileConnectionFlowView: View {
             offer.invite,
             allowBareRoomControl: false
         ) != nil else {
-            ToastCenter.shared.show(AppText.value(
-                "An invalid nearby invitation was rejected.",
-                "已拒绝无效的附近设备邀请。",
-                language: language
-            ))
+            ToastCenter.shared.show(flowText(.invalidNearbyInvitation))
             return
         }
         guard workflow.enqueue(offer) else { return }
@@ -2140,18 +2050,10 @@ struct MobileConnectionFlowView: View {
                   publicOffer: offer.invite,
                   verificationCode: code
               ) else {
-            return AppText.value(
-                "Enter the current six-digit code shown on the other device.",
-                "请输入另一台设备当前显示的六位验证码。",
-                language: language
-            )
+            return flowText(.currentVerificationCodeRequired)
         }
         guard let identityPath = roomIdentityPath else {
-            return AppText.value(
-                "Application Support is unavailable.",
-                "无法访问应用支持目录。",
-                language: language
-            )
+            return flowText(.applicationSupportUnavailable)
         }
         pendingBleVerificationOffer = nil
         guardRoomReplacement {
@@ -2237,11 +2139,7 @@ struct MobileConnectionFlowView: View {
             case .imported:
                 routePendingSendSelection(notifyWaiting: true)
             case .queued:
-                ToastCenter.shared.show(AppText.value(
-                    "The file is ready and will open after the current send finishes.",
-                    "文件已准备好，将在当前发送完成后打开。",
-                    language: language
-                ))
+                ToastCenter.shared.show(flowText(.openedFileQueued))
             }
         } catch let error as OpenedSendFileError {
             ToastCenter.shared.show(openedSendFileErrorMessage(error))
@@ -2365,11 +2263,7 @@ struct MobileConnectionFlowView: View {
     #if os(iOS) && canImport(CoreNFC)
     private func beginNFCInvitationRead(timeout: TimeInterval?) {
         nfcInvitationExchange.beginReadingEnvoixPhone(
-            prompt: AppText.value(
-                "Hold the top of this iPhone near one Android phone sharing an Envoix invitation.",
-                "请将这台 iPhone 顶部靠近一台正在共享 Envoix 邀请的 Android 手机。",
-                language: language
-            ),
+            prompt: flowText(.nfcReadPrompt),
             timeout: timeout
         ) { result in
             switch result {
@@ -2441,11 +2335,7 @@ struct MobileConnectionFlowView: View {
             case .noPendingDraft:
                 routePendingSendSelection(notifyWaiting: false)
             case .sendBusy:
-                ToastCenter.shared.show(AppText.value(
-                    "Finish the current send, then Envoix will open the shared item.",
-                    "请先完成当前发送，随后 Envoix 会打开已分享的项目。",
-                    language: language
-                ))
+                ToastCenter.shared.show(flowText(.sharedItemSendBusy))
             }
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
@@ -2473,11 +2363,7 @@ struct MobileConnectionFlowView: View {
                 ? .connect
                 : .room
             if notifyWaiting {
-                ToastCenter.shared.show(AppText.value(
-                    "Files are ready. Connect to a device to offer them in a Room.",
-                    "文件已准备好。请连接设备，并在房间中发送。",
-                    language: language
-                ))
+                ToastCenter.shared.show(flowText(.sharedItemsNeedRoom))
             }
         case .oneTimeRoom:
             presentedSharedSelectionID = selectionID
@@ -2546,11 +2432,7 @@ struct MobileConnectionFlowView: View {
         verifiedPeerLabel: String? = nil
     ) -> Bool {
         guard let identityPath = roomIdentityPath else {
-            ToastCenter.shared.show(AppText.value(
-                "Application Support is unavailable.",
-                "无法访问应用支持目录。",
-                language: language
-            ))
+            ToastCenter.shared.show(flowText(.applicationSupportUnavailable))
             return false
         }
         let error = workflow.startHosting(
@@ -2623,11 +2505,7 @@ struct MobileConnectionFlowView: View {
               let endpoint = workflow.activeRoomEndpoint,
               acceptingRoomOfferID == nil else { return }
         guard !model.receive.isBusy else {
-            ToastCenter.shared.show(AppText.value(
-                "Finish the current receive before accepting another offer.",
-                "请先完成当前接收任务，再接受新的文件邀请。",
-                language: language
-            ))
+            ToastCenter.shared.show(flowText(.anotherReceiveBusy))
             return
         }
         let invitation: FfiPairingInvite
@@ -2639,7 +2517,7 @@ struct MobileConnectionFlowView: View {
             )
             guard invitation.relayUrls.count <= 1,
                   RoomControlEndpoint(transferInvitation: invitation) == endpoint else {
-                throw RuntimeSettingsError("The file offer does not use this room's route.")
+                throw RuntimeSettingsError(flowText(.offerRouteMismatch))
             }
             settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
@@ -2719,11 +2597,7 @@ struct MobileConnectionFlowView: View {
                 resetRoomTransferHandoff()
             case .offerUnavailable:
                 resetRoomTransferHandoff()
-                ToastCenter.shared.show(AppText.value(
-                    "The file offer is no longer available.",
-                    "此文件邀请已不可用。",
-                    language: language
-                ))
+                ToastCenter.shared.show(flowText(.offerUnavailable))
             }
         }
     }
@@ -2736,11 +2610,7 @@ struct MobileConnectionFlowView: View {
         let access = SecurityScopedResourceAccess(url: url)
         do {
             guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
-                throw RuntimeSettingsError(AppText.value(
-                    "Envoix cannot access the selected save folder.",
-                    "Envoix 无法访问所选保存文件夹。",
-                    language: language
-                ))
+                throw RuntimeSettingsError(flowText(.saveFolderInaccessible))
             }
             try validateWritableDirectoryAccess(url)
             let bookmark = try makeSecurityScopedFolderBookmark(for: url)
@@ -2770,18 +2640,14 @@ struct MobileConnectionFlowView: View {
             let url = try resolveSecurityScopedFolderBookmark(bookmark)
             let access = SecurityScopedResourceAccess(url: url)
             guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
-                throw RuntimeSettingsError("The selected save folder permission expired.")
+                throw RuntimeSettingsError(flowText(.saveFolderPermissionExpired))
             }
             try validateWritableDirectoryAccess(url)
             return (url, access)
         }
 
         #if os(macOS)
-        throw RuntimeSettingsError(AppText.value(
-            "Choose a save folder before accepting files on Mac.",
-            "在 Mac 上接收文件前，请先选择保存文件夹。",
-            language: language
-        ))
+        throw RuntimeSettingsError(flowText(.saveFolderRequiredOnMac))
         #else
         let documents = FileManager.default.urls(
             for: .documentDirectory,
@@ -2799,27 +2665,14 @@ struct MobileConnectionFlowView: View {
     private func openedSendFileErrorMessage(_ error: OpenedSendFileError) -> String {
         switch error {
         case .unsupportedURL:
-            return AppText.value(
-                "Envoix can open local files only.",
-                "Envoix 目前只能打开本地文件。",
-                language: language
-            )
+            return flowText(.localFilesOnly)
         case .unsupportedItem:
-            return AppText.value(
-                "This item type is not supported. Choose a regular file or folder.",
-                "暂不支持此项目类型。请选择普通文件或文件夹。",
-                language: language
-            )
+            return flowText(.unsupportedItem)
         case .inaccessible:
-            return AppText.value(
-                "Envoix could not access this file. Download it first, then try again.",
-                "Envoix 无法访问此文件。请先下载完成，然后重试。",
-                language: language
-            )
+            return flowText(.inaccessibleItem)
         case .itemCountExceeded:
-            return AppText.value(
-                "Choose no more than \(ShareDraftStore.maxItemCount) items.",
-                "一次最多选择 \(ShareDraftStore.maxItemCount) 个项目。",
+            return MobileConnectionFlowPresentationText.itemCountExceeded(
+                maximum: ShareDraftStore.maxItemCount,
                 language: language
             )
         }
@@ -2888,18 +2741,14 @@ private struct ManualPairingCodeSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
-                Text(AppText.value(
-                    "A current Room code opens a foreground room. A complete InviteV2 link opens a one-time transfer. Neither identifies or trusts the other device.",
-                    "当前房间码会打开前台房间；完整 InviteV2 链接会打开一次性传输。两者都不代表设备身份或信任关系。",
-                    language: language
-                ))
+                Text(manualText(.manualEntryDetail))
                 .font(.subheadline)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
                 HStack(alignment: .top, spacing: 8) {
                     TextField(
-                        AppText.value("Room code or invite link", "房间码或邀请链接", language: language),
+                        manualText(.manualEntryTitle),
                         text: Binding(
                             get: { input },
                             set: { input = formatRoomCodeInput($0) }
@@ -2915,7 +2764,7 @@ private struct ManualPairingCodeSheet: View {
 
                     Button(action: pastePairingInput) {
                         Label(
-                            AppText.value("Paste", "粘贴", language: language),
+                            manualText(.paste),
                             systemImage: "doc.on.clipboard"
                         )
                         .frame(minHeight: 36)
@@ -2938,7 +2787,7 @@ private struct ManualPairingCodeSheet: View {
                 Button {
                     error = onSubmit(input)
                 } label: {
-                    Text(AppText.value("Continue", "继续", language: language))
+                    Text(manualText(.continueAction))
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
@@ -2949,17 +2798,13 @@ private struct ManualPairingCodeSheet: View {
             }
             .padding(20)
             .background(Theme.bg)
-            .navigationTitle(AppText.value(
-                "Room code or invite link",
-                "房间码或邀请链接",
-                language: language
-            ))
+            .navigationTitle(manualText(.manualEntryTitle))
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(AppText.value("Close", "关闭", language: language)) {
+                    Button(manualText(.close)) {
                         dismiss()
                     }
                 }
@@ -2972,15 +2817,15 @@ private struct ManualPairingCodeSheet: View {
 
     private func pastePairingInput() {
         guard let value = pasteboardString()?.trimmed, !value.isEmpty else {
-            error = AppText.value(
-                "Clipboard is empty",
-                "剪贴板为空",
-                language: language
-            )
+            error = manualText(.clipboardEmpty)
             return
         }
         input = value
         error = nil
+    }
+
+    private func manualText(_ copy: MobileConnectionFlowCopy) -> String {
+        MobileConnectionFlowPresentationText.value(copy, language: language)
     }
 }
 

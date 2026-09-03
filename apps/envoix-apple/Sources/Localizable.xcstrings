@@ -713,6 +713,426 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输文件" } }
       }
     },
+    "mobile_flow.action.continue" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Continue" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "继续" } }
+      }
+    },
+    "mobile_flow.activity.background_helper" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Background helper" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后台 helper" } }
+      }
+    },
+    "mobile_flow.activity.one_time_transfers" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "One-time transfers" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "一次性传输" } }
+      }
+    },
+    "mobile_flow.connection_input.invalid" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This is not a valid Envoix InviteV2 link, Room link, or current Room code." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这不是有效的 Envoix InviteV2 链接、房间链接或当前房间码。" } }
+      }
+    },
+    "mobile_flow.connection_input.invite_v2_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This InviteV2 link could not be opened." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法打开此 InviteV2 链接。" } }
+      }
+    },
+    "mobile_flow.connection_input.required" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter an Envoix InviteV2 link, Room link, or Room code." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请输入 Envoix InviteV2 链接、房间链接或房间码。" } }
+      }
+    },
+    "mobile_flow.connection_input.room_occupied" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "End the current room before joining another one." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先结束当前房间，再加入另一个房间。" } }
+      }
+    },
+    "mobile_flow.error.application_support_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Application Support is unavailable." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法访问应用支持目录。" } }
+      }
+    },
+    "mobile_flow.external.invitation.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This external invitation is untrusted. Continue to validate it and choose the normal transfer action; it does not authenticate the other device." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此外部邀请未经信任。继续后仍需验证并选择常规传输操作；它不会认证另一台设备。" } }
+      }
+    },
+    "mobile_flow.external.invitation.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open invitation?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开邀请？" } }
+      }
+    },
+    "mobile_flow.external.nfc.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "NFC confirms touch-range proximity, not the other phone's identity. Continue to validate this one-time invitation and connect." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "NFC 仅确认另一台手机处于触碰距离内，并不代表其身份已经验证。继续后将验证此一次性邀请并连接。" } }
+      }
+    },
+    "mobile_flow.external.nfc_invitation.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby Envoix invitation found" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发现附近的 Envoix 邀请" } }
+      }
+    },
+    "mobile_flow.external.nfc_room.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby Envoix room found" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发现附近的 Envoix 房间" } }
+      }
+    },
+    "mobile_flow.external.room.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This external room invitation is untrusted. Continue to validate it and connect; it does not authenticate the other device." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此房间邀请来自外部且未经信任。继续后将验证并连接；它不会认证另一台设备。" } }
+      }
+    },
+    "mobile_flow.external.room.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Join this room?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加入此房间？" } }
+      }
+    },
+    "mobile_flow.manual_entry.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "A current Room code opens a foreground room. A complete InviteV2 link opens a one-time transfer. Neither identifies or trusts the other device." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前房间码会打开前台房间；完整 InviteV2 链接会打开一次性传输。两者都不代表设备身份或信任关系。" } }
+      }
+    },
+    "mobile_flow.manual_entry.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Room code or invite link" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "房间码或邀请链接" } }
+      }
+    },
+    "mobile_flow.navigation.activity" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Activity" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "活动" } }
+      }
+    },
+    "mobile_flow.navigation.back" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Back" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "返回" } }
+      }
+    },
+    "mobile_flow.navigation.new_window" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "New Window" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "新建窗口" } }
+      }
+    },
+    "mobile_flow.navigation.settings" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Settings" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设置" } }
+      }
+    },
+    "mobile_flow.nearby_offer.accept" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Accept" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接受" } }
+      }
+    },
+    "mobile_flow.nearby_offer.invalid" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "An invalid nearby invitation was rejected." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已拒绝无效的附近设备邀请。" } }
+      }
+    },
+    "mobile_flow.nearby_offer.invitation.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ wants to start a one-time transfer. Confirm on the other device before accepting." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%@ 希望开始一次性传输。接受前，请在另一台设备上确认。" } }
+      }
+    },
+    "mobile_flow.nearby_offer.invitation.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unverified nearby invitation" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未经验证的附近设备邀请" } }
+      }
+    },
+    "mobile_flow.nearby_offer.reject" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reject" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拒绝" } }
+      }
+    },
+    "mobile_flow.nearby_offer.room.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ wants to open a room. Confirm on the other device before accepting." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%@ 希望打开一个房间。接受前，请在另一台设备上确认。" } }
+      }
+    },
+    "mobile_flow.nearby_offer.room.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unverified nearby room invitation" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未经验证的附近房间邀请" } }
+      }
+    },
+    "mobile_flow.nfc.read_prompt" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Hold the top of this iPhone near one Android phone sharing an Envoix invitation." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请将这台 iPhone 顶部靠近一台正在共享 Envoix 邀请的 Android 手机。" } }
+      }
+    },
+    "mobile_flow.open_file.inaccessible" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix could not access this file. Download it first, then try again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 无法访问此文件。请先下载完成，然后重试。" } }
+      }
+    },
+    "mobile_flow.open_file.item_limit" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose no more than %lld items." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "一次最多选择 %lld 个项目。" } }
+      }
+    },
+    "mobile_flow.open_file.local_only" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix can open local files only." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 目前只能打开本地文件。" } }
+      }
+    },
+    "mobile_flow.open_file.queued" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The file is ready and will open after the current send finishes." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件已准备好，将在当前发送完成后打开。" } }
+      }
+    },
+    "mobile_flow.open_file.unsupported_item" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This item type is not supported. Choose a regular file or folder." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂不支持此项目类型。请选择普通文件或文件夹。" } }
+      }
+    },
+    "mobile_flow.paired.completed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ is now paired through the background helper." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已通过后台 helper 与 %@ 完成配对。" } }
+      }
+    },
+    "mobile_flow.paired.queued" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Queued for %@." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已加入发送队列：%@。" } }
+      }
+    },
+    "mobile_flow.paired.refresh" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Refresh paired devices and try again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请刷新已配对设备后重试。" } }
+      }
+    },
+    "mobile_flow.peer.device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设备" } }
+      }
+    },
+    "mobile_flow.peer.nearby_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "A nearby device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近设备" } }
+      }
+    },
+    "mobile_flow.peer.other_device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "the other device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "另一台设备" } }
+      }
+    },
+    "mobile_flow.receive.busy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finish the current receive before accepting another offer." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先完成当前接收任务，再接受新的文件邀请。" } }
+      }
+    },
+    "mobile_flow.receive.offer_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The file offer is no longer available." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此文件邀请已不可用。" } }
+      }
+    },
+    "mobile_flow.receive.route_mismatch" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The file offer does not use this room's route." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此文件邀请未使用当前房间的连接路径。" } }
+      }
+    },
+    "mobile_flow.room.already_open" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "A room is already open" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已有一个房间" } }
+      }
+    },
+    "mobile_flow.room.end_and_replace" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "End and replace" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结束并替换" } }
+      }
+    },
+    "mobile_flow.room.end_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "New file offers will stop. Transfers already in progress will continue in Activity." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结束后将无法发送新文件。已经开始的传输会继续显示在“活动”中。" } }
+      }
+    },
+    "mobile_flow.room.end_question" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "End this room?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结束这个房间？" } }
+      }
+    },
+    "mobile_flow.room.keep" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keep room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保留房间" } }
+      }
+    },
+    "mobile_flow.room.return" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Return to room" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "返回房间" } }
+      }
+    },
+    "mobile_flow.room.single_limit" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix can keep one room at a time." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 一次只能保留一个房间。" } }
+      }
+    },
+    "mobile_flow.save.inaccessible" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Envoix cannot access the selected save folder." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Envoix 无法访问所选保存文件夹。" } }
+      }
+    },
+    "mobile_flow.save.permission_expired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The selected save folder permission expired." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "所选保存文件夹的访问权限已过期。" } }
+      }
+    },
+    "mobile_flow.save.required_on_mac" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose a save folder before accepting files on Mac." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "在 Mac 上接收文件前，请先选择保存文件夹。" } }
+      }
+    },
+    "mobile_flow.send.busy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finish the current send before starting another one." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先完成当前发送，再开始新的发送。" } }
+      }
+    },
+    "mobile_flow.send.drop_busy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finish the current send, then drop the items again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先完成当前发送，再重新拖入这些项目。" } }
+      }
+    },
+    "mobile_flow.send.queued_for_reconnect" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Files added. Envoix will send when the room reconnects." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件已加入；房间重连后会自动发送。" } }
+      }
+    },
+    "mobile_flow.share.need_room" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Files are ready. Connect to a device to offer them in a Room." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件已准备好。请连接设备，并在房间中发送。" } }
+      }
+    },
+    "mobile_flow.share.send_busy" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finish the current send, then Envoix will open the shared item." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先完成当前发送，随后 Envoix 会打开已分享的项目。" } }
+      }
+    },
+    "mobile_flow.transfer.offer_files" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Offer files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送文件" } }
+      }
+    },
+    "mobile_flow.transfer.receive_files" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收文件" } }
+      }
+    },
+    "mobile_flow.verification.cancel" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel verification" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消验证" } }
+      }
+    },
+    "mobile_flow.verification.connect" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verify and connect" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "验证并连接" } }
+      }
+    },
+    "mobile_flow.verification.current_code_required" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter the current six-digit code shown on the other device." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请输入另一台设备当前显示的六位验证码。" } }
+      }
+    },
+    "mobile_flow.verification.device.action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verify device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "验证设备" } }
+      }
+    },
+    "mobile_flow.verification.device.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter the six-digit code shown by %@. A successful match saves this device for future rooms." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请输入 %@ 显示的六位验证码。匹配成功后会保存此设备，以便以后自动连接。" } }
+      }
+    },
+    "mobile_flow.verification.device.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verify this device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "验证此设备" } }
+      }
+    },
+    "mobile_flow.verification.enter.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter verification code" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "输入验证码" } }
+      }
+    },
+    "mobile_flow.verification.instruction" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ask the other person for the six-digit code shown in Envoix." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请向对方确认 Envoix 中显示的六位验证码。" } }
+      }
+    },
+    "mobile_flow.verification.nearby.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verify nearby device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "验证附近设备" } }
+      }
+    },
+    "mobile_flow.verification.outgoing_code" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter %@ on the other device. The code is never sent over Bluetooth." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请在另一台设备上输入 %@。验证码不会通过蓝牙发送。" } }
+      }
+    },
     "menu_bar.action.open" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Envoix" } },
