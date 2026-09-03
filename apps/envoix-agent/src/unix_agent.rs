@@ -893,12 +893,13 @@ fn prepare_inbox_destination(runtime: &AgentRuntime) -> Result<(PathBuf, u64)> {
     Ok((target_directory, allocatable_bytes))
 }
 
-fn wake_active_room(runtime: &AgentRuntime, relationship_id: &str) -> Result<()> {
+fn wake_active_room(runtime: &AgentRuntime, relationship_id: &str) -> Result<bool> {
     let wake = lock(&runtime.active_rooms)?.get(relationship_id).cloned();
     if let Some(wake) = wake {
         wake.notify_one();
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 fn relationship_has_active_outgoing(runtime: &AgentRuntime, relationship_id: &str) -> Result<bool> {
@@ -1600,7 +1601,9 @@ async fn create_agent_transfer(
             transfer_id: transfer_id.to_string(),
         },
     )?;
-    wake_active_room(&runtime, transfer.relationship_id.as_str())?;
+    if !wake_active_room(&runtime, transfer.relationship_id.as_str())? {
+        restart_remembered_receiver(runtime.clone(), transfer.relationship_id.to_string())?;
+    }
     Ok(AgentResponse::TransferCreated { transfer })
 }
 
@@ -2146,6 +2149,20 @@ fn receiver_retry_delay(attempt: Duration, previous: Duration) -> Duration {
         .max(RECEIVER_RETRY_DELAY)
 }
 
+/// An idle Agent parks as the responder. Queuing an outbound Transfer makes
+/// this side the connector so it can authenticate against the remote Agent's
+/// background listener for the same remembered generation.
+fn remembered_connection_role(
+    store: &ProductStore,
+    device_id: &str,
+) -> Result<RememberedRoomControlRole> {
+    if store.dispatchable_transfers(device_id)?.is_empty() {
+        Ok(RememberedRoomControlRole::Responder)
+    } else {
+        Ok(RememberedRoomControlRole::Connector)
+    }
+}
+
 async fn remembered_receiver_loop(
     runtime: Arc<AgentRuntime>,
     device_id: &str,
@@ -2159,9 +2176,10 @@ async fn remembered_receiver_loop(
                 .device_record(device_id)
                 .ok_or_else(|| anyhow!("remembered device metadata is missing"))?;
             let opaque = store.device_credential(device_id)?;
-            Ok((record, opaque))
+            let role = remembered_connection_role(&store, device_id)?;
+            Ok((record, opaque, role))
         })();
-        let (record, opaque) = match loaded {
+        let (record, opaque, role) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 tracing::error!(device_id, %error, "remembered receiver cannot load device");
@@ -2169,7 +2187,9 @@ async fn remembered_receiver_loop(
             }
         };
         let attempt_started = Instant::now();
-        match connect_remembered_room(&runtime, &record, opaque.expose(), receiver_cancel).await {
+        match connect_remembered_room(&runtime, &record, opaque.expose(), role, receiver_cancel)
+            .await
+        {
             Ok((session, next_generation)) => {
                 retry_delay = Duration::ZERO;
                 if let Err(error) = lock(&runtime.store).and_then(|mut store| {
@@ -2193,6 +2213,7 @@ async fn remembered_receiver_loop(
                 tracing::info!(
                     device = %record.label(),
                     generation = next_generation,
+                    ?role,
                     "remembered room connected"
                 );
                 let result = run_room_session(
@@ -2218,6 +2239,7 @@ async fn remembered_receiver_loop(
                 retry_delay = receiver_retry_delay(attempt_started.elapsed(), retry_delay);
                 tracing::warn!(
                     device = %record.label(),
+                    ?role,
                     %error,
                     retry_in_secs = retry_delay.as_secs(),
                     "remembered receiver retrying"
@@ -2236,14 +2258,19 @@ async fn connect_remembered_room(
     runtime: &Arc<AgentRuntime>,
     record: &RememberedDeviceRecord,
     opaque: &[u8],
+    role: RememberedRoomControlRole,
     receiver_cancel: &TransferCancelToken,
 ) -> Result<(Arc<RoomControlSession>, u64)> {
     let credential = RememberedCredential::from_opaque(opaque)?;
     let relay = record.relay();
+    let generation_role = match role {
+        RememberedRoomControlRole::Connector => RememberedGenerationRole::Connector,
+        RememberedRoomControlRole::Responder => RememberedGenerationRole::Responder,
+    };
     let generations = remembered_generation_attempts(
         record.generation(),
         record.previous_generation(),
-        RememberedGenerationRole::Responder,
+        generation_role,
     )?;
     let last_index = generations.len() - 1;
     let mut last_error = None;
@@ -2257,7 +2284,7 @@ async fn connect_remembered_room(
             record.broker().to_string(),
             relay.map(str::to_string),
             runtime.config.device_name.clone(),
-            RememberedRoomControlRole::Responder,
+            role,
             runtime.session_config(relay),
             &attempt_cancel,
         );
@@ -3955,6 +3982,8 @@ mod tests {
         store
             .commit_device(pending, &opaque_credential(), 0)
             .unwrap();
+        let shutdown = TransferCancelToken::new();
+        shutdown.cancel();
         let runtime = Arc::new(AgentRuntime {
             config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
@@ -3974,9 +4003,14 @@ mod tests {
             active_paths: Mutex::new(Vec::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
-            shutdown: TransferCancelToken::new(),
+            shutdown,
             background_tasks: Mutex::new(Vec::new()),
         });
+
+        assert_eq!(
+            remembered_connection_role(&lock(&runtime.store).unwrap(), &relationship_id).unwrap(),
+            RememberedRoomControlRole::Responder
+        );
 
         assert!(matches!(
             handle_request(
@@ -4004,6 +4038,17 @@ mod tests {
         assert_eq!(transfer.relationship_id.as_str(), relationship_id);
         assert_eq!(transfer.state, envoix_client::model::TransferState::Queued);
         assert_eq!(transfer.total_bytes, 16);
+        assert_eq!(
+            remembered_connection_role(&lock(&runtime.store).unwrap(), &relationship_id).unwrap(),
+            RememberedRoomControlRole::Connector
+        );
+        assert_eq!(
+            lock(&runtime.store)
+                .unwrap()
+                .dispatchable_transfers(&relationship_id)
+                .unwrap(),
+            vec![transfer.clone()]
+        );
         assert!(matches!(
             handle_request(runtime.clone(), AgentRequest::ListTransfers).await,
             AgentResponse::Transfers { transfers } if transfers == vec![transfer.clone()]
@@ -4182,6 +4227,8 @@ mod tests {
         let pending = store.prepare_device("MacBook", &broker_text, None).unwrap();
         let relationship_id = pending.id().to_string();
         store.commit_device(pending, &credential, 0).unwrap();
+        let shutdown = TransferCancelToken::new();
+        shutdown.cancel();
         let runtime = Arc::new(AgentRuntime {
             config: AgentHostConfiguration {
                 state_directory: state_directory.clone(),
@@ -4201,7 +4248,7 @@ mod tests {
             active_paths: Mutex::new(Vec::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
-            shutdown: TransferCancelToken::new(),
+            shutdown,
             background_tasks: Mutex::new(Vec::new()),
         });
         let AgentResponse::TransferCreated { transfer } = handle_request(
