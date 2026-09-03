@@ -59,7 +59,7 @@ jobs:
         run: |
           python3 scripts/matrix_contract.py validate-registry tests/e2e/matrix/cases.v1.json
           python3 scripts/release_contract.py
-          python3 -m unittest discover -s scripts/tests -p 'test_*_contract.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
           bash -n scripts/cross-device-transfer-matrix.sh
           if grep -R -n -E --include='*.rs' 'pub use envoix_(session|transfer)::\*' crates/envoix-client/src; then
             echo 'envoix-client must not wildcard-export lower architectural layers' >&2

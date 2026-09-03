@@ -4,24 +4,20 @@ name: release
 # macOS arm64+x86_64. Android is intentionally absent until M8 provides
 # production signing and verification.
 #   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
-#   - run manually (Actions -> release -> Run workflow) -> builds everything as
-#     downloadable run artifacts, without publishing a release
+#   - run manually (Actions -> release -> Run workflow) -> builds, attests, and
+#     uploads the complete bundle without publishing a release
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      source_ref:
-        description: Source ref to package (for release repair, use the immutable tag)
-        required: false
-        type: string
+  workflow_dispatch: {}
 
 permissions:
-  contents: write # needed to create the release
+  contents: read
 
 env:
   RUST_VERSION: 1.96.0
+  CARGO_CYCLONEDX_VERSION: 0.5.9
   ENVOIX_BUILD_CACHE_MIN_FREE_GIB: '1'
   ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
 
@@ -29,15 +25,16 @@ jobs:
   contract:
     name: validate immutable release contract
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release_contract.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
       - name: Validate version, tag, and pinned actions
+        id: release_contract
         env:
           ENVOIX_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
-          args=()
+          args=(--github-output "$GITHUB_OUTPUT")
           if [ -n "$ENVOIX_RELEASE_TAG" ]; then
             args+=(--tag "$ENVOIX_RELEASE_TAG")
           fi
@@ -47,6 +44,11 @@ jobs:
     name: build desktop binaries ${{ matrix.artifact }}
     needs: [contract]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix:
@@ -77,8 +79,6 @@ jobs:
             agent_name: envoix-agent-windows-x86_64.exe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Set up pinned Rust
         shell: bash
@@ -109,6 +109,11 @@ jobs:
             fi
           fi
 
+      - name: Attest binary build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -116,15 +121,19 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  release:
-    name: publish release
-    needs: [cli]
+  metadata:
+    name: validate and attest release bundle
+    needs: [contract, cli]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      ENVOIX_RELEASE_VERSION: ${{ needs.contract.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Download all binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -132,11 +141,69 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Generate checksums
+      - name: Set up pinned Rust
         shell: bash
         run: |
-          cd dist
-          sha256sum * > SHA256SUMS
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - name: Generate reproducible CycloneDX SBOMs
+        shell: bash
+        run: |
+          scripts/with-build-cache-guard.sh \
+            cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          cargo cyclonedx --format json --describe binaries --all \
+            --all-features --target all --spec-version 1.5
+          cp apps/envoix-cli/envoix_bin.cdx.json dist/envoix-cli.cdx.json
+          cp apps/envoix-agent/envoix-agent_bin.cdx.json dist/envoix-agent.cdx.json
+          git diff --exit-code -- Cargo.lock
+
+      - name: Validate and describe release bundle
+        shell: bash
+        run: >-
+          python3 scripts/release_bundle.py
+          --directory dist
+          --version "$ENVOIX_RELEASE_VERSION"
+          --repository "$GITHUB_REPOSITORY"
+          --revision "$GITHUB_SHA"
+
+      - name: Attest CLI SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/envoix-cli-*
+          sbom-path: dist/envoix-cli.cdx.json
+
+      - name: Attest Agent SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/envoix-agent-*
+          sbom-path: dist/envoix-agent.cdx.json
+
+      - name: Upload verified release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: envoix-release-${{ needs.contract.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: [contract, metadata]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download verified release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: envoix-release-${{ needs.contract.outputs.version }}
+          path: dist
 
       - name: Publish GitHub Release
         env:

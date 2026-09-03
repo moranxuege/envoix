@@ -115,10 +115,25 @@ def validate(root: Path, tag: str | None = None) -> ReleaseContract:
     )
 
 
+def write_github_output(path: Path, contract: ReleaseContract) -> None:
+    try:
+        with path.open("a", encoding="utf-8") as output:
+            output.write(f"version={contract.version}\n")
+            output.write(f"build_number={contract.build_number}\n")
+            output.write(f"action_count={contract.action_count}\n")
+    except OSError as error:
+        raise ValueError(f"cannot write GitHub output: {error}") from error
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--tag", help="Require the exact v<workspace-version> release tag")
+    parser.add_argument(
+        "--github-output",
+        type=Path,
+        help="Append validated values to a GitHub Actions output file",
+    )
     return parser.parse_args()
 
 
@@ -129,6 +144,12 @@ def main() -> int:
     except ValueError as error:
         print(f"release contract error: {error}", file=sys.stderr)
         return 1
+    if args.github_output is not None:
+        try:
+            write_github_output(args.github_output, contract)
+        except ValueError as error:
+            print(f"release contract error: {error}", file=sys.stderr)
+            return 1
     print(
         "release contract ok: "
         f"version={contract.version} build={contract.build_number} "

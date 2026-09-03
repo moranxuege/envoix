@@ -86,6 +86,16 @@ class ReleaseContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "release tag must be v0.3.0"):
             release_contract.validate(self.root, "v0.3.1")
 
+    def test_github_output_uses_validated_values(self) -> None:
+        output = self.root / "github-output"
+        contract = release_contract.validate(self.root, "v0.3.0")
+        release_contract.write_github_output(output, contract)
+
+        self.assertEqual(
+            output.read_text(encoding="utf-8"),
+            "version=0.3.0\nbuild_number=5\naction_count=1\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
