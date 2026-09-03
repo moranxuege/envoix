@@ -1422,6 +1422,11 @@ async fn handle_request_result(
         }),
         AgentRequest::RevokeDevice { device } => {
             let forgotten = lock(&runtime.store)?.forget_device(&device)?;
+            tracing::info!(
+                relationship_id = %forgotten.id,
+                device = %forgotten.label,
+                "device revoked by local Agent control client"
+            );
             if let Some(cancel) = lock(&runtime.active_receivers)?.get(&forgotten.id) {
                 cancel.cancel();
             }

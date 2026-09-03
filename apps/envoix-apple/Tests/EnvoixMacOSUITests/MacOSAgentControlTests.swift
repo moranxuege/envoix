@@ -221,6 +221,8 @@ final class MacOSAgentControlTests: XCTestCase {
 
         XCTAssertEqual(transferID, "transfer_fixture")
         XCTAssertFalse(controller.isPreparing(deviceID: "dev_wsl"))
+        XCTAssertEqual(controller.transfers, [transfer])
+        XCTAssertTrue(controller.hasPendingTransfers)
         let requests = await client.requests
         XCTAssertEqual(requests, [
             .createTransfer(device: "dev_wsl", paths: [source.standardizedFileURL.path]),
@@ -246,6 +248,74 @@ final class MacOSAgentControlTests: XCTestCase {
         XCTAssertTrue(requests.isEmpty)
     }
 
+    @MainActor
+    func testTransferControllerLoadsAgentSnapshotAndPrioritizesPendingTransfers() async {
+        let delivered = transfer(
+            id: "transfer_delivered",
+            state: .delivered,
+            transferredBytes: 10,
+            totalBytes: 10
+        )
+        let queued = transfer(
+            id: "transfer_queued",
+            state: .queued,
+            transferredBytes: 0,
+            totalBytes: 20
+        )
+        let path = FfiAgentTransferPath(
+            transferId: queued.id,
+            direction: .send,
+            path: .relay
+        )
+        let client = FakeMacOSAgentControlClient(response: .snapshot(
+            snapshot: snapshot(transfers: [delivered, queued], activePaths: [path])
+        ))
+        let controller = MacOSAgentTransferController(controlClient: client)
+
+        await controller.refreshSnapshot()
+
+        XCTAssertTrue(controller.hasLoadedSnapshot)
+        XCTAssertNil(controller.loadError)
+        XCTAssertEqual(controller.transfers.map(\.id), [queued.id, delivered.id])
+        XCTAssertEqual(controller.transfers(deviceID: "dev_wsl").count, 2)
+        XCTAssertEqual(controller.activePath(transferID: queued.id), .relay)
+        XCTAssertTrue(controller.hasPendingTransfers)
+        let requests = await client.requests
+        XCTAssertEqual(requests, [.snapshot(inboxLimit: 20)])
+    }
+
+    func testAgentTransferPresentationExplainsQueuedAndDeliveryStates() {
+        let queued = transfer(
+            id: "transfer_queued",
+            state: .queued,
+            transferredBytes: 0,
+            totalBytes: 20
+        )
+        let awaitingProof = transfer(
+            id: "transfer_proof",
+            state: .awaitingDeliveryProof,
+            transferredBytes: 20,
+            totalBytes: 20
+        )
+
+        XCTAssertEqual(
+            MacOSAgentTransferPresentationPolicy.stateText(queued, language: "zh-Hans"),
+            "等待发送"
+        )
+        XCTAssertTrue(
+            MacOSAgentTransferPresentationPolicy.detail(queued, language: "en")?
+                .contains("retry in the background") == true
+        )
+        XCTAssertTrue(MacOSAgentTransferPresentationPolicy.showsProgress(awaitingProof.state))
+        XCTAssertFalse(
+            MacOSAgentTransferPresentationPolicy.isTerminal(awaitingProof.state)
+        )
+        XCTAssertEqual(
+            MacOSAgentTransferPresentationPolicy.pathText(.lan, language: "zh-Hans"),
+            "局域网"
+        )
+    }
+
     private func device(id: String, label: String) -> FfiAgentDeviceSummary {
         FfiAgentDeviceSummary(
             id: id,
@@ -254,6 +324,48 @@ final class MacOSAgentControlTests: XCTestCase {
             previousGeneration: nil,
             broker: "fixture-broker",
             relay: nil
+        )
+    }
+
+    private func transfer(
+        id: String,
+        state: FfiApplicationTransferState,
+        transferredBytes: UInt64,
+        totalBytes: UInt64
+    ) -> FfiApplicationTransfer {
+        FfiApplicationTransfer(
+            id: id,
+            relationshipId: "dev_wsl",
+            roomId: nil,
+            contentId: "content_\(id)",
+            direction: .send,
+            state: state,
+            transferredBytes: transferredBytes,
+            totalBytes: totalBytes,
+            failure: nil,
+            rejection: nil
+        )
+    }
+
+    private func snapshot(
+        transfers: [FfiApplicationTransfer],
+        activePaths: [FfiAgentTransferPath]
+    ) -> FfiAgentSnapshot {
+        FfiAgentSnapshot(
+            status: status(),
+            engine: FfiApplicationSnapshot(
+                contractVersion: expectedApplicationContractVersion,
+                lastSequence: 2,
+                capabilities: FfiPlatformCapabilities(values: []),
+                devices: [],
+                relationships: [],
+                rooms: [],
+                transfers: transfers
+            ),
+            inbox: [],
+            activePaths: activePaths,
+            pendingOffers: [],
+            eventCursor: FfiAgentEventCursor(instanceId: "agent_fixture", sequence: 2)
         )
     }
 

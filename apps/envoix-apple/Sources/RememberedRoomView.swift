@@ -1,4 +1,5 @@
 #if os(iOS) || os(macOS)
+import EnvoixCore
 import QuickLook
 import SwiftUI
 
@@ -566,4 +567,576 @@ struct RememberedRoomView: View {
         }
     }
 }
+
+#if os(macOS)
+enum MacOSAgentTransferPresentationPolicy {
+    static func isTerminal(_ state: FfiApplicationTransferState) -> Bool {
+        switch state {
+        case .delivered, .rejected, .failed, .canceled:
+            return true
+        case .offered, .queued, .connecting, .transferring, .paused,
+             .awaitingDeliveryProof:
+            return false
+        }
+    }
+
+    static func showsProgress(_ state: FfiApplicationTransferState) -> Bool {
+        switch state {
+        case .connecting, .transferring, .paused, .awaitingDeliveryProof:
+            return true
+        case .offered, .queued, .delivered, .rejected, .failed, .canceled:
+            return false
+        }
+    }
+
+    static func stateText(
+        _ transfer: FfiApplicationTransfer,
+        language: String
+    ) -> String {
+        switch transfer.state {
+        case .offered:
+            return AppText.value("Awaiting approval", "等待接收确认", language: language)
+        case .queued:
+            return AppText.value("Queued", "等待发送", language: language)
+        case .connecting:
+            return AppText.value("Connecting", "正在连接", language: language)
+        case .transferring:
+            return transfer.direction == .send
+                ? AppText.value("Sending", "正在发送", language: language)
+                : AppText.value("Receiving", "正在接收", language: language)
+        case .paused:
+            return AppText.value("Paused", "已暂停", language: language)
+        case .awaitingDeliveryProof:
+            return AppText.value("Verifying delivery", "正在确认送达", language: language)
+        case .delivered:
+            return transfer.direction == .send
+                ? AppText.value("Delivered", "已送达", language: language)
+                : AppText.value("Received", "已接收", language: language)
+        case .rejected:
+            return AppText.value("Rejected", "已拒绝", language: language)
+        case .failed:
+            return AppText.value("Failed", "失败", language: language)
+        case .canceled:
+            return AppText.value("Canceled", "已取消", language: language)
+        }
+    }
+
+    static func detail(
+        _ transfer: FfiApplicationTransfer,
+        language: String
+    ) -> String? {
+        if let failure = transfer.failure {
+            return friendlyFailure(
+                code: failure.code,
+                diagnosticMessage: "",
+                language: language
+            )
+        }
+        if let rejection = transfer.rejection {
+            switch rejection {
+            case .userDeclined:
+                return AppText.value(
+                    "The receiving device declined this transfer.",
+                    "接收设备拒绝了此传输。",
+                    language: language
+                )
+            case .busy:
+                return AppText.value(
+                    "The receiving device is busy. Send the files again later.",
+                    "接收设备正忙，请稍后重新发送。",
+                    language: language
+                )
+            case .insufficientSpace:
+                return AppText.value(
+                    "The receiving device does not have enough free space.",
+                    "接收设备没有足够的可用空间。",
+                    language: language
+                )
+            case .unsupportedContent:
+                return AppText.value(
+                    "The receiving device does not support this content.",
+                    "接收设备不支持此内容。",
+                    language: language
+                )
+            case .invalidOffer:
+                return AppText.value(
+                    "The receiving device could not validate this offer.",
+                    "接收设备无法验证此发送邀请。",
+                    language: language
+                )
+            }
+        }
+        switch transfer.state {
+        case .queued:
+            return AppText.value(
+                "Waiting for the paired device. The helper will retry in the background.",
+                "正在等待已配对设备；helper 会在后台继续重试。",
+                language: language
+            )
+        case .awaitingDeliveryProof:
+            return AppText.value(
+                "All bytes were sent. Waiting for the receiver to confirm a durable save.",
+                "文件数据已发完，正在等待接收端确认已安全保存。",
+                language: language
+            )
+        case .paused:
+            return AppText.value(
+                "This transfer is paused and remains in the helper queue.",
+                "此传输已暂停，并保留在 helper 队列中。",
+                language: language
+            )
+        default:
+            return nil
+        }
+    }
+
+    static func pathText(_ path: FfiAgentPathKind, language: String) -> String {
+        switch path {
+        case .lan:
+            return AppText.value("Local network", "局域网", language: language)
+        case .direct:
+            return AppText.value("Direct connection", "直连", language: language)
+        case .relay:
+            return AppText.value("Relay", "中继", language: language)
+        case .wifiAware:
+            return AppText.value("Wi-Fi Aware", "Wi-Fi Aware", language: language)
+        case .other:
+            return AppText.value("Network connection", "网络连接", language: language)
+        }
+    }
+}
+
+struct MacOSAgentRoomView: View {
+    @Environment(\.appLanguage) private var language
+
+    let device: MacOSAgentDevice
+    let transfers: [FfiApplicationTransfer]
+    let activePaths: [FfiAgentTransferPath]
+    let isPreparing: Bool
+    let loadError: String?
+    let onAddFiles: () -> Void
+    let onShowActivity: () -> Void
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                connectionCard
+                staleSnapshotWarning
+                transferSection
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 120)
+        }
+        .safeAreaInset(edge: .bottom) {
+            controls
+        }
+        .background(Theme.bg)
+        .accessibilityIdentifier("agent_room")
+    }
+
+    private var connectionCard: some View {
+        HStack(spacing: 13) {
+            Image(systemName: connectionIcon)
+                .font(.title2)
+                .foregroundStyle(connectionTint)
+                .frame(width: 36)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(device.label)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                Text(connectionText)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if isPreparing || hasPendingTransfer {
+                ProgressView()
+                    .tint(Theme.accentStrong)
+            }
+        }
+        .card(raised: true, padding: 16)
+        .accessibilityIdentifier("agent_room_status")
+    }
+
+    @ViewBuilder
+    private var staleSnapshotWarning: some View {
+        if loadError != nil {
+            Label(
+                AppText.value(
+                    "The helper is temporarily unavailable. Showing the last known status.",
+                    "helper 暂时不可用，当前显示上次已知状态。",
+                    language: language
+                ),
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.footnote)
+            .foregroundStyle(Theme.danger)
+            .card(padding: 14)
+            .accessibilityIdentifier("agent_room_snapshot_warning")
+        }
+    }
+
+    private var transferSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(AppText.value("Room activity", "房间活动", language: language))
+                    .font(.headline.weight(.semibold))
+                Spacer()
+                if !transfers.isEmpty {
+                    Button(
+                        AppText.value("View all", "查看全部", language: language),
+                        action: onShowActivity
+                    )
+                    .font(.subheadline.weight(.semibold))
+                }
+            }
+
+            if transfers.isEmpty {
+                Text(AppText.value(
+                    "No transfers yet. Files added here are owned by the background helper and remain queued while the other device is offline.",
+                    "暂无传输。在这里添加的文件由后台 helper 管理；另一台设备离线时会保留在队列中。",
+                    language: language
+                ))
+                .font(.subheadline)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(Array(transfers.prefix(6)), id: \.id) { transfer in
+                    MacOSAgentTransferCard(
+                        transfer: transfer,
+                        deviceLabel: nil,
+                        path: path(for: transfer.id)
+                    )
+                    if transfer.id != transfers.prefix(6).last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
+        .card(padding: 16)
+        .accessibilityIdentifier("agent_room_activity")
+    }
+
+    private var controls: some View {
+        VStack(spacing: 8) {
+            Button(action: onAddFiles) {
+                if isPreparing {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text(AppText.value(
+                            "Preparing files…",
+                            "正在准备文件…",
+                            language: language
+                        ))
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                } else {
+                    Label(
+                        AppText.value("Add files", "添加文件", language: language),
+                        systemImage: "plus"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                }
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+            .disabled(isPreparing)
+            .accessibilityIdentifier("agent_room_add_files")
+
+            Label(
+                AppText.value(
+                    "The helper keeps this secure room available when the window closes.",
+                    "窗口关闭后，helper 仍会维护这个安全房间。",
+                    language: language
+                ),
+                systemImage: "lock.shield"
+            )
+            .font(.caption)
+            .foregroundStyle(Theme.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Theme.line.opacity(0.7))
+                .frame(height: 0.5)
+        }
+    }
+
+    private var hasPendingTransfer: Bool {
+        transfers.contains {
+            !MacOSAgentTransferPresentationPolicy.isTerminal($0.state)
+        }
+    }
+
+    private var hasActivePath: Bool {
+        let transferIDs = Set(transfers.map(\.id))
+        return activePaths.contains { transferIDs.contains($0.transferId) }
+    }
+
+    private var connectionText: String {
+        if isPreparing {
+            return AppText.value(
+                "Preparing files in the background helper…",
+                "正在后台 helper 中准备文件…",
+                language: language
+            )
+        }
+        if hasActivePath {
+            return AppText.value(
+                "Connected · transferring securely",
+                "已连接 · 正在安全传输",
+                language: language
+            )
+        }
+        if hasPendingTransfer {
+            return AppText.value(
+                "Waiting for the paired device · retrying in the background",
+                "正在等待已配对设备 · 后台持续重试",
+                language: language
+            )
+        }
+        return AppText.value(
+            "Ready · files will queue until the other device is online",
+            "就绪 · 另一台设备上线前文件会保留在队列中",
+            language: language
+        )
+    }
+
+    private var connectionIcon: String {
+        if hasActivePath { return "checkmark.circle.fill" }
+        if isPreparing || hasPendingTransfer { return "arrow.triangle.2.circlepath" }
+        return "paperplane.circle.fill"
+    }
+
+    private var connectionTint: Color {
+        if hasActivePath { return Theme.success }
+        if isPreparing || hasPendingTransfer { return Theme.accentStrong }
+        return Theme.success
+    }
+
+    private func path(for transferID: String) -> FfiAgentPathKind? {
+        activePaths.first { $0.transferId == transferID }?.path
+    }
+}
+
+struct MacOSAgentActivityView: View {
+    @Environment(\.appLanguage) private var language
+
+    let transfers: [FfiApplicationTransfer]
+    let devices: [MacOSAgentDevice]
+    let activePaths: [FfiAgentTransferPath]
+    let hasLoadedSnapshot: Bool
+    let loadError: String?
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                if let loadError, !loadError.isEmpty {
+                    Label(
+                        AppText.value(
+                            "Could not refresh the helper. Showing the last known status.",
+                            "无法刷新 helper，当前显示上次已知状态。",
+                            language: language
+                        ),
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(Theme.danger)
+                    .card(padding: 14)
+                    .accessibilityIdentifier("agent_activity_snapshot_warning")
+                }
+
+                if transfers.isEmpty {
+                    emptyState
+                } else {
+                    ForEach(transfers, id: \.id) { transfer in
+                        MacOSAgentTransferCard(
+                            transfer: transfer,
+                            deviceLabel: deviceLabel(for: transfer.relationshipId),
+                            path: path(for: transfer.id)
+                        )
+                        .card(raised: true, padding: 16)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .accessibilityIdentifier("agent_activity")
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            if !hasLoadedSnapshot, loadError == nil {
+                ProgressView()
+            } else {
+                Image(systemName: "arrow.up.arrow.down.circle")
+                    .font(.system(size: 36, weight: .medium))
+                    .foregroundStyle(Theme.muted)
+            }
+            Text(AppText.value(
+                hasLoadedSnapshot ? "No helper transfers yet" : "Loading helper activity…",
+                hasLoadedSnapshot ? "暂无 helper 传输" : "正在载入 helper 活动…",
+                language: language
+            ))
+            .font(.headline)
+            .foregroundStyle(Theme.text)
+            if hasLoadedSnapshot {
+                Text(AppText.value(
+                    "Transfers sent to paired devices will appear here.",
+                    "发送到已配对设备的传输会显示在这里。",
+                    language: language
+                ))
+                .font(.subheadline)
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 48)
+    }
+
+    private func deviceLabel(for relationshipID: String) -> String {
+        devices.first { $0.id == relationshipID }?.label
+            ?? AppText.value("Paired device", "已配对设备", language: language)
+    }
+
+    private func path(for transferID: String) -> FfiAgentPathKind? {
+        activePaths.first { $0.transferId == transferID }?.path
+    }
+}
+
+private struct MacOSAgentTransferCard: View {
+    @Environment(\.appLanguage) private var language
+
+    let transfer: FfiApplicationTransfer
+    let deviceLabel: String?
+    let path: FfiAgentPathKind?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(tint)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.text)
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(Theme.muted)
+                }
+                Spacer(minLength: 8)
+                Text(MacOSAgentTransferPresentationPolicy.stateText(
+                    transfer,
+                    language: language
+                ))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tint)
+            }
+
+            if MacOSAgentTransferPresentationPolicy.showsProgress(transfer.state),
+               transfer.totalBytes > 0 {
+                ProgressView(
+                    value: Double(min(transfer.transferredBytes, transfer.totalBytes)),
+                    total: Double(transfer.totalBytes)
+                )
+                Text(
+                    "\(byteString(transfer.transferredBytes)) / "
+                        + byteString(transfer.totalBytes)
+                )
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Theme.muted)
+            }
+
+            if let path {
+                Label(
+                    MacOSAgentTransferPresentationPolicy.pathText(
+                        path,
+                        language: language
+                    ),
+                    systemImage: path == .wifiAware ? "wifi" : "link"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+            }
+
+            if let detail = MacOSAgentTransferPresentationPolicy.detail(
+                transfer,
+                language: language
+            ) {
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(
+                        transfer.state == .failed || transfer.state == .rejected
+                            ? Theme.danger
+                            : Theme.muted
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("agent_transfer_\(transfer.id)")
+    }
+
+    private var title: String {
+        let action = transfer.direction == .send
+            ? AppText.value("Send", "发送", language: language)
+            : AppText.value("Receive", "接收", language: language)
+        guard let deviceLabel else {
+            return transfer.direction == .send
+                ? AppText.value("Sent files", "发送文件", language: language)
+                : AppText.value("Received files", "接收文件", language: language)
+        }
+        return "\(action) · \(deviceLabel)"
+    }
+
+    private var summary: String {
+        guard transfer.totalBytes > 0 else {
+            return AppText.value("File transfer", "文件传输", language: language)
+        }
+        return byteString(transfer.totalBytes)
+    }
+
+    private var icon: String {
+        switch transfer.state {
+        case .delivered:
+            return "checkmark.circle.fill"
+        case .rejected, .failed:
+            return "exclamationmark.triangle.fill"
+        case .canceled:
+            return "xmark.circle.fill"
+        case .queued:
+            return "clock.fill"
+        case .connecting:
+            return "arrow.triangle.2.circlepath"
+        default:
+            return transfer.direction == .send
+                ? "arrow.up.circle.fill"
+                : "arrow.down.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch transfer.state {
+        case .delivered:
+            return Theme.success
+        case .rejected, .failed:
+            return Theme.danger
+        case .canceled, .paused, .queued:
+            return Theme.muted
+        case .offered, .connecting, .transferring, .awaitingDeliveryProof:
+            return Theme.accentStrong
+        }
+    }
+}
+#endif
 #endif

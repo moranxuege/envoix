@@ -391,6 +391,8 @@ struct MobileConnectionFlowView: View {
     #if os(macOS)
     @State private var helperFileImporterIsPresented = false
     @State private var helperFileImporterDeviceID: String?
+    @State private var selectedHelperDeviceID: String?
+    @State private var macActivityShowsLegacyTransfers = false
     #endif
     #if DEBUG && os(iOS)
     @State private var didStageBackgroundShareFixture = false
@@ -666,7 +668,7 @@ struct MobileConnectionFlowView: View {
             prepareUITestFixtures()
             workflow.refreshRememberedRooms()
             #if os(macOS)
-            Task { await helperTransfers.refreshDevices() }
+            Task { await helperTransfers.refresh() }
             #endif
             rememberedOutbox.start()
             updateRuntimeRequest()
@@ -696,6 +698,11 @@ struct MobileConnectionFlowView: View {
         #endif
         .onChange(of: navigation.page) { newPage in
             updateRuntimeRequest()
+            #if os(macOS)
+            if newPage == .room || newPage == .activity {
+                Task { await helperTransfers.refreshSnapshot() }
+            }
+            #endif
             #if os(iOS) && canImport(CoreNFC)
             if newPage == .connect {
                 beginOfferGatedNFCReadIfNeeded()
@@ -740,7 +747,7 @@ struct MobileConnectionFlowView: View {
             #endif
             #if os(macOS)
             if phase == .active {
-                Task { await helperTransfers.refreshDevices() }
+                Task { await helperTransfers.refresh() }
             }
             #endif
         }
@@ -750,6 +757,14 @@ struct MobileConnectionFlowView: View {
                 updateRuntimeRequest()
             }
             workflow.tick(now: date, hasActiveTransfer: roomHasActiveTransfers)
+            #if os(macOS)
+            if scenePhase == .active,
+               (navigation.page == .room
+                || navigation.page == .activity
+                || helperTransfers.hasPendingTransfers) {
+                Task { await helperTransfers.refreshSnapshot() }
+            }
+            #endif
         }
         .onReceive(model.$activities) { _ in
             workflow.setLocalTransferActive(roomHasActiveTransfers)
@@ -837,7 +852,7 @@ struct MobileConnectionFlowView: View {
             #if os(macOS)
             Task {
                 await runtime.helperService.refresh()
-                await helperTransfers.refreshDevices()
+                await helperTransfers.refresh()
             }
             #endif
         }
@@ -992,7 +1007,17 @@ struct MobileConnectionFlowView: View {
 
     private func selectPairedDevice(_ deviceID: String) {
         #if os(macOS)
-        sendToPairedDevice(deviceID)
+        guard helperTransfers.devices.contains(where: { $0.id == deviceID }) else {
+            ToastCenter.shared.show(AppText.value(
+                "Refresh paired devices and try again.",
+                "请刷新已配对设备后重试。",
+                language: language
+            ))
+            return
+        }
+        selectedHelperDeviceID = deviceID
+        navigation.show(.room)
+        Task { await helperTransfers.refreshSnapshot() }
         #else
         openRememberedRoom(deviceID)
         #endif
@@ -1058,6 +1083,9 @@ struct MobileConnectionFlowView: View {
                 if let pendingSelectionID {
                     model.consumePendingSendSelection(id: pendingSelectionID)
                 }
+                selectedHelperDeviceID = deviceID
+                navigation.show(.room)
+                await helperTransfers.refreshSnapshot()
                 ToastCenter.shared.show(AppText.value(
                     "Queued for \(device.label).",
                     "已加入发送队列：\(device.label)。",
@@ -1122,58 +1150,7 @@ struct MobileConnectionFlowView: View {
                 onSelectPeer: openNearbyRoom
             )
         case .room:
-            if let room = workflow.rememberedRoom {
-                RememberedRoomView(
-                    room: room,
-                    status: workflow.rememberedRoomStatus(
-                        relationshipID: room.relationshipID
-                    ),
-                    peerDisplayName: workflow.peerDisplayName,
-                    incomingOffer: workflow.incomingRoomOffer,
-                    isAcceptingOffer: acceptingRoomOfferID != nil
-                        || roomDestinationRepair != nil,
-                    outboxEntries: rememberedOutbox.entries(
-                        relationshipID: room.relationshipID
-                    ),
-                    outboxError: rememberedOutbox.errorMessage,
-                    records: rememberedRoomActivityRecords(room),
-                    metricsByActivityID: model.activityMetrics,
-                    onAddFiles: offerRememberedRoomFiles,
-                    onAcceptOffer: acceptIncomingRoomOffer,
-                    onRejectOffer: workflow.rejectIncomingRoomOffer,
-                    onRetryOutboxEntry: retryRememberedOutboxEntry,
-                    onRemoveOutboxEntry: removeRememberedOutboxEntry,
-                    onShowActivity: { showPage(.activity) },
-                    onDisconnect: workflow.disconnectRememberedRoom,
-                    onForget: forgetCurrentRememberedRoom
-                )
-            } else if let room = workflow.room {
-                OneTimeRoomView(
-                    room: room,
-                    records: roomActivityRecords(room),
-                    metricsByActivityID: model.activityMetrics,
-                    controlPhase: workflow.controlPhase,
-                    peerDisplayName: workflow.peerDisplayName,
-                    incomingOffer: workflow.incomingRoomOffer,
-                    isAcceptingOffer: acceptingRoomOfferID != nil
-                        || roomDestinationRepair != nil,
-                    isRoomCreator: workflow.isRoomCreator,
-                    lifetimePolicy: workflow.roomLifetimePolicy,
-                    idleDeadline: workflow.idleDeadline,
-                    now: now,
-                    selectedPeerIsVisible: selectedPeerIsVisible(room),
-                    discoveryIsActive: nearbyCoordinator.state.isActive,
-                    onAddFiles: offerFiles,
-                    onAcceptOffer: acceptIncomingRoomOffer,
-                    onRejectOffer: workflow.rejectIncomingRoomOffer,
-                    onSetKeepOpen: workflow.setKeepOpen,
-                    onShowActivity: { showPage(.activity) },
-                    onClose: requestCloseRoom
-                )
-            } else {
-                Color.clear
-                    .onAppear { navigation.page = .connect }
-            }
+            roomPage
         case .activity:
             activityPage
         case .settings:
@@ -1186,7 +1163,133 @@ struct MobileConnectionFlowView: View {
         }
     }
 
+    @ViewBuilder
+    private var roomPage: some View {
+        #if os(macOS)
+        if let device = selectedHelperDevice {
+            MacOSAgentRoomView(
+                device: device,
+                transfers: helperTransfers.transfers(deviceID: device.id),
+                activePaths: helperTransfers.activePaths,
+                isPreparing: helperTransfers.isPreparing(deviceID: device.id),
+                loadError: helperTransfers.loadError,
+                onAddFiles: { sendToPairedDevice(device.id) },
+                onShowActivity: {
+                    macActivityShowsLegacyTransfers = false
+                    showPage(.activity)
+                }
+            )
+        } else {
+            legacyRoomPage
+        }
+        #else
+        legacyRoomPage
+        #endif
+    }
+
+    @ViewBuilder
+    private var legacyRoomPage: some View {
+        if let room = workflow.rememberedRoom {
+            RememberedRoomView(
+                room: room,
+                status: workflow.rememberedRoomStatus(
+                    relationshipID: room.relationshipID
+                ),
+                peerDisplayName: workflow.peerDisplayName,
+                incomingOffer: workflow.incomingRoomOffer,
+                isAcceptingOffer: acceptingRoomOfferID != nil
+                    || roomDestinationRepair != nil,
+                outboxEntries: rememberedOutbox.entries(
+                    relationshipID: room.relationshipID
+                ),
+                outboxError: rememberedOutbox.errorMessage,
+                records: rememberedRoomActivityRecords(room),
+                metricsByActivityID: model.activityMetrics,
+                onAddFiles: offerRememberedRoomFiles,
+                onAcceptOffer: acceptIncomingRoomOffer,
+                onRejectOffer: workflow.rejectIncomingRoomOffer,
+                onRetryOutboxEntry: retryRememberedOutboxEntry,
+                onRemoveOutboxEntry: removeRememberedOutboxEntry,
+                onShowActivity: { showPage(.activity) },
+                onDisconnect: workflow.disconnectRememberedRoom,
+                onForget: forgetCurrentRememberedRoom
+            )
+        } else if let room = workflow.room {
+            OneTimeRoomView(
+                room: room,
+                records: roomActivityRecords(room),
+                metricsByActivityID: model.activityMetrics,
+                controlPhase: workflow.controlPhase,
+                peerDisplayName: workflow.peerDisplayName,
+                incomingOffer: workflow.incomingRoomOffer,
+                isAcceptingOffer: acceptingRoomOfferID != nil
+                    || roomDestinationRepair != nil,
+                isRoomCreator: workflow.isRoomCreator,
+                lifetimePolicy: workflow.roomLifetimePolicy,
+                idleDeadline: workflow.idleDeadline,
+                now: now,
+                selectedPeerIsVisible: selectedPeerIsVisible(room),
+                discoveryIsActive: nearbyCoordinator.state.isActive,
+                onAddFiles: offerFiles,
+                onAcceptOffer: acceptIncomingRoomOffer,
+                onRejectOffer: workflow.rejectIncomingRoomOffer,
+                onSetKeepOpen: workflow.setKeepOpen,
+                onShowActivity: { showPage(.activity) },
+                onClose: requestCloseRoom
+            )
+        } else {
+            Color.clear
+                .onAppear { navigation.page = .connect }
+        }
+    }
+
+    @ViewBuilder
     private var activityPage: some View {
+        #if os(macOS)
+        VStack(spacing: 8) {
+            if !model.activities.isEmpty {
+                Picker("", selection: $macActivityShowsLegacyTransfers) {
+                    Text(AppText.value(
+                        "Background helper",
+                        "后台 helper",
+                        language: language
+                    ))
+                    .tag(false)
+                    Text(AppText.value(
+                        "One-time transfers",
+                        "一次性传输",
+                        language: language
+                    ))
+                    .tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 16)
+                .accessibilityIdentifier("activity_source_picker")
+            }
+
+            if macActivityShowsLegacyTransfers, !model.activities.isEmpty {
+                legacyActivityPage
+            } else {
+                MacOSAgentActivityView(
+                    transfers: helperTransfers.transfers,
+                    devices: helperTransfers.devices,
+                    activePaths: helperTransfers.activePaths,
+                    hasLoadedSnapshot: helperTransfers.hasLoadedSnapshot,
+                    loadError: helperTransfers.loadError
+                )
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+        }
+        .accessibilityIdentifier("activity_page")
+        #else
+        legacyActivityPage
+            .accessibilityIdentifier("activity_page")
+        #endif
+    }
+
+    private var legacyActivityPage: some View {
         TransferStageView(
             records: model.activities,
             pendingRemovalIDs: model.pendingActivityRemovalIDs,
@@ -1204,7 +1307,6 @@ struct MobileConnectionFlowView: View {
         )
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .accessibilityIdentifier("activity_page")
     }
 
     @ToolbarContentBuilder
@@ -1839,6 +1941,13 @@ struct MobileConnectionFlowView: View {
     private func navigateBack() {
         switch navigation.page {
         case .room:
+            #if os(macOS)
+            if selectedHelperDeviceID != nil {
+                selectedHelperDeviceID = nil
+                navigation.page = .connect
+                return
+            }
+            #endif
             if workflow.rememberedRoom != nil {
                 workflow.unpinRememberedRoom()
                 navigation.page = .connect
@@ -1846,11 +1955,26 @@ struct MobileConnectionFlowView: View {
                 requestCloseRoom()
             }
         case .activity, .settings:
-            navigation.returnToContext(hasActiveRoom: workflow.activeRoomID != nil)
+            navigation.returnToContext(hasActiveRoom: hasNavigableRoom)
         case .connect:
             break
         }
     }
+
+    private var hasNavigableRoom: Bool {
+        #if os(macOS)
+        return selectedHelperDevice != nil || workflow.activeRoomID != nil
+        #else
+        return workflow.activeRoomID != nil
+        #endif
+    }
+
+    #if os(macOS)
+    private var selectedHelperDevice: MacOSAgentDevice? {
+        guard let selectedHelperDeviceID else { return nil }
+        return helperTransfers.devices.first { $0.id == selectedHelperDeviceID }
+    }
+    #endif
 
     private func updateRuntimeRequest() {
         let effects = MobileSceneLifecyclePolicy.effects(

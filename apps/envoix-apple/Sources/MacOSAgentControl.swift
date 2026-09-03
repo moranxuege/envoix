@@ -127,10 +127,18 @@ enum MacOSAgentTransferError: LocalizedError, Equatable {
 @MainActor
 final class MacOSAgentTransferController: ObservableObject {
     @Published private(set) var devices: [MacOSAgentDevice] = []
+    @Published private(set) var transfers: [FfiApplicationTransfer] = []
+    @Published private(set) var activePaths: [FfiAgentTransferPath] = []
     @Published private(set) var preparingDeviceIDs = Set<String>()
+    @Published private(set) var hasLoadedSnapshot = false
     @Published private(set) var loadError: String?
 
+    private static let snapshotInboxLimit: UInt64 = 20
+
     private let controlClient: MacOSHelperControlClient
+    private var isRefreshingSnapshot = false
+    private var nextTransferObservationOrder: UInt64 = 0
+    private var transferObservationOrder: [String: UInt64] = [:]
 
     init(controlClient: MacOSHelperControlClient) {
         self.controlClient = controlClient
@@ -138,6 +146,23 @@ final class MacOSAgentTransferController: ObservableObject {
 
     func isPreparing(deviceID: String) -> Bool {
         preparingDeviceIDs.contains(deviceID)
+    }
+
+    func transfers(deviceID: String) -> [FfiApplicationTransfer] {
+        transfers.filter { $0.relationshipId == deviceID }
+    }
+
+    func activePath(transferID: String) -> FfiAgentPathKind? {
+        activePaths.first { $0.transferId == transferID }?.path
+    }
+
+    var hasPendingTransfers: Bool {
+        transfers.contains { !Self.isTerminal($0.state) }
+    }
+
+    func refresh() async {
+        await refreshDevices()
+        await refreshSnapshot()
     }
 
     func refreshDevices() async {
@@ -154,6 +179,28 @@ final class MacOSAgentTransferController: ObservableObject {
             loadError = nil
         } catch {
             // Preserve the last good list while the helper is temporarily unavailable.
+            loadError = error.localizedDescription
+        }
+    }
+
+    func refreshSnapshot() async {
+        guard !isRefreshingSnapshot else { return }
+        isRefreshingSnapshot = true
+        defer { isRefreshingSnapshot = false }
+
+        do {
+            let response = try await controlClient.call(request: .snapshot(
+                inboxLimit: Self.snapshotInboxLimit
+            ))
+            guard case let .snapshot(snapshot) = response else {
+                throw MacOSAgentTransferError.unexpectedResponse
+            }
+            replaceTransfers(snapshot.engine.transfers)
+            activePaths = snapshot.activePaths
+            hasLoadedSnapshot = true
+            loadError = nil
+        } catch {
+            // Keep the last coherent snapshot visible during a transient helper restart.
             loadError = error.localizedDescription
         }
     }
@@ -179,11 +226,48 @@ final class MacOSAgentTransferController: ObservableObject {
         ))
         switch response {
         case let .transferCreated(transfer):
+            replaceTransfers(upserting: transfer)
             return transfer.id
         case let .error(code, message):
             throw MacOSAgentTransferError.rejected(code: code, reason: message)
         default:
             throw MacOSAgentTransferError.unexpectedResponse
+        }
+    }
+
+    private func replaceTransfers(upserting transfer: FfiApplicationTransfer) {
+        var updated = transfers.filter { $0.id != transfer.id }
+        updated.append(transfer)
+        replaceTransfers(updated)
+    }
+
+    private func replaceTransfers(_ updated: [FfiApplicationTransfer]) {
+        let liveIDs = Set(updated.map(\.id))
+        transferObservationOrder = transferObservationOrder.filter {
+            liveIDs.contains($0.key)
+        }
+        for transfer in updated where transferObservationOrder[transfer.id] == nil {
+            nextTransferObservationOrder &+= 1
+            transferObservationOrder[transfer.id] = nextTransferObservationOrder
+        }
+        transfers = updated.sorted { left, right in
+            let leftTerminal = Self.isTerminal(left.state)
+            let rightTerminal = Self.isTerminal(right.state)
+            if leftTerminal != rightTerminal { return !leftTerminal }
+            let leftOrder = transferObservationOrder[left.id] ?? 0
+            let rightOrder = transferObservationOrder[right.id] ?? 0
+            if leftOrder != rightOrder { return leftOrder > rightOrder }
+            return left.id < right.id
+        }
+    }
+
+    private static func isTerminal(_ state: FfiApplicationTransferState) -> Bool {
+        switch state {
+        case .delivered, .rejected, .failed, .canceled:
+            return true
+        case .offered, .queued, .connecting, .transferring, .paused,
+             .awaitingDeliveryProof:
+            return false
         }
     }
 }
