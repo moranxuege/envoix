@@ -4,13 +4,19 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::{Color32, RichText};
 use envoix_client::model::TransferState;
-use envoix_client::product::{AgentOfferDecision, AgentRequest, AgentResponse, PairingInvitation};
+use envoix_client::product::{
+    AgentOfferDecision, AgentPathKind, AgentRequest, AgentResponse, AgentTransferTelemetry,
+    PairingInvitation,
+};
 
 use crate::controller::{
     AgentController, ControllerCommand, ControllerEvent, Dashboard, Operation, join_request,
     offer_decision_request,
 };
-use crate::presentation::{direction_text, human_bytes, transfer_path_text, transfer_state_text};
+use crate::presentation::{
+    direction_text, human_bytes, transfer_eta, transfer_path_text, transfer_phase_text,
+    transfer_rate, transfer_state_text,
+};
 use crate::theme::{
     ACCENT, ACCENT_DARK, ACCENT_SOFT, BACKGROUND, BORDER, DANGER, DANGER_SOFT, MUTED, SUCCESS,
     SUCCESS_SOFT, SURFACE, SURFACE_RAISED, TEXT, WARNING, WARNING_SOFT,
@@ -241,6 +247,11 @@ impl EnvoixWindowsApp {
                 self.selected_device = None;
                 self.revoke_device = None;
                 self.show_toast(&format!("已忘记设备 {}", device.label));
+            }
+            Some(AgentResponse::PreferencesUpdated { .. })
+                if operation == Operation::SetInboxDirectory =>
+            {
+                self.show_toast("收件位置已更新");
             }
             Some(AgentResponse::Error { code, message }) => {
                 self.error = Some(format!("操作失败（{code}）：{message}"));
@@ -734,10 +745,21 @@ impl EnvoixWindowsApp {
                 )
             })
             .count();
-        let active = dashboard
+        let durable_active = dashboard
             .transfers
             .len()
             .saturating_sub(delivered + attention);
+        let transfer_ids = dashboard
+            .transfers
+            .iter()
+            .map(|transfer| transfer.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let orphan_telemetry = dashboard
+            .telemetry
+            .iter()
+            .filter(|value| !transfer_ids.contains(&value.transfer_id))
+            .collect::<Vec<_>>();
+        let active = durable_active + orphan_telemetry.len();
 
         ui.columns(3, |columns| {
             metric_card(
@@ -774,13 +796,28 @@ impl EnvoixWindowsApp {
             });
         });
         ui.add_space(10.0);
-        if dashboard.transfers.is_empty() {
+        if dashboard.transfers.is_empty() && dashboard.telemetry.is_empty() {
             empty_state(ui, "↗", "暂无传输记录", |ui| {
                 ui.label(
                     RichText::new("从设备页面选择内容，第一笔传输会显示在这里。").color(MUTED),
                 );
             });
             return;
+        }
+        for telemetry in orphan_telemetry {
+            let device = dashboard
+                .devices
+                .iter()
+                .find(|device| device.id == telemetry.relationship_id)
+                .map(|device| device.label.as_str())
+                .unwrap_or("已配对设备");
+            let path = dashboard
+                .active_paths
+                .iter()
+                .find(|path| path.transfer_id == telemetry.transfer_id)
+                .map(|path| path.path);
+            render_live_transfer_card(ui, telemetry, device, path);
+            ui.add_space(10.0);
         }
         for transfer in dashboard.transfers.iter().rev() {
             let device = dashboard
@@ -795,6 +832,16 @@ impl EnvoixWindowsApp {
                 TransferState::Paused => WARNING,
                 _ => ACCENT,
             };
+            let telemetry = dashboard
+                .telemetry
+                .iter()
+                .find(|value| value.transfer_id == transfer.id.to_string());
+            let transferred_bytes = telemetry
+                .map(|value| value.transferred_bytes)
+                .unwrap_or(transfer.transferred_bytes);
+            let total_bytes = telemetry
+                .map(|value| value.total_bytes)
+                .unwrap_or(transfer.total_bytes);
             card(ui, |ui| {
                 ui.horizontal(|ui| {
                     let direction = direction_text(transfer.direction);
@@ -807,23 +854,29 @@ impl EnvoixWindowsApp {
                                 .color(TEXT),
                         );
                         ui.label(
-                            RichText::new(format!(
-                                "{} / {}",
-                                human_bytes(transfer.transferred_bytes),
-                                human_bytes(transfer.total_bytes)
+                            RichText::new(transfer_content_summary(
+                                telemetry,
+                                transferred_bytes,
+                                total_bytes,
                             ))
                             .size(11.5)
                             .color(MUTED),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        state_pill(ui, transfer_state_text(transfer.state), state_color);
+                        state_pill(
+                            ui,
+                            telemetry
+                                .map(|value| transfer_phase_text(value.phase))
+                                .unwrap_or_else(|| transfer_state_text(transfer.state)),
+                            state_color,
+                        );
                     });
                 });
-                let progress = if transfer.total_bytes == 0 {
+                let progress = if total_bytes == 0 {
                     0.0
                 } else {
-                    transfer.transferred_bytes as f32 / transfer.total_bytes as f32
+                    transferred_bytes as f32 / total_bytes as f32
                 };
                 ui.add_space(8.0);
                 ui.add(
@@ -832,6 +885,9 @@ impl EnvoixWindowsApp {
                         .desired_height(9.0)
                         .corner_radius(8),
                 );
+                if let Some(telemetry) = telemetry {
+                    render_transfer_metrics(ui, telemetry);
+                }
                 if let Some(path) = dashboard
                     .active_paths
                     .iter()
@@ -1072,6 +1128,23 @@ impl EnvoixWindowsApp {
             key_value(ui, "协调服务", &status.broker);
             key_value(ui, "中继服务", status.relay.as_deref().unwrap_or("未启用"));
             key_value(ui, "接收文件夹", &status.inbox_directory);
+            if ui
+                .add_enabled(!self.busy(), quiet_button("更改收件位置"))
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_directory(&status.inbox_directory)
+                    .pick_folder()
+            {
+                self.start_agent_operation(
+                    Operation::SetInboxDirectory,
+                    AgentRequest::SetInboxDirectory { path },
+                );
+            }
+            ui.label(
+                RichText::new("之后收到的文件会保存到新位置；进行中的传输不受影响。")
+                    .size(11.0)
+                    .color(MUTED),
+            );
             ui.add_space(8.0);
             ui.collapsing("技术信息", |ui| {
                 key_value(ui, "后台接口版本", &format!("v{}", status.protocol_version));
@@ -1418,6 +1491,98 @@ fn card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
             color: Color32::from_black_alpha(10),
         })
         .show(ui, content);
+}
+
+fn render_live_transfer_card(
+    ui: &mut egui::Ui,
+    telemetry: &AgentTransferTelemetry,
+    device_label: &str,
+    path: Option<AgentPathKind>,
+) {
+    card(ui, |ui| {
+        ui.horizontal(|ui| {
+            let direction = direction_text(telemetry.direction);
+            transfer_icon(ui, direction, ACCENT);
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new(format!("{} · {}", direction, device_label))
+                        .size(14.0)
+                        .strong()
+                        .color(TEXT),
+                );
+                ui.label(
+                    RichText::new(transfer_content_summary(
+                        Some(telemetry),
+                        telemetry.transferred_bytes,
+                        telemetry.total_bytes,
+                    ))
+                    .size(11.5)
+                    .color(MUTED),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                state_pill(ui, transfer_phase_text(telemetry.phase), ACCENT);
+            });
+        });
+        let progress = if telemetry.total_bytes == 0 {
+            0.0
+        } else {
+            telemetry.transferred_bytes as f32 / telemetry.total_bytes as f32
+        };
+        ui.add_space(8.0);
+        ui.add(
+            egui::ProgressBar::new(progress.clamp(0.0, 1.0))
+                .fill(ACCENT)
+                .desired_height(9.0)
+                .corner_radius(8),
+        );
+        render_transfer_metrics(ui, telemetry);
+        if let Some(path) = path {
+            ui.label(RichText::new(format!("连接方式：{}", transfer_path_text(path))).color(MUTED));
+        }
+    });
+}
+
+fn transfer_content_summary(
+    telemetry: Option<&AgentTransferTelemetry>,
+    transferred_bytes: u64,
+    total_bytes: u64,
+) -> String {
+    let progress = format!(
+        "{} / {}",
+        human_bytes(transferred_bytes),
+        human_bytes(total_bytes)
+    );
+    let names = telemetry
+        .map(|value| value.root_names.join("、"))
+        .unwrap_or_default();
+    if names.is_empty() {
+        progress
+    } else {
+        format!("{names} · {progress}")
+    }
+}
+
+fn render_transfer_metrics(ui: &mut egui::Ui, telemetry: &AgentTransferTelemetry) {
+    let mut metrics = Vec::new();
+    if telemetry.current_bytes_per_second > 0 {
+        metrics.push(format!(
+            "当前 {}",
+            transfer_rate(telemetry.current_bytes_per_second)
+        ));
+    }
+    if telemetry.average_bytes_per_second > 0 {
+        metrics.push(format!(
+            "平均 {}",
+            transfer_rate(telemetry.average_bytes_per_second)
+        ));
+    }
+    if let Some(seconds) = telemetry.eta_seconds {
+        metrics.push(transfer_eta(seconds));
+    }
+    if !metrics.is_empty() {
+        ui.label(RichText::new(metrics.join(" · ")).size(11.5).color(MUTED));
+    }
 }
 
 fn room_card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {

@@ -217,6 +217,7 @@ Manage and use the Agent from any WSL shell:
 ~/.local/bin/envoix transfers reject <offer-id>
 ~/.local/bin/envoix inbox list
 ~/.local/bin/envoix inbox latest
+~/.local/bin/envoix inbox set-directory /absolute/path
 ~/.local/bin/envoix agent stop
 ```
 

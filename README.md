@@ -62,6 +62,7 @@ target/debug/envoix agent install --inbox "$PWD/inbox" --device-name WSL
 ~/.local/bin/envoix transfers show '<transfer-id>'
 ~/.local/bin/envoix inbox list
 ~/.local/bin/envoix inbox latest
+~/.local/bin/envoix inbox set-directory /absolute/path
 ~/.local/bin/envoix agent diagnostics
 
 # Replace both installed binaries from a newly built pair. This preserves

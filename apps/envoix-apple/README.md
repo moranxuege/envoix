@@ -56,7 +56,7 @@ macOS Background Task Management from reusing an incompatible ad-hoc helper
 registration while the production helper keeps `com.envoix.app.engine-helper`.
 
 This command validates the signed helper host, its Agent control surface, and
-helper-owned Keychain persistence. Agent protocol v13 keeps first-contact
+helper-owned Keychain persistence. Agent protocol v14 keeps first-contact
 `join_pairing` behind that helper: when a foreground macOS Room receives a
 verification request, the GUI closes its unverified session and sends only the
 bounded invitation, label, and one-time code over the owner-only socket. The
@@ -64,16 +64,17 @@ helper reconnects, verifies, commits the Relationship, and keeps the credential
 inside its Keychain-backed vault. The macOS paired-device list and its Send/drop
 entry points use the helper's typed `ListDevices` and `CreateTransfer` requests;
 the GUI receives only non-secret device summaries and transfer identifiers. The
-legacy active-Room presentation and helper transfer Activity/event projection
-remain separate pending their full Agent snapshot and event migration; they
-must not reopen or copy the helper credential.
+helper-owned paired-device room and Activity views consume its snapshot, live
+rate/ETA telemetry, path projection, and Inbox preference through that same
+typed boundary; they do not reopen or copy the helper credential.
 
 API 25 also exposes the Rust-owned deployment defaults to both Apple targets.
 Agent protocol v12 can update the broker and relay stored on an existing
 Relationship without exporting or rotating its credential. API 26 and Agent
 protocol v13 add helper-owned Transfer pause, resume, retry, cancel, and
-history removal; the SwiftUI process receives only the resulting secret-free
-Transfer projection.
+history removal. API 27 and Agent protocol v14 add a helper-owned receive
+location plus bounded ephemeral phase, rate, ETA, and file-summary telemetry;
+the SwiftUI process receives only these secret-free projections.
 
 A distributable build must use `scripts/apple-dev.sh
 macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and

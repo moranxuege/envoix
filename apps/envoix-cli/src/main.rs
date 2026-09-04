@@ -260,6 +260,13 @@ async fn run(cli: Cli) -> CliResult<()> {
                 call_agent(agent_endpoint, AgentRequest::LatestInbox).await?,
                 json,
             ),
+            InboxCommand::SetDirectory { path } => {
+                let path = absolute_path(path)?;
+                show_inbox_directory(
+                    call_agent(agent_endpoint, AgentRequest::SetInboxDirectory { path }).await?,
+                    json,
+                )
+            }
         },
     }
 }
@@ -275,6 +282,14 @@ async fn canonicalize_agent_sources(paths: Vec<PathBuf>) -> CliResult<Vec<PathBu
         })?);
     }
     Ok(canonical)
+}
+
+fn absolute_path(path: PathBuf) -> CliResult<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }
 
 async fn call_agent(endpoint: Option<PathBuf>, request: AgentRequest) -> CliResult<AgentResponse> {
@@ -805,6 +820,19 @@ fn show_latest_inbox(response: AgentResponse, json: bool) -> CliResult<()> {
     for root in item.roots {
         println!("{}", root.path);
     }
+    Ok(())
+}
+
+fn show_inbox_directory(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::PreferencesUpdated { preferences } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Inbox directory: {}", preferences.inbox_directory.display());
     Ok(())
 }
 

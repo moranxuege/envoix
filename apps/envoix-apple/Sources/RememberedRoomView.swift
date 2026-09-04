@@ -605,6 +605,25 @@ enum MacOSAgentTransferPresentationPolicy {
         }
         return AgentTransferPresentationText.path(copy, language: language)
     }
+
+    static func phaseText(_ phase: FfiAgentTransferPhase, language: String) -> String {
+        let key: String
+        switch phase {
+        case .pairing: key = "pairing"
+        case .connecting: key = "connecting"
+        case .authenticating: key = "authenticating"
+        case .negotiating: key = "negotiating"
+        case .transferring: key = "transferring"
+        case .verifying: key = "verifying"
+        case .saving: key = "saving"
+        case .waitingForReceiver: key = "waiting_for_receiver"
+        case .finalizing: key = "finalizing"
+        }
+        return AppText.localized(
+            "remembered_room.agent.transfer.phase.\(key)",
+            language: language
+        )
+    }
 }
 
 struct MacOSAgentRoomView: View {
@@ -613,6 +632,7 @@ struct MacOSAgentRoomView: View {
     let device: MacOSAgentDevice
     let transfers: [FfiApplicationTransfer]
     let activePaths: [FfiAgentTransferPath]
+    let telemetry: [FfiAgentTransferTelemetry]
     let isPreparing: Bool
     let loadError: String?
     let onAddFiles: () -> Void
@@ -687,7 +707,7 @@ struct MacOSAgentRoomView: View {
                 Text(agentRoomText(.roomActivity))
                     .font(.headline.weight(.semibold))
                 Spacer()
-                if !transfers.isEmpty {
+                if !transfers.isEmpty || !telemetry.isEmpty {
                     Button(
                         agentRoomText(.viewAll),
                         action: onShowActivity
@@ -696,15 +716,24 @@ struct MacOSAgentRoomView: View {
                 }
             }
 
-            if transfers.isEmpty {
+            if transfers.isEmpty && telemetry.isEmpty {
                 Text(agentRoomText(.agentRoomEmpty))
                 .font(.subheadline)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
             } else {
+                ForEach(orphanTelemetry, id: \.transferId) { value in
+                    MacOSAgentLiveTransferCard(
+                        telemetry: value,
+                        deviceLabel: nil,
+                        path: path(for: value.transferId)
+                    )
+                    Divider()
+                }
                 ForEach(Array(transfers.prefix(6)), id: \.id) { transfer in
                     MacOSAgentTransferCard(
                         transfer: transfer,
+                        telemetry: telemetry(for: transfer.id),
                         deviceLabel: nil,
                         path: path(for: transfer.id),
                         onPause: { onPauseTransfer(transfer.id) },
@@ -764,7 +793,7 @@ struct MacOSAgentRoomView: View {
     }
 
     private var hasPendingTransfer: Bool {
-        transfers.contains {
+        !telemetry.isEmpty || transfers.contains {
             !MacOSAgentTransferPresentationPolicy.isTerminal($0.state)
         }
     }
@@ -803,6 +832,15 @@ struct MacOSAgentRoomView: View {
         activePaths.first { $0.transferId == transferID }?.path
     }
 
+    private func telemetry(for transferID: String) -> FfiAgentTransferTelemetry? {
+        telemetry.first { $0.transferId == transferID }
+    }
+
+    private var orphanTelemetry: [FfiAgentTransferTelemetry] {
+        let transferIDs = Set(transfers.map(\.id))
+        return telemetry.filter { !transferIDs.contains($0.transferId) }
+    }
+
     private func agentRoomText(_ copy: RememberedRoomCopy) -> String {
         RememberedRoomPresentationText.value(copy, language: language)
     }
@@ -818,6 +856,7 @@ struct MacOSAgentActivityView: View {
     let transfers: [FfiApplicationTransfer]
     let devices: [MacOSAgentDevice]
     let activePaths: [FfiAgentTransferPath]
+    let telemetry: [FfiAgentTransferTelemetry]
     let hasLoadedSnapshot: Bool
     let loadError: String?
     let onPauseTransfer: (String) -> Void
@@ -840,12 +879,21 @@ struct MacOSAgentActivityView: View {
                     .accessibilityIdentifier("agent_activity_snapshot_warning")
                 }
 
-                if transfers.isEmpty {
+                if transfers.isEmpty && telemetry.isEmpty {
                     emptyState
                 } else {
+                    ForEach(orphanTelemetry, id: \.transferId) { value in
+                        MacOSAgentLiveTransferCard(
+                            telemetry: value,
+                            deviceLabel: deviceLabel(for: value.relationshipId),
+                            path: path(for: value.transferId)
+                        )
+                        .card(raised: true, padding: 16)
+                    }
                     ForEach(transfers, id: \.id) { transfer in
                         MacOSAgentTransferCard(
                             transfer: transfer,
+                            telemetry: telemetry(for: transfer.id),
                             deviceLabel: deviceLabel(for: transfer.relationshipId),
                             path: path(for: transfer.id),
                             onPause: { onPauseTransfer(transfer.id) },
@@ -898,8 +946,101 @@ struct MacOSAgentActivityView: View {
         activePaths.first { $0.transferId == transferID }?.path
     }
 
+    private func telemetry(for transferID: String) -> FfiAgentTransferTelemetry? {
+        telemetry.first { $0.transferId == transferID }
+    }
+
+    private var orphanTelemetry: [FfiAgentTransferTelemetry] {
+        let transferIDs = Set(transfers.map(\.id))
+        return telemetry.filter { !transferIDs.contains($0.transferId) }
+    }
+
     private func activityText(_ copy: RememberedRoomCopy) -> String {
         RememberedRoomPresentationText.value(copy, language: language)
+    }
+}
+
+private struct MacOSAgentLiveTransferCard: View {
+    @Environment(\.appLanguage) private var language
+
+    let telemetry: FfiAgentTransferTelemetry
+    let deviceLabel: String?
+    let path: FfiAgentPathKind?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: telemetry.direction == .send
+                      ? "arrow.up.circle.fill"
+                      : "arrow.down.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(Theme.accentStrong)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(RememberedRoomPresentationText.agentTransferTitle(
+                        direction: telemetry.direction,
+                        deviceLabel: deviceLabel,
+                        language: language
+                    ))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                    Text(contentSummary)
+                        .font(.caption)
+                        .foregroundStyle(Theme.muted)
+                }
+                Spacer(minLength: 8)
+                Text(MacOSAgentTransferPresentationPolicy.phaseText(
+                    telemetry.phase,
+                    language: language
+                ))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.accentStrong)
+            }
+
+            if telemetry.totalBytes > 0 {
+                ProgressView(
+                    value: Double(min(telemetry.transferredBytes, telemetry.totalBytes)),
+                    total: Double(telemetry.totalBytes)
+                )
+                Text(
+                    "\(byteString(telemetry.transferredBytes)) / "
+                        + byteString(telemetry.totalBytes)
+                )
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Theme.muted)
+            }
+
+            TransferPerformanceLine(
+                currentBytesPerSecond: Double(telemetry.currentBytesPerSecond),
+                averageBytesPerSecond: Double(telemetry.averageBytesPerSecond),
+                etaSeconds: telemetry.etaSeconds.map(Double.init),
+                currentSampleDate: Date(
+                    timeIntervalSince1970: Double(telemetry.sampledAtUnixMs) / 1_000
+                ),
+                accessibilityPrefix: "agent_live_transfer_\(telemetry.transferId)"
+            )
+
+            if let path {
+                Label(
+                    MacOSAgentTransferPresentationPolicy.pathText(
+                        path,
+                        language: language
+                    ),
+                    systemImage: path == .wifiAware ? "wifi" : "link"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("agent_live_transfer_\(telemetry.transferId)")
+    }
+
+    private var contentSummary: String {
+        let names = telemetry.rootNames.joined(separator: ", ")
+        let size = byteString(telemetry.totalBytes)
+        return names.isEmpty ? size : "\(names) · \(size)"
     }
 }
 
@@ -907,6 +1048,7 @@ private struct MacOSAgentTransferCard: View {
     @Environment(\.appLanguage) private var language
 
     let transfer: FfiApplicationTransfer
+    let telemetry: FfiAgentTransferTelemetry?
     let deviceLabel: String?
     let path: FfiAgentPathKind?
     let onPause: () -> Void
@@ -931,26 +1073,35 @@ private struct MacOSAgentTransferCard: View {
                         .foregroundStyle(Theme.muted)
                 }
                 Spacer(minLength: 8)
-                Text(MacOSAgentTransferPresentationPolicy.stateText(
-                    transfer,
-                    language: language
-                ))
+                Text(stateText)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(tint)
             }
 
             if MacOSAgentTransferPresentationPolicy.showsProgress(transfer.state),
-               transfer.totalBytes > 0 {
+               displayTotalBytes > 0 {
                 ProgressView(
-                    value: Double(min(transfer.transferredBytes, transfer.totalBytes)),
-                    total: Double(transfer.totalBytes)
+                    value: Double(min(displayTransferredBytes, displayTotalBytes)),
+                    total: Double(displayTotalBytes)
                 )
                 Text(
-                    "\(byteString(transfer.transferredBytes)) / "
-                        + byteString(transfer.totalBytes)
+                    "\(byteString(displayTransferredBytes)) / "
+                        + byteString(displayTotalBytes)
                 )
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(Theme.muted)
+            }
+
+            if let telemetry {
+                TransferPerformanceLine(
+                    currentBytesPerSecond: Double(telemetry.currentBytesPerSecond),
+                    averageBytesPerSecond: Double(telemetry.averageBytesPerSecond),
+                    etaSeconds: telemetry.etaSeconds.map(Double.init),
+                    currentSampleDate: Date(
+                        timeIntervalSince1970: Double(telemetry.sampledAtUnixMs) / 1_000
+                    ),
+                    accessibilityPrefix: "agent_transfer_\(transfer.id)"
+                )
             }
 
             if let path {
@@ -1041,10 +1192,33 @@ private struct MacOSAgentTransferCard: View {
     }
 
     private var summary: String {
-        guard transfer.totalBytes > 0 else {
+        let names = telemetry?.rootNames.joined(separator: ", ") ?? ""
+        guard displayTotalBytes > 0 else {
             return RememberedRoomPresentationText.value(.fileTransfer, language: language)
         }
-        return byteString(transfer.totalBytes)
+        let size = byteString(displayTotalBytes)
+        return names.isEmpty ? size : "\(names) · \(size)"
+    }
+
+    private var stateText: String {
+        if let telemetry {
+            return MacOSAgentTransferPresentationPolicy.phaseText(
+                telemetry.phase,
+                language: language
+            )
+        }
+        return MacOSAgentTransferPresentationPolicy.stateText(
+            transfer,
+            language: language
+        )
+    }
+
+    private var displayTransferredBytes: UInt64 {
+        telemetry?.transferredBytes ?? transfer.transferredBytes
+    }
+
+    private var displayTotalBytes: UInt64 {
+        telemetry?.totalBytes ?? transfer.totalBytes
     }
 
     private var icon: String {

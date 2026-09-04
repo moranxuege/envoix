@@ -34,12 +34,14 @@ use crate::storage::{
     VaultReference,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 13;
+pub const AGENT_PROTOCOL_VERSION: u16 = 14;
 pub const AGENT_SETTINGS_VERSION: u16 = 2;
+pub const AGENT_PREFERENCES_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_AGENT_EVENT_BATCH: usize = 256;
 pub const MAX_AGENT_ACTIVE_PATHS: usize = 256;
+pub const MAX_AGENT_TRANSFER_TELEMETRY: usize = 256;
 pub const MAX_AGENT_PENDING_OFFERS: usize = 64;
 pub const MAX_AGENT_TRANSFER_PATHS: usize = 64;
 const MAX_AGENT_REQUEST_ID_BYTES: usize = 64;
@@ -102,6 +104,30 @@ impl AgentSettings {
     }
 }
 
+/// Small user preference file owned by the running Agent.
+///
+/// Managed-service settings still choose identity and deployment defaults;
+/// this separate record lets a local authenticated UI change the receive
+/// destination without rewriting service definitions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPreferences {
+    pub version: u16,
+    pub inbox_directory: PathBuf,
+}
+
+impl AgentPreferences {
+    pub fn validate(&self) -> io::Result<()> {
+        if self.version != AGENT_PREFERENCES_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported Agent preferences version {}", self.version),
+            ));
+        }
+        validate_agent_directory_path(&self.inbox_directory)
+    }
+}
+
 /// One request is sent as one JSON line over the local Agent socket.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -153,6 +179,9 @@ pub enum AgentRequest {
     RemoveTransfer {
         transfer_id: String,
     },
+    SetInboxDirectory {
+        path: PathBuf,
+    },
     ListPendingOffers,
     DecidePendingOffer {
         offer_id: String,
@@ -201,6 +230,9 @@ pub enum AgentResponse {
     },
     TransferRemoved {
         transfer_id: String,
+    },
+    PreferencesUpdated {
+        preferences: AgentPreferences,
     },
     PendingOffers {
         offers: Vec<AgentPendingOffer>,
@@ -309,6 +341,9 @@ impl AgentRequestEnvelope {
                     io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                 })?;
             }
+            AgentRequest::SetInboxDirectory { path } => {
+                validate_agent_directory_path(path)?;
+            }
             AgentRequest::DecidePendingOffer { offer_id, .. } => {
                 validate_agent_offer_id(offer_id)?;
             }
@@ -367,6 +402,7 @@ impl AgentResponseEnvelope {
                     ));
                 }
                 validate_agent_transfer_paths(&snapshot.active_paths)?;
+                validate_agent_transfer_telemetry(&snapshot.telemetry)?;
                 validate_agent_pending_offers(&snapshot.pending_offers)?;
                 snapshot.event_cursor.validate()?;
             }
@@ -407,6 +443,9 @@ impl AgentResponseEnvelope {
                 TransferId::parse(transfer_id.clone()).map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
                 })?;
+            }
+            AgentResponse::PreferencesUpdated { preferences } => {
+                preferences.validate()?;
             }
             AgentResponse::Transfers { transfers } => {
                 if transfers.len() > MAX_DURABLE_ENTITIES {
@@ -554,6 +593,8 @@ pub struct AgentSnapshot {
     pub engine: EngineSnapshot,
     pub inbox: Vec<InboxItem>,
     pub active_paths: Vec<AgentTransferPath>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub telemetry: Vec<AgentTransferTelemetry>,
     pub pending_offers: Vec<AgentPendingOffer>,
     pub event_cursor: AgentEventCursor,
 }
@@ -602,6 +643,10 @@ pub enum AgentEvent {
         direction: TransferDirection,
         path: Option<AgentPathKind>,
     },
+    TransferTelemetryChanged {
+        transfer_id: String,
+    },
+    InboxDirectoryChanged,
     PendingOfferChanged {
         offer_id: String,
         pending: bool,
@@ -632,12 +677,14 @@ impl AgentEvent {
                 })?;
             }
             Self::TransferChanged { transfer_id }
-            | Self::TransferPathChanged { transfer_id, .. } => {
+            | Self::TransferPathChanged { transfer_id, .. }
+            | Self::TransferTelemetryChanged { transfer_id } => {
                 TransferId::parse(transfer_id.clone()).map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                 })?;
             }
             Self::PendingOfferChanged { offer_id, .. } => validate_agent_offer_id(offer_id)?,
+            Self::InboxDirectoryChanged => {}
         }
         Ok(())
     }
@@ -807,6 +854,42 @@ pub struct AgentTransferPath {
     pub transfer_id: String,
     pub direction: TransferDirection,
     pub path: AgentPathKind,
+}
+
+/// Ephemeral measurements projected by the Agent for a live Transfer.
+///
+/// The Engine's byte checkpoint remains authoritative after restart; rate and
+/// ETA are intentionally kept out of durable state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTransferPhase {
+    Pairing,
+    Connecting,
+    Authenticating,
+    Negotiating,
+    Transferring,
+    Verifying,
+    Saving,
+    WaitingForReceiver,
+    Finalizing,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTransferTelemetry {
+    pub transfer_id: String,
+    pub relationship_id: String,
+    pub direction: TransferDirection,
+    pub root_names: Vec<String>,
+    pub item_count: u32,
+    pub directory_count: u32,
+    pub phase: AgentTransferPhase,
+    pub transferred_bytes: u64,
+    pub total_bytes: u64,
+    pub current_bytes_per_second: u64,
+    pub average_bytes_per_second: u64,
+    pub eta_seconds: Option<u64>,
+    pub sampled_at_unix_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1850,6 +1933,10 @@ fn validate_agent_status(status: &AgentStatus) -> io::Result<()> {
             "Agent status contains too many active paths or pending offers",
         ));
     }
+    validate_agent_directory_path(Path::new(&status.state_directory))?;
+    validate_agent_directory_path(Path::new(&status.inbox_directory))?;
+    crate::api::parse_broker_addr(&status.broker, status.relay.as_deref())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     Ok(())
 }
 
@@ -1878,13 +1965,21 @@ fn validate_agent_pending_offer(offer: &AgentPendingOffer) -> io::Result<()> {
             "pending offer device label cannot have leading or trailing whitespace",
         ));
     }
-    if offer.directory_count > offer.item_count || offer.root_names.len() > MAX_AGENT_OFFER_ROOTS {
+    validate_agent_content_summary(&offer.root_names, offer.item_count, offer.directory_count)
+}
+
+fn validate_agent_content_summary(
+    root_names: &[String],
+    item_count: u32,
+    directory_count: u32,
+) -> io::Result<()> {
+    if directory_count > item_count || root_names.len() > MAX_AGENT_OFFER_ROOTS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "pending offer contains inconsistent item counts or root previews",
+            "Agent content summary contains inconsistent item counts or root previews",
         ));
     }
-    for name in &offer.root_names {
+    for name in root_names {
         if name.is_empty()
             || name.len() > MAX_AGENT_OFFER_ROOT_NAME_BYTES
             || matches!(name.as_str(), "." | "..")
@@ -1894,7 +1989,7 @@ fn validate_agent_pending_offer(offer: &AgentPendingOffer) -> io::Result<()> {
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "pending offer contains an invalid root preview",
+                "Agent content summary contains an invalid root preview",
             ));
         }
     }
@@ -1980,6 +2075,33 @@ fn validate_agent_transfer_paths(paths: &[AgentTransferPath]) -> io::Result<()> 
     Ok(())
 }
 
+fn validate_agent_transfer_telemetry(values: &[AgentTransferTelemetry]) -> io::Result<()> {
+    if values.len() > MAX_AGENT_TRANSFER_TELEMETRY {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent response contains too many live Transfer measurements",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for value in values {
+        TransferId::parse(value.transfer_id.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        RelationshipId::parse(value.relationship_id.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        validate_agent_content_summary(&value.root_names, value.item_count, value.directory_count)?;
+        if !ids.insert(&value.transfer_id)
+            || value.transferred_bytes > value.total_bytes
+            || (value.current_bytes_per_second == 0 && value.eta_seconds.is_some())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Agent Transfer telemetry is duplicated or inconsistent",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_agent_transfer(transfer: &Transfer) -> io::Result<()> {
     if transfer.transferred_bytes > transfer.total_bytes
         || (transfer.state == crate::model::TransferState::Failed) != transfer.failure.is_some()
@@ -2005,6 +2127,17 @@ fn validate_agent_source_path(path: &Path) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Agent source path must be bounded and contain no control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_directory_path(path: &Path) -> io::Result<()> {
+    validate_agent_source_path(path)?;
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Agent directory path must be absolute",
         ));
     }
     Ok(())
@@ -2930,7 +3063,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -2955,7 +3088,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 5);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -2975,7 +3108,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 6);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 12);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 15);
         assert!(
@@ -2993,7 +3126,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 7);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 15);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 18);
         assert!(
@@ -3011,7 +3144,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 8);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 16);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 19);
         assert_eq!(
@@ -3028,7 +3161,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 9);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
 
         let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
         settings.validate().unwrap();
@@ -3378,13 +3511,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_v13_fixture_covers_transfer_controls() {
+    fn agent_wire_v13_fixture_freezes_transfer_controls() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/v0.3/agent-control-v13.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
-        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+        assert_eq!(fixture["protocol_version"], 13);
 
         let requests = fixture["requests"]
             .as_array()
@@ -3420,7 +3553,7 @@ mod tests {
             ]
         ));
         for (request, expected) in requests.iter().zip(fixture["requests"].as_array().unwrap()) {
-            request.validate().unwrap();
+            assert!(request.validate().is_err());
             assert_eq!(serde_json::to_value(request).unwrap(), *expected);
         }
 
@@ -3445,9 +3578,53 @@ mod tests {
             .iter()
             .zip(fixture["responses"].as_array().unwrap())
         {
-            response.validate_for(&response.request_id).unwrap();
+            assert!(response.validate_for(&response.request_id).is_err());
             assert_eq!(serde_json::to_value(response).unwrap(), *expected);
         }
+    }
+
+    #[test]
+    fn agent_wire_v14_fixture_covers_preferences_and_live_telemetry() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v14.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+
+        let request: AgentRequestEnvelope =
+            serde_json::from_value(fixture["request"].clone()).unwrap();
+        assert!(matches!(
+            request.request,
+            AgentRequest::SetInboxDirectory { .. }
+        ));
+        request.validate().unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), fixture["request"]);
+
+        let response: AgentResponseEnvelope =
+            serde_json::from_value(fixture["response"].clone()).unwrap();
+        assert!(matches!(
+            response.response,
+            AgentResponse::PreferencesUpdated { .. }
+        ));
+        response.validate_for(&request.request_id).unwrap();
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            fixture["response"]
+        );
+
+        let telemetry: AgentTransferTelemetry =
+            serde_json::from_value(fixture["telemetry"].clone()).unwrap();
+        validate_agent_transfer_telemetry(std::slice::from_ref(&telemetry)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&telemetry).unwrap(),
+            fixture["telemetry"]
+        );
+
+        let event: AgentEventEnvelope = serde_json::from_value(fixture["event"].clone()).unwrap();
+        event.validate().unwrap();
+        assert!(matches!(event.event, AgentEvent::InboxDirectoryChanged));
+        assert_eq!(serde_json::to_value(&event).unwrap(), fixture["event"]);
     }
 
     #[test]

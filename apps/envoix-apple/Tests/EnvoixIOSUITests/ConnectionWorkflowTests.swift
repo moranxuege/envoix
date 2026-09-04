@@ -767,7 +767,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             "persistent_application_engine_v1"
         )
         XCTAssertTrue(info.capabilities.contains(expectedAgentHostControlCapability))
-        XCTAssertEqual(expectedAgentHostControlCapability, "agent_host_control_v3")
+        XCTAssertEqual(expectedAgentHostControlCapability, "agent_host_control_v4")
     }
 
     func testTypedRoomControlErrorsDoNotUseDiagnosticTextForDisposition() {

@@ -74,6 +74,12 @@ Engine transition and then stop an active data-plane attempt. Resume is
 rejected until that attempt has closed, preventing a canceled old attempt from
 overwriting the resumed state.
 
+Agent protocol v14 and FFI API 27 add `agent_host_control_v4`, an Agent-owned
+Inbox-directory preference, and bounded live Transfer telemetry. Foreign UIs
+may display the current phase, byte rate, average rate, ETA, path, and root-name
+preview, but must keep the Engine Transfer and Inbox projections authoritative
+for durable state and completed saves.
+
 `FfiApplicationEngine` owns one ordered application snapshot. Its no-argument
 constructor is limited to contract tests and transient previews; product hosts
 open the persistent constructor. It accepts typed event envelopes, returns

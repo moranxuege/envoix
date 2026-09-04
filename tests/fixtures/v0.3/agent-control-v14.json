@@ -1,0 +1,46 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 14,
+  "request": {
+    "protocol_version": 14,
+    "request_id": "request_set_inbox",
+    "request": {
+      "command": "set_inbox_directory",
+      "path": "/Users/fixture/Downloads/Envoix"
+    }
+  },
+  "response": {
+    "protocol_version": 14,
+    "request_id": "request_set_inbox",
+    "response": {
+      "kind": "preferences_updated",
+      "preferences": {
+        "version": 1,
+        "inbox_directory": "/Users/fixture/Downloads/Envoix"
+      }
+    }
+  },
+  "telemetry": {
+    "transfer_id": "transfer_fixture",
+    "relationship_id": "relationship_fixture",
+    "direction": "receive",
+    "root_names": ["fixture-document.pdf"],
+    "item_count": 1,
+    "directory_count": 0,
+    "phase": "transferring",
+    "transferred_bytes": 524288,
+    "total_bytes": 1048576,
+    "current_bytes_per_second": 262144,
+    "average_bytes_per_second": 209715,
+    "eta_seconds": 2,
+    "sampled_at_unix_ms": 1757066400000
+  },
+  "event": {
+    "protocol_version": 14,
+    "instance_id": "agent_fixture",
+    "sequence": 1,
+    "event": {
+      "event": "inbox_directory_changed"
+    }
+  }
+}

@@ -311,8 +311,27 @@ final class MacOSAgentControlTests: XCTestCase {
             direction: .send,
             path: .relay
         )
+        let telemetry = FfiAgentTransferTelemetry(
+            transferId: queued.id,
+            relationshipId: "dev_wsl",
+            direction: .send,
+            rootNames: ["fixture.bin"],
+            itemCount: 1,
+            directoryCount: 0,
+            phase: .transferring,
+            transferredBytes: 5,
+            totalBytes: 20,
+            currentBytesPerSecond: 10,
+            averageBytesPerSecond: 8,
+            etaSeconds: 2,
+            sampledAtUnixMs: 1_757_066_400_000
+        )
         let client = FakeMacOSAgentControlClient(response: .snapshot(
-            snapshot: snapshot(transfers: [delivered, queued], activePaths: [path])
+            snapshot: snapshot(
+                transfers: [delivered, queued],
+                activePaths: [path],
+                telemetry: [telemetry]
+            )
         ))
         let controller = MacOSAgentTransferController(controlClient: client)
 
@@ -323,6 +342,8 @@ final class MacOSAgentControlTests: XCTestCase {
         XCTAssertEqual(controller.transfers.map(\.id), [queued.id, delivered.id])
         XCTAssertEqual(controller.transfers(deviceID: "dev_wsl").count, 2)
         XCTAssertEqual(controller.activePath(transferID: queued.id), .relay)
+        XCTAssertEqual(controller.transferTelemetry(transferID: queued.id), telemetry)
+        XCTAssertEqual(controller.inboxDirectory, "/private/tmp/inbox")
         XCTAssertTrue(controller.hasPendingTransfers)
         let requests = await client.requests
         XCTAssertEqual(requests, [.snapshot(inboxLimit: 20)])
@@ -378,6 +399,30 @@ final class MacOSAgentControlTests: XCTestCase {
         XCTAssertEqual(removeRequests, [.removeTransfer(transferId: removedID)])
     }
 
+    @MainActor
+    func testTransferControllerChangesInboxThroughHelper() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("envoix-inbox-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = FakeMacOSAgentControlClient(response: .preferencesUpdated(
+            preferences: FfiAgentPreferences(
+                version: 1,
+                inboxDirectory: directory.path
+            )
+        ))
+        let controller = MacOSAgentTransferController(controlClient: client)
+
+        try await controller.setInboxDirectory(directory)
+
+        XCTAssertEqual(controller.inboxDirectory, directory.path)
+        let requests = await client.requests
+        XCTAssertEqual(requests, [.setInboxDirectory(path: directory.path)])
+    }
+
     func testAgentTransferPresentationExplainsQueuedAndDeliveryStates() {
         let queued = transfer(
             id: "transfer_queued",
@@ -407,6 +452,10 @@ final class MacOSAgentControlTests: XCTestCase {
         XCTAssertEqual(
             MacOSAgentTransferPresentationPolicy.pathText(.lan, language: "zh-Hans"),
             "局域网"
+        )
+        XCTAssertEqual(
+            MacOSAgentTransferPresentationPolicy.phaseText(.saving, language: "zh-Hans"),
+            "正在保存"
         )
     }
 
@@ -443,7 +492,8 @@ final class MacOSAgentControlTests: XCTestCase {
 
     private func snapshot(
         transfers: [FfiApplicationTransfer],
-        activePaths: [FfiAgentTransferPath]
+        activePaths: [FfiAgentTransferPath],
+        telemetry: [FfiAgentTransferTelemetry] = []
     ) -> FfiAgentSnapshot {
         FfiAgentSnapshot(
             status: status(),
@@ -458,6 +508,7 @@ final class MacOSAgentControlTests: XCTestCase {
             ),
             inbox: [],
             activePaths: activePaths,
+            telemetry: telemetry,
             pendingOffers: [],
             eventCursor: FfiAgentEventCursor(instanceId: "agent_fixture", sequence: 2)
         )

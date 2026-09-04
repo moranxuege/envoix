@@ -421,7 +421,11 @@ limited to 64 KiB and responses to 20 MiB. v3 through v10 requests receive
 Protocol v12 adds bounded Relationship route replacement for the test-cycle
 migration path. Protocol v13 adds typed pause, resume, recovery, cancellation,
 and terminal-history removal for Agent-owned Transfers. Active attempts are
-stopped only after their authoritative state transition is persisted.
+stopped only after their authoritative state transition is persisted. Protocol
+v14 adds a separate Agent-owned Inbox preference and bounded live Transfer
+telemetry. Rate, ETA, phase, path, and content previews are ephemeral and never
+enter Engine state; durable byte checkpoints and terminal outcomes remain the
+restart authority.
 
 ## 9. Persistence and secret ownership
 

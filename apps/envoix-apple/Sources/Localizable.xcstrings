@@ -1751,6 +1751,60 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Wi-Fi Aware" } }
       }
     },
+    "remembered_room.agent.transfer.phase.authenticating" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Authenticating" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在验证设备" } }
+      }
+    },
+    "remembered_room.agent.transfer.phase.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connecting" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在连接" } }
+      }
+    },
+    "remembered_room.agent.transfer.phase.finalizing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Confirming delivery" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在确认送达" } }
+      }
+    },
+    "remembered_room.agent.transfer.phase.negotiating" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing transfer" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备传输" } }
+      }
+    },
+    "remembered_room.agent.transfer.phase.pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Finding device" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在查找设备" } }
+      }
+    },
+    "remembered_room.agent.transfer.phase.saving" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Saving" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在保存" } }
+      }
+    },
+    "remembered_room.agent.transfer.phase.transferring" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transferring" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在传输" } }
+      }
+    },
+    "remembered_room.agent.transfer.phase.verifying" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Verifying" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在校验" } }
+      }
+    },
+    "remembered_room.agent.transfer.phase.waiting_for_receiver" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for receiver to save" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待对方保存" } }
+      }
+    },
     "remembered_room.agent.transfer.state.awaiting_approval" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Awaiting approval" } },
@@ -2851,6 +2905,36 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer cache" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输缓存" } }
+      }
+    },
+    "settings.inbox.choose" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择…" } }
+      }
+    },
+    "settings.inbox.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Future incoming files are saved here. Active transfers keep their current destination." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "之后收到的文件会保存在这里；进行中的传输仍使用原位置。" } }
+      }
+    },
+    "settings.inbox.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive location" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "收件位置" } }
+      }
+    },
+    "settings.inbox.unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Start the background service to choose a folder." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "启动后台服务后即可选择文件夹。" } }
+      }
+    },
+    "settings.inbox.updated" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive location updated" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "收件位置已更新" } }
       }
     },
     "settings.compression.always" : {

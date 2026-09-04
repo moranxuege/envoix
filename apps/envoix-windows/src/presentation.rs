@@ -1,7 +1,7 @@
 #[cfg(windows)]
 use envoix_client::model::TransferDirection;
 use envoix_client::model::TransferState;
-use envoix_client::product::AgentPathKind;
+use envoix_client::product::{AgentPathKind, AgentTransferPhase};
 
 pub(crate) fn transfer_state_text(state: TransferState) -> &'static str {
     match state {
@@ -33,6 +33,36 @@ pub(crate) fn transfer_path_text(path: AgentPathKind) -> &'static str {
         AgentPathKind::Relay => "中继",
         AgentPathKind::WifiAware => "Wi-Fi Aware",
         AgentPathKind::Other => "网络连接",
+    }
+}
+
+pub(crate) fn transfer_phase_text(phase: AgentTransferPhase) -> &'static str {
+    match phase {
+        AgentTransferPhase::Pairing => "正在查找设备",
+        AgentTransferPhase::Connecting => "正在连接",
+        AgentTransferPhase::Authenticating => "正在验证设备",
+        AgentTransferPhase::Negotiating => "正在准备传输",
+        AgentTransferPhase::Transferring => "正在传输",
+        AgentTransferPhase::Verifying => "正在校验",
+        AgentTransferPhase::Saving => "正在保存",
+        AgentTransferPhase::WaitingForReceiver => "等待对方保存",
+        AgentTransferPhase::Finalizing => "正在确认送达",
+    }
+}
+
+pub(crate) fn transfer_rate(bytes_per_second: u64) -> String {
+    format!("{}/s", human_bytes(bytes_per_second))
+}
+
+pub(crate) fn transfer_eta(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let remaining_seconds = seconds % 60;
+    if minutes == 0 {
+        format!("约 {remaining_seconds} 秒")
+    } else if remaining_seconds == 0 {
+        format!("约 {minutes} 分钟")
+    } else {
+        format!("约 {minutes} 分 {remaining_seconds} 秒")
     }
 }
 
@@ -78,5 +108,12 @@ mod tests {
         assert_eq!(transfer_path_text(AgentPathKind::Relay), "中继");
         assert_eq!(transfer_path_text(AgentPathKind::WifiAware), "Wi-Fi Aware");
         assert_eq!(transfer_path_text(AgentPathKind::Other), "网络连接");
+    }
+
+    #[test]
+    fn live_transfer_metrics_have_stable_user_facing_units() {
+        assert_eq!(transfer_phase_text(AgentTransferPhase::Saving), "正在保存");
+        assert_eq!(transfer_rate(1_048_576), "1.0 MB/s");
+        assert_eq!(transfer_eta(65), "约 1 分 5 秒");
     }
 }

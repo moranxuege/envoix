@@ -211,6 +211,12 @@ Transfers through typed commands. The helper persists the Engine transition
 before stopping an active attempt, and the GUI never edits transfer state
 optimistically or opens the outbox store.
 
+API 27 adds `agent_host_control_v4` and Agent protocol v14. The helper owns a
+small versioned Inbox preference file and rejects destination changes while an
+incoming Transfer or pending offer exists. The GUI receives only the selected
+path and bounded ephemeral Transfer telemetry; credentials, transfer payloads,
+and Engine mutation remain inside the helper.
+
 The Apple stage-B implementation embeds `EnvoixEngineHelper.app` at
 `Contents/Library/LoginItems`, registers it only after an explicit Settings
 action through `SMAppService`, and gives only that helper the production

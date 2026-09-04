@@ -129,6 +129,8 @@ final class MacOSAgentTransferController: ObservableObject {
     @Published private(set) var devices: [MacOSAgentDevice] = []
     @Published private(set) var transfers: [FfiApplicationTransfer] = []
     @Published private(set) var activePaths: [FfiAgentTransferPath] = []
+    @Published private(set) var telemetry: [FfiAgentTransferTelemetry] = []
+    @Published private(set) var inboxDirectory: String?
     @Published private(set) var preparingDeviceIDs = Set<String>()
     @Published private(set) var hasLoadedSnapshot = false
     @Published private(set) var loadError: String?
@@ -156,8 +158,16 @@ final class MacOSAgentTransferController: ObservableObject {
         activePaths.first { $0.transferId == transferID }?.path
     }
 
+    func transferTelemetry(transferID: String) -> FfiAgentTransferTelemetry? {
+        telemetry.first { $0.transferId == transferID }
+    }
+
+    func telemetry(deviceID: String) -> [FfiAgentTransferTelemetry] {
+        telemetry.filter { $0.relationshipId == deviceID }
+    }
+
     var hasPendingTransfers: Bool {
-        transfers.contains { !Self.isTerminal($0.state) }
+        !telemetry.isEmpty || transfers.contains { !Self.isTerminal($0.state) }
     }
 
     func refresh() async {
@@ -197,6 +207,8 @@ final class MacOSAgentTransferController: ObservableObject {
             }
             replaceTransfers(snapshot.engine.transfers)
             activePaths = snapshot.activePaths
+            telemetry = snapshot.telemetry
+            inboxDirectory = snapshot.status.inboxDirectory
             hasLoadedSnapshot = true
             loadError = nil
         } catch {
@@ -258,6 +270,26 @@ final class MacOSAgentTransferController: ObservableObject {
         switch response {
         case let .transferRemoved(removedID) where removedID == id:
             replaceTransfers(transfers.filter { $0.id != id })
+        case let .error(code, message):
+            throw MacOSAgentTransferError.rejected(code: code, reason: message)
+        default:
+            throw MacOSAgentTransferError.unexpectedResponse
+        }
+    }
+
+    func setInboxDirectory(_ url: URL) async throws {
+        let access = SecurityScopedResourceAccess(url: url)
+        defer { withExtendedLifetime(access) {} }
+        guard access.isActive
+                || FileManager.default.isReadableFile(atPath: access.url.path) else {
+            throw OpenedSendFileError.inaccessible
+        }
+        let response = try await controlClient.call(
+            request: .setInboxDirectory(path: access.url.path)
+        )
+        switch response {
+        case let .preferencesUpdated(preferences):
+            inboxDirectory = preferences.inboxDirectory
         case let .error(code, message):
             throw MacOSAgentTransferError.rejected(code: code, reason: message)
         default:

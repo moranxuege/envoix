@@ -241,6 +241,11 @@ pub(crate) enum InboxCommand {
     },
     /// Print the saved path(s) from the newest completed transfer.
     Latest,
+    /// Change where the running Agent saves future incoming files.
+    SetDirectory {
+        /// Existing or new directory. Relative paths are resolved from the current directory.
+        path: PathBuf,
+    },
 }
 
 /// Arguments for `envoix send`.
@@ -751,6 +756,7 @@ mod tests {
         assert!(Cli::try_parse_from(["envoix", "transfers", "approve", "offer_1"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "transfers", "reject", "offer_1"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "inbox", "latest"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "inbox", "set-directory", "./received"]).is_ok());
     }
 
     #[test]

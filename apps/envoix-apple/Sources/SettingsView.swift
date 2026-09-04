@@ -1,5 +1,8 @@
 import SwiftUI
 import EnvoixCore
+#if os(macOS)
+import AppKit
+#endif
 
 // Extracted from ContentView.swift (2026-07-20 split, no behavior change)
 
@@ -19,6 +22,8 @@ struct SettingsStageView: View {
     private let coreInfo = envoixCoreInfo()
     #if os(macOS)
     @ObservedObject private var agentService = AppleApplicationRuntime.shared.helperService
+    @ObservedObject private var helperTransfers = AppleApplicationRuntime.shared.helperTransfers
+    @State private var isChangingInboxDirectory = false
     #endif
 
     var body: some View {
@@ -214,10 +219,51 @@ struct SettingsStageView: View {
                 }
                 .buttonStyle(.borderless)
             }
+            Divider().overlay(Theme.line.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(AppText.localized(
+                    "settings.inbox.title",
+                    defaultValue: "Receive location",
+                    language: language
+                ))
+                .font(.subheadline.weight(.semibold))
+                Text(helperTransfers.inboxDirectory ?? AppText.localized(
+                    "settings.inbox.unavailable",
+                    defaultValue: "Start the background service to choose a folder.",
+                    language: language
+                ))
+                .font(.caption)
+                .foregroundStyle(Theme.muted)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                HStack {
+                    Text(AppText.localized(
+                        "settings.inbox.detail",
+                        defaultValue: "Future incoming files are saved here. Active transfers keep their current destination.",
+                        language: language
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(Theme.muted)
+                    Spacer(minLength: 12)
+                    Button(AppText.localized(
+                        "settings.inbox.choose",
+                        defaultValue: "Choose…",
+                        language: language
+                    )) {
+                        chooseInboxDirectory()
+                    }
+                    .disabled(
+                        !agentService.isRequestedEnabled
+                            || isChangingInboxDirectory
+                    )
+                }
+            }
+            .accessibilityIdentifier("settings_inbox_directory")
         }
         .card(padding: 14)
         .task {
             await agentService.refresh()
+            await helperTransfers.refreshSnapshot()
         }
         .accessibilityIdentifier("settings_background_service")
     }
@@ -269,6 +315,34 @@ struct SettingsStageView: View {
             }
         case .unknown, .notRegistered:
             return Theme.muted
+        }
+    }
+
+    private func chooseInboxDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = AppText.localized(
+            "settings.inbox.choose",
+            defaultValue: "Choose",
+            language: language
+        )
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isChangingInboxDirectory = true
+        Task { @MainActor in
+            defer { isChangingInboxDirectory = false }
+            do {
+                try await helperTransfers.setInboxDirectory(url)
+                ToastCenter.shared.show(AppText.localized(
+                    "settings.inbox.updated",
+                    defaultValue: "Receive location updated",
+                    language: language
+                ))
+            } catch {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
         }
     }
     #endif

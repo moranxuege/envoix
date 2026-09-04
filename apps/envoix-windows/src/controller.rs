@@ -7,7 +7,8 @@ use envoix_client::agent_control::AgentControlClient;
 use envoix_client::model::Transfer;
 use envoix_client::product::{
     AgentDiagnostics, AgentOfferDecision, AgentPairingInput, AgentPendingOffer, AgentRequest,
-    AgentResponse, AgentStatus, AgentTransferPath, DeviceSummary, InboxItem,
+    AgentResponse, AgentStatus, AgentTransferPath, AgentTransferTelemetry, DeviceSummary,
+    InboxItem,
 };
 
 const WINDOWS_CLI_NAMES: [&str; 2] = ["envoix.exe", "envoix-cli-windows-x86_64.exe"];
@@ -22,6 +23,7 @@ pub(crate) struct Dashboard {
     pub devices: Vec<DeviceSummary>,
     pub transfers: Vec<Transfer>,
     pub active_paths: Vec<AgentTransferPath>,
+    pub telemetry: Vec<AgentTransferTelemetry>,
     pub pending_offers: Vec<AgentPendingOffer>,
     pub inbox: Vec<InboxItem>,
 }
@@ -39,6 +41,7 @@ pub(crate) enum Operation {
     CancelTransfer,
     RemoveTransfer,
     RevokeDevice,
+    SetInboxDirectory,
     InstallAgent,
     StartAgent,
     RestartAgent,
@@ -163,6 +166,7 @@ async fn load_dashboard() -> Result<Dashboard, String> {
         devices,
         transfers,
         active_paths: snapshot.active_paths,
+        telemetry: snapshot.telemetry,
         pending_offers: snapshot.pending_offers,
         inbox: snapshot.inbox,
     })

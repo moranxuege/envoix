@@ -37,5 +37,9 @@ single-use approve/reject commands, and pending-offer events without rewriting
 v4-v6.
 `agent-control-v8.json` adds bounded active-path snapshots, list responses, and
 selected/cleared path events without rewriting v4-v7.
-`agent-control-v9.json` binds diagnostics to Engine schema v2 and is the
-current paired CLI/Agent contract without rewriting v8.
+`agent-control-v9.json` binds diagnostics to Engine schema v2 without rewriting
+v8. `agent-control-v10.json` adds Apple Keychain diagnostics, v11 moves pairing
+into the Agent boundary, v12 adds pinned route migration, and v13 adds durable
+Transfer controls. `agent-control-v14.json` is the current contract and adds an
+Agent-owned Inbox preference plus ephemeral, bounded Transfer telemetry without
+rewriting v9-v13.

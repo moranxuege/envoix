@@ -27,14 +27,16 @@ use envoix_client::model::{
 };
 use envoix_client::ports::{PlatformPortError, SecureVaultPort};
 use envoix_client::product::{
-    AGENT_PROTOCOL_VERSION, AgentControlTransport, AgentCredentialProtection, AgentDiagnostics,
-    AgentEvent, AgentEventCursor, AgentEventEnvelope, AgentOfferDecision, AgentPathKind,
-    AgentPendingOffer, AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
+    AGENT_PREFERENCES_VERSION, AGENT_PROTOCOL_VERSION, AgentControlTransport,
+    AgentCredentialProtection, AgentDiagnostics, AgentEvent, AgentEventCursor, AgentEventEnvelope,
+    AgentOfferDecision, AgentPathKind, AgentPendingOffer, AgentPreferences,
+    AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
     AgentResponseEnvelope, AgentSettings, AgentSnapshot, AgentStatus, AgentTransferPath,
-    DeviceSummary, InboxItem, InboxRoot, MAX_AGENT_ACTIVE_PATHS, MAX_AGENT_EVENT_BATCH,
-    MAX_AGENT_PENDING_OFFERS, MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, PairingInvitation,
-    PreparedRememberedDevice, ProductStore, RememberedDeviceRecord, default_agent_control_endpoint,
-    default_agent_state_directory, is_valid_agent_request_id,
+    AgentTransferPhase, AgentTransferTelemetry, DeviceSummary, InboxItem, InboxRoot,
+    MAX_AGENT_ACTIVE_PATHS, MAX_AGENT_EVENT_BATCH, MAX_AGENT_PENDING_OFFERS,
+    MAX_AGENT_REQUEST_BYTES, MAX_AGENT_RESPONSE_BYTES, MAX_AGENT_TRANSFER_TELEMETRY,
+    PairingInvitation, PreparedRememberedDevice, ProductStore, RememberedDeviceRecord,
+    default_agent_control_endpoint, default_agent_state_directory, is_valid_agent_request_id,
 };
 #[cfg(windows)]
 use envoix_client::product::{current_windows_user_sid, windows_process_user_sid};
@@ -59,6 +61,8 @@ const INITIAL_PAIRING_RETRY_DELAY: Duration = Duration::from_millis(750);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const MAX_RETAINED_AGENT_EVENTS: usize = 1_024;
 const OUTGOING_PROGRESS_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
+const TELEMETRY_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+const AGENT_PREFERENCES_FILE: &str = "preferences-v1.json";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -380,18 +384,25 @@ impl AgentHost {
         }
         let lifecycle = self.lifecycle.clone();
         create_private_directory(&self.config.state_directory)?;
-        create_directory(&self.config.inbox_directory)?;
+        let preferences = load_agent_preferences(
+            &self.config.state_directory,
+            self.config.inbox_directory.clone(),
+        )?;
+        create_directory(&preferences.inbox_directory)?;
         let store = ProductStore::open_with_vault(&self.config.state_directory, self.vault)?;
         let runtime = Arc::new(AgentRuntime {
             config: self.config,
+            preferences: Mutex::new(preferences),
             client: self.client,
             store: Mutex::new(store),
             credential_protection: self.credential_protection,
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new()?),
             shutdown: self.shutdown.token,
@@ -422,14 +433,17 @@ fn desktop_credential_protection() -> AgentCredentialProtection {
 
 struct AgentRuntime {
     config: AgentHostConfiguration,
+    preferences: Mutex<AgentPreferences>,
     client: api::Client,
     store: Mutex<ProductStore>,
     credential_protection: AgentCredentialProtection,
     active_receivers: Mutex<HashMap<String, TransferCancelToken>>,
     active_rooms: Mutex<HashMap<String, Arc<Notify>>>,
     active_outgoing: Mutex<HashMap<String, ActiveOutgoingTransfer>>,
+    active_incoming: Mutex<HashSet<String>>,
     active_pairings: Mutex<HashSet<String>>,
     active_paths: Mutex<Vec<AgentTransferPath>>,
+    telemetry: Mutex<HashMap<String, LiveTransferTelemetry>>,
     pending_offers: Mutex<HashMap<String, PendingOfferControl>>,
     events: Mutex<AgentEventLog>,
     shutdown: TransferCancelToken,
@@ -439,6 +453,152 @@ struct AgentRuntime {
 struct ActiveOutgoingTransfer {
     relationship_id: String,
     cancel: TransferCancelToken,
+}
+
+struct LiveTransferTelemetry {
+    value: AgentTransferTelemetry,
+    started_at: Instant,
+    started_bytes: u64,
+    last_sample_at: Instant,
+    last_sample_bytes: u64,
+    last_event_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+struct TransferContentSummary {
+    root_names: Vec<String>,
+    item_count: u32,
+    directory_count: u32,
+}
+
+impl From<&RoomTransferOffer> for TransferContentSummary {
+    fn from(offer: &RoomTransferOffer) -> Self {
+        Self {
+            root_names: offer.root_names.clone(),
+            item_count: offer.item_count,
+            directory_count: offer.directory_count,
+        }
+    }
+}
+
+impl LiveTransferTelemetry {
+    fn new(
+        transfer_id: String,
+        relationship_id: String,
+        direction: TransferDirection,
+        content: TransferContentSummary,
+        phase: AgentTransferPhase,
+        transferred_bytes: u64,
+        total_bytes: u64,
+        now: Instant,
+        sampled_at_unix_ms: u64,
+    ) -> Self {
+        Self {
+            value: AgentTransferTelemetry {
+                transfer_id,
+                relationship_id,
+                direction,
+                root_names: content.root_names,
+                item_count: content.item_count,
+                directory_count: content.directory_count,
+                phase,
+                transferred_bytes,
+                total_bytes,
+                current_bytes_per_second: 0,
+                average_bytes_per_second: 0,
+                eta_seconds: None,
+                sampled_at_unix_ms,
+            },
+            started_at: now,
+            started_bytes: transferred_bytes,
+            last_sample_at: now,
+            last_sample_bytes: transferred_bytes,
+            last_event_at: None,
+        }
+    }
+
+    fn set_phase(
+        &mut self,
+        phase: AgentTransferPhase,
+        now: Instant,
+        sampled_at_unix_ms: u64,
+    ) -> bool {
+        let changed = self.value.phase != phase;
+        self.value.phase = phase;
+        self.value.sampled_at_unix_ms = sampled_at_unix_ms;
+        if phase != AgentTransferPhase::Transferring {
+            self.value.current_bytes_per_second = 0;
+            self.value.eta_seconds = None;
+        }
+        self.should_publish(now, changed)
+    }
+
+    fn observe_progress(
+        &mut self,
+        transferred_bytes: u64,
+        total_bytes: u64,
+        now: Instant,
+        sampled_at_unix_ms: u64,
+    ) -> Result<bool> {
+        if total_bytes != self.value.total_bytes
+            || transferred_bytes > total_bytes
+            || transferred_bytes < self.value.transferred_bytes
+        {
+            bail!("live Transfer telemetry is inconsistent with its declared total");
+        }
+        self.value.phase = AgentTransferPhase::Transferring;
+        let interval_millis = now.duration_since(self.last_sample_at).as_millis();
+        if interval_millis > 0 {
+            self.value.current_bytes_per_second = scaled_rate(
+                transferred_bytes.saturating_sub(self.last_sample_bytes),
+                interval_millis,
+            );
+            self.last_sample_at = now;
+            self.last_sample_bytes = transferred_bytes;
+        }
+        let elapsed_millis = now.duration_since(self.started_at).as_millis();
+        if elapsed_millis > 0 {
+            self.value.average_bytes_per_second = scaled_rate(
+                transferred_bytes.saturating_sub(self.started_bytes),
+                elapsed_millis,
+            );
+        }
+        self.value.transferred_bytes = transferred_bytes;
+        self.value.sampled_at_unix_ms = sampled_at_unix_ms;
+        self.value.eta_seconds = estimated_seconds_remaining(
+            transferred_bytes,
+            total_bytes,
+            self.value.current_bytes_per_second,
+        );
+        Ok(self.should_publish(now, transferred_bytes == total_bytes))
+    }
+
+    fn should_publish(&mut self, now: Instant, force: bool) -> bool {
+        if force
+            || self
+                .last_event_at
+                .is_none_or(|last| now.duration_since(last) >= TELEMETRY_EVENT_INTERVAL)
+        {
+            self.last_event_at = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn scaled_rate(bytes: u64, elapsed_millis: u128) -> u64 {
+    if bytes == 0 || elapsed_millis == 0 {
+        return 0;
+    }
+    u64::try_from(u128::from(bytes).saturating_mul(1_000) / elapsed_millis).unwrap_or(u64::MAX)
+}
+
+fn estimated_seconds_remaining(transferred_bytes: u64, total_bytes: u64, rate: u64) -> Option<u64> {
+    if rate == 0 || transferred_bytes >= total_bytes {
+        return None;
+    }
+    Some(total_bytes.saturating_sub(transferred_bytes).div_ceil(rate))
 }
 
 struct PreparedOutgoingTransfer {
@@ -465,6 +625,64 @@ struct ActivePathCleanup {
     runtime: Arc<AgentRuntime>,
     transfer_id: String,
     direction: TransferDirection,
+}
+
+struct LiveTelemetryCleanup {
+    runtime: Arc<AgentRuntime>,
+    transfer_id: String,
+}
+
+impl LiveTelemetryCleanup {
+    fn new(runtime: Arc<AgentRuntime>, transfer_id: impl Into<String>) -> Self {
+        Self {
+            runtime,
+            transfer_id: transfer_id.into(),
+        }
+    }
+}
+
+impl Drop for LiveTelemetryCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = self.runtime.clear_transfer_telemetry(&self.transfer_id) {
+            tracing::error!(
+                transfer_id = %self.transfer_id,
+                %error,
+                "live Transfer telemetry could not be cleared"
+            );
+        }
+    }
+}
+
+struct ActiveIncomingCleanup {
+    runtime: Arc<AgentRuntime>,
+    transfer_id: String,
+}
+
+impl ActiveIncomingCleanup {
+    fn register(runtime: Arc<AgentRuntime>, transfer_id: impl Into<String>) -> Result<Self> {
+        let transfer_id = transfer_id.into();
+        if !lock(&runtime.active_incoming)?.insert(transfer_id.clone()) {
+            bail!("incoming Transfer is already active");
+        }
+        Ok(Self {
+            runtime,
+            transfer_id,
+        })
+    }
+}
+
+impl Drop for ActiveIncomingCleanup {
+    fn drop(&mut self) {
+        match self.runtime.active_incoming.lock() {
+            Ok(mut active) => {
+                active.remove(&self.transfer_id);
+            }
+            Err(_) => tracing::error!(
+                transfer_id = %self.transfer_id,
+                "active incoming Transfer state is poisoned"
+            ),
+        }
+    }
 }
 
 impl ActivePathCleanup {
@@ -585,6 +803,7 @@ impl AgentEventLog {
 
 impl AgentRuntime {
     fn status(&self) -> Result<AgentStatus> {
+        let preferences = lock(&self.preferences)?.clone();
         let paired_devices = lock(&self.store)?.devices().len();
         let active_receivers = lock(&self.active_receivers)?.len();
         let active_pairings = lock(&self.active_pairings)?.len();
@@ -598,7 +817,7 @@ impl AgentRuntime {
             pid: std::process::id(),
             device_name: self.config.device_name.clone(),
             state_directory: self.config.state_directory.display().to_string(),
-            inbox_directory: self.config.inbox_directory.display().to_string(),
+            inbox_directory: preferences.inbox_directory.display().to_string(),
             broker: self.config.broker.clone(),
             relay: self.config.relay.clone(),
             paired_devices,
@@ -618,6 +837,7 @@ impl AgentRuntime {
     fn snapshot(&self, inbox_limit: usize) -> Result<AgentSnapshot> {
         let status = self.status()?;
         let active_paths = self.active_paths()?;
+        let telemetry = self.transfer_telemetry()?;
         let pending_offers = self.pending_offers()?;
         let store = lock(&self.store)?;
         let event_cursor = lock(&self.events)?.cursor();
@@ -626,6 +846,7 @@ impl AgentRuntime {
             engine: store.engine_snapshot(),
             inbox: store.inbox(inbox_limit),
             active_paths,
+            telemetry,
             pending_offers,
             event_cursor,
         })
@@ -676,6 +897,111 @@ impl AgentRuntime {
             })
         });
         Ok(paths)
+    }
+
+    fn transfer_telemetry(&self) -> Result<Vec<AgentTransferTelemetry>> {
+        let mut telemetry = lock(&self.telemetry)?
+            .values()
+            .map(|value| value.value.clone())
+            .collect::<Vec<_>>();
+        telemetry.sort_by(|left, right| left.transfer_id.cmp(&right.transfer_id));
+        Ok(telemetry)
+    }
+
+    fn start_transfer_telemetry(
+        &self,
+        transfer_id: String,
+        relationship_id: String,
+        direction: TransferDirection,
+        content: TransferContentSummary,
+        transferred_bytes: u64,
+        total_bytes: u64,
+    ) -> Result<()> {
+        let now = Instant::now();
+        let mut telemetry = lock(&self.telemetry)?;
+        if telemetry.contains_key(&transfer_id) {
+            bail!("live Transfer telemetry already exists");
+        }
+        if telemetry.len() >= MAX_AGENT_TRANSFER_TELEMETRY {
+            bail!("Agent already has the maximum number of live Transfer measurements");
+        }
+        telemetry.insert(
+            transfer_id.clone(),
+            LiveTransferTelemetry::new(
+                transfer_id.clone(),
+                relationship_id,
+                direction,
+                content,
+                AgentTransferPhase::Pairing,
+                transferred_bytes,
+                total_bytes,
+                now,
+                unix_millis()?,
+            ),
+        );
+        drop(telemetry);
+        record_agent_event(self, AgentEvent::TransferTelemetryChanged { transfer_id })
+    }
+
+    fn set_transfer_phase(&self, transfer_id: &str, phase: AgentTransferPhase) -> Result<()> {
+        let should_publish = {
+            let mut telemetry = lock(&self.telemetry)?;
+            let value = telemetry
+                .get_mut(transfer_id)
+                .ok_or_else(|| anyhow!("live Transfer telemetry does not exist"))?;
+            value.set_phase(phase, Instant::now(), unix_millis()?)
+        };
+        if should_publish {
+            record_agent_event(
+                self,
+                AgentEvent::TransferTelemetryChanged {
+                    transfer_id: transfer_id.to_string(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn observe_transfer_progress(
+        &self,
+        transfer_id: &str,
+        transferred_bytes: u64,
+        total_bytes: u64,
+    ) -> Result<()> {
+        let should_publish = {
+            let mut telemetry = lock(&self.telemetry)?;
+            let value = telemetry
+                .get_mut(transfer_id)
+                .ok_or_else(|| anyhow!("live Transfer telemetry does not exist"))?;
+            value.observe_progress(
+                transferred_bytes,
+                total_bytes,
+                Instant::now(),
+                unix_millis()?,
+            )?
+        };
+        if should_publish {
+            record_agent_event(
+                self,
+                AgentEvent::TransferTelemetryChanged {
+                    transfer_id: transfer_id.to_string(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn clear_transfer_telemetry(&self, transfer_id: &str) -> Result<()> {
+        let removed = lock(&self.telemetry)?.remove(transfer_id).is_some();
+        if removed {
+            record_agent_event(
+                self,
+                AgentEvent::TransferTelemetryChanged {
+                    transfer_id: transfer_id.to_string(),
+                },
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -887,8 +1213,9 @@ fn requires_explicit_offer_approval(total_bytes: u64, allocatable_bytes: u64) ->
 }
 
 fn prepare_inbox_destination(runtime: &AgentRuntime) -> Result<(PathBuf, u64)> {
-    create_directory(&runtime.config.inbox_directory)?;
-    let target_directory = fs::canonicalize(&runtime.config.inbox_directory)?;
+    let inbox_directory = lock(&runtime.preferences)?.inbox_directory.clone();
+    create_directory(&inbox_directory)?;
+    let target_directory = fs::canonicalize(&inbox_directory)?;
     let allocatable_bytes = api::local_allocatable_bytes(&target_directory)?;
     Ok((target_directory, allocatable_bytes))
 }
@@ -1134,6 +1461,47 @@ fn read_agent_settings(path: &Path) -> Result<AgentSettings> {
     Ok(settings)
 }
 
+fn load_agent_preferences(
+    state_directory: &Path,
+    default_inbox_directory: PathBuf,
+) -> Result<AgentPreferences> {
+    let path = state_directory.join(AGENT_PREFERENCES_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let preferences = AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: default_inbox_directory,
+            };
+            preferences.validate()?;
+            return Ok(preferences);
+        }
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let preferences: AgentPreferences =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    preferences
+        .validate()
+        .with_context(|| format!("validate {}", path.display()))?;
+    Ok(preferences)
+}
+
+fn persist_agent_preferences(state_directory: &Path, preferences: &AgentPreferences) -> Result<()> {
+    preferences.validate()?;
+    let path = state_directory.join(AGENT_PREFERENCES_FILE);
+    let temporary = state_directory.join(format!(".{AGENT_PREFERENCES_FILE}.tmp"));
+    let bytes = serde_json::to_vec(preferences)?;
+    fs::write(&temporary, bytes).with_context(|| format!("write {}", temporary.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(
+        &temporary,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )?;
+    fs::rename(&temporary, &path)
+        .with_context(|| format!("commit Agent preferences {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(unix)]
 async fn serve(
     runtime: Arc<AgentRuntime>,
@@ -1150,7 +1518,7 @@ async fn serve(
     let _cleanup = SocketCleanup(runtime.config.control_endpoint.clone());
     tracing::info!(
         endpoint = %runtime.config.control_endpoint.display(),
-        inbox = %runtime.config.inbox_directory.display(),
+        inbox = %lock(&runtime.preferences)?.inbox_directory.display(),
         "Envoix Agent ready"
     );
     if runtime.shutdown.is_cancelled() {
@@ -1190,7 +1558,7 @@ async fn serve(
     let mut server = create_windows_pipe(&endpoint, &owner_sid, true)?;
     tracing::info!(
         endpoint,
-        inbox = %runtime.config.inbox_directory.display(),
+        inbox = %lock(&runtime.preferences)?.inbox_directory.display(),
         "Envoix Agent ready"
     );
     if runtime.shutdown.is_cancelled() {
@@ -1622,6 +1990,7 @@ async fn handle_request_result(
         AgentRequest::RemoveTransfer { transfer_id } => {
             remove_agent_transfer(&runtime, &transfer_id)
         }
+        AgentRequest::SetInboxDirectory { path } => set_agent_inbox_directory(&runtime, path),
         AgentRequest::ListPendingOffers => Ok(AgentResponse::PendingOffers {
             offers: runtime.pending_offers()?,
         }),
@@ -1725,6 +2094,31 @@ fn remove_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<Ag
     Ok(AgentResponse::TransferRemoved {
         transfer_id: transfer_id.to_string(),
     })
+}
+
+fn set_agent_inbox_directory(
+    runtime: &AgentRuntime,
+    inbox_directory: PathBuf,
+) -> Result<AgentResponse> {
+    if !lock(&runtime.active_incoming)?.is_empty() || !lock(&runtime.pending_offers)?.is_empty() {
+        bail!("Inbox location cannot change while an incoming Transfer is active");
+    }
+    create_directory(&inbox_directory)?;
+    let inbox_directory = fs::canonicalize(&inbox_directory)
+        .with_context(|| format!("resolve Inbox directory {}", inbox_directory.display()))?;
+    let preferences = AgentPreferences {
+        version: AGENT_PREFERENCES_VERSION,
+        inbox_directory,
+    };
+    preferences.validate()?;
+    persist_agent_preferences(&runtime.config.state_directory, &preferences)?;
+    *lock(&runtime.preferences)? = preferences.clone();
+    record_agent_event(runtime, AgentEvent::InboxDirectoryChanged)?;
+    tracing::info!(
+        inbox = %preferences.inbox_directory.display(),
+        "Agent Inbox directory changed by local control client"
+    );
+    Ok(AgentResponse::PreferencesUpdated { preferences })
 }
 
 async fn create_agent_transfer(
@@ -2928,11 +3322,23 @@ fn start_outgoing_transfer(
             },
         );
     }
+    if let Err(error) = runtime.start_transfer_telemetry(
+        transfer_id.to_string(),
+        outgoing.transfer.relationship_id.to_string(),
+        TransferDirection::Send,
+        TransferContentSummary::from(&outgoing.offer),
+        outgoing.transfer.transferred_bytes,
+        outgoing.transfer.total_bytes,
+    ) {
+        lock(&runtime.active_outgoing)?.remove(transfer_id.as_str());
+        return Err(error);
+    }
     let task_runtime = runtime.clone();
     if let Err(error) = spawn_background_task(runtime, async move {
         run_outgoing_transfer(task_runtime, session, outgoing, cancel).await;
     }) {
         lock(&runtime.active_outgoing)?.remove(transfer_id.as_str());
+        runtime.clear_transfer_telemetry(transfer_id.as_str())?;
         return Err(error);
     }
     Ok(())
@@ -2946,6 +3352,7 @@ async fn run_outgoing_transfer(
 ) {
     let transfer_id = outgoing.transfer.id.clone();
     let relationship_id = outgoing.transfer.relationship_id.to_string();
+    let _telemetry_cleanup = LiveTelemetryCleanup::new(runtime.clone(), transfer_id.to_string());
     let _path_cleanup = ActivePathCleanup::new(
         runtime.clone(),
         transfer_id.to_string(),
@@ -3098,6 +3505,17 @@ async fn receive_room_offer(
     offer: RoomTransferOffer,
     exceptional_transfer_approved: bool,
 ) -> Result<InboxItem> {
+    let _incoming_cleanup =
+        ActiveIncomingCleanup::register(runtime.clone(), offer.offer_id.clone())?;
+    runtime.start_transfer_telemetry(
+        offer.offer_id.clone(),
+        device_id.to_string(),
+        TransferDirection::Receive,
+        TransferContentSummary::from(&offer),
+        0,
+        offer.total_bytes,
+    )?;
+    let _telemetry_cleanup = LiveTelemetryCleanup::new(runtime.clone(), offer.offer_id.clone());
     let bootstrap = api::parse_invitation_for_role(
         &offer.transfer_invite,
         TransferRole::Receiver,
@@ -3314,8 +3732,28 @@ impl AgentOutgoingEvents {
     }
 
     fn set_phase(&self, phase: FailurePhase) {
+        self.set_phase_with_telemetry(phase, agent_phase_from_failure_phase(phase));
+    }
+
+    fn set_phase_with_telemetry(&self, phase: FailurePhase, telemetry_phase: AgentTransferPhase) {
         match self.projection.lock() {
-            Ok(mut projection) if projection.error.is_none() => projection.phase = phase,
+            Ok(mut projection) if projection.error.is_none() => {
+                projection.phase = phase;
+                drop(projection);
+                if let Err(error) = self
+                    .runtime
+                    .set_transfer_phase(self.transfer_id.as_str(), telemetry_phase)
+                {
+                    if let Ok(mut projection) = self.projection.lock() {
+                        self.fail_projection(
+                            &mut projection,
+                            format!("project live Transfer phase: {error}"),
+                        );
+                    } else {
+                        self.cancel.cancel();
+                    }
+                }
+            }
             Ok(_) => {}
             Err(_) => self.cancel.cancel(),
         }
@@ -3349,6 +3787,17 @@ impl AgentOutgoingEvents {
         if bytes_transferred < projection.persisted_bytes {
             return;
         }
+        if let Err(error) = self.runtime.observe_transfer_progress(
+            self.transfer_id.as_str(),
+            bytes_transferred,
+            total_bytes,
+        ) {
+            self.fail_projection(
+                &mut projection,
+                format!("project live Transfer progress: {error}"),
+            );
+            return;
+        }
         if bytes_transferred != total_bytes
             && bytes_transferred.saturating_sub(projection.persisted_bytes)
                 < OUTGOING_PROGRESS_CHECKPOINT_BYTES
@@ -3377,6 +3826,19 @@ impl AgentOutgoingEvents {
         ) {
             tracing::error!(transfer_id = %self.transfer_id, %error, "progress event could not be recorded");
         }
+    }
+}
+
+fn agent_phase_from_failure_phase(phase: FailurePhase) -> AgentTransferPhase {
+    match phase {
+        FailurePhase::Setup => AgentTransferPhase::Pairing,
+        FailurePhase::Pairing => AgentTransferPhase::Pairing,
+        FailurePhase::Connecting => AgentTransferPhase::Connecting,
+        FailurePhase::Authenticating => AgentTransferPhase::Authenticating,
+        FailurePhase::Negotiating => AgentTransferPhase::Negotiating,
+        FailurePhase::Transferring => AgentTransferPhase::Transferring,
+        FailurePhase::Verifying => AgentTransferPhase::Verifying,
+        FailurePhase::Committing => AgentTransferPhase::Finalizing,
     }
 }
 
@@ -3409,14 +3871,25 @@ impl EventSink for AgentOutgoingEvents {
                 ..
             } => self.project_progress(bytes_transferred, total_bytes),
             TransferEvent::ManifestV2Phase { phase, .. } => {
-                let phase = match phase {
-                    api::ManifestV2ProgressPhase::Transferring => FailurePhase::Transferring,
-                    api::ManifestV2ProgressPhase::Verifying => FailurePhase::Verifying,
-                    api::ManifestV2ProgressPhase::Saving
-                    | api::ManifestV2ProgressPhase::WaitingForReceiverSave
-                    | api::ManifestV2ProgressPhase::FinalizingDelivery => FailurePhase::Committing,
+                let (failure_phase, telemetry_phase) = match phase {
+                    api::ManifestV2ProgressPhase::Transferring => {
+                        (FailurePhase::Transferring, AgentTransferPhase::Transferring)
+                    }
+                    api::ManifestV2ProgressPhase::Verifying => {
+                        (FailurePhase::Verifying, AgentTransferPhase::Verifying)
+                    }
+                    api::ManifestV2ProgressPhase::Saving => {
+                        (FailurePhase::Committing, AgentTransferPhase::Saving)
+                    }
+                    api::ManifestV2ProgressPhase::WaitingForReceiverSave => (
+                        FailurePhase::Committing,
+                        AgentTransferPhase::WaitingForReceiver,
+                    ),
+                    api::ManifestV2ProgressPhase::FinalizingDelivery => {
+                        (FailurePhase::Committing, AgentTransferPhase::Finalizing)
+                    }
                 };
-                self.set_phase(phase);
+                self.set_phase_with_telemetry(failure_phase, telemetry_phase);
             }
             TransferEvent::StageTiming { stage, .. } => {
                 let phase = match stage {
@@ -3445,18 +3918,73 @@ struct AgentIncomingEvents {
 
 impl EventSink for AgentIncomingEvents {
     fn on_event(&self, event: TransferEvent) {
-        if let TransferEvent::Connected { path } | TransferEvent::PathChanged { path } = &event
-            && let Err(error) = set_active_path(
-                &self.runtime,
+        let projection = match &event {
+            TransferEvent::Diagnostic { .. } => Ok(()),
+            TransferEvent::Pairing { .. } => self
+                .runtime
+                .set_transfer_phase(&self.transfer_id, AgentTransferPhase::Pairing),
+            TransferEvent::Connecting => self
+                .runtime
+                .set_transfer_phase(&self.transfer_id, AgentTransferPhase::Connecting),
+            TransferEvent::Connected { path } | TransferEvent::PathChanged { path } => {
+                set_active_path(
+                    &self.runtime,
+                    &self.transfer_id,
+                    TransferDirection::Receive,
+                    path,
+                )
+                .and_then(|()| {
+                    self.runtime
+                        .set_transfer_phase(&self.transfer_id, AgentTransferPhase::Connecting)
+                })
+            }
+            TransferEvent::Progress {
+                bytes_transferred,
+                total_bytes,
+                ..
+            } => self.runtime.observe_transfer_progress(
                 &self.transfer_id,
-                TransferDirection::Receive,
-                path,
-            )
-        {
+                *bytes_transferred,
+                *total_bytes,
+            ),
+            TransferEvent::ManifestV2Phase { phase, .. } => {
+                let phase = match phase {
+                    api::ManifestV2ProgressPhase::Transferring => AgentTransferPhase::Transferring,
+                    api::ManifestV2ProgressPhase::Verifying => AgentTransferPhase::Verifying,
+                    api::ManifestV2ProgressPhase::Saving => AgentTransferPhase::Saving,
+                    api::ManifestV2ProgressPhase::WaitingForReceiverSave => {
+                        AgentTransferPhase::WaitingForReceiver
+                    }
+                    api::ManifestV2ProgressPhase::FinalizingDelivery => {
+                        AgentTransferPhase::Finalizing
+                    }
+                };
+                self.runtime.set_transfer_phase(&self.transfer_id, phase)
+            }
+            TransferEvent::StageTiming { stage, .. } => {
+                let phase = match stage {
+                    api::TransferStage::SessionStarted => AgentTransferPhase::Pairing,
+                    api::TransferStage::ConnectionReady => AgentTransferPhase::Connecting,
+                    api::TransferStage::AuthenticationStarted
+                    | api::TransferStage::AuthenticationComplete => {
+                        AgentTransferPhase::Authenticating
+                    }
+                    api::TransferStage::ManifestOffer | api::TransferStage::ManifestAccepted => {
+                        AgentTransferPhase::Negotiating
+                    }
+                    api::TransferStage::FirstPayload => AgentTransferPhase::Transferring,
+                    api::TransferStage::PayloadComplete => AgentTransferPhase::Verifying,
+                    api::TransferStage::DeliveryComplete => AgentTransferPhase::Finalizing,
+                    api::TransferStage::Canceled | api::TransferStage::Failed => return,
+                };
+                self.runtime.set_transfer_phase(&self.transfer_id, phase)
+            }
+        };
+        if let Err(error) = projection {
             tracing::error!(
                 transfer_id = %self.transfer_id,
                 %error,
-                "incoming transfer path could not be recorded"
+                "incoming Transfer telemetry could not be projected"
             );
         }
         tracing::debug!(?event, "incoming transfer event");
@@ -3783,7 +4311,7 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v13_envelope() {
+    fn request_decoder_accepts_a_valid_v14_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -3873,14 +4401,20 @@ mod tests {
                 broker: "broker".into(),
                 relay: None,
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -3904,6 +4438,7 @@ mod tests {
         assert_eq!(snapshot.engine.contract_version, 6);
         assert!(snapshot.inbox.is_empty());
         assert!(snapshot.active_paths.is_empty());
+        assert!(snapshot.telemetry.is_empty());
         assert!(snapshot.pending_offers.is_empty());
         assert_eq!(snapshot.event_cursor.sequence, 0);
         snapshot.event_cursor.validate().unwrap();
@@ -3996,8 +4531,83 @@ mod tests {
             ]
         ));
         assert_eq!(
-            handle_request(runtime, AgentRequest::LatestInbox).await,
+            handle_request(runtime.clone(), AgentRequest::LatestInbox).await,
             AgentResponse::Latest { item: None }
+        );
+
+        let selected_inbox = directory.path().join("selected-inbox");
+        let AgentResponse::PreferencesUpdated { preferences } = handle_request(
+            runtime.clone(),
+            AgentRequest::SetInboxDirectory {
+                path: selected_inbox.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("unexpected preferences response")
+        };
+        let selected_inbox = selected_inbox.canonicalize().unwrap();
+        assert_eq!(preferences.inbox_directory, selected_inbox);
+        assert_eq!(
+            load_agent_preferences(&state_directory, state_directory.join("fallback"))
+                .unwrap()
+                .inbox_directory,
+            selected_inbox
+        );
+        lock(&runtime.active_incoming)
+            .unwrap()
+            .insert("transfer_active".into());
+        assert!(matches!(
+            handle_request(
+                runtime,
+                AgentRequest::SetInboxDirectory {
+                    path: directory.path().join("blocked-inbox"),
+                },
+            )
+            .await,
+            AgentResponse::Error { .. }
+        ));
+    }
+
+    #[test]
+    fn live_telemetry_calculates_rate_eta_and_non_transfer_phases() {
+        let started = Instant::now();
+        let mut telemetry = LiveTransferTelemetry::new(
+            "transfer_metrics".into(),
+            "relationship_metrics".into(),
+            TransferDirection::Send,
+            TransferContentSummary {
+                root_names: vec!["fixture.bin".into()],
+                item_count: 1,
+                directory_count: 0,
+            },
+            AgentTransferPhase::Pairing,
+            100,
+            1_100,
+            started,
+            1_000,
+        );
+
+        assert!(
+            telemetry
+                .observe_progress(300, 1_100, started + Duration::from_millis(200), 1_200)
+                .unwrap()
+        );
+        assert_eq!(telemetry.value.current_bytes_per_second, 1_000);
+        assert_eq!(telemetry.value.average_bytes_per_second, 1_000);
+        assert_eq!(telemetry.value.eta_seconds, Some(1));
+
+        assert!(telemetry.set_phase(
+            AgentTransferPhase::Saving,
+            started + Duration::from_millis(300),
+            1_300,
+        ));
+        assert_eq!(telemetry.value.current_bytes_per_second, 0);
+        assert_eq!(telemetry.value.eta_seconds, None);
+        assert!(
+            telemetry
+                .observe_progress(200, 1_100, started, 900)
+                .is_err()
         );
     }
 
@@ -4031,6 +4641,10 @@ mod tests {
                 broker: "broker".into(),
                 relay: None,
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(store),
             credential_protection: desktop_credential_protection(),
@@ -4043,8 +4657,10 @@ mod tests {
                     cancel: active_cancel.clone(),
                 },
             )])),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -4213,14 +4829,20 @@ mod tests {
                 broker: "broker".into(),
                 relay: None,
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -4337,14 +4959,20 @@ mod tests {
                 broker: DEFAULT_RENDEZVOUS_BROKER.into(),
                 relay: None,
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(store),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown,
@@ -4462,6 +5090,12 @@ mod tests {
             )
             .unwrap();
         store.start_outgoing_transfer(&transfer_id).unwrap();
+        let relationship_id = store
+            .transfer(transfer_id.as_str())
+            .unwrap()
+            .unwrap()
+            .relationship_id
+            .to_string();
         let initial_sequence = store.engine_snapshot().last_sequence;
         let runtime = Arc::new(AgentRuntime {
             config: AgentHostConfiguration {
@@ -4472,19 +5106,39 @@ mod tests {
                 broker: "broker".into(),
                 relay: None,
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(store),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
             background_tasks: Mutex::new(Vec::new()),
         });
+        runtime
+            .start_transfer_telemetry(
+                transfer_id.to_string(),
+                relationship_id,
+                TransferDirection::Send,
+                TransferContentSummary {
+                    root_names: vec!["fixture.bin".into()],
+                    item_count: 1,
+                    directory_count: 0,
+                },
+                0,
+                16,
+            )
+            .unwrap();
         let events = AgentOutgoingEvents::new(
             runtime.clone(),
             transfer_id.clone(),
@@ -4582,14 +5236,20 @@ mod tests {
                 broker: broker_text.clone(),
                 relay: None,
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(store),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown,
@@ -4621,14 +5281,20 @@ mod tests {
                 broker: broker_text.clone(),
                 relay: None,
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -4872,7 +5538,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v13_envelope() {
+    async fn local_socket_round_trips_a_v14_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -4881,17 +5547,23 @@ mod tests {
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: state_directory.join("agent.sock"),
                 device_name: "test-wsl".into(),
-                broker: "broker".into(),
-                relay: None,
+                broker: DEFAULT_RENDEZVOUS_BROKER.into(),
+                relay: Some(DEFAULT_RELAY_URL.into()),
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -4916,7 +5588,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_named_pipe_round_trips_a_v12_envelope_for_its_owner() {
+    async fn windows_named_pipe_round_trips_a_v14_envelope_for_its_owner() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let directory = tempfile::tempdir().unwrap();
@@ -4932,17 +5604,23 @@ mod tests {
                 inbox_directory: state_directory.join("inbox"),
                 control_endpoint: PathBuf::from(&endpoint),
                 device_name: "test-windows".into(),
-                broker: "broker".into(),
-                relay: None,
+                broker: DEFAULT_RENDEZVOUS_BROKER.into(),
+                relay: Some(DEFAULT_RELAY_URL.into()),
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(ProductStore::open(&state_directory).unwrap()),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -5017,6 +5695,10 @@ mod tests {
                 broker: "broker".into(),
                 relay: None,
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(store),
             credential_protection: desktop_credential_protection(),
@@ -5032,8 +5714,10 @@ mod tests {
                     cancel: outgoing_cancel.clone(),
                 },
             )])),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown: TransferCancelToken::new(),
@@ -5108,14 +5792,20 @@ mod tests {
                 broker: DEFAULT_RENDEZVOUS_BROKER.into(),
                 relay: Some(DEFAULT_RELAY_URL.into()),
             },
+            preferences: Mutex::new(AgentPreferences {
+                version: AGENT_PREFERENCES_VERSION,
+                inbox_directory: state_directory.join("inbox"),
+            }),
             client: api::Client::default(),
             store: Mutex::new(store),
             credential_protection: desktop_credential_protection(),
             active_receivers: Mutex::new(HashMap::new()),
             active_rooms: Mutex::new(HashMap::new()),
             active_outgoing: Mutex::new(HashMap::new()),
+            active_incoming: Mutex::new(HashSet::new()),
             active_pairings: Mutex::new(HashSet::new()),
             active_paths: Mutex::new(Vec::new()),
+            telemetry: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
             events: Mutex::new(AgentEventLog::new().unwrap()),
             shutdown,

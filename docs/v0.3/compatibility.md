@@ -73,7 +73,7 @@ state and then re-pairing:
 ```text
 stop/uninstall the old Agent with confirmed state cleanup
   -> install the paired v0.3 CLI and Agent
-  -> verify protocol v13 and Engine schema v2
+  -> verify protocol v14 and Engine schema v2
   -> pair supported devices again
 ```
 

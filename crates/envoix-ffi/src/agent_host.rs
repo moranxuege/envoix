@@ -16,8 +16,9 @@ use envoix_client::product::AGENT_PROTOCOL_VERSION;
 use envoix_client::product::{
     AgentControlTransport, AgentCredentialProtection, AgentDiagnostics, AgentEvent,
     AgentEventCursor, AgentEventEnvelope, AgentOfferDecision, AgentPathKind, AgentPendingOffer,
-    AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse, AgentSnapshot,
-    AgentStatus, AgentTransferPath, DeviceSummary, InboxItem, InboxRoot, PairingInvitation,
+    AgentPreferences, AgentRelationshipChange, AgentRequest, AgentRequestEnvelope, AgentResponse,
+    AgentSnapshot, AgentStatus, AgentTransferPath, AgentTransferPhase, AgentTransferTelemetry,
+    DeviceSummary, InboxItem, InboxRoot, PairingInvitation,
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -366,6 +367,9 @@ pub enum FfiAgentRequest {
     RemoveTransfer {
         transfer_id: String,
     },
+    SetInboxDirectory {
+        path: String,
+    },
     ListPendingOffers,
     DecidePendingOffer {
         offer_id: String,
@@ -462,6 +466,42 @@ pub struct FfiAgentTransferPath {
     pub path: FfiAgentPathKind,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiAgentTransferPhase {
+    Pairing,
+    Connecting,
+    Authenticating,
+    Negotiating,
+    Transferring,
+    Verifying,
+    Saving,
+    WaitingForReceiver,
+    Finalizing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiAgentTransferTelemetry {
+    pub transfer_id: String,
+    pub relationship_id: String,
+    pub direction: FfiTransferDirection,
+    pub root_names: Vec<String>,
+    pub item_count: u32,
+    pub directory_count: u32,
+    pub phase: FfiAgentTransferPhase,
+    pub transferred_bytes: u64,
+    pub total_bytes: u64,
+    pub current_bytes_per_second: u64,
+    pub average_bytes_per_second: u64,
+    pub eta_seconds: Option<u64>,
+    pub sampled_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiAgentPreferences {
+    pub version: u16,
+    pub inbox_directory: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiAgentPendingOffer {
     pub offer_id: String,
@@ -521,6 +561,10 @@ pub enum FfiAgentEvent {
         direction: FfiTransferDirection,
         path: Option<FfiAgentPathKind>,
     },
+    TransferTelemetryChanged {
+        transfer_id: String,
+    },
+    InboxDirectoryChanged,
     PendingOfferChanged {
         offer_id: String,
         pending: bool,
@@ -541,6 +585,7 @@ pub struct FfiAgentSnapshot {
     pub engine: FfiApplicationSnapshot,
     pub inbox: Vec<FfiAgentInboxItem>,
     pub active_paths: Vec<FfiAgentTransferPath>,
+    pub telemetry: Vec<FfiAgentTransferTelemetry>,
     pub pending_offers: Vec<FfiAgentPendingOffer>,
     pub event_cursor: FfiAgentEventCursor,
 }
@@ -582,6 +627,9 @@ pub enum FfiAgentResponse {
     },
     TransferRemoved {
         transfer_id: String,
+    },
+    PreferencesUpdated {
+        preferences: FfiAgentPreferences,
     },
     PendingOffers {
         offers: Vec<FfiAgentPendingOffer>,
@@ -726,6 +774,9 @@ fn core_agent_request(request: FfiAgentRequest) -> Result<AgentRequest, FfiAgent
         FfiAgentRequest::RemoveTransfer { transfer_id } => {
             AgentRequest::RemoveTransfer { transfer_id }
         }
+        FfiAgentRequest::SetInboxDirectory { path } => AgentRequest::SetInboxDirectory {
+            path: PathBuf::from(path),
+        },
         FfiAgentRequest::ListPendingOffers => AgentRequest::ListPendingOffers,
         FfiAgentRequest::DecidePendingOffer { offer_id, decision } => {
             AgentRequest::DecidePendingOffer {
@@ -803,6 +854,9 @@ fn ffi_agent_response(response: AgentResponse) -> FfiAgentResponse {
         AgentResponse::TransferRemoved { transfer_id } => {
             FfiAgentResponse::TransferRemoved { transfer_id }
         }
+        AgentResponse::PreferencesUpdated { preferences } => FfiAgentResponse::PreferencesUpdated {
+            preferences: ffi_preferences(preferences),
+        },
         AgentResponse::PendingOffers { offers } => FfiAgentResponse::PendingOffers {
             offers: offers.into_iter().map(ffi_pending_offer).collect(),
         },
@@ -877,6 +931,45 @@ fn ffi_transfer_path(path: AgentTransferPath) -> FfiAgentTransferPath {
         transfer_id: path.transfer_id,
         direction: ffi_direction(path.direction),
         path: ffi_path_kind(path.path),
+    }
+}
+
+fn ffi_transfer_telemetry(value: AgentTransferTelemetry) -> FfiAgentTransferTelemetry {
+    FfiAgentTransferTelemetry {
+        transfer_id: value.transfer_id,
+        relationship_id: value.relationship_id,
+        direction: ffi_direction(value.direction),
+        root_names: value.root_names,
+        item_count: value.item_count,
+        directory_count: value.directory_count,
+        phase: ffi_transfer_phase(value.phase),
+        transferred_bytes: value.transferred_bytes,
+        total_bytes: value.total_bytes,
+        current_bytes_per_second: value.current_bytes_per_second,
+        average_bytes_per_second: value.average_bytes_per_second,
+        eta_seconds: value.eta_seconds,
+        sampled_at_unix_ms: value.sampled_at_unix_ms,
+    }
+}
+
+fn ffi_transfer_phase(phase: AgentTransferPhase) -> FfiAgentTransferPhase {
+    match phase {
+        AgentTransferPhase::Pairing => FfiAgentTransferPhase::Pairing,
+        AgentTransferPhase::Connecting => FfiAgentTransferPhase::Connecting,
+        AgentTransferPhase::Authenticating => FfiAgentTransferPhase::Authenticating,
+        AgentTransferPhase::Negotiating => FfiAgentTransferPhase::Negotiating,
+        AgentTransferPhase::Transferring => FfiAgentTransferPhase::Transferring,
+        AgentTransferPhase::Verifying => FfiAgentTransferPhase::Verifying,
+        AgentTransferPhase::Saving => FfiAgentTransferPhase::Saving,
+        AgentTransferPhase::WaitingForReceiver => FfiAgentTransferPhase::WaitingForReceiver,
+        AgentTransferPhase::Finalizing => FfiAgentTransferPhase::Finalizing,
+    }
+}
+
+fn ffi_preferences(preferences: AgentPreferences) -> FfiAgentPreferences {
+    FfiAgentPreferences {
+        version: preferences.version,
+        inbox_directory: preferences.inbox_directory.display().to_string(),
     }
 }
 
@@ -964,6 +1057,10 @@ fn ffi_event(event: AgentEvent) -> FfiAgentEvent {
             direction: ffi_direction(direction),
             path: path.map(ffi_path_kind),
         },
+        AgentEvent::TransferTelemetryChanged { transfer_id } => {
+            FfiAgentEvent::TransferTelemetryChanged { transfer_id }
+        }
+        AgentEvent::InboxDirectoryChanged => FfiAgentEvent::InboxDirectoryChanged,
         AgentEvent::PendingOfferChanged { offer_id, pending } => {
             FfiAgentEvent::PendingOfferChanged { offer_id, pending }
         }
@@ -988,6 +1085,11 @@ fn ffi_agent_snapshot(snapshot: AgentSnapshot) -> FfiAgentSnapshot {
             .active_paths
             .into_iter()
             .map(ffi_transfer_path)
+            .collect(),
+        telemetry: snapshot
+            .telemetry
+            .into_iter()
+            .map(ffi_transfer_telemetry)
             .collect(),
         pending_offers: snapshot
             .pending_offers
@@ -1166,13 +1268,13 @@ mod tests {
     }
 
     #[test]
-    fn api_v26_advertises_the_agent_host_control_capability() {
+    fn api_v27_advertises_the_agent_host_control_capability() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 26);
+        assert_eq!(info.ffi_api_version, 27);
         assert!(
             info.capabilities
                 .iter()
-                .any(|capability| capability == "agent_host_control_v3")
+                .any(|capability| capability == "agent_host_control_v4")
         );
     }
 
@@ -1242,6 +1344,9 @@ mod tests {
             FfiAgentRequest::RemoveTransfer {
                 transfer_id: "transfer_fixture".into(),
             },
+            FfiAgentRequest::SetInboxDirectory {
+                path: "/tmp/envoix-inbox".into(),
+            },
             FfiAgentRequest::ListPendingOffers,
             FfiAgentRequest::DecidePendingOffer {
                 offer_id: "offer_fixture".into(),
@@ -1302,6 +1407,33 @@ mod tests {
             let envelope: AgentResponseEnvelope = serde_json::from_value(response.clone()).unwrap();
             let _ = ffi_agent_response(envelope.response);
         }
+
+        assert!(matches!(
+            ffi_agent_response(AgentResponse::PreferencesUpdated {
+                preferences: AgentPreferences {
+                    version: envoix_client::product::AGENT_PREFERENCES_VERSION,
+                    inbox_directory: PathBuf::from("/tmp/envoix-inbox"),
+                },
+            }),
+            FfiAgentResponse::PreferencesUpdated { .. }
+        ));
+    }
+
+    #[test]
+    fn live_transfer_telemetry_preserves_content_and_rate_fields() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v14.json"
+        ))
+        .unwrap();
+        let telemetry: AgentTransferTelemetry =
+            serde_json::from_value(fixture["telemetry"].clone()).unwrap();
+
+        let projected = ffi_transfer_telemetry(telemetry);
+
+        assert_eq!(projected.root_names, ["fixture-document.pdf"]);
+        assert_eq!(projected.item_count, 1);
+        assert_eq!(projected.current_bytes_per_second, 262_144);
+        assert_eq!(projected.eta_seconds, Some(2));
     }
 
     #[test]
