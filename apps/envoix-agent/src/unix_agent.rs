@@ -3533,29 +3533,39 @@ mod tests {
             AgentCredentialProtection::OwnerOnlyFile,
         );
         let shutdown = host.shutdown_handle();
-        let lifecycle = host.lifecycle_handle();
+        let mut lifecycle = host.lifecycle_handle();
         assert_eq!(lifecycle.state(), AgentHostLifecycleState::Starting);
         let running = tokio::spawn(host.run());
         let client = AgentControlClient::new(&control_endpoint);
 
-        let response = tokio::time::timeout(Duration::from_secs(5), async {
+        let ready = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                match client.call(AgentRequest::Diagnostics).await {
-                    Ok(response) => break response,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                        ) =>
-                    {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                    Err(error) => panic!("embedded Agent did not start: {error}"),
+                match lifecycle.changed().await {
+                    Some(AgentHostLifecycleState::Starting) => {}
+                    Some(state) => break state,
+                    None => panic!("embedded Agent lifecycle closed before readiness"),
                 }
             }
         })
         .await
-        .expect("embedded Agent did not become ready");
+        .expect("embedded Agent did not report readiness");
+        assert_eq!(
+            ready,
+            AgentHostLifecycleState::Ready,
+            "embedded Agent failed during startup"
+        );
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.call(AgentRequest::Diagnostics),
+        )
+        .await
+        .expect("embedded Agent diagnostics timed out")
+        .unwrap_or_else(|error| {
+            panic!(
+                "embedded Agent diagnostics failed at {}: {error}",
+                control_endpoint.display()
+            )
+        });
         let AgentResponse::Diagnostics { diagnostics } = response else {
             panic!("unexpected Agent response")
         };
