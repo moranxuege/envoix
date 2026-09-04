@@ -118,4 +118,3 @@ M6 and M7 presentation work cannot close until evidence includes:
   cross-device transfers;
 - source scans proving diagnostic terminology is absent from primary copy;
 - a recorded list of compatibility paths removed in each migration slice.
-
