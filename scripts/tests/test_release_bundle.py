@@ -50,7 +50,7 @@ class ReleaseBundleTests(unittest.TestCase):
             self.directory, VERSION, REPOSITORY, REVISION
         )
 
-        self.assertEqual(len(artifacts), 10)
+        self.assertEqual(len(artifacts), 12)
         manifest_path = self.directory / "release-manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest["releaseVersion"], VERSION)
@@ -60,7 +60,7 @@ class ReleaseBundleTests(unittest.TestCase):
             sorted(set(release_bundle.BINARY_FORMATS) | set(release_bundle.SBOM_COMPONENTS)),
         )
         checksum_lines = (self.directory / "SHA256SUMS").read_text().splitlines()
-        self.assertEqual(len(checksum_lines), 11)
+        self.assertEqual(len(checksum_lines), 13)
         expected_manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         self.assertIn(
             f"{expected_manifest_digest}  release-manifest.json", checksum_lines

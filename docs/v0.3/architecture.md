@@ -37,7 +37,7 @@ These rules are release gates, not suggestions.
 
 ```text
 Native presentation
-SwiftUI / Compose / WinUI / CLI
+SwiftUI / Compose / Windows GUI / CLI
         |
         | intents and immutable UI state
         v
@@ -305,10 +305,14 @@ boundaries and must not expose a parallel product state machine.
 
 ### Windows
 
-Windows first receives a supported per-user Agent and CLI. The proposed native
-GUI is a WinUI shell that talks to the Agent through an owner-only Named Pipe.
-The GUI framework is confirmed only after the local control protocol is stable;
-the temporary egui demo is not the foundation of the Windows product.
+Windows has a supported per-user Agent and CLI plus the `envoix-windows`
+graphical shell. The shell is a Windows-native Rust executable using egui and
+talks to the Agent through the same typed owner-only Named Pipe contract as the
+CLI. It is not the retired v0.2 desktop demo: it never constructs an Engine,
+opens the Engine store, or obtains a credential. Its worker projects Agent
+snapshots and sends typed requests for pairing, device revocation, Transfer
+creation, offer decisions, Inbox inspection, diagnostics, and lifecycle
+recovery. Closing the shell leaves the Agent and transfer queue running.
 
 The Windows adapter derives its default local pipe name from the current user
 SID. It creates the pipe with a protected DACL granting that SID alone, rejects
@@ -336,7 +340,10 @@ confirmed cleanup mode
 removes only explicit Agent-owned state entries and settings; Inbox and unknown
 files remain. When uninstall runs from the installed CLI itself, a bounded,
 hidden system cleanup process removes that locked executable after it exits.
-The Windows CI job runs
+The graphical binary resolves the CLI and Agent only from its own application
+directory when offering installation recovery. Both development names and the
+architecture-suffixed release names are explicit allowlists; it does not search
+an arbitrary working directory. The Windows CI job runs
 [`windows-agent-lifecycle-test.ps1`](../../scripts/windows-agent-lifecycle-test.ps1)
 against an isolated temporary product root. It refuses to replace an existing
 Envoix task and covers install, stop, start, restart, update, both uninstall
@@ -489,8 +496,11 @@ Shared UI assets are semantic rather than pixel-identical:
 - native localization catalogs;
 - accessibility and input behavior requirements.
 
-Strings are not moved into Rust. SwiftUI, Compose, and WinUI continue to use
-their native resource and accessibility systems.
+Strings remain inside each platform presentation target and never move into
+the shared Engine or protocol crates. SwiftUI and Compose continue to use their
+native resource and accessibility systems. The Windows shell owns its
+presentation text and uses AccessKit plus an installed Windows CJK font
+fallback; localization and accessibility verification remain release gates.
 
 ## 11. Dependency rules
 
@@ -511,7 +521,7 @@ The following require focused ADRs at the milestone that first needs them:
 
 1. exact macOS helper packaging and whether Mac App Store distribution is a
    future requirement;
-2. final Windows GUI framework after Agent IPC validation;
+2. Windows installer, Authenticode, and SmartScreen policy for the GUI bundle;
 3. whether Linux gains a graphical shell after v0.3;
 4. the later cross-device clipboard consent and history policy.
 

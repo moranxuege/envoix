@@ -86,8 +86,15 @@ the configured Inbox and unknown files.
 
 #### Windows 10/11
 
-Keep the two Windows release binaries together, then install from PowerShell
-without administrator privileges:
+Keep the three Windows release binaries together. Start the graphical client;
+if no Agent is installed, its recovery screen can install and start the
+current-user Agent without administrator privileges:
+
+```powershell
+.\Envoix-Windows-x86_64.exe
+```
+
+The same lifecycle remains available from PowerShell:
 
 ```powershell
 .\envoix-cli-windows-x86_64.exe agent install `
@@ -97,7 +104,13 @@ without administrator privileges:
 & "$env:LOCALAPPDATA\Envoix\bin\envoix.exe" agent restart
 ```
 
-The installer copies the pair under `%LOCALAPPDATA%\Envoix\bin`, keeps settings
+The GUI provides paired-device Room cards, file/folder selection, transfer
+activity with delivery-state distinctions, pending-offer approval, Inbox
+reveal, pairing, revocation, and Agent diagnostics. It controls the Agent over
+the owner-only Named Pipe; it never loads the Engine store or raw credentials.
+Closing the GUI does not stop queued or active transfers.
+
+The installer copies the CLI/Agent pair under `%LOCALAPPDATA%\Envoix\bin`, keeps settings
 under `%LOCALAPPDATA%\Envoix\config`, and registers `Envoix Agent <user-SID>` as
 a current-user Task Scheduler task. It runs only with an interactive user token
 at limited privilege, starts at logon, and retries failures without storing a
@@ -185,6 +198,7 @@ deny = ["100.64.0.0/10"]
   command contract.
 - `apps/envoix-agent`: persistent Windows/Linux/WSL Engine, Inbox, and Outbox
   owner.
+- `apps/envoix-windows`: Windows graphical controller over the typed Agent API.
 - `crates/envoix-ffi/src/android_jni`: exceptional Android runtime and platform save JNI gate inside the typed native core.
 - `apps/envoix-apple`, `android`, `apps/envoix-cli`: native front ends.
 

@@ -3,6 +3,7 @@ members = [
     "apps/envoix-agent",
     "apps/envoix-cli",
     "apps/envoix-rendezvous-server",
+    "apps/envoix-windows",
     "crates/envoix-auth",
     "crates/envoix-client",
     "crates/envoix-error",

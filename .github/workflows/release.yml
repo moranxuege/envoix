@@ -1,7 +1,7 @@
 name: release
 
-# Builds the paired CLI and Agent for Linux/Windows, the standalone CLI for
-# macOS arm64+x86_64, and the Linux broker. Tag builds additionally require the
+# Builds the Windows GUI plus paired CLI/Agent, the Linux CLI/Agent, the
+# standalone CLI for macOS arm64+x86_64, and the Linux broker. Tag builds require the
 # protected Android production key and publish verified APK/AAB artifacts.
 #   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
 #   - run manually (Actions -> release -> Run workflow) -> builds, attests, and
@@ -66,24 +66,32 @@ jobs:
             cli_name: envoix-cli-linux-x86_64
             agent_package: -p envoix-agent
             agent_name: envoix-agent-linux-x86_64
+            gui_package: ''
+            gui_name: ''
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: envoix-cli-macos-aarch64
             cli_name: envoix-cli-macos-aarch64
             agent_package: ''
             agent_name: ''
+            gui_package: ''
+            gui_name: ''
           - os: macos-14
             target: x86_64-apple-darwin
             artifact: envoix-cli-macos-x86_64
             cli_name: envoix-cli-macos-x86_64
             agent_package: ''
             agent_name: ''
+            gui_package: ''
+            gui_name: ''
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: envoix-windows-x86_64
             cli_name: envoix-cli-windows-x86_64.exe
             agent_package: -p envoix-agent
             agent_name: envoix-agent-windows-x86_64.exe
+            gui_package: -p envoix-windows
+            gui_name: Envoix-Windows-x86_64.exe
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -95,11 +103,12 @@ jobs:
           rustup target add --toolchain "$RUST_VERSION" ${{ matrix.target }}
           rustc --version
 
-      - name: Build envoix CLI
+      - name: Build Envoix desktop binaries
         shell: bash
         run: >-
           scripts/with-build-cache-guard.sh
           cargo build --locked --release -p envoix-cli ${{ matrix.agent_package }}
+          ${{ matrix.gui_package }}
           --target ${{ matrix.target }}
 
       - name: Stage binary
@@ -109,6 +118,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/envoix.exe" "dist/${{ matrix.cli_name }}"
             cp "target/${{ matrix.target }}/release/envoix-agent.exe" "dist/${{ matrix.agent_name }}"
+            cp "target/${{ matrix.target }}/release/envoix-windows.exe" "dist/${{ matrix.gui_name }}"
           else
             cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.cli_name }}"
             if [ -n "${{ matrix.agent_name }}" ]; then
@@ -366,6 +376,7 @@ jobs:
             --all-features --target all --spec-version 1.5
           cp apps/envoix-cli/envoix_bin.cdx.json dist/envoix-cli.cdx.json
           cp apps/envoix-agent/envoix-agent_bin.cdx.json dist/envoix-agent.cdx.json
+          cp apps/envoix-windows/envoix-windows_bin.cdx.json dist/envoix-windows.cdx.json
           cp apps/envoix-rendezvous-server/envoix-rendezvous-server_bin.cdx.json \
             dist/envoix-broker.cdx.json
           git diff --exit-code -- Cargo.lock
@@ -390,6 +401,12 @@ jobs:
         with:
           subject-path: dist/envoix-agent-*
           sbom-path: dist/envoix-agent.cdx.json
+
+      - name: Attest Windows GUI SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/Envoix-Windows-x86_64.exe
+          sbom-path: dist/envoix-windows.cdx.json
 
       - name: Attest broker SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
