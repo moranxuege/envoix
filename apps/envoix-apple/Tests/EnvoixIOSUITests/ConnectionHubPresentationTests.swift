@@ -144,8 +144,8 @@ final class ConnectionHubPresentationTests: XCTestCase {
             ("connection.nearby.aware", "Aware", "感知"),
             (
                 "connection.nearby.macos_note",
-                "Discovery uses Bluetooth and the local network. Wi‑Fi Aware and NFC phone scanning are not available on macOS.",
-                "通过蓝牙和局域网发现设备；macOS 暂不支持 Wi‑Fi Aware 和手机 NFC 扫描。"
+                "Open Envoix on another device to discover it nearby.",
+                "在另一台设备上打开 Envoix，即可在这里发现它。"
             ),
             (
                 "connection.nearby.open_bluetooth_settings",
