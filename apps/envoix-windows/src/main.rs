@@ -12,11 +12,19 @@ mod controller;
 
 #[cfg(windows)]
 fn main() -> eframe::Result {
+    let screenshot_mode = std::env::var_os("ENVOIX_UI_SCREENSHOT").is_some();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1120.0, 720.0])
+        .with_min_inner_size([900.0, 580.0])
+        .with_title("Envoix");
+    if screenshot_mode {
+        viewport = viewport
+            .with_active(false)
+            .with_mouse_passthrough(true)
+            .with_position([24.0, 24.0]);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 720.0])
-            .with_min_inner_size([900.0, 580.0])
-            .with_title("Envoix"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

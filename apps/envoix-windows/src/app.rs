@@ -14,19 +14,31 @@ use crate::presentation::{direction_text, human_bytes, transfer_state_text};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const TOAST_DURATION: Duration = Duration::from_secs(4);
-const SIDEBAR_WIDTH: f32 = 172.0;
-const CARD_RADIUS: u8 = 14;
-const CARD_PADDING: i8 = 16;
+const SIDEBAR_WIDTH: f32 = 226.0;
+const CARD_RADIUS: u8 = 20;
+const CARD_PADDING: i8 = 22;
+const BMP_DIB_HEADER_BYTES: u32 = 40;
+const BMP_PIXEL_OFFSET: u32 = 54;
+const BMP_BYTES_PER_PIXEL: u32 = 4;
+const BMP_PLANES: u16 = 1;
+const BMP_BITS_PER_PIXEL: u16 = 32;
+const BMP_PIXELS_PER_METER: i32 = 2_835;
 
-const BACKGROUND: Color32 = Color32::from_rgb(246, 248, 252);
+const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 250);
 const SURFACE: Color32 = Color32::from_rgb(255, 255, 255);
-const TEXT: Color32 = Color32::from_rgb(17, 24, 39);
-const MUTED: Color32 = Color32::from_rgb(91, 103, 125);
-const BORDER: Color32 = Color32::from_rgb(225, 231, 240);
-const ACCENT: Color32 = Color32::from_rgb(24, 119, 242);
-const SUCCESS: Color32 = Color32::from_rgb(18, 137, 83);
+const SURFACE_TINT: Color32 = Color32::from_rgb(236, 248, 244);
+const TEXT: Color32 = Color32::from_rgb(22, 31, 45);
+const MUTED: Color32 = Color32::from_rgb(101, 112, 130);
+const BORDER: Color32 = Color32::from_rgb(226, 232, 239);
+const ACCENT: Color32 = Color32::from_rgb(22, 132, 96);
+const ACCENT_DARK: Color32 = Color32::from_rgb(14, 105, 76);
+const SUCCESS: Color32 = Color32::from_rgb(18, 139, 91);
 const WARNING: Color32 = Color32::from_rgb(190, 116, 17);
 const DANGER: Color32 = Color32::from_rgb(211, 55, 55);
+const SIDEBAR: Color32 = Color32::from_rgb(15, 25, 41);
+const SIDEBAR_SELECTED: Color32 = Color32::from_rgb(30, 49, 70);
+const SIDEBAR_TEXT: Color32 = Color32::from_rgb(229, 237, 244);
+const SIDEBAR_MUTED: Color32 = Color32::from_rgb(143, 159, 177);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Page {
@@ -55,15 +67,31 @@ pub(crate) struct EnvoixWindowsApp {
     join_invitation: String,
     join_verification: String,
     revoke_device: Option<String>,
+    screenshot_target: Option<PathBuf>,
+    screenshot_requested: bool,
 }
 
 impl EnvoixWindowsApp {
     pub(crate) fn new(context: &egui::Context) -> Self {
         configure_style(context);
         let controller = AgentController::start(context.clone());
+        let screenshot_target = std::env::var_os("ENVOIX_UI_SCREENSHOT").map(PathBuf::from);
+        let page = if screenshot_target.is_some() {
+            match std::env::var("ENVOIX_UI_PAGE").as_deref() {
+                Ok("activity") => Page::Activity,
+                Ok("inbox") => Page::Inbox,
+                Ok("settings") => Page::Settings,
+                _ => Page::Devices,
+            }
+        } else {
+            Page::Devices
+        };
+        if let Some(target) = &screenshot_target {
+            let _ = std::fs::write(target.with_extension("pending"), b"waiting for screenshot");
+        }
         let mut app = Self {
             controller,
-            page: Page::Devices,
+            page,
             dashboard: None,
             refresh_pending: false,
             last_refresh: Instant::now() - REFRESH_INTERVAL,
@@ -80,8 +108,17 @@ impl EnvoixWindowsApp {
             join_invitation: String::new(),
             join_verification: String::new(),
             revoke_device: None,
+            screenshot_target,
+            screenshot_requested: false,
         };
         app.request_refresh();
+        if app.screenshot_target.is_some() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while app.dashboard.is_none() && app.error.is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(40));
+                app.drain_events();
+            }
+        }
         app
     }
 
@@ -219,6 +256,40 @@ impl EnvoixWindowsApp {
         self.toast = Some((message.to_owned(), Instant::now()));
     }
 
+    fn handle_screenshot_result(&mut self, context: &egui::Context) {
+        let screenshot = context.input(|input| {
+            input.raw.events.iter().find_map(|event| {
+                if let egui::Event::Screenshot { image, .. } = event {
+                    Some(std::sync::Arc::clone(image))
+                } else {
+                    None
+                }
+            })
+        });
+        let Some(image) = screenshot else {
+            return;
+        };
+        let Some(target) = self.screenshot_target.take() else {
+            return;
+        };
+        if let Err(error) = write_bmp(&target, &image) {
+            self.error = Some(format!("无法写入 UI 截图：{error}"));
+        }
+        let _ = std::fs::remove_file(target.with_extension("pending"));
+        let _ = std::fs::remove_file(target.with_extension("requested"));
+        context.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn maybe_request_screenshot(&mut self, context: &egui::Context) {
+        if self.screenshot_target.is_some() && !self.screenshot_requested {
+            if let Some(target) = &self.screenshot_target {
+                let _ = std::fs::write(target.with_extension("requested"), b"screenshot requested");
+            }
+            self.screenshot_requested = true;
+            context.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+    }
+
     fn busy(&self) -> bool {
         self.active_operation.is_some()
     }
@@ -227,35 +298,21 @@ impl EnvoixWindowsApp {
         egui::Panel::top("header")
             .frame(
                 egui::Frame::new()
-                    .fill(SURFACE)
-                    .inner_margin(egui::Margin::symmetric(22, 14))
-                    .stroke(egui::Stroke::new(1.0, BORDER)),
+                    .fill(BACKGROUND)
+                    .inner_margin(egui::Margin::symmetric(28, 18)),
             )
             .show(root, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Envoix").size(24.0).strong().color(TEXT));
-                    ui.add_space(12.0);
-                    match &self.dashboard {
-                        Some(dashboard) => {
-                            ui.colored_label(SUCCESS, "● Agent 在线");
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} · {} 个已配对设备",
-                                    dashboard.status.device_name,
-                                    dashboard.devices.len()
-                                ))
-                                .color(MUTED),
-                            );
-                        }
-                        None => {
-                            ui.colored_label(DANGER, "● Agent 未连接");
-                        }
-                    }
+                    let (title, subtitle) = page_heading(self.page);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(title).size(28.0).strong().color(TEXT));
+                        ui.label(RichText::new(subtitle).size(13.5).color(MUTED));
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add_enabled(
                                 !self.refresh_pending && !self.busy(),
-                                egui::Button::new("刷新"),
+                                quiet_button("刷新"),
                             )
                             .clicked()
                         {
@@ -263,7 +320,20 @@ impl EnvoixWindowsApp {
                         }
                         if self.busy() {
                             ui.spinner();
-                            ui.label(RichText::new("正在处理…").color(MUTED));
+                        }
+                        match &self.dashboard {
+                            Some(dashboard) => status_pill(
+                                ui,
+                                &format!("●  Agent 在线 · {}", dashboard.status.device_name),
+                                SUCCESS,
+                                Color32::from_rgb(229, 246, 238),
+                            ),
+                            None => status_pill(
+                                ui,
+                                "●  Agent 未连接",
+                                DANGER,
+                                Color32::from_rgb(253, 235, 235),
+                            ),
                         }
                     });
                 });
@@ -275,39 +345,92 @@ impl EnvoixWindowsApp {
             .exact_size(SIDEBAR_WIDTH)
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(238, 243, 250))
-                    .inner_margin(14.0),
+                    .fill(SIDEBAR)
+                    .inner_margin(egui::Margin::symmetric(18, 20)),
             )
             .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    brand_mark(ui);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Envoix")
+                                .size(21.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+                        ui.label(
+                            RichText::new("Private transfer")
+                                .size(11.0)
+                                .color(SIDEBAR_MUTED),
+                        );
+                    });
+                });
+                ui.add_space(34.0);
+                ui.label(
+                    RichText::new("WORKSPACE")
+                        .size(10.0)
+                        .strong()
+                        .color(SIDEBAR_MUTED),
+                );
                 ui.add_space(8.0);
-                nav_button(ui, &mut self.page, Page::Devices, "已配对设备");
-                nav_button(ui, &mut self.page, Page::Activity, "传输活动");
-                nav_button(ui, &mut self.page, Page::Inbox, "收件箱");
-                nav_button(ui, &mut self.page, Page::Settings, "设置与诊断");
+                nav_button(ui, &mut self.page, Page::Devices, "01", "设备");
+                nav_button(ui, &mut self.page, Page::Activity, "02", "传输活动");
+                nav_button(ui, &mut self.page, Page::Inbox, "03", "收件箱");
+                ui.add_space(18.0);
+                ui.label(
+                    RichText::new("SYSTEM")
+                        .size(10.0)
+                        .strong()
+                        .color(SIDEBAR_MUTED),
+                );
+                ui.add_space(8.0);
+                nav_button(ui, &mut self.page, Page::Settings, "04", "设置与诊断");
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new("v0.3 · protocol 12").small().color(MUTED));
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(22, 38, 57))
+                        .corner_radius(14)
+                        .inner_margin(12.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("凭据由 Agent 保护")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(SIDEBAR_TEXT),
+                            );
+                            ui.label(
+                                RichText::new("DPAPI · owner-only IPC")
+                                    .size(10.5)
+                                    .color(SIDEBAR_MUTED),
+                            );
+                        });
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("v0.3 · protocol 12")
+                            .small()
+                            .color(SIDEBAR_MUTED),
+                    );
                 });
             });
     }
 
     fn render_unavailable(&mut self, ui: &mut egui::Ui) {
-        card(ui, |ui| {
-            ui.heading("后台 Agent 尚未连接");
-            ui.label(
-                "图形界面不直接持有设备凭据。安装并启动当前用户的 Agent 后，设备、房间和传输会显示在这里。",
-            );
+        empty_state(ui, "!", "后台 Agent 尚未连接", |ui| {
+            ui.label(RichText::new(
+                "安装并启动当前用户的 Agent 后，设备、房间和传输会自动恢复。图形界面不会接触设备凭据。",
+            ).color(MUTED));
             if let Some(error) = &self.error {
                 ui.colored_label(DANGER, error);
             }
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!self.busy(), egui::Button::new("安装并启动 Agent"))
+                    .add_enabled(!self.busy(), primary_button("安装并启动 Agent"))
                     .clicked()
                 {
                     self.start_lifecycle(Operation::InstallAgent);
                 }
                 if ui
-                    .add_enabled(!self.busy(), egui::Button::new("启动已有 Agent"))
+                    .add_enabled(!self.busy(), quiet_button("启动已有 Agent"))
                     .clicked()
                 {
                     self.start_lifecycle(Operation::StartAgent);
@@ -317,33 +440,47 @@ impl EnvoixWindowsApp {
     }
 
     fn render_devices(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("已配对设备");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("加入配对").clicked() {
-                    self.show_join = true;
-                }
-                if ui.button("添加设备").clicked() {
-                    self.show_pair = true;
-                    self.pairing = None;
-                }
-            });
-        });
-        ui.label(
-            RichText::new("选择一台设备进入房间并发送文件。Agent 会在窗口关闭后继续处理队列。")
-                .color(MUTED),
-        );
-        ui.add_space(12.0);
-
         let devices = self
             .dashboard
             .as_ref()
             .map(|dashboard| dashboard.devices.clone())
             .unwrap_or_default();
+
+        let dropped_paths = ui.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect::<Vec<_>>()
+        });
+        append_unique_paths(&mut self.selected_paths, dropped_paths);
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("{} 台已验证设备", devices.len()))
+                    .size(13.0)
+                    .strong()
+                    .color(MUTED),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(primary_button("＋  添加设备")).clicked() {
+                    self.show_pair = true;
+                    self.pairing = None;
+                }
+                if ui.add(quiet_button("使用配对码加入")).clicked() {
+                    self.show_join = true;
+                }
+            });
+        });
+        ui.add_space(18.0);
+
         if devices.is_empty() {
-            card(ui, |ui| {
-                ui.strong("还没有已验证的设备");
-                ui.label("点击“添加设备”创建房间，或使用另一台设备给出的房间码加入配对。");
+            empty_state(ui, "+", "还没有已验证的设备", |ui| {
+                ui.label(
+                    RichText::new("创建一个一次性配对房间，或输入另一台设备给出的配对信息。")
+                        .color(MUTED),
+                );
             });
             return;
         }
@@ -351,26 +488,12 @@ impl EnvoixWindowsApp {
         ui.horizontal_wrapped(|ui| {
             for device in &devices {
                 let selected = self.selected_device.as_deref() == Some(device.id.as_str());
-                let button = egui::Button::new(
-                    RichText::new(format!(
-                        "{}\n已验证 · 第 {} 代",
-                        device.label, device.generation
-                    ))
-                    .color(if selected { Color32::WHITE } else { TEXT }),
-                )
-                .fill(if selected { ACCENT } else { SURFACE })
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    if selected { ACCENT } else { BORDER },
-                ))
-                .corner_radius(CARD_RADIUS)
-                .min_size(egui::vec2(210.0, 62.0));
-                if ui.add(button).clicked() {
+                if device_button(ui, &device.label, device.generation, selected).clicked() {
                     self.selected_device = Some(device.id.clone());
                 }
             }
         });
-        ui.add_space(14.0);
+        ui.add_space(20.0);
 
         let Some(device) = devices
             .iter()
@@ -379,59 +502,157 @@ impl EnvoixWindowsApp {
         else {
             return;
         };
-        card(ui, |ui| {
+        room_card(ui, |ui| {
             ui.horizontal(|ui| {
+                device_avatar(ui, &device.label, 48.0, ACCENT);
+                ui.add_space(4.0);
                 ui.vertical(|ui| {
-                    ui.heading(&device.label);
-                    ui.colored_label(SUCCESS, "● 房间就绪 · 对方上线后文件会保留在队列中");
+                    ui.label(RichText::new(&device.label).size(21.0).strong().color(TEXT));
+                    ui.label(
+                        RichText::new("已验证的私人房间 · 离线时也可以排队")
+                            .size(12.5)
+                            .color(MUTED),
+                    );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("忘记设备").clicked() {
+                    if ui.add(danger_quiet_button("忘记设备")).clicked() {
                         self.revoke_device = Some(device.id.clone());
+                    }
+                    status_pill(ui, "●  房间就绪", SUCCESS, Color32::from_rgb(229, 246, 238));
+                });
+            });
+            ui.add_space(18.0);
+
+            let hovering_files = ui.input(|input| !input.raw.hovered_files.is_empty());
+            egui::Frame::new()
+                .fill(if hovering_files {
+                    SURFACE_TINT
+                } else {
+                    BACKGROUND
+                })
+                .stroke(egui::Stroke::new(
+                    if hovering_files { 2.0 } else { 1.0 },
+                    if hovering_files { ACCENT } else { BORDER },
+                ))
+                .corner_radius(18)
+                .inner_margin(22.0)
+                .show(ui, |ui| {
+                    ui.set_min_height(if self.selected_paths.is_empty() {
+                        190.0
+                    } else {
+                        228.0
+                    });
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(if hovering_files { "↓" } else { "＋" })
+                                .size(34.0)
+                                .strong()
+                                .color(ACCENT),
+                        );
+                        ui.label(
+                            RichText::new(if hovering_files {
+                                "松开即可添加"
+                            } else {
+                                "把文件拖到这里"
+                            })
+                            .size(18.0)
+                            .strong()
+                            .color(TEXT),
+                        );
+                        ui.label(
+                            RichText::new("也可以从系统文件选择器添加多个文件或整个文件夹")
+                                .size(12.5)
+                                .color(MUTED),
+                        );
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(quiet_button("选择文件")).clicked()
+                                && let Some(paths) = rfd::FileDialog::new().pick_files()
+                            {
+                                append_unique_paths(&mut self.selected_paths, paths);
+                            }
+                            if ui.add(quiet_button("选择文件夹")).clicked()
+                                && let Some(path) = rfd::FileDialog::new().pick_folder()
+                            {
+                                append_unique_paths(&mut self.selected_paths, vec![path]);
+                            }
+                        });
+                    });
+
+                    if !self.selected_paths.is_empty() {
+                        ui.add_space(14.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "已选择 {} 个项目",
+                                    self.selected_paths.len()
+                                ))
+                                .strong()
+                                .color(TEXT),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.add(danger_quiet_button("清空")).clicked() {
+                                        self.selected_paths.clear();
+                                    }
+                                },
+                            );
+                        });
+                        for path in self.selected_paths.iter().take(4) {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("●").size(8.0).color(ACCENT));
+                                ui.label(
+                                    RichText::new(path_display_name(path))
+                                        .size(12.5)
+                                        .color(TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(path.display().to_string())
+                                        .size(10.5)
+                                        .color(MUTED),
+                                );
+                            });
+                        }
+                        if self.selected_paths.len() > 4 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "另外 {} 个项目",
+                                    self.selected_paths.len() - 4
+                                ))
+                                .size(11.0)
+                                .color(MUTED),
+                            );
+                        }
+                    }
+                });
+
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Agent 会在窗口关闭后继续完成发送")
+                        .size(11.5)
+                        .color(MUTED),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let can_send = !self.selected_paths.is_empty() && !self.busy();
+                    if ui
+                        .add_enabled(can_send, primary_button("发送到这台设备  →"))
+                        .clicked()
+                    {
+                        self.start_agent_operation(
+                            Operation::CreateTransfer,
+                            AgentRequest::CreateTransfer {
+                                device: device.id,
+                                paths: self.selected_paths.clone(),
+                            },
+                        );
                     }
                 });
             });
-            ui.separator();
-            ui.strong("发送文件");
-            ui.horizontal(|ui| {
-                if ui.button("选择文件").clicked()
-                    && let Some(paths) = rfd::FileDialog::new().pick_files()
-                {
-                    append_unique_paths(&mut self.selected_paths, paths);
-                }
-                if ui.button("选择文件夹").clicked()
-                    && let Some(path) = rfd::FileDialog::new().pick_folder()
-                {
-                    append_unique_paths(&mut self.selected_paths, vec![path]);
-                }
-                if !self.selected_paths.is_empty() && ui.button("清空").clicked() {
-                    self.selected_paths.clear();
-                }
-            });
-            if self.selected_paths.is_empty() {
-                ui.label(RichText::new("尚未选择内容").color(MUTED));
-            } else {
-                egui::ScrollArea::vertical()
-                    .max_height(110.0)
-                    .show(ui, |ui| {
-                        for path in &self.selected_paths {
-                            ui.label(path.display().to_string());
-                        }
-                    });
-            }
-            let can_send = !self.selected_paths.is_empty() && !self.busy();
-            if ui
-                .add_enabled(can_send, egui::Button::new("发送到此设备").fill(ACCENT))
-                .clicked()
-            {
-                self.start_agent_operation(
-                    Operation::CreateTransfer,
-                    AgentRequest::CreateTransfer {
-                        device: device.id,
-                        paths: self.selected_paths.clone(),
-                    },
-                );
-            }
         });
 
         self.render_pending_offers(ui);
@@ -446,61 +667,136 @@ impl EnvoixWindowsApp {
         if offers.is_empty() {
             return;
         }
-        ui.add_space(16.0);
-        ui.heading("等待你确认的接收");
+        ui.add_space(22.0);
+        ui.label(RichText::new("等待你确认").size(16.0).strong().color(TEXT));
+        ui.label(
+            RichText::new("对方只会在你允许后开始发送内容。")
+                .size(12.0)
+                .color(MUTED),
+        );
+        ui.add_space(10.0);
         for offer in offers {
             card(ui, |ui| {
-                ui.strong(format!("来自 {}", offer.from_device_label));
-                ui.label(format!(
-                    "{} 个项目 · {} 个文件夹 · {}",
-                    offer.item_count,
-                    offer.directory_count,
-                    human_bytes(offer.total_bytes)
-                ));
-                ui.label(offer.root_names.join("、"));
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.busy(), egui::Button::new("允许接收").fill(ACCENT))
-                        .clicked()
-                    {
-                        self.start_agent_operation(
-                            Operation::ApproveOffer,
-                            offer_decision_request(
-                                offer.offer_id.clone(),
-                                AgentOfferDecision::Approve,
-                            ),
+                    device_avatar(ui, &offer.from_device_label, 42.0, ACCENT);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(format!("来自 {}", offer.from_device_label))
+                                .strong()
+                                .color(TEXT),
                         );
-                    }
-                    if ui
-                        .add_enabled(!self.busy(), egui::Button::new("拒绝"))
-                        .clicked()
-                    {
-                        self.start_agent_operation(
-                            Operation::RejectOffer,
-                            offer_decision_request(
-                                offer.offer_id.clone(),
-                                AgentOfferDecision::Reject,
-                            ),
+                        ui.label(
+                            RichText::new(format!(
+                                "{} 个项目 · {} 个文件夹 · {}",
+                                offer.item_count,
+                                offer.directory_count,
+                                human_bytes(offer.total_bytes)
+                            ))
+                            .size(12.0)
+                            .color(MUTED),
                         );
-                    }
+                        ui.label(
+                            RichText::new(offer.root_names.join("、"))
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(!self.busy(), primary_button("允许接收"))
+                            .clicked()
+                        {
+                            self.start_agent_operation(
+                                Operation::ApproveOffer,
+                                offer_decision_request(
+                                    offer.offer_id.clone(),
+                                    AgentOfferDecision::Approve,
+                                ),
+                            );
+                        }
+                        if ui
+                            .add_enabled(!self.busy(), danger_quiet_button("拒绝"))
+                            .clicked()
+                        {
+                            self.start_agent_operation(
+                                Operation::RejectOffer,
+                                offer_decision_request(
+                                    offer.offer_id.clone(),
+                                    AgentOfferDecision::Reject,
+                                ),
+                            );
+                        }
+                    });
                 });
             });
+            ui.add_space(10.0);
         }
     }
 
     fn render_activity(&mut self, ui: &mut egui::Ui) {
-        ui.heading("传输活动");
-        ui.label(
-            RichText::new("“已送达”表示接收方已经保存并返回确认，不只是本机发送完成。")
-                .color(MUTED),
-        );
-        ui.add_space(12.0);
         let Some(dashboard) = &self.dashboard else {
             return;
         };
+        let delivered = dashboard
+            .transfers
+            .iter()
+            .filter(|transfer| transfer.state == TransferState::Delivered)
+            .count();
+        let attention = dashboard
+            .transfers
+            .iter()
+            .filter(|transfer| {
+                matches!(
+                    transfer.state,
+                    TransferState::Failed | TransferState::Rejected | TransferState::Canceled
+                )
+            })
+            .count();
+        let active = dashboard
+            .transfers
+            .len()
+            .saturating_sub(delivered + attention);
+
+        ui.columns(3, |columns| {
+            metric_card(
+                &mut columns[0],
+                "已送达",
+                delivered,
+                SUCCESS,
+                "接收方已确认保存",
+            );
+            metric_card(
+                &mut columns[1],
+                "进行中",
+                active,
+                ACCENT,
+                "含排队与等待确认",
+            );
+            metric_card(
+                &mut columns[2],
+                "需要留意",
+                attention,
+                WARNING,
+                "失败、拒绝或取消",
+            );
+        });
+        ui.add_space(22.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("最近传输").size(16.0).strong().color(TEXT));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new("“已送达” = 接收方已落盘并返回证明")
+                        .size(11.5)
+                        .color(MUTED),
+                );
+            });
+        });
+        ui.add_space(10.0);
         if dashboard.transfers.is_empty() {
-            card(ui, |ui| {
-                ui.label("暂无传输记录");
+            empty_state(ui, "↗", "暂无传输记录", |ui| {
+                ui.label(
+                    RichText::new("从设备页面选择内容，第一笔传输会显示在这里。").color(MUTED),
+                );
             });
             return;
         }
@@ -519,13 +815,27 @@ impl EnvoixWindowsApp {
             };
             card(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong(format!(
-                        "{} · {}",
-                        direction_text(transfer.direction),
-                        device
-                    ));
+                    let direction = direction_text(transfer.direction);
+                    transfer_icon(ui, direction, state_color);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(format!("{} · {}", direction, device))
+                                .size(14.0)
+                                .strong()
+                                .color(TEXT),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "{} / {}",
+                                human_bytes(transfer.transferred_bytes),
+                                human_bytes(transfer.total_bytes)
+                            ))
+                            .size(11.5)
+                            .color(MUTED),
+                        );
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.colored_label(state_color, transfer_state_text(transfer.state));
+                        state_pill(ui, transfer_state_text(transfer.state), state_color);
                     });
                 });
                 let progress = if transfer.total_bytes == 0 {
@@ -533,12 +843,12 @@ impl EnvoixWindowsApp {
                 } else {
                     transfer.transferred_bytes as f32 / transfer.total_bytes as f32
                 };
+                ui.add_space(8.0);
                 ui.add(
-                    egui::ProgressBar::new(progress.clamp(0.0, 1.0)).text(format!(
-                        "{} / {}",
-                        human_bytes(transfer.transferred_bytes),
-                        human_bytes(transfer.total_bytes)
-                    )),
+                    egui::ProgressBar::new(progress.clamp(0.0, 1.0))
+                        .fill(state_color)
+                        .desired_height(9.0)
+                        .corner_radius(8),
                 );
                 if let Some(path) = dashboard
                     .active_paths
@@ -561,93 +871,166 @@ impl EnvoixWindowsApp {
                         ),
                     );
                 }
-                ui.label(RichText::new(transfer.id.to_string()).small().color(MUTED));
+                ui.label(
+                    RichText::new(format!("传输 ID  {}", transfer.id))
+                        .size(9.5)
+                        .color(Color32::from_rgb(151, 160, 174)),
+                );
             });
+            ui.add_space(10.0);
         }
     }
 
     fn render_inbox(&mut self, ui: &mut egui::Ui) {
-        ui.heading("收件箱");
-        ui.label(RichText::new("这里只显示已经完整校验并保存到磁盘的内容。").color(MUTED));
-        ui.add_space(12.0);
         let items = self
             .dashboard
             .as_ref()
             .map(|dashboard| dashboard.inbox.clone())
             .unwrap_or_default();
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(format!("{} 批已保存内容", items.len()))
+                            .size(18.0)
+                            .strong()
+                            .color(TEXT),
+                    );
+                    ui.label(
+                        RichText::new("这里只显示完整校验、已经安全写入磁盘的内容。")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                });
+                if let Some(inbox) = self
+                    .dashboard
+                    .as_ref()
+                    .map(|dashboard| dashboard.status.inbox_directory.clone())
+                {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(primary_button("打开收件箱  →")).clicked() {
+                            open_in_explorer(PathBuf::from(inbox));
+                        }
+                    });
+                }
+            });
+        });
+        ui.add_space(18.0);
         if items.is_empty() {
-            card(ui, |ui| {
-                ui.label("尚未收到文件");
+            empty_state(ui, "↓", "尚未收到文件", |ui| {
+                ui.label(
+                    RichText::new("对方发送并完成校验后，文件会自动出现在这里。").color(MUTED),
+                );
             });
             return;
         }
         for item in items {
             card(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong(format!("来自 {}", item.from_device_label));
+                    transfer_icon(ui, "接收", SUCCESS);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(format!("来自 {}", item.from_device_label))
+                                .size(14.0)
+                                .strong()
+                                .color(TEXT),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "{} 个文件 · {} 个文件夹 · {}",
+                                item.file_count,
+                                item.directory_count,
+                                human_bytes(item.total_bytes)
+                            ))
+                            .size(11.5)
+                            .color(MUTED),
+                        );
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.colored_label(SUCCESS, "已保存");
+                        state_pill(ui, "已保存", SUCCESS);
                     });
                 });
-                ui.label(format!(
-                    "{} 个文件 · {} 个文件夹 · {}",
-                    item.file_count,
-                    item.directory_count,
-                    human_bytes(item.total_bytes)
-                ));
+                ui.add_space(10.0);
                 for root in &item.roots {
-                    ui.horizontal(|ui| {
-                        ui.label(&root.name);
-                        if ui.button("在资源管理器中显示").clicked() {
-                            open_in_explorer(PathBuf::from(&root.path));
-                        }
-                    });
+                    egui::Frame::new()
+                        .fill(BACKGROUND)
+                        .corner_radius(12)
+                        .inner_margin(egui::Margin::symmetric(14, 9))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&root.name).strong().color(TEXT));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.add(quiet_button("在资源管理器中显示")).clicked()
+                                        {
+                                            open_in_explorer(PathBuf::from(&root.path));
+                                        }
+                                    },
+                                );
+                            });
+                        });
                 }
             });
+            ui.add_space(10.0);
         }
     }
 
     fn render_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("设置与诊断");
-        ui.label(
-            RichText::new("图形界面只使用本机控制接口，不读取 Agent 的凭据内容。").color(MUTED),
-        );
-        ui.add_space(12.0);
         let Some(dashboard) = &self.dashboard else {
             self.render_unavailable(ui);
             return;
         };
         let status = dashboard.status.clone();
         let diagnostics = dashboard.diagnostics.clone();
+        ui.columns(2, |columns| {
+            card(&mut columns[0], |ui| {
+                ui.label(RichText::new("安全边界").size(16.0).strong().color(TEXT));
+                ui.add_space(8.0);
+                security_line(ui, "●", "凭据由 Windows DPAPI 保护");
+                security_line(ui, "●", "GUI 不读取设备 credential");
+                security_line(ui, "●", "控制通道仅限当前用户");
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{:?} · {:?}",
+                        diagnostics.credential_protection, diagnostics.control_transport
+                    ))
+                    .size(10.5)
+                    .color(MUTED),
+                );
+            });
+            card(&mut columns[1], |ui| {
+                ui.label(RichText::new("后台 Agent").size(16.0).strong().color(TEXT));
+                ui.add_space(8.0);
+                key_value(ui, "设备", &status.device_name);
+                key_value(ui, "协议", &format!("v{}", status.protocol_version));
+                key_value(
+                    ui,
+                    "Engine",
+                    &format!("schema {}", diagnostics.engine_schema_version),
+                );
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(!self.busy(), quiet_button("重新启动 Agent"))
+                    .clicked()
+                {
+                    self.start_lifecycle(Operation::RestartAgent);
+                }
+            });
+        });
+        ui.add_space(18.0);
         card(ui, |ui| {
-            ui.heading("Agent");
-            key_value(ui, "设备名称", &status.device_name);
-            key_value(ui, "协议", &status.protocol_version.to_string());
-            key_value(
-                ui,
-                "控制通道",
-                &format!("{:?}", diagnostics.control_transport),
+            ui.label(RichText::new("连接与存储").size(16.0).strong().color(TEXT));
+            ui.label(
+                RichText::new("这些地址由 Agent 使用；普通发送不需要修改。")
+                    .size(11.5)
+                    .color(MUTED),
             );
-            key_value(
-                ui,
-                "凭据保护",
-                &format!("{:?}", diagnostics.credential_protection),
-            );
-            key_value(
-                ui,
-                "Engine schema",
-                &diagnostics.engine_schema_version.to_string(),
-            );
+            ui.add_space(10.0);
             key_value(ui, "Broker", &status.broker);
             key_value(ui, "Relay", status.relay.as_deref().unwrap_or("未启用"));
             key_value(ui, "Inbox", &status.inbox_directory);
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(!self.busy(), egui::Button::new("重新启动 Agent"))
-                .clicked()
-            {
-                self.start_lifecycle(Operation::RestartAgent);
-            }
         });
     }
 
@@ -685,7 +1068,7 @@ impl EnvoixWindowsApp {
                         && self.pair_label.trim() == self.pair_label
                         && !self.busy();
                     if ui
-                        .add_enabled(valid, egui::Button::new("创建配对房间").fill(ACCENT))
+                        .add_enabled(valid, primary_button("创建配对房间"))
                         .clicked()
                     {
                         self.start_agent_operation(
@@ -732,7 +1115,7 @@ impl EnvoixWindowsApp {
                         .all(|byte| byte.is_ascii_digit())
                     && !self.busy();
                 if ui
-                    .add_enabled(valid, egui::Button::new("验证并加入").fill(ACCENT))
+                    .add_enabled(valid, primary_button("验证并加入"))
                     .clicked()
                 {
                     self.start_agent_operation(
@@ -761,7 +1144,7 @@ impl EnvoixWindowsApp {
                 ui.label("这会撤销双方关系，并删除此设备对应的本地凭据。已接收文件不会被删除。");
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!self.busy(), egui::Button::new("确认忘记").fill(DANGER))
+                        .add_enabled(!self.busy(), danger_button("确认忘记"))
                         .clicked()
                     {
                         self.start_agent_operation(
@@ -771,7 +1154,7 @@ impl EnvoixWindowsApp {
                             },
                         );
                     }
-                    if ui.button("取消").clicked() {
+                    if ui.add(quiet_button("取消")).clicked() {
                         self.revoke_device = None;
                     }
                 });
@@ -815,7 +1198,9 @@ impl EnvoixWindowsApp {
 
 impl eframe::App for EnvoixWindowsApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_screenshot_result(context);
         self.drain_events();
+        self.maybe_request_screenshot(context);
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
             self.request_refresh();
         }
@@ -824,6 +1209,7 @@ impl eframe::App for EnvoixWindowsApp {
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = root.ctx().clone();
+        self.handle_screenshot_result(&context);
         self.render_header(root);
         self.render_sidebar(root);
         self.render_notices(root);
@@ -846,20 +1232,50 @@ impl eframe::App for EnvoixWindowsApp {
         self.render_pair_window(&context);
         self.render_join_window(&context);
         self.render_revoke_window(&context);
+        self.maybe_request_screenshot(&context);
     }
 }
 
 fn configure_style(context: &egui::Context) {
     configure_system_font(context);
+    context.set_theme(egui::ThemePreference::Light);
     for theme in [egui::Theme::Light, egui::Theme::Dark] {
         let mut style = (*context.style_of(theme)).clone();
-        style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+        style.spacing.item_spacing = egui::vec2(10.0, 9.0);
+        style.spacing.button_padding = egui::vec2(15.0, 8.0);
+        style.spacing.interact_size.y = 38.0;
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::new(14.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::new(13.0, egui::FontFamily::Proportional),
+        );
         style.visuals.panel_fill = BACKGROUND;
         style.visuals.window_fill = SURFACE;
         style.visuals.override_text_color = Some(TEXT);
+        style.visuals.selection.bg_fill = ACCENT;
+        style.visuals.selection.stroke.color = Color32::WHITE;
+        style.visuals.widgets.inactive.bg_fill = SURFACE;
+        style.visuals.widgets.inactive.weak_bg_fill = SURFACE;
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER);
+        style.visuals.widgets.hovered.bg_fill = SURFACE_TINT;
+        style.visuals.widgets.hovered.weak_bg_fill = SURFACE_TINT;
+        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
+        style.visuals.widgets.active.bg_fill = SURFACE_TINT;
+        style.visuals.widgets.active.weak_bg_fill = SURFACE_TINT;
+        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT_DARK);
         style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(9);
         style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(9);
         style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(9);
+        style.visuals.window_corner_radius = egui::CornerRadius::same(18);
+        style.visuals.window_shadow = egui::epaint::Shadow {
+            offset: [0, 6],
+            blur: 24,
+            spread: 0,
+            color: Color32::from_black_alpha(32),
+        };
         context.set_style_of(theme, style);
     }
 }
@@ -906,17 +1322,27 @@ fn configure_system_font(context: &egui::Context) {
     context.set_fonts(fonts);
 }
 
-fn nav_button(ui: &mut egui::Ui, page: &mut Page, target: Page, label: &str) {
+fn nav_button(ui: &mut egui::Ui, page: &mut Page, target: Page, icon: &str, label: &str) {
     let selected = *page == target;
     let response = ui.add_sized(
-        [ui.available_width(), 40.0],
-        egui::Button::new(RichText::new(label).color(if selected { Color32::WHITE } else { TEXT }))
-            .fill(if selected {
-                ACCENT
-            } else {
-                Color32::TRANSPARENT
-            })
-            .corner_radius(10),
+        [ui.available_width(), 44.0],
+        egui::Button::new(
+            RichText::new(format!("{icon}    {label}"))
+                .size(13.5)
+                .strong()
+                .color(if selected {
+                    Color32::WHITE
+                } else {
+                    SIDEBAR_TEXT
+                }),
+        )
+        .fill(if selected {
+            SIDEBAR_SELECTED
+        } else {
+            Color32::TRANSPARENT
+        })
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(12),
     );
     if response.clicked() {
         *page = target;
@@ -929,14 +1355,265 @@ fn card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
         .stroke(egui::Stroke::new(1.0, BORDER))
         .corner_radius(CARD_RADIUS)
         .inner_margin(CARD_PADDING)
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 2],
+            blur: 10,
+            spread: 0,
+            color: Color32::from_black_alpha(10),
+        })
+        .show(ui, content);
+}
+
+fn room_card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(207, 225, 218)))
+        .corner_radius(24)
+        .inner_margin(26.0)
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 5],
+            blur: 20,
+            spread: 0,
+            color: Color32::from_black_alpha(18),
+        })
         .show(ui, content);
 }
 
 fn key_value(ui: &mut egui::Ui, key: &str, value: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(key).color(MUTED).strong());
-        ui.label(value);
+    egui::Frame::new()
+        .fill(BACKGROUND)
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(key).size(11.0).color(MUTED).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(value).size(11.0).color(TEXT));
+                });
+            });
+        });
+}
+
+fn page_heading(page: Page) -> (&'static str, &'static str) {
+    match page {
+        Page::Devices => ("你的设备", "选择一个私人房间，发送文件或文件夹"),
+        Page::Activity => ("传输活动", "清楚区分排队、传输和真正送达"),
+        Page::Inbox => ("收件箱", "查看已经校验并保存到此电脑的内容"),
+        Page::Settings => ("设置与诊断", "Agent、安全边界和连接状态"),
+    }
+}
+
+fn primary_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(
+        RichText::new(label)
+            .size(13.0)
+            .strong()
+            .color(Color32::WHITE),
+    )
+    .fill(ACCENT)
+    .stroke(egui::Stroke::NONE)
+    .corner_radius(11)
+    .min_size(egui::vec2(132.0, 42.0))
+}
+
+fn quiet_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(label).size(12.5).strong().color(TEXT))
+        .fill(SURFACE)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .corner_radius(11)
+        .min_size(egui::vec2(104.0, 40.0))
+}
+
+fn danger_quiet_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(label).size(12.0).strong().color(DANGER))
+        .fill(Color32::TRANSPARENT)
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(9)
+}
+
+fn danger_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(
+        RichText::new(label)
+            .size(12.5)
+            .strong()
+            .color(Color32::WHITE),
+    )
+    .fill(DANGER)
+    .stroke(egui::Stroke::NONE)
+    .corner_radius(11)
+    .min_size(egui::vec2(110.0, 40.0))
+}
+
+fn brand_mark(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(42.0, 42.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 13.0, ACCENT);
+    ui.painter()
+        .circle_stroke(rect.center(), 10.0, egui::Stroke::new(2.2, Color32::WHITE));
+    ui.painter()
+        .circle_filled(rect.center() + egui::vec2(7.0, -7.0), 3.5, Color32::WHITE);
+}
+
+fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32, fill: Color32) {
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(20)
+        .inner_margin(egui::Margin::symmetric(12, 7))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(11.5).strong().color(color));
+        });
+}
+
+fn state_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
+    let fill = if color == SUCCESS {
+        Color32::from_rgb(229, 246, 238)
+    } else if color == DANGER {
+        Color32::from_rgb(253, 235, 235)
+    } else if color == WARNING {
+        Color32::from_rgb(253, 244, 225)
+    } else {
+        Color32::from_rgb(231, 241, 251)
+    };
+    status_pill(ui, text, color, fill);
+}
+
+fn device_avatar(ui: &mut egui::Ui, label: &str, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), size / 2.0, color);
+    let initial = label.chars().next().unwrap_or('E').to_string();
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        initial,
+        egui::FontId::proportional(size * 0.38),
+        Color32::WHITE,
+    );
+}
+
+fn device_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    generation: u64,
+    selected: bool,
+) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            RichText::new(format!("●   {label}\n     已验证 · 第 {generation} 代"))
+                .size(12.5)
+                .strong()
+                .color(if selected { ACCENT_DARK } else { TEXT }),
+        )
+        .fill(if selected { SURFACE_TINT } else { SURFACE })
+        .stroke(egui::Stroke::new(
+            if selected { 1.5 } else { 1.0 },
+            if selected { ACCENT } else { BORDER },
+        ))
+        .corner_radius(16)
+        .min_size(egui::vec2(218.0, 66.0)),
+    )
+}
+
+fn metric_card(ui: &mut egui::Ui, label: &str, value: usize, color: Color32, detail: &str) {
+    card(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("●").size(11.0).color(color));
+            ui.label(RichText::new(label).size(12.0).strong().color(MUTED));
+        });
+        ui.label(
+            RichText::new(value.to_string())
+                .size(30.0)
+                .strong()
+                .color(TEXT),
+        );
+        ui.label(RichText::new(detail).size(10.5).color(MUTED));
     });
+}
+
+fn transfer_icon(ui: &mut egui::Ui, direction: &str, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(38.0, 38.0), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), 19.0, color.gamma_multiply(0.12));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        if direction.contains("发送") {
+            "↗"
+        } else {
+            "↓"
+        },
+        egui::FontId::proportional(18.0),
+        color,
+    );
+}
+
+fn empty_state(ui: &mut egui::Ui, icon: &str, title: &str, content: impl FnOnce(&mut egui::Ui)) {
+    card(ui, |ui| {
+        ui.set_min_height(220.0);
+        ui.vertical_centered(|ui| {
+            ui.add_space(32.0);
+            ui.label(RichText::new(icon).size(34.0).strong().color(ACCENT));
+            ui.label(RichText::new(title).size(18.0).strong().color(TEXT));
+            content(ui);
+        });
+    });
+}
+
+fn security_line(ui: &mut egui::Ui, icon: &str, text: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icon).strong().color(SUCCESS));
+        ui.label(RichText::new(text).size(12.0).color(TEXT));
+    });
+}
+
+fn path_display_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn write_bmp(path: &std::path::Path, image: &egui::ColorImage) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    let width = u32::try_from(image.width())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "screenshot width is too large"))?;
+    let height = u32::try_from(image.height())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "screenshot height is too large"))?;
+    let signed_width = i32::try_from(width)
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "screenshot width is too large"))?;
+    let signed_height = i32::try_from(height)
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "screenshot height is too large"))?;
+    let pixel_bytes = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(BMP_BYTES_PER_PIXEL))
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "screenshot is too large"))?;
+    let file_size = BMP_PIXEL_OFFSET
+        .checked_add(pixel_bytes)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "screenshot is too large"))?;
+
+    let mut output = Vec::with_capacity(file_size as usize);
+    output.extend_from_slice(b"BM");
+    output.extend_from_slice(&file_size.to_le_bytes());
+    output.extend_from_slice(&[0; 4]);
+    output.extend_from_slice(&BMP_PIXEL_OFFSET.to_le_bytes());
+    output.extend_from_slice(&BMP_DIB_HEADER_BYTES.to_le_bytes());
+    output.extend_from_slice(&signed_width.to_le_bytes());
+    output.extend_from_slice(&signed_height.to_le_bytes());
+    output.extend_from_slice(&BMP_PLANES.to_le_bytes());
+    output.extend_from_slice(&BMP_BITS_PER_PIXEL.to_le_bytes());
+    output.extend_from_slice(&0_u32.to_le_bytes());
+    output.extend_from_slice(&pixel_bytes.to_le_bytes());
+    output.extend_from_slice(&BMP_PIXELS_PER_METER.to_le_bytes());
+    output.extend_from_slice(&BMP_PIXELS_PER_METER.to_le_bytes());
+    output.extend_from_slice(&0_u32.to_le_bytes());
+    output.extend_from_slice(&0_u32.to_le_bytes());
+
+    for row in image.pixels.chunks_exact(image.width()).rev() {
+        for pixel in row {
+            let [red, green, blue, alpha] = pixel.to_array();
+            output.extend_from_slice(&[blue, green, red, alpha]);
+        }
+    }
+    std::fs::write(path, output)
 }
 
 fn append_unique_paths(target: &mut Vec<PathBuf>, paths: Vec<PathBuf>) {
