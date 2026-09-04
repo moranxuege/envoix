@@ -748,6 +748,14 @@ final class LiveRoomControlGateway: RoomControlGateway {
             return .verificationSucceeded
         case .verificationFailed:
             return .verificationFailed
+        case .relationshipUpgradeRequested,
+             .relationshipUpgradeAccepted,
+             .relationshipUpgradeRejected,
+             .relationshipUpgradePrepared,
+             .relationshipUpgradeCommitted,
+             .relationshipConfirmationRequested,
+             .relationshipConfirmationAcknowledged:
+            return nil
         case .incomingOffer:
             guard let offer = event.offer else { return nil }
             return .incomingOffer(RoomControlTransferOffer(

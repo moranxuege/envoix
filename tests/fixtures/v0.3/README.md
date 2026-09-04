@@ -40,6 +40,8 @@ selected/cleared path events without rewriting v4-v7.
 `agent-control-v9.json` binds diagnostics to Engine schema v2 without rewriting
 v8. `agent-control-v10.json` adds Apple Keychain diagnostics, v11 moves pairing
 into the Agent boundary, v12 adds pinned route migration, and v13 adds durable
-Transfer controls. `agent-control-v14.json` is the current contract and adds an
-Agent-owned Inbox preference plus ephemeral, bounded Transfer telemetry without
-rewriting v9-v13.
+Transfer controls. `agent-control-v14.json` adds an Agent-owned Inbox preference
+plus ephemeral, bounded Transfer telemetry. `agent-control-v15.json` is the
+current contract and makes the complete Room invitation authoritative across
+different deployments while exposing an unconfirmed Relationship as requiring
+repair, without rewriting v9-v14.

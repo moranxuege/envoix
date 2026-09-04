@@ -212,6 +212,28 @@ fn verification_code_is_six_ascii_digits_and_one_attempt_only() {
 }
 
 #[test]
+fn relationship_upgrade_state_requires_acceptance_and_both_prepared_peers() {
+    let transaction_id = "relationship_tx_1";
+    let mut initiator = RelationshipUpgradeState::default();
+    initiator.begin_local(transaction_id.into()).unwrap();
+    assert!(initiator.mark_local_prepared(transaction_id).is_err());
+    initiator.receive_acceptance(transaction_id).unwrap();
+    initiator.mark_local_prepared(transaction_id).unwrap();
+    assert!(!initiator.can_commit(transaction_id).unwrap());
+    initiator.mark_remote_prepared(transaction_id).unwrap();
+    assert!(initiator.can_commit(transaction_id).unwrap());
+    initiator.mark_local_committed(transaction_id).unwrap();
+    assert!(!initiator.is_complete(transaction_id).unwrap());
+    initiator.mark_remote_committed(transaction_id).unwrap();
+    assert!(initiator.is_complete(transaction_id).unwrap());
+    assert!(!initiator.blocks_transfers());
+
+    for invalid in ["", "space is invalid", "../escape"] {
+        assert!(validate_relationship_transaction_id(invalid).is_err());
+    }
+}
+
+#[test]
 fn remembered_hello_rejects_protocol_and_session_mode_mismatches() {
     let mode = RoomControlSessionMode::Remembered { generation: 7 };
     let binding = [0x42; 32];
@@ -647,6 +669,82 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
             .pairing_credential()
             .expect("joiner pairing credential")
     );
+    assert!(host.supports_relationship_upgrade());
+    assert!(joiner.supports_relationship_upgrade());
+    let transaction_id = "relationship_upgrade_1";
+    host.request_relationship_upgrade(transaction_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::RelationshipUpgradeRequested {
+            transaction_id: transaction_id.into(),
+        }
+    );
+    joiner
+        .accept_relationship_upgrade(transaction_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.next_event().await.unwrap(),
+        RoomControlEvent::RelationshipUpgradeAccepted {
+            transaction_id: transaction_id.into(),
+        }
+    );
+    let (host_prepared, joiner_prepared) = tokio::join!(
+        host.mark_relationship_upgrade_prepared(transaction_id),
+        joiner.mark_relationship_upgrade_prepared(transaction_id)
+    );
+    host_prepared.unwrap();
+    joiner_prepared.unwrap();
+    assert_eq!(
+        host.next_event().await.unwrap(),
+        RoomControlEvent::RelationshipUpgradePrepared {
+            transaction_id: transaction_id.into(),
+        }
+    );
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::RelationshipUpgradePrepared {
+            transaction_id: transaction_id.into(),
+        }
+    );
+    assert!(
+        host.relationship_upgrade_ready_to_commit(transaction_id)
+            .unwrap()
+    );
+    assert!(
+        joiner
+            .relationship_upgrade_ready_to_commit(transaction_id)
+            .unwrap()
+    );
+    let (host_committed, joiner_committed) = tokio::join!(
+        host.mark_relationship_upgrade_committed(transaction_id),
+        joiner.mark_relationship_upgrade_committed(transaction_id)
+    );
+    host_committed.unwrap();
+    joiner_committed.unwrap();
+    assert_eq!(
+        host.next_event().await.unwrap(),
+        RoomControlEvent::RelationshipUpgradeCommitted {
+            transaction_id: transaction_id.into(),
+        }
+    );
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::RelationshipUpgradeCommitted {
+            transaction_id: transaction_id.into(),
+        }
+    );
+    assert!(
+        host.relationship_upgrade_is_complete(transaction_id)
+            .unwrap()
+    );
+    assert!(
+        joiner
+            .relationship_upgrade_is_complete(transaction_id)
+            .unwrap()
+    );
     assert!(
         registry.metrics_snapshot().room_not_found_rejections >= 1,
         "joiner-first connection should exercise the broker retry path"
@@ -924,6 +1022,9 @@ async fn remembered_room_control_is_equal_and_bidirectional_after_authentication
     assert!(!connector.is_creator());
     assert!(responder.is_remembered());
     assert!(connector.is_remembered());
+    assert!(!responder.supports_relationship_upgrade());
+    assert!(responder.supports_relationship_repair());
+    assert!(connector.supports_relationship_repair());
     assert_eq!(responder.remembered_generation(), Some(7));
     assert_eq!(connector.remembered_generation(), Some(7));
     assert_eq!(responder.lifetime_state(), RoomLifetimeState::remembered());
@@ -939,6 +1040,27 @@ async fn remembered_room_control_is_equal_and_bidirectional_after_authentication
             .set_policy(RoomLifetimePolicy::Idle15Minutes)
             .await
             .is_err()
+    );
+
+    connector
+        .request_relationship_confirmation("relationship_transaction_1")
+        .await
+        .unwrap();
+    assert_eq!(
+        responder.next_event().await.unwrap(),
+        RoomControlEvent::RelationshipConfirmationRequested {
+            transaction_id: "relationship_transaction_1".into(),
+        }
+    );
+    responder
+        .acknowledge_relationship_confirmation("relationship_transaction_1")
+        .await
+        .unwrap();
+    assert_eq!(
+        connector.next_event().await.unwrap(),
+        RoomControlEvent::RelationshipConfirmationAcknowledged {
+            transaction_id: "relationship_transaction_1".into(),
+        }
     );
 
     assert!(

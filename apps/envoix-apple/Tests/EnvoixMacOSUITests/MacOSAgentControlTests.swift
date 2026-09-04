@@ -194,7 +194,8 @@ final class MacOSAgentControlTests: XCTestCase {
                 generation: 0,
                 previousGeneration: nil,
                 broker: "fixture-broker",
-                relay: nil
+                relay: nil,
+                needsRepair: false
             )
         ))
         let coordinator = MacOSAgentPairingCoordinator(controlClient: client)
@@ -466,7 +467,8 @@ final class MacOSAgentControlTests: XCTestCase {
             generation: 0,
             previousGeneration: nil,
             broker: "fixture-broker",
-            relay: nil
+            relay: nil,
+            needsRepair: false
         )
     }
 

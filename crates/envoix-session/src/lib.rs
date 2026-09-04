@@ -88,10 +88,10 @@ pub use room::{
     send_manifest_v2_via_room_with_authentication,
 };
 pub use room_control::{
-    ROOM_CONTROL_ALPN, RememberedRoomControlConnectError, RememberedRoomControlRole,
-    RoomCloseReason, RoomControlEvent, RoomControlInvite, RoomControlSession, RoomLifetimePolicy,
-    RoomLifetimeState, RoomOfferRejection, RoomTransferOffer, connect_remembered_room_control,
-    connect_room_control,
+    ROOM_CONTROL_ALPN, RelationshipUpgradeRejection, RememberedRoomControlConnectError,
+    RememberedRoomControlRole, RoomCloseReason, RoomControlEvent, RoomControlInvite,
+    RoomControlSession, RoomLifetimePolicy, RoomLifetimeState, RoomOfferRejection,
+    RoomTransferOffer, connect_remembered_room_control, connect_room_control,
 };
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);

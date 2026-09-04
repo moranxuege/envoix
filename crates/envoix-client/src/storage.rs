@@ -30,6 +30,45 @@ const MAX_REFERENCE_BYTES: usize = 128;
 const MAX_LABEL_CHARS: usize = 256;
 const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_PATH_BYTES: usize = 4_096;
+const MAX_RELATIONSHIP_TRANSACTION_ID_BYTES: usize = 128;
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum RelationshipConfirmation {
+    #[default]
+    Confirmed,
+    AwaitingPeerCommit {
+        transaction_id: String,
+    },
+}
+
+impl RelationshipConfirmation {
+    pub fn needs_repair(&self) -> bool {
+        matches!(self, Self::AwaitingPeerCommit { .. })
+    }
+
+    pub fn transaction_id(&self) -> Option<&str> {
+        match self {
+            Self::Confirmed => None,
+            Self::AwaitingPeerCommit { transaction_id } => Some(transaction_id),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), EngineStoreError> {
+        if let Self::AwaitingPeerCommit { transaction_id } = self
+            && (transaction_id.is_empty()
+                || transaction_id.len() > MAX_RELATIONSHIP_TRANSACTION_ID_BYTES
+                || !transaction_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+        {
+            return Err(invalid(
+                "Relationship confirmation has an invalid transaction id",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum EngineStoreError {
@@ -108,6 +147,8 @@ pub struct DurableRelationship {
     pub vault_reference: Option<VaultReference>,
     pub broker: String,
     pub relay: Option<String>,
+    #[serde(default)]
+    pub confirmation: RelationshipConfirmation,
 }
 
 impl DurableRelationship {
@@ -116,6 +157,7 @@ impl DurableRelationship {
         if let Some(relay) = &self.relay {
             validate_endpoint("relationship relay", relay)?;
         }
+        self.confirmation.validate()?;
         match state {
             RelationshipState::Trusted if self.vault_reference.is_none() => {
                 Err(invalid("trusted relationship has no vault reference"))
@@ -676,6 +718,7 @@ mod tests {
                 vault_reference: Some(VaultReference::parse("vault_test").unwrap()),
                 broker: "broker.invalid:8445".into(),
                 relay: Some("https://relay.invalid".into()),
+                confirmation: RelationshipConfirmation::Confirmed,
             },
         );
         state.snapshot.transfers.insert(
@@ -694,6 +737,36 @@ mod tests {
             },
         );
         state
+    }
+
+    #[test]
+    fn pre_confirmation_schema_two_relationship_defaults_to_confirmed() {
+        let durable: DurableRelationship = serde_json::from_value(serde_json::json!({
+            "vault_reference": "vault_test",
+            "broker": "broker.invalid:8445",
+            "relay": null
+        }))
+        .unwrap();
+
+        assert_eq!(durable.confirmation, RelationshipConfirmation::Confirmed);
+        durable.validate(RelationshipState::Trusted).unwrap();
+    }
+
+    #[test]
+    fn relationship_confirmation_rejects_unbounded_or_unsafe_transaction_ids() {
+        for transaction_id in [
+            "",
+            "contains spaces",
+            &"x".repeat(MAX_RELATIONSHIP_TRANSACTION_ID_BYTES + 1),
+        ] {
+            assert!(
+                RelationshipConfirmation::AwaitingPeerCommit {
+                    transaction_id: transaction_id.to_string(),
+                }
+                .validate()
+                .is_err()
+            );
+        }
     }
 
     #[test]

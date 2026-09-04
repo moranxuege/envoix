@@ -734,7 +734,7 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 26)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 28)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
         XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v5")
         XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
@@ -767,7 +767,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             "persistent_application_engine_v1"
         )
         XCTAssertTrue(info.capabilities.contains(expectedAgentHostControlCapability))
-        XCTAssertEqual(expectedAgentHostControlCapability, "agent_host_control_v4")
+        XCTAssertEqual(expectedAgentHostControlCapability, "agent_host_control_v5")
     }
 
     func testTypedRoomControlErrorsDoNotUseDiagnosticTextForDisposition() {

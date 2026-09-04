@@ -2236,10 +2236,18 @@ async fn begin_pairing(runtime: Arc<AgentRuntime>, label: String) -> Result<Agen
             return Err(error);
         }
     };
+    let relationship_transaction_id = match generate_relationship_transaction_id() {
+        Ok(transaction_id) => transaction_id,
+        Err(error) => {
+            lock(&runtime.active_pairings)?.remove(&prepared.label().to_ascii_lowercase());
+            return Err(error);
+        }
+    };
     let response = AgentResponse::Pairing {
         pairing: PairingInvitation {
             label: prepared.label().to_string(),
             room_code: invitation.code().to_string(),
+            invitation: invitation.payload(),
             verification_code: verification_code.clone(),
             expires_at_unix_seconds: invitation.expires_at_unix_secs(),
         },
@@ -2258,7 +2266,13 @@ async fn begin_pairing(runtime: Arc<AgentRuntime>, label: String) -> Result<Agen
     let task_runtime = runtime.clone();
     if let Err(error) = spawn_background_task(
         &runtime,
-        run_initial_pairing(task_runtime, prepared, invitation, verification_code),
+        run_initial_pairing(
+            task_runtime,
+            prepared,
+            invitation,
+            verification_code,
+            relationship_transaction_id,
+        ),
     ) {
         lock(&runtime.active_pairings)?.remove(&pairing_label.to_ascii_lowercase());
         record_agent_event(
@@ -2295,6 +2309,7 @@ async fn run_initial_pairing(
     prepared: PreparedRememberedDevice,
     invitation: RoomControlInvite,
     verification_code: String,
+    relationship_transaction_id: String,
 ) {
     let label = prepared.label().to_string();
     let device_id = prepared.id().to_string();
@@ -2308,6 +2323,7 @@ async fn run_initial_pairing(
             prepared.clone(),
             invitation.clone(),
             &verification_code,
+            &relationship_transaction_id,
         )
         .await
         {
@@ -2465,10 +2481,11 @@ async fn continue_initial_room(
 }
 
 async fn establish_initial_room(
-    runtime: &AgentRuntime,
+    runtime: &Arc<AgentRuntime>,
     prepared: PreparedRememberedDevice,
     invitation: RoomControlInvite,
     verification_code: &str,
+    relationship_transaction_id: &str,
 ) -> Result<(Arc<RoomControlSession>, TransferCancelToken, DeviceSummary)> {
     let device_id = prepared.id().to_string();
     let invitation_relay = invitation.relay().map(str::to_string);
@@ -2484,26 +2501,33 @@ async fn establish_initial_room(
         .await?,
     );
     let pairing: Result<(TransferCancelToken, DeviceSummary)> = async {
-        session.request_verification(verification_code).await?;
+        session
+            .request_relationship_upgrade(relationship_transaction_id)
+            .await?;
+        let mut upgrade_accepted = false;
         loop {
             match session.next_event().await? {
-                RoomControlEvent::VerificationSucceeded => {
-                    let credential = session.pairing_credential().ok_or_else(|| {
-                        anyhow!("verified room did not expose a pairing credential")
-                    })?;
-                    let session_cancel = register_remembered_receiver(runtime, &device_id)?
-                        .ok_or_else(|| anyhow!("remembered receiver was already active"))?;
-                    let commit_result =
-                        lock(&runtime.store)?.commit_device(prepared, &credential.to_opaque(), 0);
-                    let device = match commit_result {
-                        Ok(device) => device,
-                        Err(error) => {
-                            lock_or_log(&runtime.active_receivers, "active receivers")
-                                .map(|mut active| active.remove(&device_id));
-                            return Err(error.into());
-                        }
-                    };
-                    return Ok((session_cancel, device));
+                RoomControlEvent::RelationshipUpgradeAccepted { transaction_id }
+                    if transaction_id == relationship_transaction_id && !upgrade_accepted =>
+                {
+                    upgrade_accepted = true;
+                    session.request_verification(verification_code).await?;
+                }
+                RoomControlEvent::RelationshipUpgradeRejected {
+                    transaction_id,
+                    reason,
+                } if transaction_id == relationship_transaction_id => {
+                    bail!("the peer rejected saving this device: {reason:?}");
+                }
+                RoomControlEvent::VerificationSucceeded if upgrade_accepted => {
+                    return complete_initial_relationship(
+                        runtime,
+                        session.as_ref(),
+                        prepared,
+                        &device_id,
+                        relationship_transaction_id,
+                    )
+                    .await;
                 }
                 RoomControlEvent::VerificationFailed => {
                     bail!("the one-time device verification code was rejected");
@@ -2525,6 +2549,16 @@ async fn establish_initial_room(
                 RoomControlEvent::OfferAccepted { .. } | RoomControlEvent::OfferRejected { .. } => {
                     bail!("peer sent an unexpected offer decision during verification");
                 }
+                RoomControlEvent::RelationshipUpgradeRequested { .. }
+                | RoomControlEvent::RelationshipUpgradeAccepted { .. }
+                | RoomControlEvent::RelationshipUpgradeRejected { .. }
+                | RoomControlEvent::RelationshipUpgradePrepared { .. }
+                | RoomControlEvent::RelationshipUpgradeCommitted { .. }
+                | RoomControlEvent::RelationshipConfirmationRequested { .. }
+                | RoomControlEvent::RelationshipConfirmationAcknowledged { .. }
+                | RoomControlEvent::VerificationSucceeded => {
+                    bail!("peer advanced an unexpected Relationship upgrade transaction");
+                }
             }
         }
     }
@@ -2539,7 +2573,7 @@ async fn establish_initial_room(
 }
 
 async fn establish_joined_room(
-    runtime: &AgentRuntime,
+    runtime: &Arc<AgentRuntime>,
     prepared: PreparedRememberedDevice,
     invitation: RoomControlInvite,
     verification_code: &str,
@@ -2559,27 +2593,34 @@ async fn establish_joined_room(
     );
     let pairing: Result<(TransferCancelToken, DeviceSummary)> = async {
         let mut submitted = false;
+        let mut relationship_transaction_id = None;
         loop {
             match session.next_event().await? {
-                RoomControlEvent::VerificationRequested if !submitted => {
+                RoomControlEvent::RelationshipUpgradeRequested { transaction_id }
+                    if relationship_transaction_id.is_none() =>
+                {
+                    session.accept_relationship_upgrade(&transaction_id).await?;
+                    relationship_transaction_id = Some(transaction_id);
+                }
+                RoomControlEvent::VerificationRequested
+                    if !submitted && relationship_transaction_id.is_some() =>
+                {
                     session.submit_verification_code(verification_code).await?;
                     submitted = true;
                 }
                 RoomControlEvent::VerificationSucceeded if submitted => {
-                    let credential = session.pairing_credential().ok_or_else(|| {
-                        anyhow!("verified room did not expose a pairing credential")
-                    })?;
-                    let session_cancel = register_remembered_receiver(runtime, &device_id)?
-                        .ok_or_else(|| anyhow!("remembered receiver was already active"))?;
-                    match lock(&runtime.store)?.commit_device(prepared, &credential.to_opaque(), 0)
-                    {
-                        Ok(device) => return Ok((session_cancel, device)),
-                        Err(error) => {
-                            lock_or_log(&runtime.active_receivers, "active receivers")
-                                .map(|mut active| active.remove(&device_id));
-                            return Err(error.into());
-                        }
-                    }
+                    let transaction_id =
+                        relationship_transaction_id.as_deref().ok_or_else(|| {
+                            anyhow!("device verification succeeded without a Relationship upgrade")
+                        })?;
+                    return complete_initial_relationship(
+                        runtime,
+                        session.as_ref(),
+                        prepared,
+                        &device_id,
+                        transaction_id,
+                    )
+                    .await;
                 }
                 RoomControlEvent::VerificationFailed => {
                     bail!("the one-time device verification code was rejected");
@@ -2601,6 +2642,20 @@ async fn establish_joined_room(
                 RoomControlEvent::OfferAccepted { .. } | RoomControlEvent::OfferRejected { .. } => {
                     bail!("peer sent an unexpected offer decision during verification");
                 }
+                RoomControlEvent::RelationshipUpgradeRejected {
+                    transaction_id,
+                    reason,
+                } => {
+                    bail!("Relationship upgrade {transaction_id} was rejected: {reason:?}");
+                }
+                RoomControlEvent::RelationshipUpgradeRequested { .. }
+                | RoomControlEvent::RelationshipUpgradeAccepted { .. }
+                | RoomControlEvent::RelationshipUpgradePrepared { .. }
+                | RoomControlEvent::RelationshipUpgradeCommitted { .. }
+                | RoomControlEvent::RelationshipConfirmationRequested { .. }
+                | RoomControlEvent::RelationshipConfirmationAcknowledged { .. } => {
+                    bail!("peer advanced an unexpected Relationship upgrade transaction");
+                }
             }
         }
     }
@@ -2610,6 +2665,113 @@ async fn establish_joined_room(
         Err(error) => {
             session.shutdown().await;
             Err(error)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelationshipUpgradeCheckpoint {
+    Prepared,
+    Committed,
+}
+
+async fn complete_initial_relationship(
+    runtime: &Arc<AgentRuntime>,
+    session: &RoomControlSession,
+    prepared: PreparedRememberedDevice,
+    device_id: &str,
+    transaction_id: &str,
+) -> Result<(TransferCancelToken, DeviceSummary)> {
+    let credential = session
+        .pairing_credential()
+        .ok_or_else(|| anyhow!("verified room did not expose a pairing credential"))?
+        .to_opaque();
+    session
+        .mark_relationship_upgrade_prepared(transaction_id)
+        .await?;
+    wait_for_relationship_upgrade_checkpoint(
+        session,
+        transaction_id,
+        RelationshipUpgradeCheckpoint::Prepared,
+    )
+    .await?;
+    if !session.relationship_upgrade_ready_to_commit(transaction_id)? {
+        bail!("Relationship upgrade was not prepared by both peers");
+    }
+
+    let session_cancel = register_remembered_receiver(runtime, device_id)?
+        .ok_or_else(|| anyhow!("remembered receiver was already active"))?;
+    if let Err(error) =
+        lock(&runtime.store)?.commit_device_awaiting_peer(prepared, &credential, 0, transaction_id)
+    {
+        lock_or_log(&runtime.active_receivers, "active receivers")
+            .map(|mut active| active.remove(device_id));
+        session_cancel.cancel();
+        return Err(error.into());
+    }
+
+    let confirmation = async {
+        session
+            .mark_relationship_upgrade_committed(transaction_id)
+            .await?;
+        wait_for_relationship_upgrade_checkpoint(
+            session,
+            transaction_id,
+            RelationshipUpgradeCheckpoint::Committed,
+        )
+        .await?;
+        if !session.relationship_upgrade_is_complete(transaction_id)? {
+            bail!("Relationship upgrade did not receive both commit confirmations");
+        }
+        lock(&runtime.store)?
+            .confirm_device(device_id, transaction_id)
+            .map_err(anyhow::Error::from)
+    }
+    .await;
+
+    match confirmation {
+        Ok(confirmed) => Ok((session_cancel, confirmed)),
+        Err(error) => {
+            lock_or_log(&runtime.active_receivers, "active receivers")
+                .map(|mut active| active.remove(device_id));
+            session_cancel.cancel();
+            spawn_remembered_receiver(runtime.clone(), device_id.to_string());
+            Err(error.context("Relationship was saved locally but still needs peer confirmation"))
+        }
+    }
+}
+
+async fn wait_for_relationship_upgrade_checkpoint(
+    session: &RoomControlSession,
+    transaction_id: &str,
+    expected: RelationshipUpgradeCheckpoint,
+) -> Result<()> {
+    loop {
+        match session.next_event().await? {
+            RoomControlEvent::RelationshipUpgradePrepared {
+                transaction_id: peer_transaction,
+            } if expected == RelationshipUpgradeCheckpoint::Prepared
+                && peer_transaction == transaction_id =>
+            {
+                return Ok(());
+            }
+            RoomControlEvent::RelationshipUpgradeCommitted {
+                transaction_id: peer_transaction,
+            } if expected == RelationshipUpgradeCheckpoint::Committed
+                && peer_transaction == transaction_id =>
+            {
+                return Ok(());
+            }
+            RoomControlEvent::IncomingOffer(offer) => {
+                session
+                    .reject_offer(&offer.offer_id, RoomOfferRejection::Busy)
+                    .await?;
+            }
+            RoomControlEvent::LifetimeChanged(_) | RoomControlEvent::Pong { .. } => {}
+            RoomControlEvent::PeerClosed(reason) => {
+                bail!("peer closed the Room during Relationship commit: {reason:?}");
+            }
+            _ => bail!("peer advanced an unexpected Relationship upgrade transaction"),
         }
     }
 }
@@ -2975,8 +3137,22 @@ async fn run_room_session(
     let result = async {
         let mut pending_outgoing = None;
         let mut pending_incoming = None;
+        if let Some(transaction_id) = pending_relationship_confirmation(runtime, device_id)? {
+            if session.supports_relationship_repair() {
+                session
+                    .request_relationship_confirmation(&transaction_id)
+                    .await?;
+            } else {
+                tracing::warn!(
+                    device = device_label,
+                    "Relationship needs confirmation but the peer does not support repair"
+                );
+            }
+        }
         loop {
-            if pending_outgoing.is_none() && !relationship_has_active_outgoing(runtime, device_id)?
+            if pending_outgoing.is_none()
+                && pending_relationship_confirmation(runtime, device_id)?.is_none()
+                && !relationship_has_active_outgoing(runtime, device_id)?
             {
                 pending_outgoing =
                     offer_next_outgoing(runtime, &session, device_id, device_label).await?;
@@ -3136,6 +3312,28 @@ async fn run_room_session(
                 ) => {
                     bail!("peer attempted device verification after pairing completed");
                 }
+                RoomSessionInput::Control(
+                    RoomControlEvent::RelationshipUpgradeRequested { .. }
+                    | RoomControlEvent::RelationshipUpgradeAccepted { .. }
+                    | RoomControlEvent::RelationshipUpgradeRejected { .. }
+                    | RoomControlEvent::RelationshipUpgradePrepared { .. }
+                    | RoomControlEvent::RelationshipUpgradeCommitted { .. },
+                ) => {
+                    bail!("peer attempted Relationship upgrade after pairing completed");
+                }
+                RoomSessionInput::Control(
+                    RoomControlEvent::RelationshipConfirmationRequested { transaction_id },
+                ) => {
+                    confirm_relationship_if_pending(runtime, device_id, &transaction_id)?;
+                    session
+                        .acknowledge_relationship_confirmation(&transaction_id)
+                        .await?;
+                }
+                RoomSessionInput::Control(
+                    RoomControlEvent::RelationshipConfirmationAcknowledged { transaction_id },
+                ) => {
+                    confirm_relationship_if_pending(runtime, device_id, &transaction_id)?;
+                }
             }
         }
     }
@@ -3153,6 +3351,41 @@ async fn run_room_session(
         tracing::error!(device = device_label, %error, "active room could not be unregistered");
     }
     result
+}
+
+fn pending_relationship_confirmation(
+    runtime: &AgentRuntime,
+    device_id: &str,
+) -> Result<Option<String>> {
+    Ok(lock(&runtime.store)?
+        .device_record(device_id)
+        .ok_or_else(|| anyhow!("remembered device is missing"))?
+        .pending_confirmation_transaction_id()
+        .map(str::to_string))
+}
+
+fn confirm_relationship_if_pending(
+    runtime: &AgentRuntime,
+    device_id: &str,
+    transaction_id: &str,
+) -> Result<bool> {
+    let pending = pending_relationship_confirmation(runtime, device_id)?;
+    let Some(pending) = pending else {
+        return Ok(false);
+    };
+    if pending != transaction_id {
+        bail!("peer confirmed a different Relationship transaction");
+    }
+    lock(&runtime.store)?.confirm_device(device_id, transaction_id)?;
+    record_agent_event(
+        runtime,
+        AgentEvent::RelationshipChanged {
+            relationship_id: device_id.to_string(),
+            change: AgentRelationshipChange::Trusted,
+        },
+    )?;
+    tracing::info!(relationship_id = device_id, "Relationship repair completed");
+    Ok(true)
 }
 
 fn take_pending_outgoing(
@@ -4097,6 +4330,13 @@ fn generate_verification_code() -> Result<String> {
     }
 }
 
+fn generate_relationship_transaction_id() -> Result<String> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|error| anyhow!("generate Relationship transaction id: {error}"))?;
+    Ok(format!("relationship_{}", URL_SAFE_NO_PAD.encode(random)))
+}
+
 fn unix_millis() -> Result<u64> {
     u64::try_from(
         SystemTime::now()
@@ -4311,7 +4551,7 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v14_envelope() {
+    fn request_decoder_accepts_a_valid_v15_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -5538,7 +5778,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v14_envelope() {
+    async fn local_socket_round_trips_a_v15_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -5588,7 +5828,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_named_pipe_round_trips_a_v14_envelope_for_its_owner() {
+    async fn windows_named_pipe_round_trips_a_v15_envelope_for_its_owner() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let directory = tempfile::tempdir().unwrap();

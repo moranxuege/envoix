@@ -31,10 +31,10 @@ use crate::ports::{PlatformPortError, SecretBytes, SecureVaultPort};
 use crate::snapshot::{ApplyOutcome, EngineSnapshot};
 use crate::storage::{
     DurableRelationship, EngineState, EngineStore, EngineStoreError, MAX_DURABLE_ENTITIES,
-    VaultReference,
+    RelationshipConfirmation, VaultReference,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 14;
+pub const AGENT_PROTOCOL_VERSION: u16 = 15;
 pub const AGENT_SETTINGS_VERSION: u16 = 2;
 pub const AGENT_PREFERENCES_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
@@ -447,6 +447,7 @@ impl AgentResponseEnvelope {
             AgentResponse::PreferencesUpdated { preferences } => {
                 preferences.validate()?;
             }
+            AgentResponse::Pairing { pairing } => pairing.validate()?,
             AgentResponse::Transfers { transfers } => {
                 if transfers.len() > MAX_DURABLE_ENTITIES {
                     return Err(io::Error::new(
@@ -748,6 +749,8 @@ impl AgentEventEnvelope {
 pub struct PairingInvitation {
     pub label: String,
     pub room_code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub invitation: String,
     pub verification_code: String,
     pub expires_at_unix_seconds: u64,
 }
@@ -758,9 +761,49 @@ impl std::fmt::Debug for PairingInvitation {
             .debug_struct("PairingInvitation")
             .field("label", &self.label)
             .field("room_code", &"<redacted>")
+            .field("invitation", &"<redacted>")
             .field("verification_code", &"<redacted>")
             .field("expires_at_unix_seconds", &self.expires_at_unix_seconds)
             .finish()
+    }
+}
+
+impl PairingInvitation {
+    fn validate(&self) -> io::Result<()> {
+        if validate_label(&self.label)? != self.label {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pairing label has surrounding whitespace",
+            ));
+        }
+        validate_complete_room_invitation(&self.invitation)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let invitation = crate::api::RoomControlInvite::parse(
+            &self.invitation,
+            default_agent_broker(),
+            default_agent_relay(),
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        if invitation.code() != self.room_code
+            || invitation.expires_at_unix_secs() != self.expires_at_unix_seconds
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pairing invitation summary does not match its complete Room invitation",
+            ));
+        }
+        if self.verification_code.len() != 6
+            || !self
+                .verification_code
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pairing verification code must contain exactly six digits",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -805,6 +848,7 @@ impl AgentPairingInput {
                 "Room invitation must be a bounded, non-empty single-line value",
             ));
         }
+        validate_complete_room_invitation(&self.invitation)?;
         if self.verification_code.len() != 6
             || !self
                 .verification_code
@@ -829,6 +873,8 @@ pub struct DeviceSummary {
     pub previous_generation: Option<u64>,
     pub broker: String,
     pub relay: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub needs_repair: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -954,6 +1000,7 @@ pub struct RememberedDeviceRecord {
     previous_generation: Option<u64>,
     broker: String,
     relay: Option<String>,
+    confirmation: RelationshipConfirmation,
 }
 
 impl std::fmt::Debug for RememberedDeviceRecord {
@@ -967,6 +1014,7 @@ impl std::fmt::Debug for RememberedDeviceRecord {
             .field("previous_generation", &self.previous_generation)
             .field("broker", &self.broker)
             .field("relay", &self.relay)
+            .field("confirmation", &self.confirmation)
             .finish()
     }
 }
@@ -996,6 +1044,14 @@ impl RememberedDeviceRecord {
         self.relay.as_deref()
     }
 
+    pub fn needs_repair(&self) -> bool {
+        self.confirmation.needs_repair()
+    }
+
+    pub fn pending_confirmation_transaction_id(&self) -> Option<&str> {
+        self.confirmation.transaction_id()
+    }
+
     pub fn summary(&self) -> DeviceSummary {
         DeviceSummary {
             id: self.id.clone(),
@@ -1004,6 +1060,7 @@ impl RememberedDeviceRecord {
             previous_generation: self.previous_generation,
             broker: self.broker.clone(),
             relay: self.relay.clone(),
+            needs_repair: self.needs_repair(),
         }
     }
 }
@@ -1059,6 +1116,7 @@ impl ProductStore {
             )?),
             broker: prepared.broker.clone(),
             relay: prepared.relay.clone(),
+            confirmation: RelationshipConfirmation::Confirmed,
         };
         durable.validate(RelationshipState::Trusted)?;
         Ok(prepared)
@@ -1069,6 +1127,35 @@ impl ProductStore {
         prepared: PreparedRememberedDevice,
         opaque_credential: &[u8],
         generation: u64,
+    ) -> Result<DeviceSummary, EngineStoreError> {
+        self.commit_device_with_confirmation(
+            prepared,
+            opaque_credential,
+            generation,
+            RelationshipConfirmation::Confirmed,
+        )
+    }
+
+    pub fn commit_device_awaiting_peer(
+        &mut self,
+        prepared: PreparedRememberedDevice,
+        opaque_credential: &[u8],
+        generation: u64,
+        transaction_id: &str,
+    ) -> Result<DeviceSummary, EngineStoreError> {
+        let confirmation = RelationshipConfirmation::AwaitingPeerCommit {
+            transaction_id: transaction_id.to_string(),
+        };
+        confirmation.validate()?;
+        self.commit_device_with_confirmation(prepared, opaque_credential, generation, confirmation)
+    }
+
+    fn commit_device_with_confirmation(
+        &mut self,
+        prepared: PreparedRememberedDevice,
+        opaque_credential: &[u8],
+        generation: u64,
+        confirmation: RelationshipConfirmation,
     ) -> Result<DeviceSummary, EngineStoreError> {
         RememberedCredential::from_opaque(opaque_credential).map_err(|_| {
             EngineStoreError::InvalidState("remembered credential is corrupt or unsupported".into())
@@ -1118,6 +1205,7 @@ impl ProductStore {
                 vault_reference: Some(vault_reference.clone()),
                 broker: prepared.broker,
                 relay: prepared.relay,
+                confirmation,
             },
         );
 
@@ -1133,6 +1221,38 @@ impl ProductStore {
         }
         self.device_record(&prepared.id)
             .ok_or_else(|| EngineStoreError::InvalidState("committed device is missing".into()))
+            .map(|record| record.summary())
+    }
+
+    pub fn confirm_device(
+        &mut self,
+        selector: &str,
+        transaction_id: &str,
+    ) -> Result<DeviceSummary, EngineStoreError> {
+        let record = self.resolve_device(selector)?;
+        let relationship_id =
+            RelationshipId::parse(record.id.clone()).expect("stored Relationship id is valid");
+        let mut state = self.engine.state().clone();
+        let durable = state
+            .durable_relationships
+            .get_mut(&relationship_id)
+            .ok_or_else(|| EngineStoreError::InvalidState("device route is missing".into()))?;
+        match &durable.confirmation {
+            RelationshipConfirmation::Confirmed => return Ok(record.summary()),
+            RelationshipConfirmation::AwaitingPeerCommit {
+                transaction_id: pending,
+            } if pending == transaction_id => {
+                durable.confirmation = RelationshipConfirmation::Confirmed;
+            }
+            RelationshipConfirmation::AwaitingPeerCommit { .. } => {
+                return Err(EngineStoreError::InvalidState(
+                    "Relationship confirmation transaction does not match".into(),
+                ));
+            }
+        }
+        self.engine.replace(state)?;
+        self.device_record(&record.id)
+            .ok_or_else(|| EngineStoreError::InvalidState("confirmed device is missing".into()))
             .map(|record| record.summary())
     }
 
@@ -1275,6 +1395,7 @@ impl ProductStore {
                     previous_generation: relationship.previous_generation,
                     broker: durable.broker.clone(),
                     relay: durable.relay.clone(),
+                    confirmation: durable.confirmation.clone(),
                 })
             })
             .collect()
@@ -1387,6 +1508,11 @@ impl ProductStore {
         total_bytes: u64,
     ) -> Result<Transfer, EngineStoreError> {
         let record = self.resolve_device(device)?;
+        if record.needs_repair() {
+            return Err(EngineStoreError::InvalidState(
+                "Relationship is awaiting peer confirmation; repair it before sending".into(),
+            ));
+        }
         let relationship_id = RelationshipId::parse(record.id)
             .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
         let command_id = CommandId::parse(random_identifier("command")?)
@@ -2050,6 +2176,30 @@ fn validate_agent_device(device: &DeviceSummary) -> io::Result<()> {
     Ok(())
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn validate_complete_room_invitation(invitation: &str) -> io::Result<()> {
+    let has_explicit_broker = invitation
+        .strip_prefix("envoix://room/")
+        .and_then(|value| value.split_once('?'))
+        .is_some_and(|(_, query)| {
+            query.split('&').any(|field| {
+                field
+                    .split_once('=')
+                    .is_some_and(|(name, value)| name == "broker" && !value.is_empty())
+            })
+        });
+    if !has_explicit_broker {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "durable pairing requires the complete Room invitation with its broker route",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_agent_transfer_paths(paths: &[AgentTransferPath]) -> io::Result<()> {
     if paths.len() > MAX_AGENT_ACTIVE_PATHS {
         return Err(io::Error::new(
@@ -2612,6 +2762,73 @@ mod tests {
     }
 
     #[test]
+    fn relationship_commit_remains_repairable_until_peer_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let credential = opaque_credential();
+        let transaction_id = "relationship_transaction_1";
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let pending = store
+            .prepare_device("Peer", "broker", Some("https://relay"))
+            .unwrap();
+        let id = pending.id().to_string();
+
+        let staged = store
+            .commit_device_awaiting_peer(pending, &credential, 0, transaction_id)
+            .unwrap();
+        assert!(staged.needs_repair);
+        assert_eq!(
+            store
+                .device_record(&id)
+                .unwrap()
+                .pending_confirmation_transaction_id(),
+            Some(transaction_id)
+        );
+        assert!(store.confirm_device(&id, "different_transaction").is_err());
+
+        let confirmed = store.confirm_device(&id, transaction_id).unwrap();
+        assert!(!confirmed.needs_repair);
+        assert_eq!(
+            store
+                .device_record(&id)
+                .unwrap()
+                .pending_confirmation_transaction_id(),
+            None
+        );
+        drop(store);
+
+        let reopened = ProductStore::open(directory.path()).unwrap();
+        assert!(!reopened.device_record(&id).unwrap().needs_repair());
+    }
+
+    #[test]
+    fn unconfirmed_relationship_cannot_create_a_transfer() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let pending = store.prepare_device("Peer", "broker", None).unwrap();
+        let id = pending.id().to_string();
+        store
+            .commit_device_awaiting_peer(
+                pending,
+                &opaque_credential(),
+                0,
+                "relationship_transaction_1",
+            )
+            .unwrap();
+
+        let error = store
+            .create_transfer(
+                &id,
+                TransferId::parse("transfer_pending_confirmation").unwrap(),
+                ContentId::parse("content_pending_confirmation").unwrap(),
+                42,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("awaiting peer confirmation"));
+        assert!(store.engine.state().snapshot.transfers.is_empty());
+    }
+
+    #[test]
     fn device_route_update_preserves_credential_and_generation() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = ProductStore::open(directory.path()).unwrap();
@@ -3063,7 +3280,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -3088,7 +3305,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 5);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -3108,7 +3325,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 6);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 12);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 15);
         assert!(
@@ -3126,7 +3343,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 7);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 15);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 18);
         assert!(
@@ -3144,7 +3361,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 8);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 16);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 19);
         assert_eq!(
@@ -3161,7 +3378,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 9);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 14);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
 
         let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
         settings.validate().unwrap();
@@ -3584,13 +3801,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_v14_fixture_covers_preferences_and_live_telemetry() {
+    fn agent_wire_v14_fixture_remains_frozen() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/v0.3/agent-control-v14.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
-        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+        assert_eq!(fixture["protocol_version"], 14);
 
         let request: AgentRequestEnvelope =
             serde_json::from_value(fixture["request"].clone()).unwrap();
@@ -3598,7 +3815,7 @@ mod tests {
             request.request,
             AgentRequest::SetInboxDirectory { .. }
         ));
-        request.validate().unwrap();
+        assert!(request.validate().is_err());
         assert_eq!(serde_json::to_value(&request).unwrap(), fixture["request"]);
 
         let response: AgentResponseEnvelope =
@@ -3607,7 +3824,7 @@ mod tests {
             response.response,
             AgentResponse::PreferencesUpdated { .. }
         ));
-        response.validate_for(&request.request_id).unwrap();
+        assert!(response.validate_for(&request.request_id).is_err());
         assert_eq!(
             serde_json::to_value(&response).unwrap(),
             fixture["response"]
@@ -3622,9 +3839,37 @@ mod tests {
         );
 
         let event: AgentEventEnvelope = serde_json::from_value(fixture["event"].clone()).unwrap();
-        event.validate().unwrap();
+        assert!(event.validate().is_err());
         assert!(matches!(event.event, AgentEvent::InboxDirectoryChanged));
         assert_eq!(serde_json::to_value(&event).unwrap(), fixture["event"]);
+    }
+
+    #[test]
+    fn agent_wire_v15_fixture_covers_complete_pairing_invitation_and_repair_state() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v15.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+
+        let request: AgentRequestEnvelope =
+            serde_json::from_value(fixture["request"].clone()).unwrap();
+        request.validate().unwrap();
+
+        let response: AgentResponseEnvelope =
+            serde_json::from_value(fixture["response"].clone()).unwrap();
+        response.validate_for(&request.request_id).unwrap();
+        let AgentResponse::Pairing { pairing } = &response.response else {
+            panic!("fixture must contain a pairing response");
+        };
+        assert!(pairing.invitation.contains("broker="));
+        assert!(pairing.invitation.contains("relay="));
+
+        let device: DeviceSummary =
+            serde_json::from_value(fixture["device_needing_repair"].clone()).unwrap();
+        validate_agent_device(&device).unwrap();
+        assert!(device.needs_repair);
     }
 
     #[test]
@@ -3654,6 +3899,18 @@ mod tests {
     }
 
     #[test]
+    fn durable_pairing_rejects_a_room_code_without_its_creator_route() {
+        let pairing = AgentPairingInput {
+            label: "Fixture WSL".into(),
+            invitation: "123456-a1b2-c3d4".into(),
+            verification_code: "654321".into(),
+        };
+
+        let error = pairing.validate().unwrap_err();
+        assert!(error.to_string().contains("complete Room invitation"));
+    }
+
+    #[test]
     fn agent_device_responses_reject_malformed_and_duplicate_summaries() {
         let device = DeviceSummary {
             id: "dev_fixture".into(),
@@ -3662,6 +3919,7 @@ mod tests {
             previous_generation: Some(0),
             broker: "127.0.0.1:4000".into(),
             relay: None,
+            needs_repair: false,
         };
         let paired = AgentResponseEnvelope::new(
             "request_1",

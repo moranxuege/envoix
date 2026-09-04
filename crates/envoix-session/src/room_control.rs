@@ -42,6 +42,7 @@ const MAX_OFFER_ID_BYTES: usize = 128;
 const MAX_ROOT_NAME_BYTES: usize = 255;
 const MAX_ROOT_PREVIEWS: usize = 3;
 const MAX_SEEN_OFFER_IDS: usize = 256;
+const MAX_RELATIONSHIP_TRANSACTION_ID_BYTES: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoomControlInvite {
@@ -307,6 +308,14 @@ pub enum RoomOfferRejection {
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipUpgradeRejection {
+    Declined,
+    Busy,
+    AlreadyRelated,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RoomTransferOffer {
     pub offer_id: String,
@@ -393,6 +402,28 @@ pub enum RoomControlEvent {
     VerificationRequested,
     VerificationSucceeded,
     VerificationFailed,
+    RelationshipUpgradeRequested {
+        transaction_id: String,
+    },
+    RelationshipUpgradeAccepted {
+        transaction_id: String,
+    },
+    RelationshipUpgradeRejected {
+        transaction_id: String,
+        reason: RelationshipUpgradeRejection,
+    },
+    RelationshipUpgradePrepared {
+        transaction_id: String,
+    },
+    RelationshipUpgradeCommitted {
+        transaction_id: String,
+    },
+    RelationshipConfirmationRequested {
+        transaction_id: String,
+    },
+    RelationshipConfirmationAcknowledged {
+        transaction_id: String,
+    },
     IncomingOffer(RoomTransferOffer),
     OfferAccepted {
         offer_id: String,
@@ -427,6 +458,28 @@ enum ControlMessage {
     },
     VerificationAccepted,
     VerificationRejected,
+    RelationshipUpgradeRequest {
+        transaction_id: String,
+    },
+    RelationshipUpgradeAccepted {
+        transaction_id: String,
+    },
+    RelationshipUpgradeRejected {
+        transaction_id: String,
+        reason: RelationshipUpgradeRejection,
+    },
+    RelationshipUpgradePrepared {
+        transaction_id: String,
+    },
+    RelationshipUpgradeCommitted {
+        transaction_id: String,
+    },
+    RelationshipConfirmationRequest {
+        transaction_id: String,
+    },
+    RelationshipConfirmationAcknowledged {
+        transaction_id: String,
+    },
     TransferOffer(RoomTransferOffer),
     OfferAccepted {
         offer_id: String,
@@ -461,6 +514,7 @@ enum ControlSessionKind {
 #[serde(rename_all = "snake_case")]
 enum RoomControlCapability {
     VerificationV1,
+    RelationshipUpgradeV1,
     #[serde(other)]
     Unknown,
 }
@@ -477,6 +531,200 @@ enum VerificationPhase {
 
 struct VerificationState {
     phase: VerificationPhase,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RelationshipUpgradeTransaction {
+    transaction_id: String,
+    initiated_locally: bool,
+    accepted: bool,
+    local_prepared: bool,
+    remote_prepared: bool,
+    local_committed: bool,
+    remote_committed: bool,
+}
+
+#[derive(Default)]
+struct RelationshipUpgradeState {
+    transaction: Option<RelationshipUpgradeTransaction>,
+}
+
+impl RelationshipUpgradeState {
+    fn begin_local(&mut self, transaction_id: String) -> Result<(), SessionError> {
+        if self.transaction.is_some() {
+            return Err(CoreError::InvalidInput(
+                "another Relationship upgrade is already active".into(),
+            ));
+        }
+        self.transaction = Some(RelationshipUpgradeTransaction {
+            transaction_id,
+            initiated_locally: true,
+            accepted: false,
+            local_prepared: false,
+            remote_prepared: false,
+            local_committed: false,
+            remote_committed: false,
+        });
+        Ok(())
+    }
+
+    fn begin_remote(&mut self, transaction_id: String) -> Result<bool, SessionError> {
+        match &self.transaction {
+            None => {
+                self.transaction = Some(RelationshipUpgradeTransaction {
+                    transaction_id,
+                    initiated_locally: false,
+                    accepted: false,
+                    local_prepared: false,
+                    remote_prepared: false,
+                    local_committed: false,
+                    remote_committed: false,
+                });
+                Ok(true)
+            }
+            Some(transaction) if transaction.transaction_id == transaction_id => Ok(false),
+            Some(_) => Err(CoreError::InvalidInput(
+                "another Relationship upgrade is already active".into(),
+            )),
+        }
+    }
+
+    fn accept_remote(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.remote_transaction_mut(transaction_id)?;
+        transaction.accepted = true;
+        Ok(())
+    }
+
+    fn receive_acceptance(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.local_transaction_mut(transaction_id)?;
+        transaction.accepted = true;
+        Ok(())
+    }
+
+    fn reject_remote(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        self.remote_transaction_mut(transaction_id)?;
+        self.transaction = None;
+        Ok(())
+    }
+
+    fn receive_rejection(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        self.local_transaction_mut(transaction_id)?;
+        self.transaction = None;
+        Ok(())
+    }
+
+    fn mark_local_prepared(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.accepted_transaction_mut(transaction_id)?;
+        transaction.local_prepared = true;
+        Ok(())
+    }
+
+    fn mark_remote_prepared(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.accepted_transaction_mut(transaction_id)?;
+        transaction.remote_prepared = true;
+        Ok(())
+    }
+
+    fn can_commit(&self, transaction_id: &str) -> Result<bool, SessionError> {
+        let transaction = self.transaction(transaction_id)?;
+        Ok(transaction.local_prepared && transaction.remote_prepared)
+    }
+
+    fn mark_local_committed(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if !transaction.local_prepared || !transaction.remote_prepared {
+            return Err(CoreError::InvalidInput(
+                "Relationship upgrade cannot commit before both peers are prepared".into(),
+            ));
+        }
+        transaction.local_committed = true;
+        Ok(())
+    }
+
+    fn mark_remote_committed(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if !transaction.local_prepared || !transaction.remote_prepared {
+            return Err(CoreError::Protocol(
+                "peer committed a Relationship upgrade before both peers were prepared".into(),
+            ));
+        }
+        transaction.remote_committed = true;
+        Ok(())
+    }
+
+    fn is_complete(&self, transaction_id: &str) -> Result<bool, SessionError> {
+        let transaction = self.transaction(transaction_id)?;
+        Ok(transaction.local_committed && transaction.remote_committed)
+    }
+
+    fn blocks_transfers(&self) -> bool {
+        self.transaction.as_ref().is_some_and(|transaction| {
+            !(transaction.local_committed && transaction.remote_committed)
+        })
+    }
+
+    fn transaction(
+        &self,
+        transaction_id: &str,
+    ) -> Result<&RelationshipUpgradeTransaction, SessionError> {
+        self.transaction
+            .as_ref()
+            .filter(|transaction| transaction.transaction_id == transaction_id)
+            .ok_or_else(|| {
+                CoreError::InvalidInput("Relationship upgrade transaction is not active".into())
+            })
+    }
+
+    fn transaction_mut(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<&mut RelationshipUpgradeTransaction, SessionError> {
+        self.transaction
+            .as_mut()
+            .filter(|transaction| transaction.transaction_id == transaction_id)
+            .ok_or_else(|| {
+                CoreError::InvalidInput("Relationship upgrade transaction is not active".into())
+            })
+    }
+
+    fn local_transaction_mut(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<&mut RelationshipUpgradeTransaction, SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if !transaction.initiated_locally {
+            return Err(CoreError::Protocol(
+                "peer responded to a Relationship upgrade it initiated".into(),
+            ));
+        }
+        Ok(transaction)
+    }
+
+    fn remote_transaction_mut(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<&mut RelationshipUpgradeTransaction, SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if transaction.initiated_locally {
+            return Err(CoreError::InvalidInput(
+                "local peer cannot decide its own Relationship upgrade request".into(),
+            ));
+        }
+        Ok(transaction)
+    }
+
+    fn accepted_transaction_mut(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<&mut RelationshipUpgradeTransaction, SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if !transaction.accepted {
+            return Err(CoreError::InvalidInput(
+                "Relationship upgrade has not been accepted".into(),
+            ));
+        }
+        Ok(transaction)
+    }
 }
 
 impl VerificationState {
@@ -701,7 +949,9 @@ pub struct RoomControlSession {
     pairing_credential: Option<RememberedCredential>,
     pairing_authorized: AtomicBool,
     peer_supports_verification: bool,
+    peer_supports_relationship_upgrade: bool,
     verification: std::sync::Mutex<VerificationState>,
+    relationship_upgrade: std::sync::Mutex<RelationshipUpgradeState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -826,6 +1076,175 @@ impl RoomControlSession {
         Ok(())
     }
 
+    pub fn supports_relationship_upgrade(&self) -> bool {
+        !self.mode.is_remembered() && self.peer_supports_relationship_upgrade
+    }
+
+    pub fn supports_relationship_repair(&self) -> bool {
+        self.mode.is_remembered() && self.peer_supports_relationship_upgrade
+    }
+
+    /// Proposes turning this temporary Room's authenticated peer into a
+    /// durable Relationship. The transaction identifier is safe to persist,
+    /// but must be unique for each new attempt.
+    pub async fn request_relationship_upgrade(
+        &self,
+        transaction_id: &str,
+    ) -> Result<(), SessionError> {
+        validate_relationship_transaction_id(transaction_id)?;
+        if self.mode.is_remembered() {
+            return Err(CoreError::InvalidInput(
+                "a remembered Room already belongs to a Relationship".into(),
+            ));
+        }
+        if !self.peer_supports_relationship_upgrade {
+            return Err(CoreError::InvalidInput(
+                "the Room peer does not support saving this device".into(),
+            ));
+        }
+        self.ensure_no_pending_offer()?;
+        self.relationship_upgrade
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
+            .begin_local(transaction_id.to_string())?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::RelationshipUpgradeRequest {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    /// Accepts a peer's pending save-device request. User consent must be
+    /// collected before calling this method.
+    pub async fn accept_relationship_upgrade(
+        &self,
+        transaction_id: &str,
+    ) -> Result<(), SessionError> {
+        validate_relationship_transaction_id(transaction_id)?;
+        self.ensure_no_pending_offer()?;
+        self.relationship_upgrade
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
+            .accept_remote(transaction_id)?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::RelationshipUpgradeAccepted {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    pub async fn reject_relationship_upgrade(
+        &self,
+        transaction_id: &str,
+        reason: RelationshipUpgradeRejection,
+    ) -> Result<(), SessionError> {
+        validate_relationship_transaction_id(transaction_id)?;
+        self.relationship_upgrade
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
+            .reject_remote(transaction_id)?;
+        self.send_offer_response(ControlMessage::RelationshipUpgradeRejected {
+            transaction_id: transaction_id.to_string(),
+            reason,
+        })
+        .await
+    }
+
+    /// Announces that local durable state and secure-vault writes can be
+    /// attempted. Callers must wait for the peer's matching Prepared event
+    /// before committing either side.
+    pub async fn mark_relationship_upgrade_prepared(
+        &self,
+        transaction_id: &str,
+    ) -> Result<(), SessionError> {
+        validate_relationship_transaction_id(transaction_id)?;
+        self.relationship_upgrade
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
+            .mark_local_prepared(transaction_id)?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::RelationshipUpgradePrepared {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    pub fn relationship_upgrade_ready_to_commit(
+        &self,
+        transaction_id: &str,
+    ) -> Result<bool, SessionError> {
+        validate_relationship_transaction_id(transaction_id)?;
+        self.relationship_upgrade
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
+            .can_commit(transaction_id)
+    }
+
+    /// Announces that local state was durably committed. Until the matching
+    /// peer event arrives, the local Relationship must remain marked as
+    /// needing peer confirmation.
+    pub async fn mark_relationship_upgrade_committed(
+        &self,
+        transaction_id: &str,
+    ) -> Result<(), SessionError> {
+        validate_relationship_transaction_id(transaction_id)?;
+        self.relationship_upgrade
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
+            .mark_local_committed(transaction_id)?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::RelationshipUpgradeCommitted {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    pub fn relationship_upgrade_is_complete(
+        &self,
+        transaction_id: &str,
+    ) -> Result<bool, SessionError> {
+        validate_relationship_transaction_id(transaction_id)?;
+        self.relationship_upgrade
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
+            .is_complete(transaction_id)
+    }
+
+    /// Asks an authenticated remembered peer to confirm that it committed the
+    /// initial Relationship transaction. This repairs the only ambiguous state
+    /// left when the temporary Room closes after the local commit.
+    pub async fn request_relationship_confirmation(
+        &self,
+        transaction_id: &str,
+    ) -> Result<(), SessionError> {
+        self.ensure_relationship_repair_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        self.send(ControlMessage::RelationshipConfirmationRequest {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await
+    }
+
+    pub async fn acknowledge_relationship_confirmation(
+        &self,
+        transaction_id: &str,
+    ) -> Result<(), SessionError> {
+        self.ensure_relationship_repair_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        self.send(ControlMessage::RelationshipConfirmationAcknowledged {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await
+    }
+
     pub fn lifetime_state(&self) -> RoomLifetimeState {
         self.lifetime
             .lock()
@@ -839,6 +1258,11 @@ impl RoomControlSession {
         offer: RoomTransferOffer,
     ) -> Result<Option<RoomLifetimeState>, SessionError> {
         offer.validate(&self.broker, self.relay.as_deref())?;
+        if self.relationship_upgrade_blocks_transfers()? {
+            return Err(CoreError::InvalidInput(
+                "file offers are paused while saving this device".into(),
+            ));
+        }
         {
             let mut state = self
                 .offers
@@ -1092,7 +1516,147 @@ impl RoomControlSession {
                         .finish_remote(false)?;
                     return Ok(RoomControlEvent::VerificationFailed);
                 }
+                ControlMessage::RelationshipUpgradeRequest { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    if self.mode.is_remembered() || !self.peer_supports_relationship_upgrade {
+                        return Err(CoreError::Protocol(
+                            "Relationship upgrade is not available in this Room".into(),
+                        ));
+                    }
+                    let offer_pending = {
+                        let offers = self.offers.lock().map_err(|_| {
+                            CoreError::Transport("room offer state unavailable".into())
+                        })?;
+                        offers.pending_local.is_some() || offers.pending_remote.is_some()
+                    };
+                    if offer_pending {
+                        self.send(ControlMessage::RelationshipUpgradeRejected {
+                            transaction_id,
+                            reason: RelationshipUpgradeRejection::Busy,
+                        })
+                        .await?;
+                        continue;
+                    }
+                    let accepted = self
+                        .relationship_upgrade
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship upgrade state unavailable".into())
+                        })?
+                        .begin_remote(transaction_id.clone());
+                    match accepted {
+                        Ok(true) => {
+                            return Ok(RoomControlEvent::RelationshipUpgradeRequested {
+                                transaction_id,
+                            });
+                        }
+                        Ok(false) => continue,
+                        Err(_) => {
+                            self.send(ControlMessage::RelationshipUpgradeRejected {
+                                transaction_id,
+                                reason: RelationshipUpgradeRejection::Busy,
+                            })
+                            .await?;
+                        }
+                    }
+                }
+                ControlMessage::RelationshipUpgradeAccepted { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    self.relationship_upgrade
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship upgrade state unavailable".into())
+                        })?
+                        .receive_acceptance(&transaction_id)
+                        .map_err(|_| {
+                            CoreError::Protocol(
+                                "peer accepted an unknown Relationship upgrade transaction".into(),
+                            )
+                        })?;
+                    return Ok(RoomControlEvent::RelationshipUpgradeAccepted { transaction_id });
+                }
+                ControlMessage::RelationshipUpgradeRejected {
+                    transaction_id,
+                    reason,
+                } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    self.relationship_upgrade
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship upgrade state unavailable".into())
+                        })?
+                        .receive_rejection(&transaction_id)
+                        .map_err(|_| {
+                            CoreError::Protocol(
+                                "peer rejected an unknown Relationship upgrade transaction".into(),
+                            )
+                        })?;
+                    return Ok(RoomControlEvent::RelationshipUpgradeRejected {
+                        transaction_id,
+                        reason,
+                    });
+                }
+                ControlMessage::RelationshipUpgradePrepared { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    self.relationship_upgrade
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship upgrade state unavailable".into())
+                        })?
+                        .mark_remote_prepared(&transaction_id)
+                        .map_err(|_| {
+                            CoreError::Protocol(
+                                "peer prepared an invalid Relationship upgrade transaction".into(),
+                            )
+                        })?;
+                    return Ok(RoomControlEvent::RelationshipUpgradePrepared { transaction_id });
+                }
+                ControlMessage::RelationshipUpgradeCommitted { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    self.relationship_upgrade
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship upgrade state unavailable".into())
+                        })?
+                        .mark_remote_committed(&transaction_id)
+                        .map_err(|_| {
+                            CoreError::Protocol(
+                                "peer committed an invalid Relationship upgrade transaction".into(),
+                            )
+                        })?;
+                    return Ok(RoomControlEvent::RelationshipUpgradeCommitted { transaction_id });
+                }
+                ControlMessage::RelationshipConfirmationRequest { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    if !self.supports_relationship_repair() {
+                        return Err(CoreError::Protocol(
+                            "Relationship confirmation is not available in this Room".into(),
+                        ));
+                    }
+                    return Ok(RoomControlEvent::RelationshipConfirmationRequested {
+                        transaction_id,
+                    });
+                }
+                ControlMessage::RelationshipConfirmationAcknowledged { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    if !self.supports_relationship_repair() {
+                        return Err(CoreError::Protocol(
+                            "Relationship confirmation is not available in this Room".into(),
+                        ));
+                    }
+                    return Ok(RoomControlEvent::RelationshipConfirmationAcknowledged {
+                        transaction_id,
+                    });
+                }
                 ControlMessage::TransferOffer(offer) => {
+                    if self.relationship_upgrade_blocks_transfers()? {
+                        self.send(ControlMessage::OfferRejected {
+                            offer_id: offer.offer_id,
+                            reason: RoomOfferRejection::Busy,
+                        })
+                        .await?;
+                        continue;
+                    }
                     if let Err(error) = offer.validate(&self.broker, self.relay.as_deref()) {
                         let _ = self
                             .send(ControlMessage::OfferRejected {
@@ -1231,6 +1795,41 @@ impl RoomControlSession {
             ));
         }
         state.pending_remote = None;
+        Ok(())
+    }
+
+    fn ensure_no_pending_offer(&self) -> Result<(), SessionError> {
+        let state = self
+            .offers
+            .lock()
+            .map_err(|_| CoreError::Transport("room offer state unavailable".into()))?;
+        if state.pending_local.is_some() || state.pending_remote.is_some() {
+            return Err(CoreError::InvalidInput(
+                "Relationship upgrade cannot start while a file offer is pending".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn relationship_upgrade_blocks_transfers(&self) -> Result<bool, SessionError> {
+        Ok(self
+            .relationship_upgrade
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
+            .blocks_transfers())
+    }
+
+    fn ensure_relationship_repair_supported(&self) -> Result<(), SessionError> {
+        if !self.mode.is_remembered() {
+            return Err(CoreError::InvalidInput(
+                "Relationship confirmation requires a remembered Room".into(),
+            ));
+        }
+        if !self.peer_supports_relationship_upgrade {
+            return Err(CoreError::InvalidInput(
+                "the remembered peer does not support Relationship repair".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1545,7 +2144,10 @@ async fn connect_room_control_inner(
     let hello = ControlMessage::Hello {
         protocol_version: ROOM_CONTROL_VERSION,
         session_kind: request.mode.session_kind(),
-        capabilities: vec![RoomControlCapability::VerificationV1],
+        capabilities: vec![
+            RoomControlCapability::VerificationV1,
+            RoomControlCapability::RelationshipUpgradeV1,
+        ],
         display_name,
         creator: request.mode.is_creator(),
         pairing_binding: pairing_binding.clone(),
@@ -1593,10 +2195,13 @@ async fn connect_room_control_inner(
         pairing_authorized: AtomicBool::new(pairing_authorized),
         peer_supports_verification: peer_capabilities
             .contains(&RoomControlCapability::VerificationV1),
+        peer_supports_relationship_upgrade: peer_capabilities
+            .contains(&RoomControlCapability::RelationshipUpgradeV1),
         verification: std::sync::Mutex::new(VerificationState::new(
             request.mode,
             pairing_authorized,
         )),
+        relationship_upgrade: std::sync::Mutex::new(RelationshipUpgradeState::default()),
     })
 }
 
@@ -1686,6 +2291,25 @@ fn validate_verification_code(code: &str) -> Result<(), SessionError> {
 fn validate_peer_verification_code(code: &str) -> Result<(), SessionError> {
     validate_verification_code(code)
         .map_err(|_| CoreError::Protocol("peer sent an invalid device verification code".into()))
+}
+
+fn validate_relationship_transaction_id(transaction_id: &str) -> Result<(), SessionError> {
+    if transaction_id.is_empty()
+        || transaction_id.len() > MAX_RELATIONSHIP_TRANSACTION_ID_BYTES
+        || !transaction_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(CoreError::InvalidInput(
+            "Relationship transaction id must be 1-128 ASCII letters, digits, '-' or '_'".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_peer_relationship_transaction_id(transaction_id: &str) -> Result<(), SessionError> {
+    validate_relationship_transaction_id(transaction_id)
+        .map_err(|_| CoreError::Protocol("peer sent an invalid Relationship transaction id".into()))
 }
 
 struct RoomControlPairingRequest {

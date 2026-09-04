@@ -1,0 +1,35 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 15,
+  "request": {
+    "protocol_version": 15,
+    "request_id": "request_pair_fixture",
+    "request": {
+      "command": "pair",
+      "label": "Fixture WSL"
+    }
+  },
+  "response": {
+    "protocol_version": 15,
+    "request_id": "request_pair_fixture",
+    "response": {
+      "kind": "pairing",
+      "pairing": {
+        "label": "Fixture WSL",
+        "room_code": "123456-a1b2-c3d4",
+        "invitation": "envoix://room/123456-a1b2-c3d4?broker=6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92%4047.237.15.48%3A8445&relay=https%3A%2F%2Frelay.fixture.invalid%3A8444&expires=18446744073709551615",
+        "verification_code": "654321",
+        "expires_at_unix_seconds": 18446744073709551615
+      }
+    }
+  },
+  "device_needing_repair": {
+    "id": "relationship_fixture",
+    "label": "Fixture WSL",
+    "generation": 0,
+    "previous_generation": null,
+    "broker": "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@47.237.15.48:8445",
+    "relay": "https://relay.fixture.invalid:8444",
+    "needs_repair": true
+  }
+}

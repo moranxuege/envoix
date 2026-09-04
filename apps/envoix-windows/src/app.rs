@@ -1178,15 +1178,19 @@ impl EnvoixWindowsApp {
             .show(context, |ui| {
                 if let Some(pairing) = &self.pairing {
                     ui.colored_label(SUCCESS, "房间已建立，等待另一台设备加入");
-                    ui.label("在另一台设备选择“加入配对”，输入下面的房间码和验证码。");
+                    ui.label("在另一台设备选择“加入配对”，粘贴完整链接并输入验证码。");
                     ui.separator();
                     ui.label(RichText::new("房间码").color(MUTED));
                     ui.horizontal(|ui| {
                         ui.monospace(&pairing.room_code);
-                        if ui.button("复制").clicked() {
-                            ui.ctx().copy_text(pairing.room_code.clone());
+                        if ui.button("复制完整链接").clicked() {
+                            ui.ctx().copy_text(pairing.invitation.clone());
                         }
                     });
+                    ui.label(
+                        RichText::new("完整链接包含本房间使用的服务器地址，可跨不同网络配置加入。")
+                            .color(MUTED),
+                    );
                     ui.label(RichText::new("验证码").color(MUTED));
                     ui.monospace(RichText::new(&pairing.verification_code).size(26.0));
                     ui.label(

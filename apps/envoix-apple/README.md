@@ -74,7 +74,11 @@ Relationship without exporting or rotating its credential. API 26 and Agent
 protocol v13 add helper-owned Transfer pause, resume, retry, cancel, and
 history removal. API 27 and Agent protocol v14 add a helper-owned receive
 location plus bounded ephemeral phase, rate, ETA, and file-summary telemetry;
-the SwiftUI process receives only these secret-free projections.
+the SwiftUI process receives only these secret-free projections. API 28 and
+Agent protocol v15 move durable pairing to a four-phase Relationship upgrade,
+carry the creator's complete Room route across different deployments, and mark
+an interrupted post-commit Relationship as needing repair instead of presenting
+it as ready.
 
 A distributable build must use `scripts/apple-dev.sh
 macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and

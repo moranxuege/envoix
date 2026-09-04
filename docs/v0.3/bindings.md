@@ -80,6 +80,16 @@ may display the current phase, byte rate, average rate, ETA, path, and root-name
 preview, but must keep the Engine Transfer and Inbox projections authoritative
 for durable state and completed saves.
 
+Agent protocol v15 and FFI API 28 add `agent_host_control_v5` and
+`room_relationship_upgrade_v1`. A durable pairing response carries the complete
+Room invitation, including the creator's broker and relay route, so the joining
+Agent does not substitute its own deployment defaults. Relationship creation
+uses an explicit request, acceptance, prepared, and committed exchange. A local
+commit that has not observed the peer commit remains durable but is projected as
+`needs_repair`; it cannot be used to create a Transfer. The next authenticated
+remembered Room exchanges the persisted transaction identifier and clears that
+state only after the peer acknowledges its commit.
+
 `FfiApplicationEngine` owns one ordered application snapshot. Its no-argument
 constructor is limited to contract tests and transient previews; product hosts
 open the persistent constructor. It accepts typed event envelopes, returns

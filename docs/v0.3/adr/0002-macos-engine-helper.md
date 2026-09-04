@@ -217,6 +217,15 @@ incoming Transfer or pending offer exists. The GUI receives only the selected
 path and bounded ephemeral Transfer telemetry; credentials, transfer payloads,
 and Engine mutation remain inside the helper.
 
+API 28 adds `agent_host_control_v5`, `room_relationship_upgrade_v1`, and Agent
+protocol v15. The helper owns the full Room-to-Relationship upgrade transaction
+and commits its credential only after both peers have prepared. A local commit
+whose peer acknowledgement is interrupted is retained as `needs_repair` and is
+not eligible for sending. A later authenticated remembered Room repairs this
+state with a matching confirmation request and acknowledgement. Pairing shares
+the complete Room invitation, making the creator's broker and relay route
+authoritative even when the peers use different local deployment defaults.
+
 The Apple stage-B implementation embeds `EnvoixEngineHelper.app` at
 `Contents/Library/LoginItems`, registers it only after an explicit Settings
 action through `SMAppService`, and gives only that helper the production

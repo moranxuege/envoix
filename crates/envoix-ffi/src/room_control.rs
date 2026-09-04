@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use envoix_client::api::{
-    Client, IdentityConfig, RememberedCredentialRef, RememberedRoomControlConnectError,
-    RememberedRoomControlRole, RendezvousCause, RoomCloseReason, RoomControlEvent,
-    RoomControlInvite, RoomControlSession, RoomLifetimePolicy, RoomLifetimeState,
+    Client, IdentityConfig, RelationshipUpgradeRejection, RememberedCredentialRef,
+    RememberedRoomControlConnectError, RememberedRoomControlRole, RendezvousCause, RoomCloseReason,
+    RoomControlEvent, RoomControlInvite, RoomControlSession, RoomLifetimePolicy, RoomLifetimeState,
     RoomOfferRejection, RoomTransferOffer, SessionError, TransferCancelToken, TransferOptions,
     acquire_remembered_credential, connect_remembered_room_control, connect_room_control,
 };
@@ -99,6 +99,13 @@ pub enum FfiRoomOfferRejection {
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiRelationshipUpgradeRejection {
+    Declined,
+    Busy,
+    AlreadyRelated,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiRoomTransferOffer {
     pub offer_id: String,
@@ -114,6 +121,13 @@ pub enum FfiRoomControlEventKind {
     VerificationRequested,
     VerificationSucceeded,
     VerificationFailed,
+    RelationshipUpgradeRequested,
+    RelationshipUpgradeAccepted,
+    RelationshipUpgradeRejected,
+    RelationshipUpgradePrepared,
+    RelationshipUpgradeCommitted,
+    RelationshipConfirmationRequested,
+    RelationshipConfirmationAcknowledged,
     IncomingOffer,
     OfferAccepted,
     OfferRejected,
@@ -128,6 +142,8 @@ pub struct FfiRoomControlEvent {
     pub offer: Option<FfiRoomTransferOffer>,
     pub offer_id: String,
     pub rejection: Option<FfiRoomOfferRejection>,
+    pub relationship_transaction_id: String,
+    pub relationship_rejection: Option<FfiRelationshipUpgradeRejection>,
     pub lifetime: Option<FfiRoomLifetimeState>,
     pub close_reason: Option<FfiRoomCloseReason>,
     pub nonce: u64,
@@ -138,6 +154,8 @@ pub struct FfiRoomControlSnapshot {
     pub peer_name: String,
     pub creator: bool,
     pub remembered_generation: Option<u64>,
+    pub supports_relationship_upgrade: bool,
+    pub supports_relationship_repair: bool,
     pub lifetime: FfiRoomLifetimeState,
 }
 
@@ -176,6 +194,8 @@ impl FfiRoomControlSession {
             peer_name: self.session.peer_name().to_string(),
             creator: self.session.is_creator(),
             remembered_generation: self.session.remembered_generation(),
+            supports_relationship_upgrade: self.session.supports_relationship_upgrade(),
+            supports_relationship_repair: self.session.supports_relationship_repair(),
             lifetime: ffi_lifetime(self.session.lifetime_state()),
         }
     }
@@ -224,6 +244,123 @@ impl FfiRoomControlSession {
         spawn_on_ffi_runtime(async move {
             session
                 .submit_verification_code(&code)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub async fn request_relationship_upgrade(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .request_relationship_upgrade(&transaction_id)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub async fn accept_relationship_upgrade(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .accept_relationship_upgrade(&transaction_id)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub async fn reject_relationship_upgrade(
+        &self,
+        transaction_id: String,
+        reason: FfiRelationshipUpgradeRejection,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .reject_relationship_upgrade(&transaction_id, core_relationship_rejection(reason))
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub async fn mark_relationship_upgrade_prepared(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .mark_relationship_upgrade_prepared(&transaction_id)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub fn relationship_upgrade_ready_to_commit(
+        &self,
+        transaction_id: String,
+    ) -> Result<bool, FfiRoomControlError> {
+        self.session
+            .relationship_upgrade_ready_to_commit(&transaction_id)
+            .map_err(room_control_err)
+    }
+
+    pub async fn mark_relationship_upgrade_committed(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .mark_relationship_upgrade_committed(&transaction_id)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub fn relationship_upgrade_is_complete(
+        &self,
+        transaction_id: String,
+    ) -> Result<bool, FfiRoomControlError> {
+        self.session
+            .relationship_upgrade_is_complete(&transaction_id)
+            .map_err(room_control_err)
+    }
+
+    pub async fn request_relationship_confirmation(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .request_relationship_confirmation(&transaction_id)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub async fn acknowledge_relationship_confirmation(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .acknowledge_relationship_confirmation(&transaction_id)
                 .await
                 .map_err(room_control_err)
         })
@@ -569,6 +706,8 @@ fn project_event(event: RoomControlEvent) -> FfiRoomControlEvent {
         offer: None,
         offer_id: String::new(),
         rejection: None,
+        relationship_transaction_id: String::new(),
+        relationship_rejection: None,
         lifetime: None,
         close_reason: None,
         nonce: 0,
@@ -582,6 +721,38 @@ fn project_event(event: RoomControlEvent) -> FfiRoomControlEvent {
         }
         RoomControlEvent::VerificationFailed => {
             projected.kind = FfiRoomControlEventKind::VerificationFailed;
+        }
+        RoomControlEvent::RelationshipUpgradeRequested { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RelationshipUpgradeRequested;
+            projected.relationship_transaction_id = transaction_id;
+        }
+        RoomControlEvent::RelationshipUpgradeAccepted { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RelationshipUpgradeAccepted;
+            projected.relationship_transaction_id = transaction_id;
+        }
+        RoomControlEvent::RelationshipUpgradeRejected {
+            transaction_id,
+            reason,
+        } => {
+            projected.kind = FfiRoomControlEventKind::RelationshipUpgradeRejected;
+            projected.relationship_transaction_id = transaction_id;
+            projected.relationship_rejection = Some(ffi_relationship_rejection(reason));
+        }
+        RoomControlEvent::RelationshipUpgradePrepared { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RelationshipUpgradePrepared;
+            projected.relationship_transaction_id = transaction_id;
+        }
+        RoomControlEvent::RelationshipUpgradeCommitted { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RelationshipUpgradeCommitted;
+            projected.relationship_transaction_id = transaction_id;
+        }
+        RoomControlEvent::RelationshipConfirmationRequested { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RelationshipConfirmationRequested;
+            projected.relationship_transaction_id = transaction_id;
+        }
+        RoomControlEvent::RelationshipConfirmationAcknowledged { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RelationshipConfirmationAcknowledged;
+            projected.relationship_transaction_id = transaction_id;
         }
         RoomControlEvent::IncomingOffer(offer) => {
             projected.kind = FfiRoomControlEventKind::IncomingOffer;
@@ -616,6 +787,30 @@ fn ffi_lifetime(state: RoomLifetimeState) -> FfiRoomLifetimeState {
         revision: state.revision,
         policy: ffi_policy(state.policy),
         idle_deadline_epoch_ms: state.idle_deadline_unix_ms,
+    }
+}
+
+fn core_relationship_rejection(
+    rejection: FfiRelationshipUpgradeRejection,
+) -> RelationshipUpgradeRejection {
+    match rejection {
+        FfiRelationshipUpgradeRejection::Declined => RelationshipUpgradeRejection::Declined,
+        FfiRelationshipUpgradeRejection::Busy => RelationshipUpgradeRejection::Busy,
+        FfiRelationshipUpgradeRejection::AlreadyRelated => {
+            RelationshipUpgradeRejection::AlreadyRelated
+        }
+    }
+}
+
+fn ffi_relationship_rejection(
+    rejection: RelationshipUpgradeRejection,
+) -> FfiRelationshipUpgradeRejection {
+    match rejection {
+        RelationshipUpgradeRejection::Declined => FfiRelationshipUpgradeRejection::Declined,
+        RelationshipUpgradeRejection::Busy => FfiRelationshipUpgradeRejection::Busy,
+        RelationshipUpgradeRejection::AlreadyRelated => {
+            FfiRelationshipUpgradeRejection::AlreadyRelated
+        }
     }
 }
 
@@ -748,6 +943,33 @@ mod tests {
     }
 
     #[test]
+    fn relationship_repair_events_cross_the_ffi_boundary() {
+        let requested = project_event(RoomControlEvent::RelationshipConfirmationRequested {
+            transaction_id: "relationship_transaction_1".into(),
+        });
+        assert_eq!(
+            requested.kind,
+            FfiRoomControlEventKind::RelationshipConfirmationRequested
+        );
+        assert_eq!(
+            requested.relationship_transaction_id,
+            "relationship_transaction_1"
+        );
+
+        let acknowledged = project_event(RoomControlEvent::RelationshipConfirmationAcknowledged {
+            transaction_id: "relationship_transaction_1".into(),
+        });
+        assert_eq!(
+            acknowledged.kind,
+            FfiRoomControlEventKind::RelationshipConfirmationAcknowledged
+        );
+        assert_eq!(
+            acknowledged.relationship_transaction_id,
+            "relationship_transaction_1"
+        );
+    }
+
+    #[test]
     fn offer_projection_preserves_directory_count() {
         let offer = FfiRoomTransferOffer {
             offer_id: "opaque_7".into(),
@@ -872,7 +1094,7 @@ mod tests {
     #[test]
     fn core_info_advertises_room_control_v5_in_current_ffi() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 27);
+        assert_eq!(info.ffi_api_version, 28);
         assert!(
             info.capabilities
                 .iter()
@@ -902,6 +1124,11 @@ mod tests {
             info.capabilities
                 .iter()
                 .any(|capability| capability == "typed_remembered_credential_vault_v1")
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == "room_relationship_upgrade_v1")
         );
     }
 }

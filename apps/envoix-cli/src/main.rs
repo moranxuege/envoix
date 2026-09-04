@@ -549,9 +549,10 @@ fn show_pairing(response: AgentResponse, json: bool) -> CliResult<()> {
         return Err("Agent returned an unexpected response".into());
     };
     println!("Room code: {}", pairing.room_code);
+    println!("Complete invitation: {}", pairing.invitation);
     println!("Verification code: {}", pairing.verification_code);
     eprintln!(
-        "On the Mac, enter the room code in Envoix, then enter the six-digit verification code when prompted."
+        "On the other device, paste the complete invitation, then enter the six-digit verification code when prompted."
     );
     eprintln!("Keep envoix-agent running until the device appears in `envoix devices list`.");
     Ok(())

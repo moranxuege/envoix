@@ -424,6 +424,7 @@ pub struct FfiAgentDiagnostics {
 pub struct FfiAgentPairingInvitation {
     pub label: String,
     pub room_code: String,
+    pub invitation: String,
     pub verification_code: String,
     pub expires_at_unix_seconds: u64,
 }
@@ -434,6 +435,7 @@ impl std::fmt::Debug for FfiAgentPairingInvitation {
             .debug_struct("FfiAgentPairingInvitation")
             .field("label", &self.label)
             .field("room_code", &"<redacted>")
+            .field("invitation", &"<redacted>")
             .field("verification_code", &"<redacted>")
             .field("expires_at_unix_seconds", &self.expires_at_unix_seconds)
             .finish()
@@ -448,6 +450,7 @@ pub struct FfiAgentDeviceSummary {
     pub previous_generation: Option<u64>,
     pub broker: String,
     pub relay: Option<String>,
+    pub needs_repair: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -910,6 +913,7 @@ fn ffi_pairing_invitation(pairing: PairingInvitation) -> FfiAgentPairingInvitati
     FfiAgentPairingInvitation {
         label: pairing.label,
         room_code: pairing.room_code,
+        invitation: pairing.invitation,
         verification_code: pairing.verification_code,
         expires_at_unix_seconds: pairing.expires_at_unix_seconds,
     }
@@ -923,6 +927,7 @@ fn ffi_device_summary(device: DeviceSummary) -> FfiAgentDeviceSummary {
         previous_generation: device.previous_generation,
         broker: device.broker,
         relay: device.relay,
+        needs_repair: device.needs_repair,
     }
 }
 
@@ -1268,13 +1273,13 @@ mod tests {
     }
 
     #[test]
-    fn api_v27_advertises_the_agent_host_control_capability() {
+    fn api_v28_advertises_the_agent_host_control_capability() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 27);
+        assert_eq!(info.ffi_api_version, 28);
         assert!(
             info.capabilities
                 .iter()
-                .any(|capability| capability == "agent_host_control_v4")
+                .any(|capability| capability == "agent_host_control_v5")
         );
     }
 
@@ -1441,6 +1446,7 @@ mod tests {
         let pairing = FfiAgentPairingInvitation {
             label: "Mac".into(),
             room_code: "room-secret".into(),
+            invitation: "envoix://room/room-secret?broker=fixture".into(),
             verification_code: "verify-secret".into(),
             expires_at_unix_seconds: 1,
         };
