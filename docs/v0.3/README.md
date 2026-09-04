@@ -59,6 +59,7 @@ as typed capabilities, not inferred by a frontend.
 - [Document status and historical boundary](document-status.md)
 - [ADR 0001: Engine storage](adr/0001-engine-storage.md)
 - [ADR 0002: macOS Engine helper](adr/0002-macos-engine-helper.md)
+- [ADR 0003: Room, Relationship, and deployment routes](adr/0003-room-relationship-and-deployment-routes.md)
 
 When an older design document conflicts with these documents, the v0.3
 documents take precedence. The document-status register classifies supporting
