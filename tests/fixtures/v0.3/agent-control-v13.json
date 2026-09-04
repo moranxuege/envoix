@@ -1,0 +1,18 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 13,
+  "requests": [
+    {"protocol_version":13,"request_id":"request_pause","request":{"command":"pause_transfer","transfer_id":"transfer_fixture"}},
+    {"protocol_version":13,"request_id":"request_resume","request":{"command":"resume_transfer","transfer_id":"transfer_fixture"}},
+    {"protocol_version":13,"request_id":"request_recover","request":{"command":"recover_transfer","transfer_id":"transfer_fixture"}},
+    {"protocol_version":13,"request_id":"request_cancel","request":{"command":"cancel_transfer","transfer_id":"transfer_fixture"}},
+    {"protocol_version":13,"request_id":"request_remove","request":{"command":"remove_transfer","transfer_id":"transfer_fixture"}}
+  ],
+  "responses": [
+    {"protocol_version":13,"request_id":"request_pause","response":{"kind":"transfer","transfer":{"id":"transfer_fixture","relationship_id":"relationship_fixture","room_id":null,"content_id":"content_fixture","direction":"send","state":"paused","transferred_bytes":21,"total_bytes":42,"failure":null}}},
+    {"protocol_version":13,"request_id":"request_resume","response":{"kind":"transfer","transfer":{"id":"transfer_fixture","relationship_id":"relationship_fixture","room_id":null,"content_id":"content_fixture","direction":"send","state":"connecting","transferred_bytes":21,"total_bytes":42,"failure":null}}},
+    {"protocol_version":13,"request_id":"request_recover","response":{"kind":"transfer","transfer":{"id":"transfer_fixture","relationship_id":"relationship_fixture","room_id":null,"content_id":"content_fixture","direction":"send","state":"connecting","transferred_bytes":21,"total_bytes":42,"failure":null}}},
+    {"protocol_version":13,"request_id":"request_cancel","response":{"kind":"transfer","transfer":{"id":"transfer_fixture","relationship_id":"relationship_fixture","room_id":null,"content_id":"content_fixture","direction":"send","state":"canceled","transferred_bytes":21,"total_bytes":42,"failure":null}}},
+    {"protocol_version":13,"request_id":"request_remove","response":{"kind":"transfer_removed","transfer_id":"transfer_fixture"}}
+  ]
+}

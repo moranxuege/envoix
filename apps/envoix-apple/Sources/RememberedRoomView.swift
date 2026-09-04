@@ -617,6 +617,11 @@ struct MacOSAgentRoomView: View {
     let loadError: String?
     let onAddFiles: () -> Void
     let onShowActivity: () -> Void
+    let onPauseTransfer: (String) -> Void
+    let onResumeTransfer: (String) -> Void
+    let onRetryTransfer: (String) -> Void
+    let onCancelTransfer: (String) -> Void
+    let onRemoveTransfer: (String) -> Void
 
     var body: some View {
         ScrollView {
@@ -701,7 +706,12 @@ struct MacOSAgentRoomView: View {
                     MacOSAgentTransferCard(
                         transfer: transfer,
                         deviceLabel: nil,
-                        path: path(for: transfer.id)
+                        path: path(for: transfer.id),
+                        onPause: { onPauseTransfer(transfer.id) },
+                        onResume: { onResumeTransfer(transfer.id) },
+                        onRetry: { onRetryTransfer(transfer.id) },
+                        onCancel: { onCancelTransfer(transfer.id) },
+                        onRemove: { onRemoveTransfer(transfer.id) }
                     )
                     if transfer.id != transfers.prefix(6).last?.id {
                         Divider()
@@ -810,6 +820,11 @@ struct MacOSAgentActivityView: View {
     let activePaths: [FfiAgentTransferPath]
     let hasLoadedSnapshot: Bool
     let loadError: String?
+    let onPauseTransfer: (String) -> Void
+    let onResumeTransfer: (String) -> Void
+    let onRetryTransfer: (String) -> Void
+    let onCancelTransfer: (String) -> Void
+    let onRemoveTransfer: (String) -> Void
 
     var body: some View {
         ScrollView {
@@ -832,7 +847,12 @@ struct MacOSAgentActivityView: View {
                         MacOSAgentTransferCard(
                             transfer: transfer,
                             deviceLabel: deviceLabel(for: transfer.relationshipId),
-                            path: path(for: transfer.id)
+                            path: path(for: transfer.id),
+                            onPause: { onPauseTransfer(transfer.id) },
+                            onResume: { onResumeTransfer(transfer.id) },
+                            onRetry: { onRetryTransfer(transfer.id) },
+                            onCancel: { onCancelTransfer(transfer.id) },
+                            onRemove: { onRemoveTransfer(transfer.id) }
                         )
                         .card(raised: true, padding: 16)
                     }
@@ -889,6 +909,11 @@ private struct MacOSAgentTransferCard: View {
     let transfer: FfiApplicationTransfer
     let deviceLabel: String?
     let path: FfiAgentPathKind?
+    let onPause: () -> Void
+    let onResume: () -> Void
+    let onRetry: () -> Void
+    let onCancel: () -> Void
+    let onRemove: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -953,10 +978,58 @@ private struct MacOSAgentTransferCard: View {
                     )
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            transferControls
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("agent_transfer_\(transfer.id)")
+    }
+
+    @ViewBuilder
+    private var transferControls: some View {
+        HStack(spacing: 12) {
+            switch transfer.state {
+            case .connecting, .transferring:
+                Button(actionText("common.pause"), action: onPause)
+            case .paused:
+                Button(actionText("common.resume"), action: onResume)
+            case .failed where transfer.failure?.retryable == true:
+                Button(actionText("remembered_room.action.retry"), action: onRetry)
+            default:
+                EmptyView()
+            }
+
+            if canCancel {
+                Button(
+                    actionText("common.cancel"),
+                    role: .destructive,
+                    action: onCancel
+                )
+            }
+            if MacOSAgentTransferPresentationPolicy.isTerminal(transfer.state) {
+                Button(
+                    actionText("common.remove"),
+                    role: .destructive,
+                    action: onRemove
+                )
+            }
+        }
+        .buttonStyle(.borderless)
+        .font(.caption.weight(.semibold))
+    }
+
+    private var canCancel: Bool {
+        switch transfer.state {
+        case .queued, .connecting, .transferring, .paused:
+            return true
+        case .offered, .awaitingDeliveryProof, .delivered, .rejected, .failed, .canceled:
+            return false
+        }
+    }
+
+    private func actionText(_ key: String) -> String {
+        AppText.localized(key, language: language)
     }
 
     private var title: String {

@@ -196,6 +196,30 @@ async fn run(cli: Cli) -> CliResult<()> {
                 call_agent(agent_endpoint, AgentRequest::GetTransfer { transfer_id }).await?,
                 json,
             ),
+            TransfersCommand::Pause { transfer_id } => show_transfer(
+                call_agent(agent_endpoint, AgentRequest::PauseTransfer { transfer_id }).await?,
+                json,
+            ),
+            TransfersCommand::Resume { transfer_id } => show_transfer(
+                call_agent(agent_endpoint, AgentRequest::ResumeTransfer { transfer_id }).await?,
+                json,
+            ),
+            TransfersCommand::Retry { transfer_id } => show_transfer(
+                call_agent(
+                    agent_endpoint,
+                    AgentRequest::RecoverTransfer { transfer_id },
+                )
+                .await?,
+                json,
+            ),
+            TransfersCommand::Cancel { transfer_id } => show_transfer(
+                call_agent(agent_endpoint, AgentRequest::CancelTransfer { transfer_id }).await?,
+                json,
+            ),
+            TransfersCommand::Remove { transfer_id } => show_removed_transfer(
+                call_agent(agent_endpoint, AgentRequest::RemoveTransfer { transfer_id }).await?,
+                json,
+            ),
             TransfersCommand::Paths => show_transfer_paths(
                 call_agent(agent_endpoint, AgentRequest::ListTransferPaths).await?,
                 json,
@@ -646,6 +670,19 @@ fn show_transfer(response: AgentResponse, json: bool) -> CliResult<()> {
         "progress: {} / {} bytes",
         transfer.transferred_bytes, transfer.total_bytes
     );
+    Ok(())
+}
+
+fn show_removed_transfer(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::TransferRemoved { transfer_id } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Removed Transfer: {transfer_id}");
     Ok(())
 }
 

@@ -328,6 +328,56 @@ final class MacOSAgentControlTests: XCTestCase {
         XCTAssertEqual(requests, [.snapshot(inboxLimit: 20)])
     }
 
+    @MainActor
+    func testTransferControllerUsesTypedHelperControlsAndAppliesResponses() async throws {
+        let controls: [(FfiAgentRequest, FfiApplicationTransferState)] = [
+            (.pauseTransfer(transferId: "transfer_fixture"), .paused),
+            (.resumeTransfer(transferId: "transfer_fixture"), .connecting),
+            (.recoverTransfer(transferId: "transfer_fixture"), .connecting),
+            (.cancelTransfer(transferId: "transfer_fixture"), .canceled),
+        ]
+
+        for (request, expectedState) in controls {
+            let updated = transfer(
+                id: "transfer_fixture",
+                state: expectedState,
+                transferredBytes: 5,
+                totalBytes: 20
+            )
+            let client = FakeMacOSAgentControlClient(response: .transfer(transfer: updated))
+            let controller = MacOSAgentTransferController(controlClient: client)
+
+            switch request {
+            case .pauseTransfer:
+                try await controller.pauseTransfer(id: updated.id)
+            case .resumeTransfer:
+                try await controller.resumeTransfer(id: updated.id)
+            case .recoverTransfer:
+                try await controller.retryTransfer(id: updated.id)
+            case .cancelTransfer:
+                try await controller.cancelTransfer(id: updated.id)
+            default:
+                return XCTFail("fixture contains an unsupported Transfer control")
+            }
+
+            XCTAssertEqual(controller.transfers, [updated])
+            let requests = await client.requests
+            XCTAssertEqual(requests, [request])
+        }
+
+        let removedID = "transfer_fixture"
+        let removeClient = FakeMacOSAgentControlClient(
+            response: .transferRemoved(transferId: removedID)
+        )
+        let removeController = MacOSAgentTransferController(controlClient: removeClient)
+
+        try await removeController.removeTransfer(id: removedID)
+
+        XCTAssertTrue(removeController.transfers.isEmpty)
+        let removeRequests = await removeClient.requests
+        XCTAssertEqual(removeRequests, [.removeTransfer(transferId: removedID)])
+    }
+
     func testAgentTransferPresentationExplainsQueuedAndDeliveryStates() {
         let queued = transfer(
             id: "transfer_queued",

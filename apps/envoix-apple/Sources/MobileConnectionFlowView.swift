@@ -1046,6 +1046,49 @@ struct MobileConnectionFlowView: View {
             }
         }
     }
+
+    private func pauseHelperTransfer(_ transferID: String) {
+        runHelperTransferControl {
+            try await helperTransfers.pauseTransfer(id: transferID)
+        }
+    }
+
+    private func resumeHelperTransfer(_ transferID: String) {
+        runHelperTransferControl {
+            try await helperTransfers.resumeTransfer(id: transferID)
+        }
+    }
+
+    private func retryHelperTransfer(_ transferID: String) {
+        runHelperTransferControl {
+            try await helperTransfers.retryTransfer(id: transferID)
+        }
+    }
+
+    private func cancelHelperTransfer(_ transferID: String) {
+        runHelperTransferControl {
+            try await helperTransfers.cancelTransfer(id: transferID)
+        }
+    }
+
+    private func removeHelperTransfer(_ transferID: String) {
+        runHelperTransferControl {
+            try await helperTransfers.removeTransfer(id: transferID)
+        }
+    }
+
+    private func runHelperTransferControl(
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                try await operation()
+                await helperTransfers.refreshSnapshot()
+            } catch {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        }
+    }
     #endif
 
     @ViewBuilder
@@ -1127,7 +1170,12 @@ struct MobileConnectionFlowView: View {
                 onShowActivity: {
                     macActivityShowsLegacyTransfers = false
                     showPage(.activity)
-                }
+                },
+                onPauseTransfer: pauseHelperTransfer,
+                onResumeTransfer: resumeHelperTransfer,
+                onRetryTransfer: retryHelperTransfer,
+                onCancelTransfer: cancelHelperTransfer,
+                onRemoveTransfer: removeHelperTransfer
             )
             .frame(maxWidth: 960)
             .frame(maxWidth: .infinity)
@@ -1220,7 +1268,12 @@ struct MobileConnectionFlowView: View {
                     devices: helperTransfers.devices,
                     activePaths: helperTransfers.activePaths,
                     hasLoadedSnapshot: helperTransfers.hasLoadedSnapshot,
-                    loadError: helperTransfers.loadError
+                    loadError: helperTransfers.loadError,
+                    onPauseTransfer: pauseHelperTransfer,
+                    onResumeTransfer: resumeHelperTransfer,
+                    onRetryTransfer: retryHelperTransfer,
+                    onCancelTransfer: cancelHelperTransfer,
+                    onRemoveTransfer: removeHelperTransfer
                 )
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)

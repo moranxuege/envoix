@@ -23,7 +23,7 @@ use envoix_client::api::{
 use envoix_client::model::{
     ContentId, FailureCode, FailureOutcome, FailurePhase, RecoveryAction, RememberedAttemptOutcome,
     RememberedGenerationRole, Transfer, TransferDirection, TransferFailure, TransferId,
-    TransferRejection, remembered_generation_attempts,
+    TransferRejection, TransferState, remembered_generation_attempts,
 };
 use envoix_client::ports::{PlatformPortError, SecureVaultPort};
 use envoix_client::product::{
@@ -1609,6 +1609,19 @@ async fn handle_request_result(
                 .ok_or_else(|| anyhow!("Transfer {transfer_id} does not exist"))?;
             Ok(AgentResponse::Transfer { transfer })
         }
+        AgentRequest::PauseTransfer { transfer_id } => pause_agent_transfer(&runtime, &transfer_id),
+        AgentRequest::ResumeTransfer { transfer_id } => {
+            resume_agent_transfer(&runtime, &transfer_id)
+        }
+        AgentRequest::RecoverTransfer { transfer_id } => {
+            recover_agent_transfer(&runtime, &transfer_id)
+        }
+        AgentRequest::CancelTransfer { transfer_id } => {
+            cancel_agent_transfer(&runtime, &transfer_id)
+        }
+        AgentRequest::RemoveTransfer { transfer_id } => {
+            remove_agent_transfer(&runtime, &transfer_id)
+        }
         AgentRequest::ListPendingOffers => Ok(AgentResponse::PendingOffers {
             offers: runtime.pending_offers()?,
         }),
@@ -1628,6 +1641,90 @@ async fn handle_request_result(
         AgentRequest::Pair { label } => begin_pairing(runtime, label).await,
         AgentRequest::JoinPairing { pairing } => join_pairing(runtime, pairing).await,
     }
+}
+
+fn pause_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<AgentResponse> {
+    let transfer_id = TransferId::parse(transfer_id.to_string())?;
+    let transfer = lock(&runtime.store)?.pause_transfer(&transfer_id)?;
+    if let Some(active) = lock(&runtime.active_outgoing)?.get(transfer_id.as_str()) {
+        active.cancel.cancel();
+    }
+    record_agent_event(
+        runtime,
+        AgentEvent::TransferChanged {
+            transfer_id: transfer_id.to_string(),
+        },
+    )?;
+    tracing::info!(transfer_id = %transfer_id, "Transfer paused by local control client");
+    Ok(AgentResponse::Transfer { transfer })
+}
+
+fn resume_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<AgentResponse> {
+    let transfer_id = TransferId::parse(transfer_id.to_string())?;
+    if lock(&runtime.active_outgoing)?.contains_key(transfer_id.as_str()) {
+        bail!("Transfer is still stopping; retry resume after its active attempt closes");
+    }
+    let transfer = lock(&runtime.store)?.resume_transfer(&transfer_id)?;
+    record_agent_event(
+        runtime,
+        AgentEvent::TransferChanged {
+            transfer_id: transfer_id.to_string(),
+        },
+    )?;
+    wake_active_room(runtime, transfer.relationship_id.as_str())?;
+    tracing::info!(transfer_id = %transfer_id, "Transfer resumed by local control client");
+    Ok(AgentResponse::Transfer { transfer })
+}
+
+fn recover_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<AgentResponse> {
+    let transfer_id = TransferId::parse(transfer_id.to_string())?;
+    if lock(&runtime.active_outgoing)?.contains_key(transfer_id.as_str()) {
+        bail!("Transfer still has an active attempt");
+    }
+    let transfer = lock(&runtime.store)?.recover_transfer(&transfer_id)?;
+    record_agent_event(
+        runtime,
+        AgentEvent::TransferChanged {
+            transfer_id: transfer_id.to_string(),
+        },
+    )?;
+    wake_active_room(runtime, transfer.relationship_id.as_str())?;
+    tracing::info!(transfer_id = %transfer_id, "Transfer recovery requested by local control client");
+    Ok(AgentResponse::Transfer { transfer })
+}
+
+fn cancel_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<AgentResponse> {
+    let transfer_id = TransferId::parse(transfer_id.to_string())?;
+    let transfer = lock(&runtime.store)?.cancel_transfer(&transfer_id)?;
+    if let Some(active) = lock(&runtime.active_outgoing)?.get(transfer_id.as_str()) {
+        active.cancel.cancel();
+    }
+    record_agent_event(
+        runtime,
+        AgentEvent::TransferChanged {
+            transfer_id: transfer_id.to_string(),
+        },
+    )?;
+    tracing::info!(transfer_id = %transfer_id, "Transfer canceled by local control client");
+    Ok(AgentResponse::Transfer { transfer })
+}
+
+fn remove_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<AgentResponse> {
+    let transfer_id = TransferId::parse(transfer_id.to_string())?;
+    if lock(&runtime.active_outgoing)?.contains_key(transfer_id.as_str()) {
+        bail!("Transfer is still stopping; retry removal after its active attempt closes");
+    }
+    lock(&runtime.store)?.remove_transfer(&transfer_id)?;
+    record_agent_event(
+        runtime,
+        AgentEvent::TransferChanged {
+            transfer_id: transfer_id.to_string(),
+        },
+    )?;
+    tracing::info!(transfer_id = %transfer_id, "Transfer history removed by local control client");
+    Ok(AgentResponse::TransferRemoved {
+        transfer_id: transfer_id.to_string(),
+    })
 }
 
 async fn create_agent_transfer(
@@ -2927,10 +3024,24 @@ async fn run_outgoing_transfer(
                 );
                 lock(&runtime.store).and_then(|mut store| {
                     if projection.failure.outcome() == FailureOutcome::Canceled {
-                        store
-                            .cancel_outgoing_transfer(&transfer_id)
-                            .map(Some)
-                            .map_err(Into::into)
+                        let current = store.transfer(transfer_id.as_str())?;
+                        match current {
+                            Some(transfer)
+                                if matches!(
+                                    transfer.state,
+                                    TransferState::Paused | TransferState::Canceled
+                                ) =>
+                            {
+                                Ok(Some(transfer))
+                            }
+                            Some(_) => store
+                                .cancel_outgoing_transfer(&transfer_id)
+                                .map(Some)
+                                .map_err(Into::into),
+                            None => Err(anyhow!(
+                                "active outgoing Transfer disappeared before settlement"
+                            )),
+                        }
                     } else {
                         store
                             .fail_outgoing_transfer(&transfer_id, projection.failure)
@@ -3672,7 +3783,7 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v12_envelope() {
+    fn request_decoder_accepts_a_valid_v13_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -3887,6 +3998,150 @@ mod tests {
         assert_eq!(
             handle_request(runtime, AgentRequest::LatestInbox).await,
             AgentResponse::Latest { item: None }
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_transfer_controls_cancel_active_work_and_emit_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        let mut store = ProductStore::open(&state_directory).unwrap();
+        let pending = store.prepare_device("MacBook", "broker", None).unwrap();
+        let relationship_id = pending.id().to_string();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+        let transfer_id = TransferId::parse("transfer_control").unwrap();
+        store
+            .create_transfer(
+                &relationship_id,
+                transfer_id.clone(),
+                ContentId::parse("content_control").unwrap(),
+                42,
+            )
+            .unwrap();
+        store.start_outgoing_transfer(&transfer_id).unwrap();
+        let active_cancel = TransferCancelToken::new();
+        let runtime = Arc::new(AgentRuntime {
+            config: AgentHostConfiguration {
+                state_directory: state_directory.clone(),
+                inbox_directory: state_directory.join("inbox"),
+                control_endpoint: state_directory.join("agent.sock"),
+                device_name: "test-wsl".into(),
+                broker: "broker".into(),
+                relay: None,
+            },
+            client: api::Client::default(),
+            store: Mutex::new(store),
+            credential_protection: desktop_credential_protection(),
+            active_receivers: Mutex::new(HashMap::new()),
+            active_rooms: Mutex::new(HashMap::new()),
+            active_outgoing: Mutex::new(HashMap::from([(
+                transfer_id.to_string(),
+                ActiveOutgoingTransfer {
+                    relationship_id,
+                    cancel: active_cancel.clone(),
+                },
+            )])),
+            active_pairings: Mutex::new(HashSet::new()),
+            active_paths: Mutex::new(Vec::new()),
+            pending_offers: Mutex::new(HashMap::new()),
+            events: Mutex::new(AgentEventLog::new().unwrap()),
+            shutdown: TransferCancelToken::new(),
+            background_tasks: Mutex::new(Vec::new()),
+        });
+        let cursor = lock(&runtime.events).unwrap().cursor();
+
+        let paused = handle_request(
+            runtime.clone(),
+            AgentRequest::PauseTransfer {
+                transfer_id: transfer_id.to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            paused,
+            AgentResponse::Transfer {
+                transfer: Transfer {
+                    state: TransferState::Paused,
+                    ..
+                }
+            }
+        ));
+        assert!(active_cancel.is_cancelled());
+
+        let early_resume = handle_request(
+            runtime.clone(),
+            AgentRequest::ResumeTransfer {
+                transfer_id: transfer_id.to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(early_resume, AgentResponse::Error { .. }));
+        lock(&runtime.active_outgoing)
+            .unwrap()
+            .remove(transfer_id.as_str());
+
+        let resumed = handle_request(
+            runtime.clone(),
+            AgentRequest::ResumeTransfer {
+                transfer_id: transfer_id.to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            resumed,
+            AgentResponse::Transfer {
+                transfer: Transfer {
+                    state: TransferState::Connecting,
+                    ..
+                }
+            }
+        ));
+        assert!(matches!(
+            handle_request(
+                runtime.clone(),
+                AgentRequest::CancelTransfer {
+                    transfer_id: transfer_id.to_string(),
+                },
+            )
+            .await,
+            AgentResponse::Transfer {
+                transfer: Transfer {
+                    state: TransferState::Canceled,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            handle_request(
+                runtime.clone(),
+                AgentRequest::RemoveTransfer {
+                    transfer_id: transfer_id.to_string(),
+                },
+            )
+            .await,
+            AgentResponse::TransferRemoved {
+                transfer_id: transfer_id.to_string()
+            }
+        );
+        assert!(
+            lock(&runtime.store)
+                .unwrap()
+                .transfer(transfer_id.as_str())
+                .unwrap()
+                .is_none()
+        );
+        let AgentEventRead::Events { events, .. } =
+            lock(&runtime.events).unwrap().read_after(&cursor, 10)
+        else {
+            panic!("Transfer control events unexpectedly required a snapshot")
+        };
+        assert_eq!(events.len(), 4);
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event.event, AgentEvent::TransferChanged { .. }))
         );
     }
 
@@ -4617,7 +4872,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v12_envelope() {
+    async fn local_socket_round_trips_a_v13_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {

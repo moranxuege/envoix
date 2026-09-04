@@ -34,7 +34,7 @@ use crate::storage::{
     VaultReference,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 12;
+pub const AGENT_PROTOCOL_VERSION: u16 = 13;
 pub const AGENT_SETTINGS_VERSION: u16 = 2;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_AGENT_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
@@ -138,6 +138,21 @@ pub enum AgentRequest {
     GetTransfer {
         transfer_id: String,
     },
+    PauseTransfer {
+        transfer_id: String,
+    },
+    ResumeTransfer {
+        transfer_id: String,
+    },
+    RecoverTransfer {
+        transfer_id: String,
+    },
+    CancelTransfer {
+        transfer_id: String,
+    },
+    RemoveTransfer {
+        transfer_id: String,
+    },
     ListPendingOffers,
     DecidePendingOffer {
         offer_id: String,
@@ -183,6 +198,9 @@ pub enum AgentResponse {
     },
     Transfer {
         transfer: Transfer,
+    },
+    TransferRemoved {
+        transfer_id: String,
     },
     PendingOffers {
         offers: Vec<AgentPendingOffer>,
@@ -281,7 +299,12 @@ impl AgentRequestEnvelope {
                     validate_agent_source_path(path)?;
                 }
             }
-            AgentRequest::GetTransfer { transfer_id } => {
+            AgentRequest::GetTransfer { transfer_id }
+            | AgentRequest::PauseTransfer { transfer_id }
+            | AgentRequest::ResumeTransfer { transfer_id }
+            | AgentRequest::RecoverTransfer { transfer_id }
+            | AgentRequest::CancelTransfer { transfer_id }
+            | AgentRequest::RemoveTransfer { transfer_id } => {
                 TransferId::parse(transfer_id.clone()).map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                 })?;
@@ -379,6 +402,11 @@ impl AgentResponseEnvelope {
             AgentResponse::SnapshotRequired { cursor } => cursor.validate()?,
             AgentResponse::TransferCreated { transfer } | AgentResponse::Transfer { transfer } => {
                 validate_agent_transfer(transfer)?
+            }
+            AgentResponse::TransferRemoved { transfer_id } => {
+                TransferId::parse(transfer_id.clone()).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })?;
             }
             AgentResponse::Transfers { transfers } => {
                 if transfers.len() > MAX_DURABLE_ENTITIES {
@@ -1508,6 +1536,125 @@ impl ProductStore {
         )
     }
 
+    pub fn pause_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+    ) -> Result<Transfer, EngineStoreError> {
+        self.control_transfer(EngineCommand::PauseTransfer {
+            transfer_id: transfer_id.clone(),
+        })?
+        .ok_or_else(|| EngineStoreError::InvalidState("paused Transfer is missing".into()))
+    }
+
+    pub fn resume_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+    ) -> Result<Transfer, EngineStoreError> {
+        self.control_transfer(EngineCommand::ResumeTransfer {
+            transfer_id: transfer_id.clone(),
+        })?
+        .ok_or_else(|| EngineStoreError::InvalidState("resumed Transfer is missing".into()))
+    }
+
+    pub fn recover_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+    ) -> Result<Transfer, EngineStoreError> {
+        self.control_transfer(EngineCommand::RecoverTransfer {
+            transfer_id: transfer_id.clone(),
+        })?
+        .ok_or_else(|| EngineStoreError::InvalidState("recovering Transfer is missing".into()))
+    }
+
+    pub fn cancel_transfer(
+        &mut self,
+        transfer_id: &TransferId,
+    ) -> Result<Transfer, EngineStoreError> {
+        self.control_transfer(EngineCommand::CancelTransfer {
+            transfer_id: transfer_id.clone(),
+        })?
+        .ok_or_else(|| EngineStoreError::InvalidState("canceled Transfer is missing".into()))
+    }
+
+    pub fn remove_transfer(&mut self, transfer_id: &TransferId) -> Result<(), EngineStoreError> {
+        if self
+            .control_transfer(EngineCommand::RemoveTransfer {
+                transfer_id: transfer_id.clone(),
+            })?
+            .is_some()
+        {
+            return Err(EngineStoreError::InvalidState(
+                "removed Transfer remains in the Engine snapshot".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn control_transfer(
+        &mut self,
+        command: EngineCommand,
+    ) -> Result<Option<Transfer>, EngineStoreError> {
+        let command_id = CommandId::parse(random_identifier("command")?)
+            .expect("generated command identifier is valid");
+        let effect = decide(
+            &self.engine.state().snapshot,
+            CommandEnvelope {
+                contract_version: crate::APPLICATION_CONTRACT_VERSION,
+                command_id,
+                command,
+            },
+        )
+        .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        let (transfer_id, event, removed) = match effect.effect {
+            EngineEffect::PauseTransfer { transfer_id } => {
+                let event = EngineEvent::TransferPaused {
+                    transfer_id: transfer_id.clone(),
+                };
+                (transfer_id, event, false)
+            }
+            EngineEffect::ResumeTransfer { transfer_id } => {
+                let event = EngineEvent::TransferResumed {
+                    transfer_id: transfer_id.clone(),
+                };
+                (transfer_id, event, false)
+            }
+            EngineEffect::RecoverTransfer { transfer_id, .. } => {
+                let event = EngineEvent::TransferRecoveryStarted {
+                    transfer_id: transfer_id.clone(),
+                };
+                (transfer_id, event, false)
+            }
+            EngineEffect::CancelTransfer { transfer_id } => {
+                let event = EngineEvent::TransferCanceled {
+                    transfer_id: transfer_id.clone(),
+                };
+                (transfer_id, event, false)
+            }
+            EngineEffect::RemoveTransfer { transfer_id } => {
+                let event = EngineEvent::TransferRemoved {
+                    transfer_id: transfer_id.clone(),
+                };
+                (transfer_id, event, true)
+            }
+            _ => {
+                return Err(EngineStoreError::InvalidState(
+                    "Transfer control decision returned an unexpected effect".into(),
+                ));
+            }
+        };
+
+        let mut state = self.engine.state().clone();
+        apply_product_event(&mut state, event)?;
+        let transfer = state.snapshot.transfers.get(&transfer_id).cloned();
+        if removed == transfer.is_some() {
+            return Err(EngineStoreError::InvalidState(
+                "Transfer control produced an inconsistent snapshot".into(),
+            ));
+        }
+        self.engine.replace(state)?;
+        Ok(transfer)
+    }
+
     fn required_outgoing_transfer(
         &self,
         transfer_id: &TransferId,
@@ -2594,6 +2741,67 @@ mod tests {
     }
 
     #[test]
+    fn transfer_controls_follow_the_engine_state_machine_and_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let pending = store.prepare_device("MacBook", "broker", None).unwrap();
+        store
+            .commit_device(pending, &opaque_credential(), 0)
+            .unwrap();
+        let transfer_id = TransferId::parse("transfer_control").unwrap();
+        store
+            .create_transfer(
+                "MacBook",
+                transfer_id.clone(),
+                ContentId::parse("content_control").unwrap(),
+                42,
+            )
+            .unwrap();
+
+        assert!(store.pause_transfer(&transfer_id).is_err());
+        store.start_outgoing_transfer(&transfer_id).unwrap();
+        assert_eq!(
+            store.pause_transfer(&transfer_id).unwrap().state,
+            TransferState::Paused
+        );
+        assert!(
+            store
+                .dispatchable_transfers(
+                    store
+                        .transfer(transfer_id.as_str())
+                        .unwrap()
+                        .unwrap()
+                        .relationship_id
+                        .as_str()
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.resume_transfer(&transfer_id).unwrap().state,
+            TransferState::Connecting
+        );
+        assert_eq!(
+            store.cancel_transfer(&transfer_id).unwrap().state,
+            TransferState::Canceled
+        );
+        assert!(store.resume_transfer(&transfer_id).is_err());
+        drop(store);
+
+        let mut reopened = ProductStore::open(directory.path()).unwrap();
+        assert_eq!(
+            reopened
+                .transfer(transfer_id.as_str())
+                .unwrap()
+                .unwrap()
+                .state,
+            TransferState::Canceled
+        );
+        reopened.remove_transfer(&transfer_id).unwrap();
+        assert!(reopened.transfer(transfer_id.as_str()).unwrap().is_none());
+    }
+
+    #[test]
     fn forgetting_device_revokes_credential_and_preserves_inbox_history() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = ProductStore::open(directory.path()).unwrap();
@@ -2722,7 +2930,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -2747,7 +2955,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 5);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -2767,7 +2975,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 6);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 12);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 15);
         assert!(
@@ -2785,7 +2993,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 7);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 15);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 18);
         assert!(
@@ -2803,7 +3011,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 8);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 16);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 19);
         assert_eq!(
@@ -2820,7 +3028,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 9);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 12);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 13);
 
         let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
         settings.validate().unwrap();
@@ -3136,7 +3344,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
-        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+        assert_eq!(fixture["protocol_version"], 12);
 
         let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
         settings.validate().unwrap();
@@ -3144,7 +3352,7 @@ mod tests {
 
         let request: AgentRequestEnvelope =
             serde_json::from_value(fixture["request"].clone()).unwrap();
-        request.validate().unwrap();
+        assert!(request.validate().is_err());
         assert!(matches!(
             request.request,
             AgentRequest::UpdateDeviceRoute { .. }
@@ -3152,14 +3360,14 @@ mod tests {
 
         let response: AgentResponseEnvelope =
             serde_json::from_value(fixture["response"].clone()).unwrap();
-        response.validate_for(&request.request_id).unwrap();
+        assert!(response.validate_for(&request.request_id).is_err());
         assert!(matches!(
             response.response,
             AgentResponse::DeviceRouteUpdated { .. }
         ));
 
         let event: AgentEventEnvelope = serde_json::from_value(fixture["event"].clone()).unwrap();
-        event.validate().unwrap();
+        assert!(event.validate().is_err());
         assert!(matches!(
             event.event,
             AgentEvent::RelationshipChanged {
@@ -3167,6 +3375,79 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn agent_wire_v13_fixture_covers_transfer_controls() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v13.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+
+        let requests = fixture["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<AgentRequestEnvelope>)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(matches!(
+            requests.as_slice(),
+            [
+                AgentRequestEnvelope {
+                    request: AgentRequest::PauseTransfer { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::ResumeTransfer { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::RecoverTransfer { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::CancelTransfer { .. },
+                    ..
+                },
+                AgentRequestEnvelope {
+                    request: AgentRequest::RemoveTransfer { .. },
+                    ..
+                },
+            ]
+        ));
+        for (request, expected) in requests.iter().zip(fixture["requests"].as_array().unwrap()) {
+            request.validate().unwrap();
+            assert_eq!(serde_json::to_value(request).unwrap(), *expected);
+        }
+
+        let responses = fixture["responses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<AgentResponseEnvelope>)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            responses[..4]
+                .iter()
+                .all(|response| matches!(response.response, AgentResponse::Transfer { .. }))
+        );
+        assert!(matches!(
+            responses[4].response,
+            AgentResponse::TransferRemoved { .. }
+        ));
+        for (response, expected) in responses
+            .iter()
+            .zip(fixture["responses"].as_array().unwrap())
+        {
+            response.validate_for(&response.request_id).unwrap();
+            assert_eq!(serde_json::to_value(response).unwrap(), *expected);
+        }
     }
 
     #[test]

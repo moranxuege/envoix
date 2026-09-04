@@ -213,6 +213,28 @@ impl EnvoixWindowsApp {
                     "已拒绝本次接收"
                 });
             }
+            Some(AgentResponse::Transfer { .. })
+                if matches!(
+                    operation,
+                    Operation::PauseTransfer
+                        | Operation::ResumeTransfer
+                        | Operation::RetryTransfer
+                        | Operation::CancelTransfer
+                ) =>
+            {
+                self.show_toast(match operation {
+                    Operation::PauseTransfer => "正在暂停传输",
+                    Operation::ResumeTransfer => "传输已继续",
+                    Operation::RetryTransfer => "已重新尝试传输",
+                    Operation::CancelTransfer => "传输已取消",
+                    _ => unreachable!(),
+                });
+            }
+            Some(AgentResponse::TransferRemoved { .. })
+                if operation == Operation::RemoveTransfer =>
+            {
+                self.show_toast("传输记录已移除");
+            }
             Some(AgentResponse::DeviceRevoked { device })
                 if operation == Operation::RevokeDevice =>
             {
@@ -694,7 +716,7 @@ impl EnvoixWindowsApp {
     }
 
     fn render_activity(&mut self, ui: &mut egui::Ui) {
-        let Some(dashboard) = &self.dashboard else {
+        let Some(dashboard) = self.dashboard.clone() else {
             return;
         };
         let delivered = dashboard
@@ -834,6 +856,76 @@ impl EnvoixWindowsApp {
                         ),
                     );
                 }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let transfer_id = transfer.id.to_string();
+                    match transfer.state {
+                        TransferState::Connecting | TransferState::Transferring => {
+                            if ui.add_enabled(!self.busy(), quiet_button("暂停")).clicked() {
+                                self.start_agent_operation(
+                                    Operation::PauseTransfer,
+                                    AgentRequest::PauseTransfer {
+                                        transfer_id: transfer_id.clone(),
+                                    },
+                                );
+                            }
+                        }
+                        TransferState::Paused => {
+                            if ui
+                                .add_enabled(!self.busy(), primary_button("继续"))
+                                .clicked()
+                            {
+                                self.start_agent_operation(
+                                    Operation::ResumeTransfer,
+                                    AgentRequest::ResumeTransfer {
+                                        transfer_id: transfer_id.clone(),
+                                    },
+                                );
+                            }
+                        }
+                        TransferState::Failed
+                            if transfer
+                                .failure
+                                .as_ref()
+                                .is_some_and(|failure| failure.retryable) =>
+                        {
+                            if ui
+                                .add_enabled(!self.busy(), primary_button("重试"))
+                                .clicked()
+                            {
+                                self.start_agent_operation(
+                                    Operation::RetryTransfer,
+                                    AgentRequest::RecoverTransfer {
+                                        transfer_id: transfer_id.clone(),
+                                    },
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                    if transfer.state.can_cancel()
+                        && ui
+                            .add_enabled(!self.busy(), danger_quiet_button("取消"))
+                            .clicked()
+                    {
+                        self.start_agent_operation(
+                            Operation::CancelTransfer,
+                            AgentRequest::CancelTransfer {
+                                transfer_id: transfer_id.clone(),
+                            },
+                        );
+                    }
+                    if transfer.state.is_terminal()
+                        && ui
+                            .add_enabled(!self.busy(), danger_quiet_button("移除记录"))
+                            .clicked()
+                    {
+                        self.start_agent_operation(
+                            Operation::RemoveTransfer,
+                            AgentRequest::RemoveTransfer { transfer_id },
+                        );
+                    }
+                });
                 ui.label(
                     RichText::new(format!("传输 ID  {}", transfer.id))
                         .size(9.5)

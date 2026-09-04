@@ -205,6 +205,16 @@ pub(crate) enum TransfersCommand {
     List,
     /// Show one durable Transfer by ID.
     Show { transfer_id: String },
+    /// Pause an active outgoing Transfer.
+    Pause { transfer_id: String },
+    /// Continue a paused outgoing Transfer.
+    Resume { transfer_id: String },
+    /// Retry a recoverable failed outgoing Transfer.
+    Retry { transfer_id: String },
+    /// Cancel a queued or active outgoing Transfer.
+    Cancel { transfer_id: String },
+    /// Remove one terminal Transfer from history.
+    Remove { transfer_id: String },
     /// List the network paths selected by active Agent transfers.
     Paths,
     /// List incoming offers waiting for an explicit size approval.
@@ -731,6 +741,11 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["envoix", "transfers", "list"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "transfers", "show", "transfer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "pause", "transfer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "resume", "transfer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "retry", "transfer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "cancel", "transfer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "remove", "transfer_1"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "transfers", "paths"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "transfers", "pending"]).is_ok());
         assert!(Cli::try_parse_from(["envoix", "transfers", "approve", "offer_1"]).is_ok());

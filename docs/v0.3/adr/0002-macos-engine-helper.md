@@ -205,6 +205,12 @@ approval, a versioned import contract, and independent evidence covering the
 source inventory, validated destination, rollback, and retention behavior.
 Until then, legacy data remains retained but outside the API 25 Agent owner.
 
+API 26 adds `agent_host_control_v3` and Agent protocol v13. The macOS
+application can pause, resume, recover, cancel, and remove helper-owned
+Transfers through typed commands. The helper persists the Engine transition
+before stopping an active attempt, and the GUI never edits transfer state
+optimistically or opens the outbox store.
+
 The Apple stage-B implementation embeds `EnvoixEngineHelper.app` at
 `Contents/Library/LoginItems`, registers it only after an explicit Settings
 action through `SMAppService`, and gives only that helper the production

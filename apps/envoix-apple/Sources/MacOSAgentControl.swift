@@ -235,6 +235,48 @@ final class MacOSAgentTransferController: ObservableObject {
         }
     }
 
+    func pauseTransfer(id: String) async throws {
+        try await updateTransfer(request: .pauseTransfer(transferId: id))
+    }
+
+    func resumeTransfer(id: String) async throws {
+        try await updateTransfer(request: .resumeTransfer(transferId: id))
+    }
+
+    func retryTransfer(id: String) async throws {
+        try await updateTransfer(request: .recoverTransfer(transferId: id))
+    }
+
+    func cancelTransfer(id: String) async throws {
+        try await updateTransfer(request: .cancelTransfer(transferId: id))
+    }
+
+    func removeTransfer(id: String) async throws {
+        let response = try await controlClient.call(
+            request: .removeTransfer(transferId: id)
+        )
+        switch response {
+        case let .transferRemoved(removedID) where removedID == id:
+            replaceTransfers(transfers.filter { $0.id != id })
+        case let .error(code, message):
+            throw MacOSAgentTransferError.rejected(code: code, reason: message)
+        default:
+            throw MacOSAgentTransferError.unexpectedResponse
+        }
+    }
+
+    private func updateTransfer(request: FfiAgentRequest) async throws {
+        let response = try await controlClient.call(request: request)
+        switch response {
+        case let .transfer(transfer):
+            replaceTransfers(upserting: transfer)
+        case let .error(code, message):
+            throw MacOSAgentTransferError.rejected(code: code, reason: message)
+        default:
+            throw MacOSAgentTransferError.unexpectedResponse
+        }
+    }
+
     private func replaceTransfers(upserting transfer: FfiApplicationTransfer) {
         var updated = transfers.filter { $0.id != transfer.id }
         updated.append(transfer)

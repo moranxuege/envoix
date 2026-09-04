@@ -418,6 +418,10 @@ ephemeral authentication inputs, the Agent performs verification and vault
 commit atomically, and the response contains only a device summary. Requests are
 limited to 64 KiB and responses to 20 MiB. v3 through v10 requests receive
 `unsupported_protocol_version`; the Agent does not execute a legacy decoder.
+Protocol v12 adds bounded Relationship route replacement for the test-cycle
+migration path. Protocol v13 adds typed pause, resume, recovery, cancellation,
+and terminal-history removal for Agent-owned Transfers. Active attempts are
+stopped only after their authoritative state transition is persisted.
 
 ## 9. Persistence and secret ownership
 

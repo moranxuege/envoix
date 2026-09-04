@@ -56,7 +56,7 @@ macOS Background Task Management from reusing an incompatible ad-hoc helper
 registration while the production helper keeps `com.envoix.app.engine-helper`.
 
 This command validates the signed helper host, its Agent control surface, and
-helper-owned Keychain persistence. Agent protocol v12 keeps first-contact
+helper-owned Keychain persistence. Agent protocol v13 keeps first-contact
 `join_pairing` behind that helper: when a foreground macOS Room receives a
 verification request, the GUI closes its unverified session and sends only the
 bounded invitation, label, and one-time code over the owner-only socket. The
@@ -70,7 +70,10 @@ must not reopen or copy the helper credential.
 
 API 25 also exposes the Rust-owned deployment defaults to both Apple targets.
 Agent protocol v12 can update the broker and relay stored on an existing
-Relationship without exporting or rotating its credential.
+Relationship without exporting or rotating its credential. API 26 and Agent
+protocol v13 add helper-owned Transfer pause, resume, retry, cancel, and
+history removal; the SwiftUI process receives only the resulting secret-free
+Transfer projection.
 
 A distributable build must use `scripts/apple-dev.sh
 macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and

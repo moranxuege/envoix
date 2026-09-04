@@ -351,6 +351,21 @@ pub enum FfiAgentRequest {
     GetTransfer {
         transfer_id: String,
     },
+    PauseTransfer {
+        transfer_id: String,
+    },
+    ResumeTransfer {
+        transfer_id: String,
+    },
+    RecoverTransfer {
+        transfer_id: String,
+    },
+    CancelTransfer {
+        transfer_id: String,
+    },
+    RemoveTransfer {
+        transfer_id: String,
+    },
     ListPendingOffers,
     DecidePendingOffer {
         offer_id: String,
@@ -565,6 +580,9 @@ pub enum FfiAgentResponse {
     Transfer {
         transfer: FfiApplicationTransfer,
     },
+    TransferRemoved {
+        transfer_id: String,
+    },
     PendingOffers {
         offers: Vec<FfiAgentPendingOffer>,
     },
@@ -693,6 +711,21 @@ fn core_agent_request(request: FfiAgentRequest) -> Result<AgentRequest, FfiAgent
         FfiAgentRequest::ListTransfers => AgentRequest::ListTransfers,
         FfiAgentRequest::ListTransferPaths => AgentRequest::ListTransferPaths,
         FfiAgentRequest::GetTransfer { transfer_id } => AgentRequest::GetTransfer { transfer_id },
+        FfiAgentRequest::PauseTransfer { transfer_id } => {
+            AgentRequest::PauseTransfer { transfer_id }
+        }
+        FfiAgentRequest::ResumeTransfer { transfer_id } => {
+            AgentRequest::ResumeTransfer { transfer_id }
+        }
+        FfiAgentRequest::RecoverTransfer { transfer_id } => {
+            AgentRequest::RecoverTransfer { transfer_id }
+        }
+        FfiAgentRequest::CancelTransfer { transfer_id } => {
+            AgentRequest::CancelTransfer { transfer_id }
+        }
+        FfiAgentRequest::RemoveTransfer { transfer_id } => {
+            AgentRequest::RemoveTransfer { transfer_id }
+        }
         FfiAgentRequest::ListPendingOffers => AgentRequest::ListPendingOffers,
         FfiAgentRequest::DecidePendingOffer { offer_id, decision } => {
             AgentRequest::DecidePendingOffer {
@@ -767,6 +800,9 @@ fn ffi_agent_response(response: AgentResponse) -> FfiAgentResponse {
         AgentResponse::Transfer { transfer } => FfiAgentResponse::Transfer {
             transfer: ffi_application_transfer(&transfer),
         },
+        AgentResponse::TransferRemoved { transfer_id } => {
+            FfiAgentResponse::TransferRemoved { transfer_id }
+        }
         AgentResponse::PendingOffers { offers } => FfiAgentResponse::PendingOffers {
             offers: offers.into_iter().map(ffi_pending_offer).collect(),
         },
@@ -1130,13 +1166,13 @@ mod tests {
     }
 
     #[test]
-    fn api_v25_advertises_the_agent_host_control_capability() {
+    fn api_v26_advertises_the_agent_host_control_capability() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 25);
+        assert_eq!(info.ffi_api_version, 26);
         assert!(
             info.capabilities
                 .iter()
-                .any(|capability| capability == "agent_host_control_v2")
+                .any(|capability| capability == "agent_host_control_v3")
         );
     }
 
@@ -1189,6 +1225,21 @@ mod tests {
             FfiAgentRequest::ListTransfers,
             FfiAgentRequest::ListTransferPaths,
             FfiAgentRequest::GetTransfer {
+                transfer_id: "transfer_fixture".into(),
+            },
+            FfiAgentRequest::PauseTransfer {
+                transfer_id: "transfer_fixture".into(),
+            },
+            FfiAgentRequest::ResumeTransfer {
+                transfer_id: "transfer_fixture".into(),
+            },
+            FfiAgentRequest::RecoverTransfer {
+                transfer_id: "transfer_fixture".into(),
+            },
+            FfiAgentRequest::CancelTransfer {
+                transfer_id: "transfer_fixture".into(),
+            },
+            FfiAgentRequest::RemoveTransfer {
                 transfer_id: "transfer_fixture".into(),
             },
             FfiAgentRequest::ListPendingOffers,

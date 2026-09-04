@@ -692,9 +692,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn core_info_advertises_typed_staged_provider_jobs_in_ffi_v25() {
+    fn core_info_advertises_typed_staged_provider_jobs_in_current_ffi() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 25);
+        assert_eq!(info.ffi_api_version, 26);
         assert!(
             info.capabilities
                 .contains(&"typed_staged_provider_job_v1".to_string())

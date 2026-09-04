@@ -66,6 +66,14 @@ compiled broker and relay defaults. Agent protocol v12 projects
 relay without exposing, replacing, or re-pairing its credential. The Agent
 rejects route changes while that Relationship owns active transfer work.
 
+Agent protocol v13 and FFI API 26 add typed pause, resume, recover, cancel,
+and remove operations for Agent-owned Transfers. A control client never
+changes transfer state optimistically: it renders the returned authoritative
+Transfer or refreshes after a typed error. Pause and cancel first persist the
+Engine transition and then stop an active data-plane attempt. Resume is
+rejected until that attempt has closed, preventing a canceled old attempt from
+overwriting the resumed state.
+
 `FfiApplicationEngine` owns one ordered application snapshot. Its no-argument
 constructor is limited to contract tests and transient previews; product hosts
 open the persistent constructor. It accepts typed event envelopes, returns
