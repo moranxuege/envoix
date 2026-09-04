@@ -1,5 +1,6 @@
 package dev.envoix.app.discovery
 
+import dev.envoix.app.ffi.FfiNearbyInviteEndpoint
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -110,13 +111,40 @@ class NearbyRendezvousRoutingTest {
     }
 
     @Test
-    fun `endpoint ids are normalized before native routing`() {
+    fun `endpoint ids are normalized before typed core routing`() {
         assertEquals(
             ENDPOINT_ID,
             normalizeNearbyInboxEndpointId("  ${ENDPOINT_ID.uppercase()}  "),
         )
         assertNull(normalizeNearbyInboxEndpointId(ENDPOINT_ID.dropLast(1)))
         assertNull(normalizeNearbyInboxEndpointId("1" + ENDPOINT_ID.drop(1)))
+    }
+
+    @Test
+    fun `typed core route round trip preserves the selected endpoint`() {
+        val route =
+            route(
+                relayUrl = RELAY_URL,
+                directAddresses = listOf(DIRECT_ADDRESS, "[2001:db8::1]:8443"),
+            )
+
+        val endpoint = route.toFfiNearbyInviteEndpoint()
+
+        assertEquals(ENDPOINT_ID, endpoint.endpointId)
+        assertEquals(RELAY_URL, endpoint.relayUrl)
+        assertEquals(listOf(DIRECT_ADDRESS, "[2001:db8::1]:8443"), endpoint.directAddresses)
+        assertEquals(route, endpoint.toNearbyInviteRoute())
+    }
+
+    @Test
+    fun `typed core endpoint without a transport route is rejected`() {
+        assertNull(
+            FfiNearbyInviteEndpoint(
+                endpointId = ENDPOINT_ID,
+                relayUrl = null,
+                directAddresses = emptyList(),
+            ).toNearbyInviteRoute(),
+        )
     }
 
     @Test

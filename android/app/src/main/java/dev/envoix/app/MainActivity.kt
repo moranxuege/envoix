@@ -19,15 +19,19 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import dev.envoix.app.discovery.BleVerificationInvitation
 import dev.envoix.app.discovery.DiscoveryMode
+import dev.envoix.app.discovery.DiscoveryPermissions
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
-import dev.envoix.app.ui.AppText
+import dev.envoix.app.discovery.NearbyVisibility
+import dev.envoix.app.ffi.FfiRoomControlInvite
+import dev.envoix.app.ffi.parseRoomControlInvite
 import dev.envoix.app.ui.ConnectionHubScreen
 import dev.envoix.app.ui.ConnectionWorkflowUiState
 import dev.envoix.app.ui.ConnectionWorkflowViewModel
@@ -41,20 +45,29 @@ import dev.envoix.app.ui.RememberedRoomsScreen
 import dev.envoix.app.ui.RememberedRoomsViewModel
 import dev.envoix.app.ui.RoomControlInviteFormat
 import dev.envoix.app.ui.RoomControlPhase
+import dev.envoix.app.ui.SettingsDiagnosticsViewModel
 import dev.envoix.app.ui.SettingsScreen
+import dev.envoix.app.ui.TransferActivityPresentationEnvironment
 import dev.envoix.app.ui.TransferActivityScreen
+import dev.envoix.app.ui.TransferSetupPreferences
+import dev.envoix.app.ui.TransferSourcePreparationCoordinator
 import dev.envoix.app.ui.WorkflowScreen
+import dev.envoix.app.ui.appString
+import dev.envoix.app.ui.roomOfferDestinationPresentation
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
     private val vm: TransferViewModel by viewModels()
     private val discoveryVm: DiscoveryViewModel by viewModels()
     private val workflowVm: ConnectionWorkflowViewModel by viewModels()
     private val rememberedRoomsVm: RememberedRoomsViewModel by viewModels()
+    private val settingsDiagnosticsVm: SettingsDiagnosticsViewModel by viewModels()
+    private val transferSourcePreparation by lazy {
+        TransferSourcePreparationCoordinator(this, lifecycleScope)
+    }
     private val rememberedRoomConnections by lazy {
         RememberedRoomConnectionManager.get(this)
     }
@@ -81,6 +94,14 @@ class MainActivity : ComponentActivity() {
 
     private val requestNotif =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    private val requestNearbyPermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            discoveryVm.start()
+        }
+    private val requestNearbyWifiPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            settingsDiagnosticsVm.refresh()
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,9 +121,37 @@ class MainActivity : ComponentActivity() {
                     val workflow by workflowVm.uiState.collectAsState()
                     val discovery by discoveryVm.uiState.collectAsState()
                     val rememberedRooms by rememberedRoomsVm.uiState.collectAsState()
+                    val settingsDiagnostics by settingsDiagnosticsVm.uiState.collectAsState()
                     val nfcInvitation by nfcInvitationController.state.collectAsState()
                     val nfcPhoneHosting by nfcInvitationHostController.state.collectAsState()
                     val nfcPhoneReader by nfcInvitationReaderController.state.collectAsState()
+                    val downloadsRootLabel = appString(R.string.activity_downloads_folder)
+                    val chooseFolderLabel = appString(R.string.destination_choose_folder)
+                    val unavailableFolderLabel = appString(R.string.destination_unavailable_folder)
+                    val selectedFolderLabel = appString(R.string.destination_selected_folder)
+                    LaunchedEffect(settings.devMode, workflow.screen) {
+                        settingsDiagnosticsVm.setEnabled(
+                            settings.devMode && workflow.screen == WorkflowScreen.Settings,
+                        )
+                    }
+                    val transferPreferences =
+                        remember(
+                            settings.broker,
+                            settings.relay,
+                            settings.defaultRole,
+                            settings.compressionPolicy,
+                            settings.saveFolder,
+                            settings.saveTreeUri,
+                        ) {
+                            TransferSetupPreferences(
+                                broker = settings.broker,
+                                relay = settings.relay,
+                                defaultRole = settings.defaultRole,
+                                compressionPolicy = settings.compressionPolicy,
+                                saveLocationLabel = SettingsStore.saveLabel(this@MainActivity),
+                                savePickerInitialUri = SettingsStore.savePickerInitialUri(),
+                            )
+                        }
                     val selectedPeerKey = workflow.room?.nearbySelection?.discoveryPeerKey
                     val controlRoom = workflow.room?.controlSession == true
                     val activeRoomTransferCount =
@@ -172,7 +221,20 @@ class MainActivity : ComponentActivity() {
                                 onConfirmReplacement = workflowVm::confirmReplacement,
                                 onExternalActivityChanged = ::setExternalActivityActive,
                                 pendingShareCount = workflow.pendingShares.size,
-                                discoveryViewModel = discoveryVm,
+                                discovery = discovery,
+                                nearbyDisplayName = settings.nearbyDisplayName,
+                                nearbyVisibility =
+                                    NearbyVisibility.fromPersisted(settings.nearbyVisibility),
+                                onToggleDiscovery = {
+                                    toggleNearbyDiscovery(discovery.active)
+                                },
+                                onRequestNearbyPermission = ::requestNearbyPermission,
+                                onOfferNearbyInvite = discoveryVm::offerInvite,
+                                onConsumeNearbyOffer = discoveryVm::consumeRendezvousOffer,
+                                onSaveNearbyDisplayName = SettingsStore::setNearbyDisplayName,
+                                onSetNearbyVisibility = {
+                                    SettingsStore.setNearbyVisibility(it.persistedValue)
+                                },
                             )
                         WorkflowScreen.Room -> {
                             val draft = workflow.room
@@ -199,7 +261,20 @@ class MainActivity : ComponentActivity() {
                                     onConfirmReplacement = workflowVm::confirmReplacement,
                                     onExternalActivityChanged = ::setExternalActivityActive,
                                     pendingShareCount = workflow.pendingShares.size,
-                                    discoveryViewModel = discoveryVm,
+                                    discovery = discovery,
+                                    nearbyDisplayName = settings.nearbyDisplayName,
+                                    nearbyVisibility =
+                                        NearbyVisibility.fromPersisted(settings.nearbyVisibility),
+                                    onToggleDiscovery = {
+                                        toggleNearbyDiscovery(discovery.active)
+                                    },
+                                    onRequestNearbyPermission = ::requestNearbyPermission,
+                                    onOfferNearbyInvite = discoveryVm::offerInvite,
+                                    onConsumeNearbyOffer = discoveryVm::consumeRendezvousOffer,
+                                    onSaveNearbyDisplayName = SettingsStore::setNearbyDisplayName,
+                                    onSetNearbyVisibility = {
+                                        SettingsStore.setNearbyVisibility(it.persistedValue)
+                                    },
                                 )
                             } else {
                                 DeviceRoomScreen(
@@ -271,6 +346,38 @@ class MainActivity : ComponentActivity() {
                                     },
                                     onOpenReceived = ::openReceived,
                                     onShareReceived = ::shareReceived,
+                                    discovery = discovery,
+                                    incomingDestination =
+                                        workflow.control.incomingOffer?.let { offer ->
+                                            roomOfferDestinationPresentation(
+                                                context = this@MainActivity,
+                                                settings = settings,
+                                                directoryCount = offer.directoryCount,
+                                                downloadsRootLabel = downloadsRootLabel,
+                                                chooseFolderLabel = chooseFolderLabel,
+                                                unavailableLabel = unavailableFolderLabel,
+                                                selectedFolderLabel = selectedFolderLabel,
+                                            )
+                                        },
+                                    transferPreferences = transferPreferences,
+                                    sourcePreparationIntents = transferSourcePreparation.intents,
+                                    onSaveTreePicked = { uri ->
+                                        SettingsStore.setSaveTree(this@MainActivity, uri)
+                                    },
+                                    resolveRoomDestination = { directoryCount ->
+                                        val currentSettings = SettingsStore.settings.value
+                                        roomOfferDestinationPresentation(
+                                            context = this@MainActivity,
+                                            settings = currentSettings,
+                                            directoryCount = directoryCount,
+                                            downloadsRootLabel = downloadsRootLabel,
+                                            chooseFolderLabel = chooseFolderLabel,
+                                            unavailableLabel = unavailableFolderLabel,
+                                            selectedFolderLabel = selectedFolderLabel,
+                                        )
+                                    },
+                                    onOfferNearbyInvite = discoveryVm::offerInvite,
+                                    onConsumeNearbyOffer = discoveryVm::consumeRendezvousOffer,
                                     onSend = {
                                         c,
                                         b,
@@ -290,7 +397,6 @@ class MainActivity : ComponentActivity() {
                                             rememberedRelationshipId,
                                         )
                                     },
-                                    discoveryViewModel = discoveryVm,
                                 )
                             }
                         }
@@ -312,7 +418,7 @@ class MainActivity : ComponentActivity() {
                                 connection = rememberedRooms.connections[relationshipId],
                                 transferState = rememberedRooms.transfers[relationshipId],
                                 error = rememberedRooms.error,
-                                connectionManager = rememberedRoomConnections,
+                                onRoomOpenChanged = rememberedRoomConnections::setRoomOpen,
                                 onBack = workflowVm::navigateBack,
                                 onRetry = rememberedRoomsVm::retry,
                                 onRename = rememberedRoomsVm::rename,
@@ -327,11 +433,24 @@ class MainActivity : ComponentActivity() {
                                 onShareReceived = ::shareReceived,
                                 onExternalActivityChanged = ::setExternalActivityActive,
                                 onDismissError = rememberedRoomsVm::clearError,
+                                transferPreferences = transferPreferences,
+                                sourcePreparationIntents = transferSourcePreparation.intents,
+                                onSaveTreePicked = { uri ->
+                                    SettingsStore.setSaveTree(this@MainActivity, uri)
+                                },
                             )
                         }
                         WorkflowScreen.Activity ->
                             TransferActivityScreen(
                                 transfers = transfers,
+                                presentation =
+                                    TransferActivityPresentationEnvironment(
+                                        defaultDestinationLabel =
+                                            SettingsStore.saveLabel(this@MainActivity),
+                                        developerMode = settings.devMode,
+                                        canUploadDiagnostics =
+                                            settings.devMode && settings.logServer.isNotBlank(),
+                                    ),
                                 onBack = workflowVm::navigateBack,
                                 onPauseResume = { vm.pauseResume(it) },
                                 onApproveReceive = { vm.approveReceive(it) },
@@ -339,8 +458,59 @@ class MainActivity : ComponentActivity() {
                                 onRemove = { vm.remove(it) },
                                 onOpen = { openReceived(it) },
                                 onShare = { shareReceived(it) },
+                                onUploadDiagnostics = { transfer ->
+                                    LogUpload.upload(
+                                        settings.logServer,
+                                        Room(transfer.room).id,
+                                        if (transfer.direction == Direction.Send) {
+                                            "send"
+                                        } else {
+                                            "receive"
+                                        },
+                                        Diagnostics.build(
+                                            Diagnostics.Kind.Transfer,
+                                            transfer.id,
+                                        ),
+                                    )
+                                },
+                                diagnosticsForCopy = { transfer ->
+                                    runCatching {
+                                        Diagnostics.build(
+                                            Diagnostics.Kind.Transfer,
+                                            transfer.id,
+                                            Diagnostics.CLIP_MAX,
+                                        )
+                                    }.getOrNull()
+                                },
                             )
-                        WorkflowScreen.Settings -> SettingsScreen(onBack = workflowVm::navigateBack)
+                        WorkflowScreen.Settings ->
+                            SettingsScreen(
+                                settings = settings,
+                                saveLocationLabel = SettingsStore.saveLabel(this@MainActivity),
+                                savePickerInitialUri = SettingsStore.savePickerInitialUri(),
+                                avoidsTailscale = SettingsStore.avoidsTailscale(settings),
+                                onUpdateSettings = SettingsStore::update,
+                                onSaveTreePicked = { uri ->
+                                    SettingsStore.setSaveTree(this@MainActivity, uri)
+                                },
+                                onResetSaveTree = {
+                                    SettingsStore.setSaveTree(this@MainActivity, null)
+                                },
+                                onAvoidTailscaleChanged = SettingsStore::setAvoidTailscale,
+                                onLoggingSettingsChanged = { transform ->
+                                    SettingsStore.update(transform)
+                                    SettingsStore.applyLogLevel()
+                                },
+                                diagnostics = settingsDiagnostics,
+                                onRequestNearbyWifiPermission = {
+                                    requestNearbyWifiPermission.launch(
+                                        Manifest.permission.NEARBY_WIFI_DEVICES,
+                                    )
+                                },
+                                onStartWifiAwareProbe = settingsDiagnosticsVm::startProbe,
+                                onStopWifiAwareProbe = settingsDiagnosticsVm::stopProbe,
+                                onBack = workflowVm::navigateBack,
+                            )
                     }
                     NfcInvitationOverlay(
                         state = nfcInvitation,
@@ -600,6 +770,22 @@ class MainActivity : ComponentActivity() {
         workflowVm.captureSharedUris(uris)
     }
 
+    private fun toggleNearbyDiscovery(active: Boolean) {
+        if (active) {
+            discoveryVm.stop()
+        } else if (DiscoveryPermissions.hasBluetoothPermissions(this)) {
+            discoveryVm.start()
+        } else {
+            requestNearbyPermission()
+        }
+    }
+
+    private fun requestNearbyPermission() {
+        requestNearbyPermissions.launch(
+            DiscoveryPermissions.bluetoothRuntimePermissions(),
+        )
+    }
+
     private fun setExternalActivityActive(active: Boolean) {
         workflowVm.setExternalActivityActive(active)
         rememberedRoomConnections.setExternalActivityActive(active)
@@ -617,7 +803,10 @@ class MainActivity : ComponentActivity() {
             startActivity(
                 Intent.createChooser(
                     view,
-                    AppText.value("Open with", "打开方式", SettingsStore.settings.value.language),
+                    localizedString(
+                        R.string.system_open_with,
+                        SettingsStore.settings.value.language,
+                    ),
                 ),
             )
         }
@@ -641,7 +830,10 @@ class MainActivity : ComponentActivity() {
             startActivity(
                 Intent.createChooser(
                     share,
-                    AppText.value("Share received items", "分享已接收项目", SettingsStore.settings.value.language),
+                    localizedString(
+                        R.string.system_share_received_items,
+                        SettingsStore.settings.value.language,
+                    ),
                 ),
             )
         }
@@ -699,7 +891,8 @@ internal fun isStrictNativeRoomNfcInvitation(
     fallbackBroker: String,
     fallbackRelay: String,
     nowEpochMs: Long = System.currentTimeMillis(),
-    parseRoomInvite: (String, String, String) -> String = Native::parseRoomControlInvite,
+    parseRoomInvite: (String, String, String) -> FfiRoomControlInvite =
+        ::parseRoomControlInvite,
 ): Boolean {
     if (!NfcInvitationContract.isCanonicalInvitation(value) ||
         !RoomControlInviteFormat.looksLikeRoomInvite(value)
@@ -707,9 +900,9 @@ internal fun isStrictNativeRoomNfcInvitation(
         return false
     }
     return runCatching {
-        val parsed = JSONObject(parseRoomInvite(value, fallbackBroker, fallbackRelay))
-        parsed.optString("error").isBlank() &&
-            parsed.getString("payload") == value &&
-            parsed.getLong("expires_at_epoch_ms") > nowEpochMs
+        val parsed = parseRoomInvite(value, fallbackBroker, fallbackRelay)
+        parsed.payload == value &&
+            parsed.expiresAtEpochMs <= Long.MAX_VALUE.toULong() &&
+            parsed.expiresAtEpochMs.toLong() > nowEpochMs
     }.getOrDefault(false)
 }

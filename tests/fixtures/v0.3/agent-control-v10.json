@@ -1,0 +1,30 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 10,
+  "request": {
+    "protocol_version": 10,
+    "request_id": "request_diagnostics",
+    "request": { "command": "diagnostics" }
+  },
+  "response": {
+    "protocol_version": 10,
+    "request_id": "request_diagnostics",
+    "response": {
+      "kind": "diagnostics",
+      "diagnostics": {
+        "agent_protocol_version": 10,
+        "application_contract_version": 6,
+        "engine_schema_version": 2,
+        "platform": "macos",
+        "control_transport": "unix_socket",
+        "credential_protection": "apple_keychain",
+        "engine_sequence": 0,
+        "relationships": 0,
+        "transfers": 0,
+        "inbox_items": 0,
+        "active_paths": 0,
+        "pending_offers": 0
+      }
+    }
+  }
+}

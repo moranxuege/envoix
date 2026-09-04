@@ -429,7 +429,8 @@ final class ShareViewController: UIViewController {
                     available.map { "Envoix 需要 \(required) 临时空间，但目前只有 \($0) 可用。" }
                         ?? "设备没有足够的可用空间来暂存此项目。"
                 )
-            case .appGroupUnavailable, .invalidDraft, .draftNotFound:
+            case .appGroupUnavailable, .applicationSupportUnavailable,
+                 .invalidDraft, .draftNotFound:
                 return localized(
                     "Envoix could not save the shared item. Open the app once, then try again.",
                     "Envoix 无法保存此项目。请先打开一次 App，然后重试。"

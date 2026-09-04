@@ -1,0 +1,46 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 12,
+  "settings": {
+    "version": 2,
+    "device_name": "Fixture Agent",
+    "inbox_directory": "/tmp/envoix-fixture-inbox",
+    "broker": "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@47.237.15.48:8445",
+    "relay": "https://relay.envoix.cc:8444"
+  },
+  "request": {
+    "protocol_version": 12,
+    "request_id": "request_route_fixture",
+    "request": {
+      "command": "update_device_route",
+      "device": "dev_fixture",
+      "broker": "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@47.237.15.48:8445",
+      "relay": "https://relay.envoix.cc:8444"
+    }
+  },
+  "response": {
+    "protocol_version": 12,
+    "request_id": "request_route_fixture",
+    "response": {
+      "kind": "device_route_updated",
+      "device": {
+        "id": "dev_fixture",
+        "label": "Fixture WSL",
+        "generation": 0,
+        "previous_generation": null,
+        "broker": "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@47.237.15.48:8445",
+        "relay": "https://relay.envoix.cc:8444"
+      }
+    }
+  },
+  "event": {
+    "protocol_version": 12,
+    "instance_id": "agent_fixture",
+    "sequence": 1,
+    "event": {
+      "event": "relationship_changed",
+      "relationship_id": "dev_fixture",
+      "change": "route_updated"
+    }
+  }
+}

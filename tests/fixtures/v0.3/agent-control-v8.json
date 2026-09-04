@@ -1,0 +1,552 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 8,
+  "settings": {
+    "version": 1,
+    "device_name": "Fixture WSL",
+    "inbox_directory": "/var/lib/envoix-fixture/inbox"
+  },
+  "requests": [
+    {
+      "protocol_version": 8,
+      "request_id": "request_1",
+      "request": { "command": "status" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_2",
+      "request": { "command": "snapshot", "inbox_limit": 20 }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_3",
+      "request": {
+        "command": "events",
+        "after": { "instance_id": "agent_fixture", "sequence": 0 },
+        "limit": 64
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_4",
+      "request": { "command": "pair", "label": "Fixture Mac" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_5",
+      "request": { "command": "list_devices" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_6",
+      "request": { "command": "revoke_device", "device": "relationship_fixture" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_7",
+      "request": {
+        "command": "create_transfer",
+        "device": "relationship_fixture",
+        "paths": ["/tmp/fixture.txt"]
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_8",
+      "request": { "command": "list_transfers" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_paths",
+      "request": { "command": "list_transfer_paths" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_9",
+      "request": { "command": "get_transfer", "transfer_id": "transfer_fixture" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_10",
+      "request": { "command": "list_pending_offers" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_11",
+      "request": {
+        "command": "decide_pending_offer",
+        "offer_id": "offer_fixture",
+        "decision": "approve"
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_12",
+      "request": {
+        "command": "decide_pending_offer",
+        "offer_id": "offer_fixture",
+        "decision": "reject"
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_13",
+      "request": { "command": "list_inbox", "limit": 20 }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_14",
+      "request": { "command": "latest_inbox" }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_15",
+      "request": { "command": "diagnostics" }
+    }
+  ],
+  "responses": [
+    {
+      "protocol_version": 8,
+      "request_id": "request_1",
+      "response": {
+        "kind": "status",
+        "status": {
+          "protocol_version": 8,
+          "pid": 4242,
+          "device_name": "Fixture WSL",
+          "state_directory": "/var/lib/envoix-fixture",
+          "inbox_directory": "/var/lib/envoix-fixture/inbox",
+          "broker": "fixture.invalid:8445",
+          "relay": "https://relay.fixture.invalid",
+          "paired_devices": 1,
+          "active_receivers": 0,
+          "active_pairings": 1,
+          "active_paths": 2,
+          "pending_offers": 1
+        }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_2",
+      "response": {
+        "kind": "snapshot",
+        "snapshot": {
+          "status": {
+            "protocol_version": 8,
+            "pid": 4242,
+            "device_name": "Fixture WSL",
+            "state_directory": "/var/lib/envoix-fixture",
+            "inbox_directory": "/var/lib/envoix-fixture/inbox",
+            "broker": "fixture.invalid:8445",
+            "relay": "https://relay.fixture.invalid",
+            "paired_devices": 1,
+            "active_receivers": 0,
+            "active_pairings": 0,
+            "active_paths": 2,
+            "pending_offers": 1
+          },
+          "engine": {
+            "contract_version": 6,
+            "last_sequence": 0,
+            "capabilities": { "values": {} },
+            "devices": {},
+            "relationships": {},
+            "rooms": {},
+            "transfers": {}
+          },
+          "inbox": [],
+          "active_paths": [
+            {
+              "transfer_id": "transfer_fixture",
+              "direction": "send",
+              "path": "lan"
+            },
+            {
+              "transfer_id": "offer_fixture",
+              "direction": "receive",
+              "path": "relay"
+            }
+          ],
+          "pending_offers": [
+            {
+              "offer_id": "offer_fixture",
+              "from_device_id": "relationship_fixture",
+              "from_device_label": "Fixture Mac",
+              "root_names": ["fixture.bin"],
+              "item_count": 1,
+              "directory_count": 0,
+              "total_bytes": 43,
+              "allocatable_bytes": 84
+            }
+          ],
+          "event_cursor": { "instance_id": "agent_fixture", "sequence": 0 }
+        }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_3",
+      "response": {
+        "kind": "events",
+        "cursor": { "instance_id": "agent_fixture", "sequence": 10 },
+        "events": [
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 1,
+            "event": { "event": "pairing_changed", "label": "Fixture Mac", "active": true }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 2,
+            "event": {
+              "event": "relationship_changed",
+              "relationship_id": "relationship_fixture",
+              "change": "trusted"
+            }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 3,
+            "event": {
+              "event": "relationship_changed",
+              "relationship_id": "relationship_fixture",
+              "change": "rotated"
+            }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 4,
+            "event": {
+              "event": "relationship_changed",
+              "relationship_id": "relationship_fixture",
+              "change": "revoked"
+            }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 5,
+            "event": { "event": "inbox_changed", "item_id": "transfer_fixture" }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 6,
+            "event": { "event": "transfer_changed", "transfer_id": "transfer_fixture" }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 7,
+            "event": {
+              "event": "transfer_path_changed",
+              "transfer_id": "transfer_fixture",
+              "direction": "send",
+              "path": "lan"
+            }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 8,
+            "event": {
+              "event": "transfer_path_changed",
+              "transfer_id": "transfer_fixture",
+              "direction": "send",
+              "path": null
+            }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 9,
+            "event": {
+              "event": "pending_offer_changed",
+              "offer_id": "offer_fixture",
+              "pending": true
+            }
+          },
+          {
+            "protocol_version": 8,
+            "instance_id": "agent_fixture",
+            "sequence": 10,
+            "event": {
+              "event": "pending_offer_changed",
+              "offer_id": "offer_fixture",
+              "pending": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_3",
+      "response": {
+        "kind": "snapshot_required",
+        "cursor": { "instance_id": "agent_restarted", "sequence": 0 }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_4",
+      "response": {
+        "kind": "pairing",
+        "pairing": {
+          "label": "Fixture Mac",
+          "room_code": "123456-a1b2-c3d4",
+          "verification_code": "012345",
+          "expires_at_unix_seconds": 1
+        }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_5",
+      "response": {
+        "kind": "devices",
+        "devices": [
+          {
+            "id": "relationship_fixture",
+            "label": "Fixture Mac",
+            "generation": 4,
+            "previous_generation": 3,
+            "broker": "fixture.invalid:8445",
+            "relay": "https://relay.fixture.invalid"
+          }
+        ]
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_6",
+      "response": {
+        "kind": "device_revoked",
+        "device": {
+          "id": "relationship_fixture",
+          "label": "Fixture Mac",
+          "generation": 4,
+          "previous_generation": 3,
+          "broker": "fixture.invalid:8445",
+          "relay": "https://relay.fixture.invalid"
+        }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_7",
+      "response": {
+        "kind": "transfer_created",
+        "transfer": {
+          "id": "transfer_fixture",
+          "relationship_id": "relationship_fixture",
+          "room_id": null,
+          "content_id": "content_fixture",
+          "direction": "send",
+          "state": "queued",
+          "transferred_bytes": 0,
+          "total_bytes": 42,
+          "failure": null
+        }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_8",
+      "response": {
+        "kind": "transfers",
+        "transfers": [
+          {
+            "id": "transfer_fixture",
+            "relationship_id": "relationship_fixture",
+            "room_id": null,
+            "content_id": "content_fixture",
+            "direction": "send",
+            "state": "queued",
+            "transferred_bytes": 0,
+            "total_bytes": 42,
+            "failure": null
+          }
+        ]
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_paths",
+      "response": {
+        "kind": "transfer_paths",
+        "paths": [
+          {
+            "transfer_id": "transfer_fixture",
+            "direction": "send",
+            "path": "lan"
+          },
+          {
+            "transfer_id": "offer_fixture",
+            "direction": "receive",
+            "path": "relay"
+          }
+        ]
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_9",
+      "response": {
+        "kind": "transfer",
+        "transfer": {
+          "id": "transfer_fixture",
+          "relationship_id": "relationship_fixture",
+          "room_id": null,
+          "content_id": "content_fixture",
+          "direction": "send",
+          "state": "queued",
+          "transferred_bytes": 0,
+          "total_bytes": 42,
+          "failure": null
+        }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_10",
+      "response": {
+        "kind": "pending_offers",
+        "offers": [
+          {
+            "offer_id": "offer_fixture",
+            "from_device_id": "relationship_fixture",
+            "from_device_label": "Fixture Mac",
+            "root_names": ["fixture.bin"],
+            "item_count": 1,
+            "directory_count": 0,
+            "total_bytes": 43,
+            "allocatable_bytes": 84
+          }
+        ]
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_11",
+      "response": {
+        "kind": "pending_offer_decided",
+        "offer": {
+          "offer_id": "offer_fixture",
+          "from_device_id": "relationship_fixture",
+          "from_device_label": "Fixture Mac",
+          "root_names": ["fixture.bin"],
+          "item_count": 1,
+          "directory_count": 0,
+          "total_bytes": 43,
+          "allocatable_bytes": 84
+        },
+        "decision": "approve"
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_12",
+      "response": {
+        "kind": "pending_offer_decided",
+        "offer": {
+          "offer_id": "offer_fixture",
+          "from_device_id": "relationship_fixture",
+          "from_device_label": "Fixture Mac",
+          "root_names": ["fixture.bin"],
+          "item_count": 1,
+          "directory_count": 0,
+          "total_bytes": 43,
+          "allocatable_bytes": 84
+        },
+        "decision": "reject"
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_13",
+      "response": {
+        "kind": "inbox",
+        "items": [
+          {
+            "id": "transfer_fixture",
+            "received_at_unix_ms": 1,
+            "from_device_id": "relationship_fixture",
+            "from_device_label": "Fixture Mac",
+            "roots": [
+              {
+                "name": "fixture.txt",
+                "path": "/var/lib/envoix-fixture/inbox/fixture.txt"
+              }
+            ],
+            "file_count": 1,
+            "directory_count": 0,
+            "total_bytes": 42
+          }
+        ]
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_14",
+      "response": {
+        "kind": "latest",
+        "item": {
+          "id": "transfer_fixture",
+          "received_at_unix_ms": 1,
+          "from_device_id": "relationship_fixture",
+          "from_device_label": "Fixture Mac",
+          "roots": [
+            {
+              "name": "fixture.txt",
+              "path": "/var/lib/envoix-fixture/inbox/fixture.txt"
+            }
+          ],
+          "file_count": 1,
+          "directory_count": 0,
+          "total_bytes": 42
+        }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_14",
+      "response": { "kind": "latest", "item": null }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_15",
+      "response": {
+        "kind": "diagnostics",
+        "diagnostics": {
+          "agent_protocol_version": 8,
+          "application_contract_version": 6,
+          "engine_schema_version": 1,
+          "platform": "linux",
+          "control_transport": "unix_socket",
+          "credential_protection": "owner_only_file",
+          "engine_sequence": 1,
+          "relationships": 1,
+          "transfers": 1,
+          "inbox_items": 1,
+          "active_paths": 2,
+          "pending_offers": 1
+        }
+      }
+    },
+    {
+      "protocol_version": 8,
+      "request_id": "request_16",
+      "response": {
+        "kind": "error",
+        "code": "fixture_error",
+        "message": "Synthetic fixture error"
+      }
+    }
+  ]
+}

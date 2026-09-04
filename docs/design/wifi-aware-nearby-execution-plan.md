@@ -286,9 +286,9 @@ The custom-only first hop is necessary because an IP-first experiment confirmed
 that iroh 1.0.3 cannot attach a still-unvalidated custom path after the QUIC
 handshake has finished. The production construction removes that race instead
 of relying on address order. The deterministic loopback regression starts
-custom-only, observes selected Wi-Fi Aware plus the IP backup opened by NAT
-traversal, cuts both custom bridges, and proves the same QUIC connection and
-bidirectional stream continue over IP.
+custom-only, observes selected Wi-Fi Aware plus bidirectional keepalive traffic
+on the NAT-traversed IP backup at both peers, cuts both custom bridges, and
+proves the same QUIC connection and bidirectional stream continue over IP.
 
 The policy does not claim to estimate bulk throughput, signal quality, energy,
 or native queue pressure. Those inputs remain future optimization work. The
@@ -421,8 +421,8 @@ Current H1 evidence:
 
 - `mixed_endpoint_migrates_from_wifi_aware_to_ip_on_same_connection` builds one
   endpoint pair with deterministic custom and IPv4 loopback paths;
-- Wi-Fi Aware is selected immediately, after which iroh NAT traversal opens and
-  retains IP as backup;
+- Wi-Fi Aware is selected immediately, after which both peers observe iroh NAT
+  traversal retain IP as a live backup;
 - cutting both custom bridges preserves the original QUIC connection and
   bidirectional stream, then continues the second payload over IP;
 - the Nearby hybrid 2-second / 6-second policy migrates in approximately

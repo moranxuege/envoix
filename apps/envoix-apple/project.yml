@@ -17,15 +17,25 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - Sources
+      - Shared/ShareDraftStore.swift
       - Assets.xcassets
       - Resources/PrivacyInfo.xcprivacy
     dependencies:
       - package: EnvoixCore
+      - target: EnvoixEngineHelper
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LoginItems
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app
-        MARKETING_VERSION: "0.2.2"
-        CURRENT_PROJECT_VERSION: "4"
+        ENVOIX_APPLICATION_BUNDLE_IDENTIFIER: com.envoix.app
+        PRODUCT_BUNDLE_IDENTIFIER: "$(ENVOIX_APPLICATION_BUNDLE_IDENTIFIER)"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "5"
+        ENVOIX_BUILD_TIMESTAMP: "unavailable"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info-macOS.plist
@@ -48,6 +58,53 @@ targets:
           - "-framework"
           - "CoreBluetooth"
 
+  EnvoixEngineHelper:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: Helper
+        excludes:
+          - Info.plist
+          - EnvoixEngineHelper.entitlements
+      - Sources/AppleApplicationVault.swift
+      - Sources/AppleKeychainAccess.swift
+      - Sources/EnvoixCoreContract.swift
+      - Sources/EnvoixDefaults.swift
+      - Sources/MacOSAgentBoundary.swift
+    dependencies:
+      - package: EnvoixCore
+    settings:
+      base:
+        ENVOIX_ENGINE_HELPER_BUNDLE_IDENTIFIER: com.envoix.app.engine-helper
+        PRODUCT_BUNDLE_IDENTIFIER: "$(ENVOIX_ENGINE_HELPER_BUNDLE_IDENTIFIER)"
+        PRODUCT_NAME: EnvoixEngineHelper
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "5"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Helper/Info.plist
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SystemConfiguration"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SecurityFoundation"
+          - "-framework"
+          - "CoreWLAN"
+          - "-framework"
+          - "CoreBluetooth"
+      configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Helper/EnvoixEngineHelper.entitlements
+        Release:
+          CODE_SIGN_ENTITLEMENTS: Helper/EnvoixEngineHelper.entitlements
+
   Envoix-iOS:
     type: application
     platform: iOS
@@ -59,7 +116,6 @@ targets:
       - path: Resources
         excludes:
           - Info.plist
-          - Info-Debug.plist
           - Info-macOS.plist
           - Envoix-iOS.entitlements
     dependencies:
@@ -70,20 +126,19 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios
-        MARKETING_VERSION: "0.2.2"
-        CURRENT_PROJECT_VERSION: "4"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "5"
+        ENVOIX_BUILD_TIMESTAMP: "unavailable"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info.plist
         CODE_SIGN_ENTITLEMENTS: Resources/Envoix-iOS.entitlements
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 6638TTB2SF
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
-        INFOPLIST_KEY_UIRequiresFullScreen: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         INFOPLIST_KEY_UIFileSharingEnabled: YES
         INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
         INFOPLIST_KEY_CFBundleDisplayName: Envoix
@@ -97,14 +152,6 @@ targets:
           - "Network"
           - "-framework"
           - "Security"
-      configs:
-        Debug:
-          # The existing diagnostics collector is HTTP-only. Keep this exception
-          # out of Release builds; uploads themselves are additionally gated by
-          # Developer Mode in the app.
-          GENERATE_INFOPLIST_FILE: NO
-          INFOPLIST_FILE: Resources/Info-Debug.plist
-
   EnvoixShare:
     type: app-extension
     platform: iOS
@@ -119,15 +166,15 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.share
         PRODUCT_NAME: EnvoixShare
-        MARKETING_VERSION: "0.2.2"
-        CURRENT_PROJECT_VERSION: "4"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "5"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: ShareExtension/Info.plist
         CODE_SIGN_ENTITLEMENTS: ShareExtension/EnvoixShare.entitlements
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 6638TTB2SF
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
 
   Envoix-iOSUITests:
     # The transfer core opens sockets itself. Host these tests in the app so
@@ -145,7 +192,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.uitests
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
@@ -172,7 +219,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.app-uitests
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
@@ -191,7 +238,10 @@ targets:
       - Tests/EnvoixIOSUITests/AppleWifiAwareControlRoleStoreTests.swift
       - Tests/EnvoixIOSUITests/AppleWifiAwareServiceCoordinatorTests.swift
       - Tests/EnvoixIOSUITests/WifiAwareRendezvousProtocolTests.swift
+      - Tests/EnvoixIOSUITests/ApplicationEngineAdapterTests.swift
+      - Tests/EnvoixIOSUITests/AppleApplicationVaultTests.swift
       - Tests/EnvoixMacOSUITests/ConnectionHubPresentationTests.swift
+      - Tests/EnvoixMacOSUITests/MacOSAgentControlTests.swift
       - Tests/EnvoixMacOSUITests/MacNearbyIntegrationTests.swift
       - Tests/EnvoixMacOSUITests/RoomCodeInputFormatterTests.swift
     dependencies:
@@ -205,6 +255,61 @@ targets:
         TEST_TARGET_NAME: Envoix
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Envoix.app/Contents/MacOS/Envoix"
         BUNDLE_LOADER: "$(TEST_HOST)"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SystemConfiguration"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SecurityFoundation"
+          - "-framework"
+          - "CoreWLAN"
+          - "-framework"
+          - "CoreBluetooth"
+
+  Envoix-macOSClipboardTests:
+    # Clipboard and credential-store tests are intentionally unhosted so they
+    # cannot initialize the production app or touch persistent user data.
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Sources/ClipboardIntake.swift
+      - Sources/AppleKeychainAccess.swift
+      - Sources/RememberedPeers.swift
+      - Shared/ShareDraftStore.swift
+      - Tests/EnvoixMacOSUITests/ClipboardIntakeTests.swift
+      - Tests/EnvoixMacOSUITests/RememberedPeerStoreTests.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.macos.clipboard-tests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+
+  EnvoixEngineHelperTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Helper/AgentHostRuntime.swift
+      - Helper/AgentHostShutdownCoordinator.swift
+      - Sources/AppleApplicationVault.swift
+      - Sources/AppleKeychainAccess.swift
+      - Sources/EnvoixCoreContract.swift
+      - Sources/EnvoixDefaults.swift
+      - Sources/MacOSAgentBoundary.swift
+      - Tests/EnvoixEngineHelperTests
+    dependencies:
+      - package: EnvoixCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.engine-helper.tests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: NO
         OTHER_LDFLAGS:
@@ -270,3 +375,24 @@ schemes:
       gatherCoverageData: false
       targets:
         - Envoix-macOSUITests
+
+  Envoix-macOS-Clipboard:
+    build:
+      targets:
+        Envoix-macOSClipboardTests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - Envoix-macOSClipboardTests
+
+  Envoix-EngineHelper:
+    build:
+      targets:
+        EnvoixEngineHelper: all
+        EnvoixEngineHelperTests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - EnvoixEngineHelperTests

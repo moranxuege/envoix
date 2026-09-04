@@ -1,5 +1,6 @@
 package dev.envoix.app
 
+import dev.envoix.app.ffi.FfiLogSink
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -117,12 +118,12 @@ object LogStore {
 }
 
 /**
- * The native log sink, wired via [Native.initLogging]. Every core line goes to
+ * The typed core log sink, wired via `initLogging`. Every core line goes to
  * the whole-app [LogStore]; lines scoped to a transfer (the `tracing` span
  * carries `room="…"`) are also compacted and routed into that transfer's own
  * log, so the detail drawer shows the real core story, not just lifecycle events.
  */
-object LogSink : LogCallback {
+object LogSink : FfiLogSink {
     // "<LEVEL> <spans>: <message>" — re-stamped in local time so core lines
     // line up with the app's own event lines.
     private val LEVEL = Regex("""\s(TRACE|DEBUG|INFO|WARN|ERROR)\s+(.*)""")
@@ -134,7 +135,7 @@ object LogSink : LogCallback {
             .ofPattern("HH:mm:ss")
             .withZone(java.time.ZoneId.systemDefault())
 
-    /** [room] is the span field, extracted STRUCTURALLY by the JNI tracing
+    /** [room] is the span field, extracted structurally by the core tracing
      *  layer (see docs/design/diagnostics.md) — no more regex on formatted text. */
     override fun log(
         room: String?,
@@ -152,9 +153,11 @@ object LogSink : LogCallback {
 
     /** A structured timeline line, routed directly by durable card id. */
     override fun timeline(
-        sessionId: Long,
+        sessionId: ULong,
         line: String,
     ) {
-        TransferLogs.appendTimeline(sessionId, line)
+        timelineSessionId(sessionId)?.let { TransferLogs.appendTimeline(it, line) }
     }
 }
+
+internal fun timelineSessionId(sessionId: ULong): Long? = sessionId.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()

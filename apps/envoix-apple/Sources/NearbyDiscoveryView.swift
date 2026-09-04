@@ -1,6 +1,29 @@
 #if os(iOS)
 import SwiftUI
 
+enum NearbyTransferContextPresentationText {
+    static func fallbackDeviceName(language: String) -> String {
+        AppText.localized("connection.nearby.peer.fallback", language: language)
+    }
+
+    static func trustLabel(language: String) -> String {
+        AppText.localized("connection.nearby.context.unverified", language: language)
+    }
+
+    static func detail(deliversInvitationOnStart: Bool, language: String) -> String {
+        AppText.localized(
+            deliversInvitationOnStart
+                ? "connection.nearby.context.sender_help"
+                : "connection.nearby.context.receiver_help",
+            language: language
+        )
+    }
+
+    static func deliveryStatus(language: String) -> String {
+        AppText.localized("connection.nearby.context.delivering", language: language)
+    }
+}
+
 struct NearbyTransferContextView: View {
     @Environment(\.appLanguage) private var language
 
@@ -12,11 +35,8 @@ struct NearbyTransferContextView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             Label(
-                selection.displayName ?? AppText.value(
-                    "Nearby Envoix device",
-                    "附近的 Envoix 设备",
-                    language: language
-                ),
+                selection.displayName
+                    ?? NearbyTransferContextPresentationText.fallbackDeviceName(language: language),
                 systemImage: "dot.radiowaves.left.and.right"
             )
             .font(.headline)
@@ -26,20 +46,13 @@ struct NearbyTransferContextView: View {
                 ForEach(selection.sources.sorted(by: { $0.rawValue < $1.rawValue }), id: \.self) { source in
                     ModePill(text: sourceTitle(source))
                 }
-                ModePill(text: AppText.value("Unverified", "未经验证", language: language))
+                ModePill(text: NearbyTransferContextPresentationText.trustLabel(language: language))
             }
 
-            Text(deliversInvitationOnStart
-                 ? AppText.value(
-                    "Choose the transfer details first. The BLE invitation is sent only after you tap Start.",
-                    "请先完成传输设置；只有点击开始后才会发送 BLE 邀请。",
-                    language: language
-                 )
-                 : AppText.value(
-                    "The accepted invitation is loaded below. The nearby device name remains unverified.",
-                    "已接受的邀请码载入下方；附近设备名称仍未经验证。",
-                    language: language
-                 ))
+            Text(NearbyTransferContextPresentationText.detail(
+                deliversInvitationOnStart: deliversInvitationOnStart,
+                language: language
+            ))
                 .font(.footnote)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -48,11 +61,7 @@ struct NearbyTransferContextView: View {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text(AppText.value(
-                        "Delivering invitation…",
-                        "正在发送邀请码…",
-                        language: language
-                    ))
+                    Text(NearbyTransferContextPresentationText.deliveryStatus(language: language))
                     .font(.footnote)
                     .foregroundStyle(Theme.muted)
                 }

@@ -13,7 +13,7 @@ axum = "0.8"
 # TLS termination for the log endpoint. `no-provider` plus an explicit
 # ring provider install in main keeps the process-level rustls provider
 # unambiguous next to iroh's rustls/ring dependency tree.
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 clap.workspace = true
 iroh.workspace = true

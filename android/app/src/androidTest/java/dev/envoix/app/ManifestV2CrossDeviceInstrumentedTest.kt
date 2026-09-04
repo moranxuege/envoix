@@ -9,6 +9,14 @@ import android.util.Base64
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.envoix.app.ffi.FfiDestinationCommitReplyV2
+import dev.envoix.app.ffi.FfiDestinationCommitRequestV2
+import dev.envoix.app.ffi.FfiDestinationPlanReplyV2
+import dev.envoix.app.ffi.FfiDestinationPlanRequestV2
+import dev.envoix.app.ffi.FfiDestinationPlannedRootV2
+import dev.envoix.app.ffi.FfiDestinationSavedRootV2
+import dev.envoix.app.ffi.FfiManifestEntryKindV2
+import dev.envoix.app.ffi.ManifestV2PlatformDestination
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.runBlocking
@@ -27,11 +35,9 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.security.MessageDigest
 import java.util.Collections
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
-/** Scenario-driven physical coverage for the JNI Manifest-v2 surface used by
- * the Android app, including its synchronous final-save gate. */
+/** Scenario-driven physical coverage for the Android Manifest-v2 surface,
+ * including its typed platform destination/result gate. */
 @RunWith(AndroidJUnit4::class)
 class ManifestV2CrossDeviceInstrumentedTest {
     @Test
@@ -40,8 +46,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val testRoot = testRoot(context, "share-recovery")
         val jobStore = File(testRoot, "jobs").apply { check(mkdirs()) }
-        val created = checkedResponse(Native.createManifestV2Job(jobStore.path, "never"))
-        val jobId = created.getString("job_id")
+        val created = runBlocking { ManifestV2JobGateway.shared.create(jobStore.path, "never") }
+        val jobId = created.jobId
         var validUri: Uri? = null
 
         try {
@@ -62,17 +68,21 @@ class ManifestV2CrossDeviceInstrumentedTest {
             val validSource = ManifestV2Source(validUri, directory = false, displayName = validFile.name)
             val staged = runBlocking { ManifestV2SourceStager.stage(context, jobId, validSource) }
             val prepared =
-                checkedResponse(
-                    Native.prepareManifestV2Job(
+                runBlocking {
+                    ManifestV2JobGateway.shared.addStagedProviderRoot(
                         jobStore.path,
                         jobId,
-                        ManifestV2SourceStager.rootsJson(validSource, staged, origin = "share"),
-                    ),
-                )
-            assertEquals("ready_to_send", prepared.getString("state"))
-            assertEquals(1, prepared.getInt("root_count"))
-            assertEquals(1, prepared.getInt("file_count"))
-            assertEquals(SHARE_RECOVERY_BYTES.size.toLong(), prepared.getLong("total"))
+                        ManifestV2SourceStager.stagedProviderRoot(
+                            validSource,
+                            staged,
+                            origin = ManifestV2SourceOrigin.Share,
+                        ),
+                    )
+                }
+            assertEquals(ManifestV2JobState.ReadyToSend, prepared.state)
+            assertEquals(1, prepared.inventory.rootCount)
+            assertEquals(1, prepared.inventory.fileCount)
+            assertEquals(SHARE_RECOVERY_BYTES.size.toLong(), prepared.inventory.totalBytes)
             marker("Android unreadable Share source recovered with a valid selection")
         } finally {
             validUri?.let { MediaStoreSaver.delete(context, it) }
@@ -97,8 +107,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
             try {
                 val materialized = fixture.materialize(sourceDirectory)
                 evidence.recordSource(materialized.rootFiles)
-                val created = checkedResponse(Native.createManifestV2Job(jobStore.path, "never"))
-                val createdJobId = created.getString("job_id")
+                val created = runBlocking { ManifestV2JobGateway.shared.create(jobStore.path, "never") }
+                val createdJobId = created.jobId
                 jobId = createdJobId
                 evidence.jobId = createdJobId
                 val prepared =
@@ -111,66 +121,82 @@ class ManifestV2CrossDeviceInstrumentedTest {
                             val source = ManifestV2Source(uri, directory = false, displayName = root.name)
                             val staged = runBlocking { ManifestV2SourceStager.stage(context, createdJobId, source) }
                             snapshot =
-                                checkedResponse(
-                                    Native.prepareManifestV2Job(
+                                runBlocking {
+                                    ManifestV2JobGateway.shared.addStagedProviderRoot(
                                         jobStore.path,
                                         createdJobId,
-                                        ManifestV2SourceStager.rootsJson(source, staged, origin = "share"),
-                                    ),
-                                )
+                                        ManifestV2SourceStager.stagedProviderRoot(
+                                            source,
+                                            staged,
+                                            origin = ManifestV2SourceOrigin.Share,
+                                        ),
+                                    )
+                                }
                         }
                         snapshot
                     } else {
-                        checkedResponse(
-                            Native.prepareManifestV2Job(
-                                jobStore.path,
-                                createdJobId,
-                                fixture.rootsJson(materialized.selectedFiles),
-                            ),
-                        )
+                        var snapshot = created
+                        fixture.stagedProviderRoots(materialized.selectedFiles).forEach { root ->
+                            snapshot =
+                                runBlocking {
+                                    ManifestV2JobGateway.shared.addStagedProviderRoot(
+                                        jobStore.path,
+                                        createdJobId,
+                                        root,
+                                    )
+                                }
+                        }
+                        snapshot
                     }
 
-                assertEquals("ready_to_send", prepared.getString("state"))
-                assertEquals(fixture.roots.size, prepared.getInt("root_count"))
-                assertEquals(fixture.fileCount, prepared.getInt("file_count"))
-                assertEquals(fixture.directoryCount, prepared.getInt("directory_count"))
-                assertEquals(fixture.totalBytes, prepared.getLong("total"))
-                assertEquals(0, prepared.getInt("warning_count"))
+                assertEquals(ManifestV2JobState.ReadyToSend, prepared.state)
+                assertEquals(fixture.roots.size, prepared.inventory.rootCount)
+                assertEquals(fixture.fileCount, prepared.inventory.fileCount)
+                assertEquals(fixture.directoryCount, prepared.inventory.directoryCount)
+                assertEquals(fixture.totalBytes, prepared.inventory.totalBytes)
+                assertEquals(0, prepared.inventory.warningCount)
 
-                val invitation =
-                    checkedResponse(
-                        Native.parseInviteForRole(
-                            scenarioInvitation(),
-                            "send",
-                        ),
-                    )
-                val callback =
-                    RecordingCallback(
+                val invitation = requireNotNull(InviteCodec.parseForRole(scenarioInvitation(), "send"))
+                val observer =
+                    RecordingTypedObserver(
                         evidence = evidence,
                         expectedDirection = Direction.Send,
                     )
-                val sessionId = sessionId()
+                val gateway = ManifestV2SendGateway.shared
+                val cancellation = gateway.newCancellation()
                 try {
-                    Native.startManifestV2Session(
-                        sessionId,
-                        startParams(
-                            context = context,
-                            direction = "send",
-                            stateDirectory = stateDirectory,
-                            jobStore = jobStore,
-                            jobId = createdJobId,
-                            invitationReference = invitation.getString("reference"),
-                        ).toString(),
-                        callback,
-                    )
-                    callback.awaitTerminal(timeoutMs(fixture.totalBytes))
-                    callback.assertCompleted()
-                    assertTrue(callback.states.contains("waiting_for_receiver_save"))
-                    assertTrue(callback.states.contains("finalizing_delivery"))
+                    val completion =
+                        runBlocking {
+                            withTimeout(timeoutMs(fixture.totalBytes)) {
+                                gateway.sendInvitation(
+                                    request =
+                                        InvitationManifestV2SendRequest(
+                                            jobStoreDirectory = jobStore.path,
+                                            jobId = createdJobId,
+                                            stateDirectory = stateDirectory.path,
+                                            language = SettingsStore.settings.value.language,
+                                            broker = Endpoints.BROKER,
+                                            relay = Endpoints.RELAY,
+                                            invitationReference = requireNotNull(invitation.reference),
+                                            creator = false,
+                                            rememberConsent = false,
+                                        ),
+                                    cancellation = cancellation,
+                                    credentialVault = RejectingTypedCredentialVault,
+                                    observer = observer,
+                                )
+                            }
+                        }
+                    assertEquals(createdJobId, completion.jobId)
+                    assertEquals(fixture.totalBytes, completion.totalBytes)
+                    observer.assertCompleted()
+                    assertTrue(observer.states.contains("waiting_for_receiver_save"))
+                    assertTrue(observer.states.contains("finalizing_delivery"))
                     evidence.deliveryProof = true
                     marker("Android send completed scenario=${fixture.scenario.wireName} bytes=${fixture.totalBytes}")
                 } finally {
-                    Native.cancelManifestV2Session(sessionId)
+                    cancellation.cancel()
+                    cancellation.close()
                 }
             } finally {
                 transientUris.forEach { check(MediaStoreSaver.delete(context, it)) }
@@ -191,26 +217,21 @@ class ManifestV2CrossDeviceInstrumentedTest {
         val evidence = endpointEvidence(context, fixture, "receiver")
         runWithEndpointEvidence(evidence) {
             val testRoot = testRoot(context, "receive")
-            val jobStore = File(testRoot, "jobs").apply { check(mkdirs()) }
             val stateDirectory = File(testRoot, "state").apply { check(mkdirs()) }
             val privateDestination = File(testRoot, "verified").apply { check(mkdirs()) }
             val localDestination = File(testRoot, "published").apply { check(mkdirs()) }
             val publicFolder = "EnvoixMatrix-${crossDeviceRunId()}"
-            val sessionId = sessionId()
             val originalSettings = SettingsStore.settings.value
             val publishedUris = mutableListOf<Uri>()
             var collisionUri: Uri? = null
-            var callback: RecordingCallback? = null
+            var completion: ManifestV2ReceiveCompletion? = null
+            var pending: ManifestV2PendingReceive? = null
+            val gateway = ManifestV2ReceiveGateway.shared
+            val cancellation = gateway.newCancellation()
             try {
                 val invitation =
-                    checkedResponse(
-                        Native.generateInvite(
-                            "receive",
-                            Endpoints.BROKER,
-                            Endpoints.RELAY,
-                        ),
-                    )
-                marker("invitation=${invitation.getString("payload")}")
+                    requireNotNull(InviteCodec.generate("receive", Endpoints.BROKER, Endpoints.RELAY))
+                marker("invitation=${invitation.payload}")
 
                 if (fixture.scenario == Scenario.Collision) {
                     val sentinel = File(testRoot, "collision-sentinel").apply { writeBytes(COLLISION_SENTINEL) }
@@ -219,68 +240,72 @@ class ManifestV2CrossDeviceInstrumentedTest {
 
                 val platformWriter = ManifestV2DestinationWriter(context)
                 val localPublisher = LocalTestDestinationPublisher(localDestination)
-                val endpointCallback =
-                    RecordingCallback(
+                val platformDestination: ManifestV2PlatformDestination =
+                    if (fixture.directoryCount > 0) {
+                        localPublisher
+                    } else {
+                        AndroidManifestV2PlatformDestination(
+                            writer = platformWriter,
+                            isActive = { true },
+                            onCommitted = {},
+                        )
+                    }
+                val observer =
+                    RecordingTypedObserver(
                         evidence = evidence,
                         expectedDirection = Direction.Receive,
-                        plan = { request ->
-                            if (fixture.directoryCount > 0) {
-                                localPublisher.plan(request)
-                            } else {
-                                platformWriter.plan(request)
-                            }
-                        },
-                        save = { request ->
-                            if (fixture.directoryCount > 0) {
-                                localPublisher.save(request)
-                            } else {
-                                platformWriter.save(request)
-                            }
-                        },
-                        offer = { offer ->
-                            assertEquals(fixture.roots.size, offer.getInt("root_count"))
-                            assertEquals(fixture.fileCount, offer.getInt("file_count"))
-                            assertEquals(fixture.directoryCount, offer.getInt("directory_count"))
-                            assertEquals(fixture.totalBytes, offer.getLong("total"))
-                            val page = checkedResponse(Native.listManifestV2OfferEntries(sessionId, 0, 256))
-                            assertEquals(fixture.entryCount, page.getJSONArray("entries").length())
-                            assertFalse(page.has("next_offset") && !page.isNull("next_offset"))
-                            val decision =
-                                JSONObject()
-                                    .put("target_directory", privateDestination.path)
-                                    .put("target_allocatable_bytes", privateDestination.usableSpace)
-                                    .put("exceptional_transfer_approved", false)
-                            checkedResponse(Native.continueManifestV2Receive(sessionId, decision.toString()))
-                        },
                     )
-                callback = endpointCallback
 
                 SettingsStore.update { it.copy(saveTreeUri = "", saveFolder = publicFolder) }
-                Native.startManifestV2Session(
-                    sessionId,
-                    startParams(
-                        context = context,
-                        direction = "receive",
-                        stateDirectory = stateDirectory,
-                        jobStore = jobStore,
-                        jobId = null,
-                        invitationReference = invitation.getString("reference"),
-                    ).toString(),
-                    endpointCallback,
-                )
-                marker("Android receiver ready scenario=${fixture.scenario.wireName}")
-                endpointCallback.awaitTerminal(timeoutMs(fixture.totalBytes))
-                val completed = endpointCallback.assertCompleted()
-                evidence.jobId = completed.optString("job_id").takeIf(String::isNotBlank)
-                assertTrue(endpointCallback.states.contains("offer"))
-                assertTrue(endpointCallback.states.contains("saving"))
-                val outcomes =
-                    (0 until completed.getJSONArray("roots").length())
-                        .map { completed.getJSONArray("roots").getJSONObject(it) }
-                        .sortedBy { it.getInt("root_id") }
+                val completed =
+                    runBlocking {
+                        withTimeout(timeoutMs(fixture.totalBytes)) {
+                            val opened =
+                                gateway.receiveInvitationOffer(
+                                    request =
+                                        InvitationManifestV2ReceiveRequest(
+                                            stateDirectory = stateDirectory.path,
+                                            language = SettingsStore.settings.value.language,
+                                            broker = Endpoints.BROKER,
+                                            relay = Endpoints.RELAY,
+                                            invitationReference = invitation.reference,
+                                            creator = true,
+                                            rememberConsent = false,
+                                        ),
+                                    cancellation = cancellation,
+                                    credentialVault = RejectingTypedCredentialVault,
+                                    observer = observer,
+                                )
+                            pending = opened
+                            observer.recordOffer()
+                            assertEquals(fixture.roots.size, opened.offer.rootCount)
+                            assertEquals(fixture.fileCount, opened.offer.fileCount)
+                            assertEquals(fixture.directoryCount, opened.offer.directoryCount)
+                            assertEquals(fixture.totalBytes, opened.offer.totalBytes)
+                            assertEquals(fixture.entryCount, opened.offer.inventoryPreview.size)
+                            assertFalse(opened.offer.inventoryHasMore)
+                            marker("Android receiver ready scenario=${fixture.scenario.wireName}")
+                            opened.receive(
+                                destination =
+                                    ManifestV2ReceiveDestination(
+                                        verifiedStagingDirectory = privateDestination.path,
+                                        verifiedStagingAllocatableBytes = privateDestination.usableSpace,
+                                        exceptionalTransferApproved = false,
+                                    ),
+                                platformDestination = platformDestination,
+                                observer = observer,
+                            )
+                        }
+                    }
+                completion = completed
+                observer.assertCompleted()
+                evidence.jobId = completed.jobId
+                assertTrue(observer.states.contains("offer"))
+                assertTrue(observer.states.contains("saving"))
+                val outcomes = completed.savedRoots.sortedBy(ManifestV2SavedRoot::rootId)
                 assertEquals(fixture.roots.size, outcomes.size)
                 fixture.roots.zip(outcomes).forEach { (root, outcome) ->
-                    val uri = Uri.parse(outcome.getString("uri"))
+                    val uri = Uri.parse(outcome.uri)
                     if (uri.scheme == "file") {
                         root.verifyFile(File(requireNotNull(uri.path)))
                     } else {
@@ -298,13 +323,13 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 assertEquals(
                     outcomes.size,
                     outcomes
-                        .map { it.getString("final_name") }
+                        .map(ManifestV2SavedRoot::finalName)
                         .toSet()
                         .size,
                 )
                 if (collisionUri != null) {
                     assertArrayEquals(COLLISION_SENTINEL, streamBytes(context, collisionUri))
-                    assertNotEquals(fixture.roots.single().name, outcomes.single().getString("final_name"))
+                    assertNotEquals(fixture.roots.single().name, outcomes.single().finalName)
                 }
                 evidence.recordDestination(outcomes)
                 evidence.deliveryProof = true
@@ -312,17 +337,18 @@ class ManifestV2CrossDeviceInstrumentedTest {
             } finally {
                 publishedUris.forEach { check(MediaStoreSaver.delete(context, it)) }
                 collisionUri?.let { check(MediaStoreSaver.delete(context, it)) }
-                callback
-                    ?.completed
-                    ?.optString("job_id")
-                    ?.takeIf(String::isNotBlank)
+                completion
+                    ?.jobId
                     ?.let { jobId ->
                         File(context.filesDir, "manifest-v2/destination-save")
                             .listFiles()
                             ?.filter { it.name.startsWith("$jobId-") }
                             ?.forEach { check(it.delete()) }
                     }
-                Native.cancelManifestV2Session(sessionId)
+                cancellation.cancel()
+                pending?.cancel()
+                pending?.close()
+                cancellation.close()
                 SettingsStore.update { originalSettings }
                 check(testRoot.deleteRecursively())
                 evidence.cleanupCompleted = true
@@ -351,8 +377,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 val materialized = fixture.materialize(sourceDirectory)
                 evidence.recordSource(materialized.rootFiles)
                 val jobStore = TransferService.jobStoreDirectory(context)
-                val created = checkedResponse(Native.createManifestV2Job(jobStore.path, "never"))
-                val createdJobId = created.getString("job_id")
+                val created = runBlocking { ManifestV2JobGateway.shared.create(jobStore.path, "never") }
+                val createdJobId = created.jobId
                 jobId = createdJobId
                 evidence.jobId = createdJobId
                 var prepared = created
@@ -363,26 +389,27 @@ class ManifestV2CrossDeviceInstrumentedTest {
                     val source = ManifestV2Source(uri, directory = false, displayName = root.name)
                     val staged = runBlocking { ManifestV2SourceStager.stage(context, createdJobId, source) }
                     prepared =
-                        checkedResponse(
-                            Native.prepareManifestV2Job(
+                        runBlocking {
+                            ManifestV2JobGateway.shared.addStagedProviderRoot(
                                 jobStore.path,
                                 createdJobId,
-                                ManifestV2SourceStager.rootsJson(source, staged),
-                            ),
-                        )
+                                ManifestV2SourceStager.stagedProviderRoot(source, staged),
+                            )
+                        }
                 }
-                assertEquals("ready_to_send", prepared.getString("state"))
-                assertEquals(fixture.roots.size, prepared.getInt("root_count"))
-                assertEquals(fixture.fileCount, prepared.getInt("file_count"))
-                assertEquals(fixture.totalBytes, prepared.getLong("total"))
+                assertEquals(ManifestV2JobState.ReadyToSend, prepared.state)
+                assertEquals(fixture.roots.size, prepared.inventory.rootCount)
+                assertEquals(fixture.fileCount, prepared.inventory.fileCount)
+                assertEquals(fixture.totalBytes, prepared.inventory.totalBytes)
 
-                val invitation = checkedResponse(Native.parseInviteForRole(scenarioInvitation(), "send"))
+                val invitation =
+                    requireNotNull(InviteCodec.parseForRole(scenarioInvitation(), "send"))
                 val productModel =
                     TransferViewModel(context.applicationContext as Application).also { model = it }
                 val id =
                     productModel
                         .startSend(
-                            invitation.getString("reference"),
+                            requireNotNull(invitation.reference),
                             createdJobId,
                             Endpoints.BROKER,
                             Endpoints.RELAY,
@@ -428,23 +455,17 @@ class ManifestV2CrossDeviceInstrumentedTest {
             try {
                 SettingsStore.update { it.copy(saveTreeUri = "", saveFolder = publicFolder) }
                 val invitation =
-                    checkedResponse(
-                        Native.generateInvite(
-                            "receive",
-                            Endpoints.BROKER,
-                            Endpoints.RELAY,
-                        ),
-                    )
-                marker("invitation=${invitation.getString("payload")}")
+                    requireNotNull(InviteCodec.generate("receive", Endpoints.BROKER, Endpoints.RELAY))
+                marker("invitation=${invitation.payload}")
                 val productModel =
                     TransferViewModel(context.applicationContext as Application).also { model = it }
                 val id =
                     productModel
                         .startReceive(
-                            invitation.getString("reference"),
+                            invitation.reference,
                             Endpoints.BROKER,
                             Endpoints.RELAY,
-                            qrPayload = invitation.getString("payload"),
+                            qrPayload = invitation.payload,
                             destinationCopyApproved = true,
                         ).also { transferId = it }
                 var readyPublished = false
@@ -492,72 +513,68 @@ class ManifestV2CrossDeviceInstrumentedTest {
         }
     }
 
-    private class RecordingCallback(
+    private class RecordingTypedObserver(
         private val evidence: AndroidMatrixEndpointEvidence,
         expectedDirection: Direction,
-        private val plan: ((String) -> String)? = null,
-        private val save: ((String) -> String)? = null,
-        private val offer: ((JSONObject) -> Unit)? = null,
-    ) : ManifestV2Callback {
-        private val terminal = CountDownLatch(1)
+    ) : ManifestV2SessionObserver {
         private val stageTimings = StageTimingCapture(expectedDirection)
         val states: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
         @Volatile
-        var completed: JSONObject? = null
+        private var failure: ManifestV2SessionFailure? = null
 
-        @Volatile
-        private var failure: String? = null
+        override fun onStarted(
+            itemCount: Long,
+            totalBytes: Long,
+        ) = Unit
 
-        override fun onEvent(json: String) {
-            val event = JSONObject(json)
-            evidence.recordEvent(event)
-            if (event.optString("kind") == "stage_timing") {
-                marker(stageTimings.accept(event))
-                return
-            }
-
-            val state = event.optString("state")
-            if (state.isNotEmpty()) states += state
-            when (state) {
-                "offer" -> offer?.invoke(event)
-                "completed" -> {
-                    completed = event
-                    terminal.countDown()
-                }
-                "failed" -> {
-                    failure = "${event.optString("cause")}: ${event.optString("detail")}".trim()
-                    terminal.countDown()
-                }
-            }
-            event.optString("message").takeIf(String::isNotBlank)?.let(::marker)
+        override fun onPhase(status: Status) {
+            states += status.wire
+            evidence.recordPhase(status.wire)
         }
 
-        override fun onSaveRequired(requestJson: String): String =
-            requireNotNull(save) { "sender unexpectedly requested a destination save" }(requestJson)
+        override fun onProgress(
+            transferred: Long,
+            total: Long,
+        ) = Unit
 
-        override fun onPlanRequired(requestJson: String): String =
-            requireNotNull(plan) { "sender unexpectedly requested a destination plan" }(requestJson)
+        override fun onFailure(failure: ManifestV2SessionFailure) {
+            this.failure = failure
+            evidence.recordFailure(failure)
+        }
 
-        override fun onRememberedCredential(
+        override fun onConnectionPath(path: ConnectionPathKind) {
+            evidence.recordPath(path)
+        }
+
+        override fun onStageTiming(timing: TransferStageTiming) {
+            marker(stageTimings.accept(timing))
+        }
+
+        override fun onDiagnostic(message: String) {
+            message.takeIf(String::isNotBlank)?.let(::marker)
+        }
+
+        fun recordOffer() {
+            states += "offer"
+            evidence.recordPhase("offer")
+        }
+
+        fun assertCompleted() {
+            assertNull(
+                "Manifest v2 physical transfer failed: ${failure?.diagnosticMessage ?: "unknown"}",
+                failure,
+            )
+            stageTimings.assertSuccessfulTransfer()
+            marker(stageTimings.verificationMarker())
+        }
+    }
+
+    private object RejectingTypedCredentialVault : ManifestV2RememberedCredentialVault {
+        override fun storeRememberedCredential(
             opaqueCredential: ByteArray,
             generation: Long,
         ): Boolean = false
-
-        fun awaitTerminal(timeoutMs: Long) {
-            assertTrue(
-                "Manifest v2 physical transfer timed out after ${timeoutMs}ms",
-                terminal.await(timeoutMs, TimeUnit.MILLISECONDS),
-            )
-        }
-
-        fun assertCompleted(): JSONObject {
-            assertTrue("Manifest v2 physical transfer failed: ${failure ?: "unknown"}", failure == null)
-            val result = requireNotNull(completed) { "Manifest v2 transfer ended without completion" }
-            stageTimings.assertSuccessfulTransfer()
-            marker(stageTimings.verificationMarker())
-            return result
-        }
     }
 
     private class StageTimingCapture(
@@ -568,13 +585,8 @@ class ManifestV2CrossDeviceInstrumentedTest {
         private val violations = mutableListOf<String>()
         private var droppedSamples = 0
 
-        fun accept(event: JSONObject): String =
+        fun accept(timing: TransferStageTiming): String =
             synchronized(lock) {
-                val timing = parse(event)
-                if (timing == null) {
-                    violations += "malformed stage_timing event"
-                    return@synchronized "stage_timing_invalid reason=malformed"
-                }
                 if (timing.direction != expectedDirection) {
                     violations +=
                         "stage_timing direction ${timing.direction.wire} did not match ${expectedDirection.wire}"
@@ -697,44 +709,10 @@ class ManifestV2CrossDeviceInstrumentedTest {
             }
         }
 
-        private fun parse(event: JSONObject): TransferStageTiming? {
-            val transferId =
-                when {
-                    !event.has("transfer_id") || event.isNull("transfer_id") -> null
-                    else -> event.opt("transfer_id") as? String ?: return null
-                }
-            return TransferStageTimingParser.parse(
-                stageWire = event.strictString("stage"),
-                directionWire = event.strictString("direction"),
-                attemptId = event.strictNonNegativeLong("attempt_id"),
-                transferId = transferId,
-                elapsedUs = event.strictNonNegativeLong("elapsed_us"),
-                deltaUs = event.strictNonNegativeLong("delta_us"),
-            )
-        }
-
         private fun TransferStageTiming.diagnosticLine(): String =
             "stage_timing stage=${stage.wire} direction=${direction.wire} " +
                 "attempt_id=$attemptId transfer_id=${transferId ?: "-"} " +
                 "elapsed_us=$elapsedUs delta_us=$deltaUs"
-
-        private fun JSONObject.strictString(name: String): String? {
-            if (!has(name) || isNull(name)) return null
-            return opt(name) as? String
-        }
-
-        private fun JSONObject.strictNonNegativeLong(name: String): Long? {
-            if (!has(name) || isNull(name)) return null
-            val value =
-                when (val raw = opt(name)) {
-                    is Byte -> raw.toLong()
-                    is Short -> raw.toLong()
-                    is Int -> raw.toLong()
-                    is Long -> raw
-                    else -> return null
-                }
-            return value.takeIf { it >= 0L }
-        }
 
         private data class CaptureSnapshot(
             val samples: List<TransferStageTiming>,
@@ -756,28 +734,6 @@ class ManifestV2CrossDeviceInstrumentedTest {
                 )
         }
     }
-
-    private fun startParams(
-        context: Context,
-        direction: String,
-        stateDirectory: File,
-        jobStore: File,
-        jobId: String?,
-        invitationReference: String,
-    ): JSONObject =
-        JSONObject()
-            .put("direction", direction)
-            .put("mode", "invitation")
-            .put("room", invitationReference)
-            .put("invitation_ref", invitationReference)
-            .put("broker", Endpoints.BROKER)
-            .put("relay", Endpoints.RELAY)
-            .put("state_directory", stateDirectory.path)
-            .put("job_store_directory", jobStore.path)
-            .put("job_id", jobId ?: JSONObject.NULL)
-            .put("use_room", true)
-            .put("use_mdns", false)
-            .also { check(context.packageName == "dev.envoix.app") }
 
     private fun publishShareSource(
         context: Context,
@@ -953,7 +909,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
             role = role,
             buildVariant = argument(ARG_BUILD_VARIANT) ?: "debug",
             testLayer = if (productActivity) "l2_physical" else "l1_native",
-            driver = if (productActivity) "product_activity" else "direct_jni",
+            driver = if (productActivity) "product_activity" else "direct_ffi",
         )
 
     private fun runWithEndpointEvidence(
@@ -988,13 +944,6 @@ class ManifestV2CrossDeviceInstrumentedTest {
         return requireNotNull(value.toIntOrNull()) { "$ARG_REPETITION must be an integer" }
             .also { require(it in 1..10) }
     }
-
-    private fun sessionId(): Long = System.nanoTime().and(Long.MAX_VALUE)
-
-    private fun checkedResponse(raw: String): JSONObject =
-        JSONObject(raw).also { value ->
-            assertFalse(value.optString("error", "native operation failed"), value.has("error"))
-        }
 
     private companion object {
         const val LOG_TAG = "EnvoixCrossDevice"
@@ -1058,35 +1007,34 @@ private class AndroidMatrixEndpointEvidence(
         require(role == "sender" || role == "receiver")
         require(buildVariant == "debug" || buildVariant == "release_equivalent")
         require(
-            (testLayer == "l1_native" && driver == "direct_jni") ||
+            (testLayer == "l1_native" && driver == "direct_ffi") ||
                 (testLayer == "l2_physical" && driver == "product_activity"),
         )
     }
 
     @Synchronized
-    fun recordEvent(event: JSONObject) {
-        if (event.optString("kind") == "path") {
-            event
-                .optString("path_kind")
-                .takeIf { it in PATH_KINDS }
-                ?.let { selectedPath = it }
-        }
-        val state = event.optString("state")
+    fun recordPhase(state: String) {
         if (state !in PHASES) return
-        if (state == "failed") {
-            nativeFailurePhase = phases.lastOrNull()
-            nativeFailureCode =
-                event
-                    .optString("cause")
-                    .takeIf(::stableFailureCode)
-                    ?: "native_failure"
-            nativeRecoveryAction =
-                event
-                    .optString("recovery_action")
-                    .takeIf { it in RECOVERY_ACTIONS }
-                    ?: "none"
-        }
         if (phases.lastOrNull() != state) phases += state
+    }
+
+    @Synchronized
+    fun recordPath(path: ConnectionPathKind) {
+        selectedPath =
+            when (path) {
+                ConnectionPathKind.DirectIpv4,
+                ConnectionPathKind.DirectIpv6,
+                -> ConnectionPathKind.Direct.wire
+                else -> path.wire
+            }
+    }
+
+    @Synchronized
+    fun recordFailure(failure: ManifestV2SessionFailure) {
+        nativeFailurePhase = phases.lastOrNull()
+        nativeFailureCode = failure.cause.takeIf(::stableFailureCode) ?: "native_failure"
+        nativeRecoveryAction = failure.recoveryAction.wire
+        if (phases.lastOrNull() != "failed") phases += "failed"
     }
 
     @Synchronized
@@ -1131,14 +1079,14 @@ private class AndroidMatrixEndpointEvidence(
         sourceSummary = summaryFromFiles(roots, publication = null)
     }
 
-    fun recordDestination(outcomes: List<JSONObject>) {
+    fun recordDestination(outcomes: List<ManifestV2SavedRoot>) {
         check(role == "receiver")
         check(outcomes.size == fixture.roots.size)
         val entries = mutableListOf<AndroidMatrixEntry>()
         val mechanisms = mutableSetOf<String>()
         fixture.roots.zip(outcomes).forEach { (_, outcome) ->
-            val finalName = outcome.getString("final_name")
-            val uri = Uri.parse(outcome.getString("uri"))
+            val finalName = outcome.finalName
+            val uri = Uri.parse(outcome.uri)
             if (uri.scheme == "file") {
                 mechanisms += "test_local_directory"
                 entries += entriesFromFile(File(requireNotNull(uri.path)), finalName)
@@ -1399,7 +1347,6 @@ private class AndroidMatrixEndpointEvidence(
                 "failed",
             )
         val PATH_KINDS = setOf("direct", "relay", "wifi_aware", "other")
-        val RECOVERY_ACTIONS = setOf("none", "retry", "resume", "re_pair", "open_settings", "choose_folder")
         val FAILURE_CODE = Regex("[a-z0-9][a-z0-9_-]{0,63}")
 
         fun stableFailureCode(value: String): Boolean = value.matches(FAILURE_CODE)
@@ -1472,19 +1419,15 @@ private data class Fixture(
         return MaterializedFixture(roots, selected)
     }
 
-    fun rootsJson(selected: List<File>): String =
-        JSONArray()
-            .apply {
-                selected.forEach { file ->
-                    put(
-                        JSONObject()
-                            .put("path", file.path)
-                            .put("requested_name", file.name)
-                            .put("origin", "file_provider")
-                            .put("issues", JSONArray()),
-                    )
-                }
-            }.toString()
+    fun stagedProviderRoots(selected: List<File>): List<ManifestV2StagedProviderRoot> =
+        selected.map { file ->
+            ManifestV2StagedProviderRoot(
+                path = file.path,
+                requestedName = file.name,
+                origin = ManifestV2SourceOrigin.FileProvider,
+                issues = emptyList(),
+            )
+        }
 
     companion object {
         fun make(
@@ -1701,49 +1644,45 @@ private sealed interface Payload {
 
 private class LocalTestDestinationPublisher(
     private val destination: File,
-) {
-    private val plannedNames = mutableMapOf<Int, String>()
+) : ManifestV2PlatformDestination {
+    private val plannedNames = mutableMapOf<UInt, String>()
 
-    fun plan(requestJson: String): String {
-        val roots = JSONObject(requestJson).getJSONArray("roots")
-        val reply = JSONArray()
-        for (index in 0 until roots.length()) {
-            val root = roots.getJSONObject(index)
-            val name =
-                allocateName(
-                    root.getString("requested_name"),
-                    root.getString("kind") == "file",
-                    plannedNames.values.toSet(),
-                )
-            plannedNames[root.getInt("root_id")] = name
-            reply.put(
-                JSONObject()
-                    .put("root_id", root.getInt("root_id"))
-                    .put("planned_name", name),
-            )
-        }
-        return JSONObject().put("roots", reply).toString()
+    override suspend fun plan(request: FfiDestinationPlanRequestV2): FfiDestinationPlanReplyV2 {
+        val reserved = request.reservedNames.toMutableSet()
+        return FfiDestinationPlanReplyV2(
+            roots =
+                request.roots.map { root ->
+                    val name =
+                        allocateName(
+                            root.requestedName,
+                            root.kind == FfiManifestEntryKindV2.FILE,
+                            reserved + plannedNames.values,
+                        )
+                    plannedNames[root.rootId] = name
+                    reserved += name
+                    FfiDestinationPlannedRootV2(
+                        rootId = root.rootId,
+                        plannedName = name,
+                    )
+                },
+        )
     }
 
-    fun save(requestJson: String): String {
-        val roots = JSONObject(requestJson).getJSONArray("roots")
-        val outcomes = JSONArray()
-        for (index in 0 until roots.length()) {
-            val root = roots.getJSONObject(index)
-            val source = File(root.getString("local_path"))
-            val finalName = root.getString("planned_name")
-            check(plannedNames[root.getInt("root_id")] == finalName)
-            val target = File(destination, finalName)
-            check(source.copyRecursively(target, overwrite = false))
-            outcomes.put(
-                JSONObject()
-                    .put("root_id", root.getInt("root_id"))
-                    .put("final_name", finalName)
-                    .put("uri", Uri.fromFile(target).toString()),
-            )
-        }
-        return JSONObject().put("roots", outcomes).toString()
-    }
+    override suspend fun commit(request: FfiDestinationCommitRequestV2) =
+        FfiDestinationCommitReplyV2(
+            roots =
+                request.roots.map { root ->
+                    val source = File(root.localPath)
+                    check(plannedNames[root.rootId] == root.plannedName)
+                    val target = File(destination, root.plannedName)
+                    check(source.copyRecursively(target, overwrite = false))
+                    FfiDestinationSavedRootV2(
+                        rootId = root.rootId,
+                        finalName = root.plannedName,
+                        uri = Uri.fromFile(target).toString(),
+                    )
+                },
+        )
 
     private fun allocateName(
         requestedName: String,

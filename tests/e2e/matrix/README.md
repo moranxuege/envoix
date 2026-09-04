@@ -63,7 +63,7 @@ An Android endpoint writes its bounded result under the app's test-owned
 `files/envoix-matrix/` directory. The runner retrieves and validates that JSON,
 retains it under the matching sender or receiver artifact name, and removes
 only the exact test-owned files. The current Android driver is labeled
-`l1_native` / `direct_jni`; it does not satisfy the product-path L2 Activity
+`l1_native` / `direct_ffi`; it does not satisfy the product-path L2 Activity
 contract.
 
 `private/` is mode `0700`, is never an uploadable artifact, and can retain raw
@@ -80,7 +80,7 @@ Support status and execution status are separate. A planned, experimental,
 hardware-blocked, or unsupported row never becomes a pass because it was
 skipped or omitted.
 
-The registry records the direct JNI/FFI physical coverage as experimental L1
+The registry records the direct typed-FFI physical coverage as experimental L1
 evidence. The single-file and multi-file L2 baselines use each app's product
 Activity and native file publication path and are experimental until their
 mandatory physical repetitions are recorded. Multi-root L2 rows remain

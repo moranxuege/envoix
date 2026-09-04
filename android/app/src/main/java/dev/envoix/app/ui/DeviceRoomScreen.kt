@@ -28,18 +28,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.envoix.app.SettingsStore
+import dev.envoix.app.R
 import dev.envoix.app.Transfer
 import dev.envoix.app.discovery.BleVerificationInvitation
-import dev.envoix.app.discovery.DiscoveryViewModel
+import dev.envoix.app.discovery.DiscoveryUiState
+import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
 import dev.envoix.app.isTerminal
 
@@ -72,37 +71,30 @@ internal fun DeviceRoomScreen(
     onSend: (String, String, String, String, String?, String?, String?) -> Unit,
     onOpenReceived: (Transfer) -> Unit,
     onShareReceived: (Transfer) -> Unit,
+    discovery: DiscoveryUiState,
+    incomingDestination: RoomDestinationPresentation?,
+    transferPreferences: TransferSetupPreferences,
+    sourcePreparationIntents: TransferSourcePreparationIntents,
+    onSaveTreePicked: (Uri) -> Unit,
+    resolveRoomDestination: (directoryCount: Int) -> RoomDestinationPresentation,
+    onOfferNearbyInvite: (NearbyPairingSelection, String, (String?) -> Unit) -> Unit,
+    onConsumeNearbyOffer: (String) -> Unit,
     initialSources: List<Uri> = emptyList(),
-    discoveryViewModel: DiscoveryViewModel,
 ) {
     val colors = Envoix.colors
-    val context = LocalContext.current
-    val language = LocalAppLanguage.current
-    val discoveryState by discoveryViewModel.uiState.collectAsStateWithLifecycle()
-    val settings by SettingsStore.settings.collectAsStateWithLifecycle()
     var pendingDestinationOfferId by
         rememberSaveable(draft.id) { mutableStateOf<String?>(null) }
     var autoResumedDestinationOfferId by
         rememberSaveable(draft.id) { mutableStateOf<String?>(null) }
-    var destinationRevision by rememberSaveable(draft.id) { mutableStateOf(0) }
     val destinationPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             val requestedOfferId = pendingDestinationOfferId
             pendingDestinationOfferId = null
             try {
                 if (uri != null && requestedOfferId != null) {
-                    SettingsStore.setSaveTree(context, uri)
-                    destinationRevision += 1
+                    onSaveTreePicked(uri)
                     val currentOffer = control.incomingOffer
-                    val destination =
-                        currentOffer?.let {
-                            roomOfferDestinationPresentation(
-                                context = context,
-                                settings = SettingsStore.settings.value,
-                                directoryCount = it.directoryCount,
-                                language = language,
-                            )
-                        }
+                    val destination = currentOffer?.let { resolveRoomDestination(it.directoryCount) }
                     if (shouldResumeRoomOfferAfterDestinationRepair(
                             requestedOfferId = requestedOfferId,
                             currentOfferId = currentOffer?.id,
@@ -129,27 +121,9 @@ internal fun DeviceRoomScreen(
     val active = roomTransfers.filterNot { it.status.isTerminal }
     val connectedRoom = control.connected && draft.controlSession
     val legacyRoom = control.phase == RoomControlPhase.Legacy
-    val incomingDestination =
-        remember(
-            control.incomingOffer?.id,
-            control.incomingOffer?.directoryCount,
-            settings.saveTreeUri,
-            settings.saveFolder,
-            destinationRevision,
-            language,
-        ) {
-            control.incomingOffer?.let { offer ->
-                roomOfferDestinationPresentation(
-                    context = context,
-                    settings = settings,
-                    directoryCount = offer.directoryCount,
-                    language = language,
-                )
-            }
-        }
     val nearbyAvailable =
         draft.nearbySelection?.let { selection ->
-            discoveryState.peers.any { peer ->
+            discovery.peers.any { peer ->
                 peer.peerKey == selection.discoveryPeerKey &&
                     (
                         selection.nearbyInviteRoute == null ||
@@ -208,14 +182,14 @@ internal fun DeviceRoomScreen(
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                 ) {
                     Text(
-                        appText("ROOM ACTIVITY", "房间活动"),
+                        appString(R.string.room_activity_section),
                         color = colors.muted,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 0.8.sp,
                     )
                     TextButton(onClick = onActivity) {
-                        Text(appText("All Activity", "全部活动"))
+                        Text(appString(R.string.room_all_activity))
                     }
                 }
             }
@@ -230,22 +204,15 @@ internal fun DeviceRoomScreen(
                                     pendingDestinationOfferId == offer.id,
                             error = incomingOfferError,
                             onAccept = {
-                                val currentDestination =
-                                    roomOfferDestinationPresentation(
-                                        context = context,
-                                        settings = SettingsStore.settings.value,
-                                        directoryCount = offer.directoryCount,
-                                        language = language,
-                                    )
+                                val currentDestination = resolveRoomDestination(offer.directoryCount)
                                 if (currentDestination.ready) {
                                     onAcceptIncomingRoomOffer()
                                 } else if (pendingDestinationOfferId == null) {
                                     pendingDestinationOfferId = offer.id
                                     autoResumedDestinationOfferId = null
-                                    destinationRevision += 1
                                     onExternalActivityChanged(true)
                                     runCatching {
-                                        destinationPicker.launch(SettingsStore.savePickerInitialUri())
+                                        destinationPicker.launch(transferPreferences.savePickerInitialUri)
                                     }.onFailure {
                                         pendingDestinationOfferId = null
                                         onExternalActivityChanged(false)
@@ -272,6 +239,7 @@ internal fun DeviceRoomScreen(
                 items(roomTransfers.sortedByDescending(Transfer::id), key = Transfer::id) { transfer ->
                     RoomTransferSummary(
                         transfer = transfer,
+                        defaultDestinationLabel = transferPreferences.saveLocationLabel,
                         onOpen = onOpenReceived,
                         onShare = onShareReceived,
                     )
@@ -321,6 +289,9 @@ internal fun DeviceRoomScreen(
                 preparationState = activeDraft.preparation,
                 showQrInitially = activeDraft.showQrInitially,
                 initialRole = role,
+                preferences = transferPreferences,
+                sourcePreparationIntents = sourcePreparationIntents,
+                onSaveTreePicked = onSaveTreePicked,
                 initialPairingInput = draft.pairingInput.takeIf { setupUsesPending },
                 initialSources =
                     if (setupUsesPending && role == "send") {
@@ -343,7 +314,7 @@ internal fun DeviceRoomScreen(
                             nearbySelection
                                 ?.let { selection ->
                                     { offer, completion ->
-                                        discoveryViewModel.offerInvite(
+                                        onOfferNearbyInvite(
                                             selection,
                                             offer.transferInvite,
                                             completion,
@@ -396,20 +367,20 @@ internal fun DeviceRoomScreen(
     }
 
     if (legacyRoom && transferDraft == null) {
-        discoveryState.incomingRendezvousOffers.firstOrNull()?.let { offer ->
+        discovery.incomingRendezvousOffers.firstOrNull()?.let { offer ->
             IncomingNearbyInvitationDialog(
                 offerId = offer.requestId,
                 roomInvitation = RoomControlInviteFormat.looksLikeRoomInvite(offer.invite),
                 verificationOffer = BleVerificationInvitation.isPublicOffer(offer.invite),
                 peerName =
                     offer.senderDisplayName
-                        ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
+                        ?: appString(R.string.nearby_envoix_device),
                 onAccept = { code ->
                     onAcceptIncomingOffer(offer, code)
-                    discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                    onConsumeNearbyOffer(offer.requestId)
                 },
                 onReject = {
-                    discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                    onConsumeNearbyOffer(offer.requestId)
                 },
             )
         }
@@ -418,14 +389,9 @@ internal fun DeviceRoomScreen(
     if (confirmEnd) {
         AlertDialog(
             onDismissRequest = { confirmEnd = false },
-            title = { Text(appText("End this room?", "结束这个房间？")) },
+            title = { Text(appString(R.string.room_end_title)) },
             text = {
-                Text(
-                    appText(
-                        "New file offers will stop. Transfers already in progress will continue in Activity.",
-                        "结束后将无法发送新文件。已经开始的传输会继续显示在“活动”中。",
-                    ),
-                )
+                Text(appString(R.string.room_end_explanation))
             },
             confirmButton = {
                 TextButton(
@@ -434,12 +400,12 @@ internal fun DeviceRoomScreen(
                         if (legacyRoom) onBack() else onEndRoom()
                     },
                 ) {
-                    Text(appText("End room", "结束房间"), color = colors.danger)
+                    Text(appString(R.string.room_end_action), color = colors.danger)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { confirmEnd = false }) {
-                    Text(appText("Keep room", "保留房间"))
+                    Text(appString(R.string.room_keep_action))
                 }
             },
             containerColor = colors.surface,

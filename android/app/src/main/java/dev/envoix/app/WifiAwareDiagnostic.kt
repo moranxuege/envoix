@@ -35,7 +35,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import java.io.Closeable
 import java.io.EOFException
 import java.io.IOException
@@ -165,19 +164,6 @@ internal class AndroidWifiAwareDiagnosticController(
     private var ioJob: Job? = null
     private var peerActionStarted = AtomicBoolean(false)
     private var networkActionStarted = AtomicBoolean(false)
-    private var operationMode: OperationMode = OperationMode.Probe
-
-    private sealed interface OperationMode {
-        data object Probe : OperationMode
-
-        data class Transfer(
-            val nativeId: Long,
-            val paramsJson: String,
-            val pairingToken: String,
-            val callback: ManifestV2Callback,
-            val nativeStarted: AtomicBoolean = AtomicBoolean(false),
-        ) : OperationMode
-    }
 
     fun refresh() {
         val currentGeneration = synchronized(lock) { generation }
@@ -198,33 +184,11 @@ internal class AndroidWifiAwareDiagnosticController(
     }
 
     fun start(role: WifiAwareProbeRole) {
-        start(role, OperationMode.Probe)
-    }
-
-    fun startTransfer(
-        role: WifiAwareProbeRole,
-        nativeId: Long,
-        paramsJson: String,
-        pairingToken: String,
-        callback: ManifestV2Callback,
-    ) {
-        require(pairingToken.isNotBlank()) { "pairingToken must not be blank" }
-        start(
-            role,
-            OperationMode.Transfer(nativeId, paramsJson, pairingToken, callback),
-        )
-    }
-
-    private fun start(
-        role: WifiAwareProbeRole,
-        mode: OperationMode,
-    ) {
         val currentGeneration =
             synchronized(lock) {
                 closeResourcesLocked()
                 generation += 1
                 activeRole = role
-                operationMode = mode
                 peerActionStarted = AtomicBoolean(false)
                 networkActionStarted = AtomicBoolean(false)
                 generation
@@ -322,11 +286,6 @@ internal class AndroidWifiAwareDiagnosticController(
                 .setBootstrappingMethods(AwarePairingConfig.PAIRING_BOOTSTRAPPING_OPPORTUNISTIC)
                 .build()
         val callback = discoveryCallback(currentGeneration, role, cipherSuite)
-        val serviceName =
-            when (synchronized(lock) { operationMode }) {
-                OperationMode.Probe -> ENVOIX_WIFI_AWARE_PROBE_SERVICE
-                is OperationMode.Transfer -> ENVOIX_WIFI_AWARE_TRANSFER_SERVICE
-            }
 
         try {
             when (role) {
@@ -334,7 +293,7 @@ internal class AndroidWifiAwareDiagnosticController(
                     val config =
                         PublishConfig
                             .Builder()
-                            .setServiceName(serviceName)
+                            .setServiceName(ENVOIX_WIFI_AWARE_PROBE_SERVICE)
                             .setPairingConfig(pairingConfig)
                             .build()
                     session.publish(config, callback, mainHandler)
@@ -345,7 +304,7 @@ internal class AndroidWifiAwareDiagnosticController(
                     val config =
                         SubscribeConfig
                             .Builder()
-                            .setServiceName(serviceName)
+                            .setServiceName(ENVOIX_WIFI_AWARE_PROBE_SERVICE)
                             .setPairingConfig(pairingConfig)
                             .build()
                     session.subscribe(config, callback, mainHandler)
@@ -609,25 +568,16 @@ internal class AndroidWifiAwareDiagnosticController(
                             ?: throw IOException("server socket missing")
                     listener.soTimeout = WIFI_AWARE_SOCKET_TIMEOUT_MS
                     val accepted = listener.accept()
-                    accepted.soTimeout =
-                        if (isTransferOperation()) 0 else WIFI_AWARE_SOCKET_TIMEOUT_MS
+                    accepted.soTimeout = WIFI_AWARE_SOCKET_TIMEOUT_MS
                     synchronized(lock) { socket = accepted }
-                    when (val mode = synchronized(lock) { operationMode }) {
-                        OperationMode.Probe -> {
-                            update(currentGeneration, WifiAwareProbePhase.EXCHANGING, role, "receiving_probe")
-                            val request = accepted.getInputStream().readExactly(WIFI_AWARE_PROBE_FRAME_LENGTH)
-                            val response = WifiAwareProbeWireProtocol.makeResponse(request)
-                            accepted.getOutputStream().apply {
-                                write(response)
-                                flush()
-                            }
-                            succeed(currentGeneration, role)
-                        }
-
-                        is OperationMode.Transfer -> {
-                            startNativeTransfer(currentGeneration, role, accepted, mode)
-                        }
+                    update(currentGeneration, WifiAwareProbePhase.EXCHANGING, role, "receiving_probe")
+                    val request = accepted.getInputStream().readExactly(WIFI_AWARE_PROBE_FRAME_LENGTH)
+                    val response = WifiAwareProbeWireProtocol.makeResponse(request)
+                    accepted.getOutputStream().apply {
+                        write(response)
+                        flush()
                     }
+                    succeed(currentGeneration, role)
                 } catch (error: Exception) {
                     fail(currentGeneration, redactedFailure(error))
                 }
@@ -645,102 +595,23 @@ internal class AndroidWifiAwareDiagnosticController(
             scope.launch {
                 try {
                     val connected = network.socketFactory.createSocket()
-                    connected.soTimeout =
-                        if (isTransferOperation()) 0 else WIFI_AWARE_SOCKET_TIMEOUT_MS
+                    connected.soTimeout = WIFI_AWARE_SOCKET_TIMEOUT_MS
                     connected.connect(address, WIFI_AWARE_SOCKET_TIMEOUT_MS)
                     synchronized(lock) { socket = connected }
-                    when (val mode = synchronized(lock) { operationMode }) {
-                        OperationMode.Probe -> {
-                            update(currentGeneration, WifiAwareProbePhase.EXCHANGING, role, "sending_probe")
-                            val nonce = ByteArray(WIFI_AWARE_PROBE_NONCE_LENGTH).also(SecureRandom()::nextBytes)
-                            connected.getOutputStream().apply {
-                                write(WifiAwareProbeWireProtocol.makeRequest(nonce))
-                                flush()
-                            }
-                            val response = connected.getInputStream().readExactly(WIFI_AWARE_PROBE_FRAME_LENGTH)
-                            WifiAwareProbeWireProtocol.validateResponse(response, nonce)
-                            succeed(currentGeneration, role)
-                        }
-
-                        is OperationMode.Transfer -> {
-                            startNativeTransfer(currentGeneration, role, connected, mode)
-                        }
+                    update(currentGeneration, WifiAwareProbePhase.EXCHANGING, role, "sending_probe")
+                    val nonce = ByteArray(WIFI_AWARE_PROBE_NONCE_LENGTH).also(SecureRandom()::nextBytes)
+                    connected.getOutputStream().apply {
+                        write(WifiAwareProbeWireProtocol.makeRequest(nonce))
+                        flush()
                     }
+                    val response = connected.getInputStream().readExactly(WIFI_AWARE_PROBE_FRAME_LENGTH)
+                    WifiAwareProbeWireProtocol.validateResponse(response, nonce)
+                    succeed(currentGeneration, role)
                 } catch (error: Exception) {
                     fail(currentGeneration, redactedFailure(error))
                 }
             }
     }
-
-    private fun startNativeTransfer(
-        currentGeneration: Int,
-        role: WifiAwareProbeRole,
-        connected: Socket,
-        mode: OperationMode.Transfer,
-    ) {
-        update(currentGeneration, WifiAwareProbePhase.EXCHANGING, role, "manifest_v2")
-        val transport = AndroidWifiAwareSocketTransport(connected)
-        val callback =
-            object : ManifestV2Callback {
-                override fun onEvent(json: String) {
-                    mode.callback.onEvent(json)
-                    val state = runCatching { JSONObject(json).optString("state") }.getOrDefault("")
-                    when (state) {
-                        "completed" -> succeedTransfer(currentGeneration, role)
-                        "failed" -> failTransfer(currentGeneration, role)
-                    }
-                }
-
-                override fun onPlanRequired(requestJson: String): String = mode.callback.onPlanRequired(requestJson)
-
-                override fun onSaveRequired(requestJson: String): String = mode.callback.onSaveRequired(requestJson)
-
-                override fun onRememberedCredential(
-                    opaqueCredential: ByteArray,
-                    generation: Long,
-                ): Boolean = mode.callback.onRememberedCredential(opaqueCredential, generation)
-            }
-        mode.nativeStarted.set(true)
-        Native.startManifestV2NativeSession(
-            mode.nativeId,
-            mode.paramsJson,
-            mode.pairingToken,
-            transport,
-            callback,
-        )
-    }
-
-    private fun succeedTransfer(
-        currentGeneration: Int,
-        role: WifiAwareProbeRole,
-    ) {
-        complete(
-            currentGeneration,
-            WifiAwareProbeSnapshot(
-                phase = WifiAwareProbePhase.SUCCEEDED,
-                role = role,
-                detail = "path=wifi_aware · manifest_v2=completed",
-                pairedDeviceCount = _snapshot.value.pairedDeviceCount,
-            ),
-        )
-    }
-
-    private fun failTransfer(
-        currentGeneration: Int,
-        role: WifiAwareProbeRole,
-    ) {
-        complete(
-            currentGeneration,
-            WifiAwareProbeSnapshot(
-                phase = WifiAwareProbePhase.FAILED,
-                role = role,
-                detail = "path=wifi_aware · manifest_v2=failed",
-                pairedDeviceCount = _snapshot.value.pairedDeviceCount,
-            ),
-        )
-    }
-
-    private fun isTransferOperation(): Boolean = synchronized(lock) { operationMode is OperationMode.Transfer }
 
     private fun succeed(
         currentGeneration: Int,
@@ -761,19 +632,7 @@ internal class AndroidWifiAwareDiagnosticController(
         currentGeneration: Int,
         detail: String,
     ) {
-        val (role, mode) = synchronized(lock) { activeRole to operationMode }
-        if (mode is OperationMode.Transfer && !mode.nativeStarted.get()) {
-            mode.callback.onEvent(
-                JSONObject()
-                    .put("notice", "manifest_v2")
-                    .put("state", "failed")
-                    .put("cause", "network_lost")
-                    .put("detail", detail)
-                    .put("retryable", true)
-                    .put("recovery_action", "retry")
-                    .toString(),
-            )
-        }
+        val role = synchronized(lock) { activeRole }
         complete(
             currentGeneration,
             WifiAwareProbeSnapshot(

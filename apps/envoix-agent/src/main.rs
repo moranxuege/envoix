@@ -1,0 +1,19 @@
+use std::process::ExitCode;
+
+#[cfg(any(unix, windows))]
+#[tokio::main]
+async fn main() -> ExitCode {
+    match envoix_agent::run_cli().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn main() -> ExitCode {
+    eprintln!("error: envoix-agent supports Unix sockets and Windows Named Pipes");
+    ExitCode::FAILURE
+}

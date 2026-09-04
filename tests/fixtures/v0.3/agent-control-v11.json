@@ -1,0 +1,31 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 11,
+  "request": {
+    "protocol_version": 11,
+    "request_id": "request_pairing_fixture",
+    "request": {
+      "command": "join_pairing",
+      "pairing": {
+        "label": "Fixture WSL",
+        "invitation": "123456-fixture-room",
+        "verification_code": "654321"
+      }
+    }
+  },
+  "response": {
+    "protocol_version": 11,
+    "request_id": "request_pairing_fixture",
+    "response": {
+      "kind": "device_paired",
+      "device": {
+        "id": "dev_fixture",
+        "label": "Fixture WSL",
+        "generation": 0,
+        "previous_generation": null,
+        "broker": "fixture-broker",
+        "relay": "https://relay.example.test"
+      }
+    }
+  }
+}

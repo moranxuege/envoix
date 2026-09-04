@@ -43,6 +43,19 @@ internal enum class RememberedRoomConnectRole {
     Responder,
 }
 
+internal enum class RoomConnectFailureCode {
+    RoomNotFound,
+    RoomExpired,
+    RoomFull,
+    RoomRateLimited,
+    RoomUnderAttack,
+    EndpointRateLimited,
+    IpRateLimited,
+    ServerBusy,
+    MalformedJoin,
+    UnsupportedVersion,
+}
+
 internal data class RoomLifetimeSnapshot(
     val revision: Long,
     val policy: RoomLifetimePolicy,
@@ -107,7 +120,7 @@ internal sealed interface RoomControlEvent {
         val message: String,
         val peerAuthenticated: Boolean = false,
         val attemptedRememberedGeneration: Long? = null,
-        val failureCode: String? = null,
+        val failureCode: RoomConnectFailureCode? = null,
         val retryAfterSeconds: Long? = null,
     ) : RoomControlEvent
 }
@@ -208,7 +221,7 @@ internal object UnavailableRoomControlGateway : RoomControlGateway {
 }
 
 /**
- * Replaced by the JNI-backed adapter at application startup. Keeping the
+ * Replaced by the typed UniFFI adapter at application startup. Keeping the
  * default unavailable makes unsupported builds fail closed instead of showing
  * a fabricated Connected room.
  */

@@ -40,8 +40,8 @@ dnsmasq_b_pid=""
 broker_pid=""
 relay_pid=""
 broker_endpoint=""
-jni_replaced=0
-jni_had_original=0
+native_core_replaced=0
+native_core_had_original=0
 device_ip_a=""
 device_ip_b=""
 
@@ -70,7 +70,7 @@ EOF
     printf '  %s\n' "${AVAILABLE_TESTS[@]}"
     cat <<EOF
 
-The script generates a private test CA, builds a CA-enabled x86_64 JNI library
+The script generates a private test CA, builds a CA-enabled x86_64 native core
 and APK, and runs a local rendezvous broker and iroh relay on the simulated WAN.
 Each received file is checked against the source SHA-256. The selected data
 path (direct peer address or relay URL) is read from each app through ADB.
@@ -250,18 +250,18 @@ prepare_build() {
 
     printf 'Building the local broker...\n'
     cargo build --release -p envoix-rendezvous-server
-    printf 'Building the CA-enabled x86_64 JNI library...\n'
+    printf 'Building the CA-enabled x86_64 native core...\n'
     ENVOIX_NAT_TEST_CA_DER_PATH="$cert_dir/ca.der" \
         cargo ndk -t x86_64 --platform 26 build --release \
-        -p envoix-android-jni
-    mkdir -p "$(dirname "$staged_jni")"
-    if [ -f "$staged_jni" ]; then
-        cp "$staged_jni" "$jni_backup"
-        jni_had_original=1
+        -p envoix-ffi --features android-jni
+    mkdir -p "$(dirname "$staged_native_core")"
+    if [ -f "$staged_native_core" ]; then
+        cp "$staged_native_core" "$native_core_backup"
+        native_core_had_original=1
     fi
-    cp "$repo_root/target/x86_64-linux-android/release/libenvoix_jni.so" \
-        "$staged_jni"
-    jni_replaced=1
+    cp "$repo_root/target/x86_64-linux-android/release/libenvoix_ffi.so" \
+        "$staged_native_core"
+    native_core_replaced=1
     printf 'Building the debug APK...\n'
     (cd "$repo_root/android" && \
         ENVOIX_ANDROID_ABIS=x86_64 \
@@ -1108,13 +1108,13 @@ cleanup() {
     [ -z "$relay_pid" ] || kill "$relay_pid" >/dev/null 2>&1
     [ -z "$broker_pid" ] || wait "$broker_pid" >/dev/null 2>&1
     [ -z "$relay_pid" ] || wait "$relay_pid" >/dev/null 2>&1
-    if [ "$jni_replaced" -eq 1 ]; then
-        if [ "$jni_had_original" -eq 1 ]; then
-            cp "$jni_backup" "$staged_jni"
+    if [ "$native_core_replaced" -eq 1 ]; then
+        if [ "$native_core_had_original" -eq 1 ]; then
+            cp "$native_core_backup" "$staged_native_core"
         else
-            rm -f "$staged_jni"
+            rm -f "$staged_native_core"
         fi
-        rm -f "$jni_backup"
+        rm -f "$native_core_backup"
     fi
     if [ "$network_setup_started" -eq 1 ]; then
         [ -z "$dnsmasq_a_pid" ] || kill "$dnsmasq_a_pid" >/dev/null 2>&1
@@ -1199,8 +1199,8 @@ cert_dir="$log_dir/certs"
 tool_root="$log_dir/tools"
 relay_binary="$tool_root/bin/iroh-relay"
 relay_config="$log_dir/relay.toml"
-staged_jni="$repo_root/android/app/src/main/jniLibs/x86_64/libenvoix_jni.so"
-jni_backup="$log_dir/libenvoix_jni.so.before-nat-test"
+staged_native_core="$repo_root/android/app/src/main/jniLibs/x86_64/libenvoix_ffi.so"
+native_core_backup="$log_dir/libenvoix_ffi.so.before-nat-test"
 # dnsmasq is AppArmor-confined to standard paths, so its pidfile must live in
 # /run as *dnsmasq*.pid (not the repo build dir) and its leasefile under
 # /var/lib/misc as dnsmasq.*.leases. Root (via `privileged`) owns both.

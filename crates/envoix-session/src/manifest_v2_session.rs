@@ -99,6 +99,7 @@ pub struct ReceiverManifestV2SessionSummary {
     pub data_plane: ReceiverDataPlaneSummaryV2,
     pub delivery_proof_digest: ContentDigestV2,
     pub destination_plan: DestinationWritePlanV2,
+    pub saved_root_paths: Vec<PathBuf>,
 }
 
 /// An authenticated offer whose metadata is available for bounded receiver UI
@@ -1214,11 +1215,13 @@ where
         let delivery_proof_digest =
             canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::DeliveryProof(proof))
                 .map_err(|error| CoreError::Protocol(error.to_string()))?;
+        let saved_root_paths = receiver_saved_root_paths(offer, &plan, &data_plane)?;
         progress.on_stage(TransferStage::DeliveryComplete);
         return Ok(ReceiverManifestV2SessionSummary {
             data_plane,
             delivery_proof_digest,
             destination_plan: plan,
+            saved_root_paths,
         });
     }
     let mut destination_provider = match resumed_destination_provider {
@@ -1257,12 +1260,48 @@ where
     let delivery_proof_digest =
         canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::DeliveryProof(proof))
             .map_err(|error| CoreError::Protocol(error.to_string()))?;
+    let destination_plan = destination_provider.plan().clone();
+    let saved_root_paths = receiver_saved_root_paths(offer, &destination_plan, &data_plane)?;
     progress.on_stage(TransferStage::DeliveryComplete);
     Ok(ReceiverManifestV2SessionSummary {
         data_plane,
         delivery_proof_digest,
-        destination_plan: destination_provider.plan().clone(),
+        destination_plan,
+        saved_root_paths,
     })
+}
+
+fn receiver_saved_root_paths(
+    offer: &ManifestOfferV2,
+    plan: &DestinationWritePlanV2,
+    data_plane: &ReceiverDataPlaneSummaryV2,
+) -> Result<Vec<PathBuf>, SessionError> {
+    offer
+        .manifest
+        .roots
+        .iter()
+        .map(|root| {
+            let result = data_plane
+                .entry_results
+                .get(root.root_entry_id as usize)
+                .filter(|result| result.entry_id == root.root_entry_id)
+                .ok_or_else(|| {
+                    CoreError::Protocol("receiver result set is missing a root entry result".into())
+                })?;
+            let planned_path = plan.target_path_for_root(root.root_id).ok_or_else(|| {
+                CoreError::Protocol("receiver destination plan is missing a root".into())
+            })?;
+            let final_name = result
+                .final_component_override
+                .as_deref()
+                .unwrap_or(&root.requested_name);
+            Ok(saved_root_path(planned_path, final_name))
+        })
+        .collect()
+}
+
+fn saved_root_path(planned_path: PathBuf, final_name: &str) -> PathBuf {
+    planned_path.with_file_name(final_name)
 }
 
 fn session_sender_data_error(error: envoix_transfer::ManifestV2DataError) -> SessionError {
@@ -1428,6 +1467,17 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn saved_root_path_uses_the_final_result_name() {
+        let planned = PathBuf::from("/inbox/report (1).txt");
+
+        assert_eq!(
+            saved_root_path(planned.clone(), "report.txt"),
+            PathBuf::from("/inbox/report.txt")
+        );
+        assert_eq!(saved_root_path(planned.clone(), "report (1).txt"), planned);
     }
 
     #[tokio::test]

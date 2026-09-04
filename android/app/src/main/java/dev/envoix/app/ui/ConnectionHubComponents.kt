@@ -73,6 +73,7 @@ import dev.envoix.app.NfcPhoneHostingState
 import dev.envoix.app.NfcPhoneHostingStatus
 import dev.envoix.app.NfcPhoneReaderState
 import dev.envoix.app.NfcPhoneReaderStatus
+import dev.envoix.app.R
 import dev.envoix.app.discovery.DiscoveredPeer
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyVisibility
@@ -93,7 +94,7 @@ internal fun ConnectionHubAppBar(
             .padding(horizontal = 12.dp),
     ) {
         Text(
-            "Envoix",
+            appString(R.string.app_name),
             color = colors.text,
             fontSize = 21.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -105,13 +106,13 @@ internal fun ConnectionHubAppBar(
         ) {
             HubUtilityButton(
                 icon = Icons.Default.History,
-                description = appText("Activity", "活动"),
+                description = appString(R.string.activity_title),
                 testTag = "hub_activity",
                 onClick = onActivity,
             )
             HubUtilityButton(
                 icon = Icons.Default.Smartphone,
-                description = appText("Rooms", "房间"),
+                description = appString(R.string.hub_rooms),
                 testTag = "hub_rooms",
                 onClick = onRooms,
             )
@@ -119,7 +120,7 @@ internal fun ConnectionHubAppBar(
         Box(Modifier.align(Alignment.CenterEnd)) {
             HubUtilityButton(
                 icon = Icons.Default.Settings,
-                description = appText("Settings", "设置"),
+                description = appString(R.string.settings),
                 testTag = "hub_settings",
                 onClick = onSettings,
             )
@@ -196,14 +197,14 @@ internal fun MainRoomInviteCard(
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    appText("CURRENT ROOM", "当前房间"),
+                    appString(R.string.hub_current_room_section),
                     color = colors.accentStrong,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.7.sp,
                 )
                 Text(
-                    control.peerName ?: appText("Connected device", "已连接设备"),
+                    control.peerName ?: appString(R.string.hub_connected_device),
                     color = colors.text,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
@@ -213,7 +214,7 @@ internal fun MainRoomInviteCard(
             }
             Icon(
                 Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                appText("Return to room", "返回房间"),
+                appString(R.string.hub_return_to_room),
                 tint = colors.accent,
             )
         }
@@ -234,12 +235,12 @@ internal fun MainRoomInviteCard(
             control.invite == null
     val roomStatus =
         when {
-            verifying -> appText("Verify nearby device", "验证附近设备")
+            verifying -> appString(R.string.hub_verify_nearby_device)
             revealed -> requireNotNull(control.invite).code
-            creating -> appText("Creating room…", "正在创建房间…")
-            joining -> appText("Joining room…", "正在加入房间…")
-            control.invite != null -> appText("Ready · Waiting for another device", "已就绪 · 正在等待另一台设备")
-            else -> appText("No active room", "没有活动房间")
+            creating -> appString(R.string.hub_creating_room)
+            joining -> appString(R.string.hub_joining_room)
+            control.invite != null -> appString(R.string.hub_room_ready_waiting)
+            else -> appString(R.string.hub_no_active_room)
         }
     Column(
         Modifier
@@ -260,7 +261,7 @@ internal fun MainRoomInviteCard(
                 verticalArrangement = Arrangement.Center,
             ) {
                 Text(
-                    appText("ROOM", "房间"),
+                    appString(R.string.room_header_title),
                     color = colors.muted,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
@@ -286,7 +287,7 @@ internal fun MainRoomInviteCard(
                 ) {
                     Icon(
                         Icons.Default.ContentCopy,
-                        appText("Copy room code", "复制房间码"),
+                        appString(R.string.hub_copy_room_code),
                         tint = colors.muted,
                         modifier = Modifier.size(18.dp),
                     )
@@ -299,7 +300,7 @@ internal fun MainRoomInviteCard(
                 ) {
                     Icon(
                         Icons.Default.Refresh,
-                        appText("Renew room invitation", "续期房间邀请"),
+                        appString(R.string.hub_renew_room_invitation),
                         tint = colors.accent,
                         modifier = Modifier.size(19.dp),
                     )
@@ -313,9 +314,9 @@ internal fun MainRoomInviteCard(
                     Icon(
                         Icons.Default.Close,
                         if (joining) {
-                            appText("Cancel joining room", "取消加入房间")
+                            appString(R.string.hub_cancel_joining_room)
                         } else {
-                            appText("Close room", "关闭房间")
+                            appString(R.string.hub_close_room)
                         },
                         tint = colors.danger,
                         modifier = Modifier.size(19.dp),
@@ -342,10 +343,7 @@ internal fun MainRoomInviteCard(
                     )
                     Spacer(Modifier.height(14.dp))
                     Text(
-                        appText(
-                            "Enter this code on the other device. It is never sent over Bluetooth.",
-                            "请在另一台设备上输入此验证码。验证码不会通过蓝牙发送。",
-                        ),
+                        appString(R.string.hub_ble_verification_instruction),
                         color = colors.muted,
                         textAlign = TextAlign.Center,
                     )
@@ -376,7 +374,7 @@ internal fun MainRoomInviteCard(
         }
         control.error?.let {
             Spacer(Modifier.height(8.dp))
-            Text(it, color = colors.danger, fontSize = 12.sp, textAlign = TextAlign.Center)
+            Text(it.resolve(), color = colors.danger, fontSize = 12.sp, textAlign = TextAlign.Center)
         }
     }
 }
@@ -392,7 +390,7 @@ private fun MainRoomQrToggle(
             .size(side)
             .testTag("hub_room_qr_toggle")
             .clickable(
-                onClickLabel = appText("Hide room QR", "隐藏房间二维码"),
+                onClickLabel = appString(R.string.hub_hide_room_qr),
                 role = Role.Button,
                 onClick = onHide,
             ),
@@ -440,10 +438,10 @@ private fun MainRoomInviteActions(
                 Spacer(Modifier.height(7.dp))
                 Text(
                     when {
-                        creating -> appText("Creating room…", "正在创建房间…")
-                        joining -> appText("Joining room…", "正在加入房间…")
-                        control.invite == null -> appText("Create room", "创建房间")
-                        else -> appText("Reveal QR", "显示二维码")
+                        creating -> appString(R.string.hub_creating_room)
+                        joining -> appString(R.string.hub_joining_room)
+                        control.invite == null -> appString(R.string.hub_create_room)
+                        else -> appString(R.string.hub_reveal_qr)
                     },
                     textAlign = TextAlign.Center,
                 )
@@ -463,7 +461,7 @@ private fun MainRoomInviteActions(
                     Icon(Icons.Default.QrCodeScanner, null, modifier = Modifier.size(22.dp))
                     Spacer(Modifier.height(7.dp))
                     Text(
-                        appText("Scan QR", "扫描"),
+                        appString(R.string.scan_qr),
                         textAlign = TextAlign.Center,
                     )
                 }
@@ -478,7 +476,7 @@ private fun MainRoomInviteActions(
                     Icon(Icons.Default.Keyboard, null, modifier = Modifier.size(22.dp))
                     Spacer(Modifier.height(7.dp))
                     Text(
-                        appText("Enter code", "输入码"),
+                        appString(R.string.hub_enter_code),
                         textAlign = TextAlign.Center,
                     )
                 }
@@ -510,7 +508,7 @@ internal fun NearbyIdentityRow(
             .padding(horizontal = 18.dp, vertical = 14.dp),
     ) {
         Text(
-            appText("SET IDENTITY", "设置身份"),
+            appString(R.string.hub_set_identity_section),
             color = colors.muted,
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
@@ -529,7 +527,7 @@ internal fun NearbyIdentityRow(
             )
             Icon(
                 Icons.Default.Edit,
-                appText("Edit nearby name", "编辑附近名称"),
+                appString(R.string.hub_edit_nearby_name),
                 tint = colors.muted,
                 modifier =
                     Modifier
@@ -578,9 +576,9 @@ internal fun NearbyIdentityRow(
 @Composable
 private fun NearbyVisibility.label(): String =
     when (this) {
-        NearbyVisibility.Hidden -> appText("Hidden", "已隐藏")
-        NearbyVisibility.EveryoneTenMinutes -> appText("Everyone · 10 min", "所有人 · 10 分钟")
-        NearbyVisibility.Foreground -> appText("While open", "打开时可见")
+        NearbyVisibility.Hidden -> appString(R.string.hub_visibility_hidden)
+        NearbyVisibility.EveryoneTenMinutes -> appString(R.string.hub_visibility_everyone_ten_minutes)
+        NearbyVisibility.Foreground -> appString(R.string.hub_visibility_foreground)
     }
 
 internal enum class WifiAwareDiscoveryUiState {
@@ -631,7 +629,7 @@ internal fun NearbySectionHeader(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            appText("NEARBY DEVICES", "附近设备"),
+            appString(R.string.hub_nearby_devices_section),
             color = colors.muted,
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
@@ -647,7 +645,11 @@ internal fun NearbySectionHeader(
             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
         ) {
             Text(
-                if (discoveryActive) appText("Stop", "停止") else appText("Start", "开始搜索"),
+                if (discoveryActive) {
+                    appString(R.string.hub_stop_discovery)
+                } else {
+                    appString(R.string.hub_start_discovery)
+                },
                 color = colors.accent,
                 fontSize = 12.sp,
             )
@@ -663,13 +665,13 @@ internal fun NearbySectionHeader(
             ) {
                 Icon(
                     Icons.Default.WifiTethering,
-                    appText("Wi-Fi Aware", "Wi-Fi Aware"),
+                    appString(R.string.hub_wifi_aware),
                     tint = if (wifiAwareActive) colors.accent else colors.muted,
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(3.dp))
                 Text(
-                    appText("Aware", "Aware"),
+                    appString(R.string.hub_wifi_aware_short),
                     color = if (wifiAwareActive) colors.accent else colors.muted,
                     fontSize = 12.sp,
                 )
@@ -685,13 +687,13 @@ internal fun NearbySectionHeader(
         ) {
             Icon(
                 Icons.Default.Nfc,
-                appText("NFC nearby room", "NFC 附近房间"),
+                appString(R.string.hub_nfc_nearby_room),
                 tint = if (nfcActive) colors.accent else colors.muted,
                 modifier = Modifier.size(16.dp),
             )
             Spacer(Modifier.width(3.dp))
             Text(
-                "NFC",
+                appString(R.string.hub_nfc_short),
                 color = if (nfcActive) colors.accent else colors.muted,
                 fontSize = 12.sp,
             )
@@ -706,9 +708,9 @@ internal fun NearbySectionHeader(
             Icon(
                 if (listExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                 if (listExpanded) {
-                    appText("Hide nearby devices", "隐藏附近设备")
+                    appString(R.string.hub_hide_nearby_devices)
                 } else {
-                    appText("Show nearby devices", "显示附近设备")
+                    appString(R.string.hub_show_nearby_devices)
                 },
                 tint = colors.muted,
                 modifier = Modifier.size(19.dp),
@@ -729,14 +731,11 @@ internal fun NfcNearbyActionsDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("NFC nearby room", "NFC 附近房间")) },
+        title = { Text(appString(R.string.hub_nfc_nearby_room)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    appText(
-                        "NFC carries a short-lived room invitation. The room still authenticates the connection, and file data uses the selected network path.",
-                        "NFC 只携带短时房间邀请。房间仍会验证连接，文件数据通过自动选定的网络路径传输。",
-                    ),
+                    appString(R.string.hub_nfc_explanation),
                     color = Envoix.colors.muted,
                     fontSize = 13.sp,
                 )
@@ -761,9 +760,9 @@ internal fun NfcNearbyActionsDialog(
                     Spacer(Modifier.width(7.dp))
                     Text(
                         if (reader.scanning) {
-                            appText("Stop NFC scan", "停止 NFC 扫描")
+                            appString(R.string.hub_stop_nfc_scan)
                         } else {
-                            appText("Scan another phone", "扫描另一台手机")
+                            appString(R.string.hub_scan_another_phone)
                         },
                     )
                 }
@@ -785,18 +784,15 @@ internal fun NfcNearbyActionsDialog(
                     Spacer(Modifier.width(7.dp))
                     Text(
                         if (hosting.armed) {
-                            appText("Stop sharing by NFC", "停止通过 NFC 分享")
+                            appString(R.string.hub_stop_nfc_sharing)
                         } else {
-                            appText("Create or share this room", "创建或分享此房间")
+                            appString(R.string.hub_create_or_share_room)
                         },
                     )
                 }
                 if (!hosting.armed && !canShareRoomViaNfc(roomPhase)) {
                     Text(
-                        appText(
-                            "End or leave the current room before sharing a new NFC invitation.",
-                            "请先结束或离开当前房间，再分享新的 NFC 邀请。",
-                        ),
+                        appString(R.string.hub_end_room_before_nfc),
                         color = Envoix.colors.muted,
                         fontSize = 12.sp,
                     )
@@ -805,7 +801,7 @@ internal fun NfcNearbyActionsDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text(appText("Done", "完成"))
+                Text(appString(R.string.common_done))
             }
         },
         containerColor = Envoix.colors.surface,
@@ -815,41 +811,41 @@ internal fun NfcNearbyActionsDialog(
 @Composable
 private fun nfcHostingStatusLabel(status: NfcPhoneHostingStatus): String =
     when (status) {
-        NfcPhoneHostingStatus.Idle -> appText("Sharing: off", "分享：已关闭")
+        NfcPhoneHostingStatus.Idle -> appString(R.string.hub_nfc_sharing_off)
         NfcPhoneHostingStatus.Armed ->
-            appText("Sharing: ready — hold the phones together", "分享：已就绪，请将两台手机靠近")
+            appString(R.string.hub_nfc_sharing_ready)
         NfcPhoneHostingStatus.RequiresAndroid15 ->
-            appText("Sharing requires Android 15 or later", "分享需要 Android 15 或更高版本")
+            appString(R.string.hub_nfc_requires_android_15)
         NfcPhoneHostingStatus.NfcUnavailable ->
-            appText("This phone does not provide NFC", "此手机不支持 NFC")
+            appString(R.string.hub_nfc_unavailable)
         NfcPhoneHostingStatus.NfcDisabled ->
-            appText("Turn on NFC to share", "请打开 NFC 后分享")
+            appString(R.string.hub_nfc_enable_to_share)
         NfcPhoneHostingStatus.HceUnavailable ->
-            appText("NFC phone sharing is unavailable", "NFC 手机分享不可用")
+            appString(R.string.hub_nfc_phone_sharing_unavailable)
         NfcPhoneHostingStatus.ListenOnlyUnavailable ->
-            appText("Safe NFC sharing mode is unavailable", "安全 NFC 分享模式不可用")
+            appString(R.string.hub_nfc_safe_sharing_unavailable)
         NfcPhoneHostingStatus.HceActivationFailed ->
-            appText("NFC sharing could not start", "无法启动 NFC 分享")
+            appString(R.string.hub_nfc_sharing_start_failed)
         NfcPhoneHostingStatus.InvalidInvitation ->
-            appText("The room invitation is not ready", "房间邀请尚未就绪")
+            appString(R.string.hub_room_invitation_not_ready)
     }
 
 @Composable
 private fun nfcReaderStatusLabel(state: NfcPhoneReaderState): String =
     when (state.status) {
-        NfcPhoneReaderStatus.Idle -> appText("Scanning: off", "扫描：已关闭")
+        NfcPhoneReaderStatus.Idle -> appString(R.string.hub_nfc_scanning_off)
         NfcPhoneReaderStatus.Scanning ->
             if (state.automatic) {
-                appText("Scanning: nearby phone detected", "扫描：已检测到附近手机")
+                appString(R.string.hub_nfc_nearby_phone_detected)
             } else {
-                appText("Scanning: hold the phones together", "扫描：请将两台手机靠近")
+                appString(R.string.hub_nfc_scanning_ready)
             }
         NfcPhoneReaderStatus.NfcUnavailable ->
-            appText("This phone does not provide NFC scanning", "此手机不支持 NFC 扫描")
+            appString(R.string.hub_nfc_scanning_unavailable)
         NfcPhoneReaderStatus.NfcDisabled ->
-            appText("Turn on NFC to scan", "请打开 NFC 后扫描")
+            appString(R.string.hub_nfc_enable_to_scan)
         NfcPhoneReaderStatus.ReaderUnavailable ->
-            appText("NFC scanning could not start", "无法启动 NFC 扫描")
+            appString(R.string.hub_nfc_scanning_start_failed)
     }
 
 @Composable
@@ -860,25 +856,16 @@ internal fun WifiAwareDiscoveryDialog(
     val state = wifiAwareDiscoveryUiState(status)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Wi-Fi Aware") },
+        title = { Text(appString(R.string.hub_wifi_aware)) },
         text = {
             Text(
                 when (state) {
                     WifiAwareDiscoveryUiState.Active ->
-                        appText(
-                            "Wi-Fi Aware discovery is active. Envoix still chooses the data path automatically for each transfer.",
-                            "Wi-Fi Aware 发现已启用。Envoix 仍会为每次传输自动选择数据路径。",
-                        )
+                        appString(R.string.hub_wifi_aware_active)
                     WifiAwareDiscoveryUiState.Starting ->
-                        appText(
-                            "Wi-Fi Aware discovery is starting.",
-                            "Wi-Fi Aware 发现正在启动。",
-                        )
+                        appString(R.string.hub_wifi_aware_starting)
                     WifiAwareDiscoveryUiState.Unavailable ->
-                        appText(
-                            "Wi-Fi Aware discovery is not connected in this Android build yet. Nearby continues over Bluetooth and local-network discovery.",
-                            "此 Android 版本尚未接入 Wi-Fi Aware 发现。附近发现仍会通过蓝牙和局域网继续工作。",
-                        )
+                        appString(R.string.hub_wifi_aware_unavailable)
                 },
                 color = Envoix.colors.muted,
                 fontSize = 13.sp,
@@ -886,7 +873,7 @@ internal fun WifiAwareDiscoveryDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text(appText("Done", "完成"))
+                Text(appString(R.string.common_done))
             }
         },
         containerColor = Envoix.colors.surface,
@@ -923,7 +910,7 @@ internal fun NearbyDeviceCard(
                 nearbyPeerDisplayName(
                     peer,
                     peers,
-                    appText("Nearby Envoix device", "附近的 Envoix 设备"),
+                    appString(R.string.nearby_envoix_device),
                 ),
                 color = colors.text,
                 fontSize = 15.sp,
@@ -933,16 +920,22 @@ internal fun NearbyDeviceCard(
             )
             Text(
                 "${
-                    nearbyDiscoverySourceLabel(peer.sources, LocalAppLanguage.current)
+                    nearbyDiscoverySourceLabel(
+                        sources = peer.sources,
+                        bluetooth = appString(R.string.hub_discovery_source_ble),
+                        localNetwork = appString(R.string.hub_discovery_source_local_network),
+                        wifiAware = appString(R.string.hub_wifi_aware),
+                        fallback = appString(R.string.hub_discovery_source_nearby),
+                    )
                 } · ${
                     if (enabled) {
                         if (DiscoverySource.Bluetooth in peer.sources && peer.nearbyInviteRoute == null) {
-                            appText("Tap to verify", "轻触验证")
+                            appString(R.string.hub_tap_to_verify)
                         } else {
-                            appText("Unverified", "未验证")
+                            appString(R.string.hub_unverified)
                         }
                     } else {
-                        appText("Discovery only", "仅可发现")
+                        appString(R.string.hub_discovery_only)
                     }
                 }",
                 color = colors.muted,
@@ -953,7 +946,7 @@ internal fun NearbyDeviceCard(
         if (enabled) {
             Icon(
                 Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                appText("Open room", "打开房间"),
+                appString(R.string.hub_open_room),
                 tint = colors.muted,
             )
         }
@@ -975,17 +968,18 @@ internal fun nearbyPeerDisplayName(
 
 internal fun nearbyDiscoverySourceLabel(
     sources: Set<DiscoverySource>,
-    language: String,
+    bluetooth: String,
+    localNetwork: String,
+    wifiAware: String,
+    fallback: String,
 ): String {
     val labels =
         listOf(
-            DiscoverySource.Bluetooth to AppText.value("BLE", "BLE", language),
-            DiscoverySource.Mdns to AppText.value("Local network", "局域网", language),
-            DiscoverySource.WifiAware to AppText.value("Wi-Fi Aware", "Wi-Fi Aware", language),
+            DiscoverySource.Bluetooth to bluetooth,
+            DiscoverySource.Mdns to localNetwork,
+            DiscoverySource.WifiAware to wifiAware,
         ).mapNotNull { (source, label) -> label.takeIf { source in sources } }
-    return labels.joinToString(" · ").ifEmpty {
-        AppText.value("Nearby", "附近", language)
-    }
+    return labels.joinToString(" · ").ifEmpty { fallback }
 }
 
 @Composable
@@ -995,12 +989,12 @@ internal fun EnterRoomCodeDialog(
     onContinue: (String) -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
-    val emptyClipboardMessage = appText("Clipboard is empty", "剪贴板为空")
+    val emptyClipboardMessage = appString(R.string.hub_clipboard_empty)
     var typed by remember { mutableStateOf("") }
     var inlineError by remember(error) { mutableStateOf(error) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Room code or invite link", "房间码或邀请链接")) },
+        title = { Text(appString(R.string.hub_room_code_or_link)) },
         text = {
             Column {
                 OutlinedTextField(
@@ -1010,8 +1004,8 @@ internal fun EnterRoomCodeDialog(
                         inlineError = null
                     },
                     singleLine = true,
-                    label = { Text(appText("Room code or invite link", "房间码或邀请链接")) },
-                    placeholder = { Text("123456-a1b2-c3d4") },
+                    label = { Text(appString(R.string.hub_room_code_or_link)) },
+                    placeholder = { Text(appString(R.string.hub_room_code_placeholder)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 TextButton(
@@ -1034,7 +1028,7 @@ internal fun EnterRoomCodeDialog(
                             .align(Alignment.End)
                             .testTag("room_code_paste"),
                 ) {
-                    Text(appText("Paste", "粘贴"))
+                    Text(appString(R.string.common_paste))
                 }
                 inlineError?.let {
                     Spacer(Modifier.height(8.dp))
@@ -1047,12 +1041,12 @@ internal fun EnterRoomCodeDialog(
                 onClick = { onContinue(typed.trim()) },
                 enabled = typed.isNotBlank(),
             ) {
-                Text(appText("Continue", "继续"))
+                Text(appString(R.string.common_continue))
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text(appText("Cancel", "取消"))
+                Text(appString(R.string.common_cancel))
             }
         },
         containerColor = Envoix.colors.surface,
@@ -1068,27 +1062,27 @@ internal fun EditNearbyNameDialog(
     var typed by remember(currentName) { mutableStateOf(currentName) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Other devices can find you as", "其他设备可以发现你为"), fontSize = 16.sp) },
+        title = { Text(appString(R.string.hub_nearby_name_dialog_title), fontSize = 16.sp) },
         text = {
             OutlinedTextField(
                 value = typed,
                 onValueChange = { if (it.length <= 48) typed = it },
                 singleLine = true,
-                label = { Text(appText("Visible as", "显示为")) },
+                label = { Text(appString(R.string.hub_visible_as)) },
                 supportingText = {
-                    Text(appText("This identity is temporary.", "此身份为临时身份。"))
+                    Text(appString(R.string.hub_identity_temporary))
                 },
                 modifier = Modifier.fillMaxWidth(),
             )
         },
         confirmButton = {
             TextButton(onClick = { onSave(typed) }, enabled = typed.isNotBlank()) {
-                Text(appText("Save", "保存"))
+                Text(appString(R.string.common_save))
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text(appText("Cancel", "取消"))
+                Text(appString(R.string.common_cancel))
             }
         },
         containerColor = Envoix.colors.surface,
@@ -1103,7 +1097,7 @@ internal fun NearbyVisibilityDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Who can find you?", "谁可以发现你？")) },
+        title = { Text(appString(R.string.hub_visibility_dialog_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 NearbyVisibility.entries.forEach { visibility ->
@@ -1139,7 +1133,7 @@ internal fun NearbyVisibilityDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text(appText("Done", "完成"))
+                Text(appString(R.string.common_done))
             }
         },
         containerColor = Envoix.colors.surface,
@@ -1150,11 +1144,11 @@ internal fun NearbyVisibilityDialog(
 private fun NearbyVisibility.description(): String =
     when (this) {
         NearbyVisibility.Hidden ->
-            appText("You can still find and connect to other devices.", "你仍可发现并连接其他设备。")
+            appString(R.string.hub_visibility_hidden_description)
         NearbyVisibility.EveryoneTenMinutes ->
-            appText("Nearby people can find you for ten minutes.", "附近的人可以在十分钟内发现你。")
+            appString(R.string.hub_visibility_everyone_description)
         NearbyVisibility.Foreground ->
-            appText("Nearby people can find you while Envoix is open.", "Envoix 打开时，附近的人可以发现你。")
+            appString(R.string.hub_visibility_foreground_description)
     }
 
 @Composable
@@ -1172,11 +1166,11 @@ internal fun IncomingNearbyInvitationDialog(
         title = {
             Text(
                 if (verificationOffer) {
-                    appText("Verify nearby device", "验证附近设备")
+                    appString(R.string.hub_verify_nearby_device)
                 } else if (roomInvitation) {
-                    appText("Room invitation", "房间邀请")
+                    appString(R.string.hub_room_invitation)
                 } else {
-                    appText("File invitation", "文件邀请")
+                    appString(R.string.hub_file_invitation)
                 },
             )
         },
@@ -1184,17 +1178,14 @@ internal fun IncomingNearbyInvitationDialog(
             if (verificationOffer) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        appText(
-                            "Ask $peerName for the six-digit code shown in Envoix.",
-                            "请向 $peerName 确认 Envoix 中显示的六位验证码。",
-                        ),
+                        appString(R.string.hub_ask_verification_code, peerName),
                     )
                     OutlinedTextField(
                         value = code,
                         onValueChange = { value ->
                             code = value.filter { it in '0'..'9' }.take(6)
                         },
-                        label = { Text(appText("Verification code", "验证码")) },
+                        label = { Text(appString(R.string.hub_verification_code)) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                         textStyle =
@@ -1209,15 +1200,9 @@ internal fun IncomingNearbyInvitationDialog(
             } else {
                 Text(
                     if (roomInvitation) {
-                        appText(
-                            "$peerName wants to open a room with you.",
-                            "$peerName 想与你建立房间。",
-                        )
+                        appString(R.string.hub_peer_wants_room, peerName)
                     } else {
-                        appText(
-                            "$peerName wants to transfer files.",
-                            "$peerName 想要传输文件。",
-                        )
+                        appString(R.string.hub_peer_wants_transfer, peerName)
                     },
                 )
             }
@@ -1227,12 +1212,18 @@ internal fun IncomingNearbyInvitationDialog(
                 onClick = { onAccept(code.takeIf { verificationOffer }) },
                 enabled = !verificationOffer || code.length == 6,
             ) {
-                Text(if (verificationOffer) appText("Verify", "验证") else appText("Accept", "接受"))
+                Text(
+                    if (verificationOffer) {
+                        appString(R.string.hub_verify)
+                    } else {
+                        appString(R.string.common_accept)
+                    },
+                )
             }
         },
         dismissButton = {
             TextButton(onClick = onReject) {
-                Text(appText("Reject", "拒绝"))
+                Text(appString(R.string.common_reject))
             }
         },
         containerColor = Envoix.colors.surface,

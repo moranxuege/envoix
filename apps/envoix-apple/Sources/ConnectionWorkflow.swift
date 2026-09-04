@@ -3,6 +3,20 @@ import Combine
 import EnvoixCore
 import Foundation
 
+struct DurablePairedDevice: Equatable {
+    let id: String
+    let label: String
+}
+
+@MainActor
+protocol DurablePairingCoordinating: AnyObject {
+    func joinPairing(
+        label: String,
+        invitation: String,
+        verificationCode: String
+    ) async throws -> DurablePairedDevice
+}
+
 enum OneTimeRoomAction: Equatable {
     case offerFiles
     case receiveFiles
@@ -72,6 +86,7 @@ struct RememberedRoomSession: Equatable, Identifiable {
 
 enum RememberedRoomConnectionStatus: Equatable {
     case offline
+    case available
     case connecting
     case waiting
     case connected
@@ -248,13 +263,16 @@ final class ConnectionWorkflowState: ObservableObject {
     @Published private(set) var controlPhase: RoomControlPhase = .idle
     @Published private(set) var roomInvitation: RoomControlInvitation?
     @Published private(set) var peerDisplayName: String?
+    @Published private(set) var verificationRequested = false
+    @Published private(set) var durablePairingCompletedLabel: String?
     @Published private(set) var incomingRoomOffer: RoomControlTransferOffer?
     @Published private(set) var roomLifetimePolicy: RoomControlLifetimePolicy = .idleFifteenMinutes
     @Published private(set) var idleDeadline: Date?
     @Published private(set) var isRoomCreator = false
 
     private let gateway: RoomControlGateway?
-    private let rememberedStore: RememberedPeerStore
+    private let durablePairingCoordinator: DurablePairingCoordinating?
+    private let rememberedStore: RememberedPeerStoring
     private let reconnectPolicy: RememberedRoomReconnectPolicy
     private let clock: () -> Date
     private let jitterUnit: () -> Double
@@ -265,6 +283,7 @@ final class ConnectionWorkflowState: ObservableObject {
     private var baselineActivityIDs: Set<String> = []
     private var pendingControlNearbySelection: NearbyPairingSelection?
     private var pendingDeviceVerification = false
+    private var pendingDurablePairingInvitation: RoomControlInvitation?
     private var outgoingDecisions: [String: (Bool) -> Void] = [:]
     private var incomingRoomOfferDeadline: Date?
     private var lifetimeRevision: UInt64?
@@ -291,12 +310,14 @@ final class ConnectionWorkflowState: ObservableObject {
 
     init(
         gateway: RoomControlGateway? = nil,
-        rememberedStore: RememberedPeerStore = .shared,
+        durablePairingCoordinator: DurablePairingCoordinating? = nil,
+        rememberedStore: RememberedPeerStoring = RememberedPeerStore.shared,
         reconnectPolicy: RememberedRoomReconnectPolicy = .live,
         jitterUnit: @escaping () -> Double = { Double.random(in: 0...1) },
         clock: @escaping () -> Date = Date.init
     ) {
         self.gateway = gateway
+        self.durablePairingCoordinator = durablePairingCoordinator
         self.rememberedStore = rememberedStore
         self.reconnectPolicy = reconnectPolicy
         self.jitterUnit = jitterUnit
@@ -662,7 +683,8 @@ final class ConnectionWorkflowState: ObservableObject {
             switch outcome {
             case .sessionEnded:
                 return
-            case .authenticatedFailure(let message):
+            case .authenticatedFailure(let message),
+                 .credentialUnavailable(let message):
                 blockedRememberedRelationships.insert(relationshipID)
                 rememberedRoomErrors[relationshipID] = message
                 activeRememberedRelationshipID = nil
@@ -711,6 +733,7 @@ final class ConnectionWorkflowState: ObservableObject {
         case sessionEnded
         case preAuthenticationFailure(requiredCooldown: TimeInterval?)
         case authenticatedFailure(String)
+        case credentialUnavailable(String)
     }
 
     private func connectRememberedPeer(
@@ -729,12 +752,13 @@ final class ConnectionWorkflowState: ObservableObject {
         }
         defer { releaseRememberedLease(peer.relationshipID) }
 
-        let material: RememberedPeerSessionMaterial
+        let relationship: RememberedPeerSummary
         let credentialReference: String
         do {
-            material = try rememberedStore.sessionMaterial(
+            let material = try rememberedStore.sessionMaterial(
                 relationshipID: peer.relationshipID
             )
+            relationship = material.summary
             if let existing = rememberedCredentialReferences[peer.relationshipID] {
                 credentialReference = existing
             } else {
@@ -743,6 +767,14 @@ final class ConnectionWorkflowState: ObservableObject {
                 )
                 rememberedCredentialReferences[peer.relationshipID] = credentialReference
             }
+        } catch RememberedPeerStoreError.credentialInteractionRequired {
+            return .credentialUnavailable(
+                RememberedPeerStoreError.credentialInteractionRequired.localizedDescription
+            )
+        } catch RememberedPeerStoreError.credentialStorageUnavailable {
+            return .credentialUnavailable(
+                RememberedPeerStoreError.credentialStorageUnavailable.localizedDescription
+            )
         } catch RememberedPeerStoreError.keychain {
             return .preAuthenticationFailure(
                 requiredCooldown: reconnectPolicy.minimumBackoff
@@ -763,8 +795,8 @@ final class ConnectionWorkflowState: ObservableObject {
             : []
 
         let generations = ConnectionWorkflowPolicy.rememberedGenerationSchedule(
-            current: material.summary.generation,
-            previous: material.summary.previousGeneration,
+            current: relationship.generation,
+            previous: relationship.previousGeneration,
             mode: mode
         )
         var lastPreAuthenticationFailure = false
@@ -781,8 +813,8 @@ final class ConnectionWorkflowState: ObservableObject {
                         credentialReference: credentialReference,
                         generation: attemptedGeneration,
                         endpoint: RoomControlEndpoint(
-                            broker: material.summary.broker,
-                            relay: material.summary.relay
+                            broker: relationship.broker,
+                            relay: relationship.relay
                         ),
                         displayName: rememberedDisplayName,
                         identityPath: rememberedIdentityPath
@@ -795,16 +827,19 @@ final class ConnectionWorkflowState: ObservableObject {
                                 "Remembered-room credential generation is exhausted."
                             )
                         }
+                        let rotationMaterial = try rememberedStore.sessionMaterial(
+                            relationshipID: peer.relationshipID
+                        )
                         try rememberedStore.rotate(
                             relationshipID: peer.relationshipID,
-                            opaqueCredential: material.opaqueCredential,
+                            opaqueCredential: rotationMaterial.opaqueCredential,
                             generation: authenticatedGeneration + 1
                         )
                     },
                     onEvent: { [weak self] event in
                         self?.handleRemembered(
                             event,
-                            peer: material.summary,
+                            peer: relationship,
                             generation: generation
                         )
                     }
@@ -987,6 +1022,8 @@ final class ConnectionWorkflowState: ObservableObject {
         guard let gateway else {
             return "Room control is unavailable in this build."
         }
+        durablePairingCompletedLabel = nil
+        pendingDurablePairingInvitation = nil
         do {
             let now = clock()
             let invitation: RoomControlInvitation
@@ -1073,6 +1110,8 @@ final class ConnectionWorkflowState: ObservableObject {
                 relay: relay,
                 now: clock()
             )
+            durablePairingCompletedLabel = nil
+            pendingDurablePairingInvitation = invitation
             if let verifiedPeerLabel {
                 try gateway.prepareDeviceVerification(
                     label: verifiedPeerLabel,
@@ -1163,9 +1202,78 @@ final class ConnectionWorkflowState: ObservableObject {
             } catch {
                 guard let self, controlGeneration == generation else { return }
                 outgoingDecisions.removeValue(forKey: offer.id)?(false)
-                handleControlFailure(error.localizedDescription, generation: generation)
+                handleControlFailure(error, generation: generation)
             }
         }
+    }
+
+    @discardableResult
+    func submitDeviceVerification(_ code: String) -> String? {
+        let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard code.count == 6,
+              code.allSatisfy({ $0.isASCII && $0.isNumber }) else {
+            return "The verification code must contain exactly six digits."
+        }
+        guard verificationRequested,
+              controlPhase == .connected,
+              let endpoint = activeRoomEndpoint,
+              let gateway else {
+            return "This room is not waiting for device verification."
+        }
+        if let durablePairingCoordinator,
+           let invitation = pendingDurablePairingInvitation {
+            let label = peerDisplayName ?? "Nearby device"
+            gateway.close(reason: .userEnded)
+            endLocalState()
+            controlPhase = .joining
+            let generation = controlGeneration
+            controlTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let device = try await durablePairingCoordinator.joinPairing(
+                        label: label,
+                        invitation: invitation.payload,
+                        verificationCode: code
+                    )
+                    guard controlGeneration == generation else { return }
+                    controlTask = nil
+                    peerDisplayName = device.label
+                    controlPhase = .ended(.userEnded)
+                    durablePairingCompletedLabel = device.label
+                } catch {
+                    handleControlFailure(
+                        "Background helper pairing failed: \(error.localizedDescription)",
+                        generation: generation
+                    )
+                }
+            }
+            return nil
+        }
+        do {
+            try gateway.prepareDeviceVerification(
+                label: peerDisplayName ?? "Nearby device",
+                endpoint: endpoint
+            )
+        } catch {
+            return error.localizedDescription
+        }
+        verificationRequested = false
+        pendingDurablePairingInvitation = nil
+        let generation = controlGeneration
+        Task { @MainActor [weak self] in
+            do {
+                try await gateway.submitVerificationCode(code)
+            } catch {
+                self?.handleControlFailure(error, generation: generation)
+            }
+        }
+        return nil
+    }
+
+    func cancelDeviceVerification() {
+        guard verificationRequested else { return }
+        verificationRequested = false
+        finishControl(reason: .userEnded, notifyGateway: true)
     }
 
     func acceptIncomingRoomOffer() async -> RoomControlTransferOffer? {
@@ -1184,7 +1292,7 @@ final class ConnectionWorkflowState: ObservableObject {
             guard controlGeneration == generation else { return nil }
             return offer
         } catch {
-            handleControlFailure(error.localizedDescription, generation: generation)
+            handleControlFailure(error, generation: generation)
             return nil
         }
     }
@@ -1215,7 +1323,7 @@ final class ConnectionWorkflowState: ObservableObject {
                 }
                 self?.schedulePassiveRememberedDwellIfNeeded()
             } catch {
-                self?.handleControlFailure(error.localizedDescription, generation: generation)
+                self?.handleControlFailure(error, generation: generation)
             }
         }
     }
@@ -1233,7 +1341,7 @@ final class ConnectionWorkflowState: ObservableObject {
                     self?.applyLifetime(lifetime)
                 }
             } catch {
-                self?.handleControlFailure(error.localizedDescription, generation: generation)
+                self?.handleControlFailure(error, generation: generation)
             }
         }
     }
@@ -1307,9 +1415,11 @@ final class ConnectionWorkflowState: ObservableObject {
         outgoingDecisions.removeAll()
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
+        verificationRequested = false
         roomInvitation = nil
         pendingControlNearbySelection = nil
         pendingDeviceVerification = false
+        pendingDurablePairingInvitation = nil
         idleDeadline = nil
         lifetimeRevision = nil
         requestedLocalTransferActive = nil
@@ -1348,6 +1458,20 @@ final class ConnectionWorkflowState: ObservableObject {
             pendingControlNearbySelection = nil
             pendingDeviceVerification = false
             applyLifetime(lifetime)
+        case .verificationRequested:
+            guard controlPhase == .connected,
+                  room != nil,
+                  activeRememberedRelationshipID == nil else {
+                return
+            }
+            verificationRequested = true
+        case .verificationSucceeded:
+            verificationRequested = false
+            pendingDurablePairingInvitation = nil
+            refreshRememberedRooms()
+        case .verificationFailed:
+            verificationRequested = false
+            failControl("The device verification code did not match.")
         case .incomingOffer(let offer):
             guard controlPhase == .connected, incomingRoomOffer == nil else { return }
             incomingRoomOffer = offer
@@ -1374,6 +1498,7 @@ final class ConnectionWorkflowState: ObservableObject {
             outgoingDecisions.removeAll()
             incomingRoomOffer = nil
             incomingRoomOfferDeadline = nil
+            verificationRequested = false
             roomInvitation = nil
             pendingControlNearbySelection = nil
             pendingDeviceVerification = false
@@ -1383,6 +1508,8 @@ final class ConnectionWorkflowState: ObservableObject {
             reportedLocalTransferActive = nil
             controlPhase = .ended(reason)
             scheduleRememberedReconnect()
+        case .failed(let message):
+            failControl(message)
         }
     }
 
@@ -1421,6 +1548,11 @@ final class ConnectionWorkflowState: ObservableObject {
             nextRememberedMode[peer.relationshipID] = .responder
             applyLifetime(lifetime)
             schedulePassiveRememberedDwellIfNeeded()
+        case .verificationRequested, .verificationSucceeded, .verificationFailed:
+            handleControlFailure(
+                "A remembered room attempted first-contact verification.",
+                generation: generation
+            )
         case .incomingOffer(let offer):
             guard controlPhase == .connected, incomingRoomOffer == nil else { return }
             cancelPassiveRememberedDwell()
@@ -1458,6 +1590,8 @@ final class ConnectionWorkflowState: ObservableObject {
                 rememberedRoom = nil
             }
             controlPhase = .ended(reason)
+        case .failed(let message):
+            failControl(message)
         }
     }
 
@@ -1495,7 +1629,7 @@ final class ConnectionWorkflowState: ObservableObject {
                 } catch {
                     guard self.controlGeneration == generation else { return }
                     self.localTransferSyncTask = nil
-                    self.failControl(error.localizedDescription)
+                    self.handleControlFailure(error, generation: generation)
                     return
                 }
             }
@@ -1522,6 +1656,13 @@ final class ConnectionWorkflowState: ObservableObject {
             } catch {
                 guard self.controlGeneration == generation,
                       self.idleExpiryRevision == revision else {
+                    return
+                }
+                if let operationError = error as? RoomControlOperationError,
+                   !operationError.roomRemainsUsable {
+                    self.idleExpiryTask = nil
+                    self.idleExpiryRevision = nil
+                    self.handleControlFailure(error, generation: generation)
                     return
                 }
                 // A transfer-active update may win the race after the UI's
@@ -1552,6 +1693,27 @@ final class ConnectionWorkflowState: ObservableObject {
         failControl(message)
     }
 
+    private func handleControlFailure(_ error: Error, generation: Int) {
+        guard controlGeneration == generation else { return }
+        guard let operationError = error as? RoomControlOperationError else {
+            handleControlFailure(error.localizedDescription, generation: generation)
+            return
+        }
+        switch operationError {
+        case .rejected:
+            #if DEBUG
+            NSLog("Envoix room command rejected: %@", operationError.localizedDescription)
+            #endif
+        case .networkLost:
+            finishControl(reason: .networkLost, notifyGateway: true)
+        case .canceled, .failed:
+            handleControlFailure(
+                operationError.localizedDescription,
+                generation: generation
+            )
+        }
+    }
+
     private func failControl(_ message: String) {
         guard controlPhase != .idle else { return }
         #if DEBUG
@@ -1572,9 +1734,11 @@ final class ConnectionWorkflowState: ObservableObject {
         outgoingDecisions.removeAll()
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
+        verificationRequested = false
         roomInvitation = nil
         pendingControlNearbySelection = nil
         pendingDeviceVerification = false
+        pendingDurablePairingInvitation = nil
         idleDeadline = nil
         lifetimeRevision = nil
         requestedLocalTransferActive = nil
@@ -1608,9 +1772,11 @@ final class ConnectionWorkflowState: ObservableObject {
         pendingOffers.removeAll()
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
+        verificationRequested = false
         roomInvitation = nil
         pendingControlNearbySelection = nil
         pendingDeviceVerification = false
+        pendingDurablePairingInvitation = nil
         peerDisplayName = nil
         idleDeadline = nil
         lifetimeRevision = nil

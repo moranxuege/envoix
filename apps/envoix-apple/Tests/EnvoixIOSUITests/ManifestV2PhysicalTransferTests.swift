@@ -289,6 +289,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             request: try Self.request(direction: .send),
             stateDirectory: stateDirectory.path,
             cancellation: FfiManifestV2Cancellation(),
+            credentialVault: ManifestV2RejectingCredentialVault(),
             observer: observer
         )
         XCTAssertEqual(completion.entryCount, UInt32(fixture.entryCount))
@@ -348,6 +349,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             ),
             stateDirectory: stateDirectory.path,
             cancellation: FfiManifestV2Cancellation(),
+            credentialVault: ManifestV2RejectingCredentialVault(),
             observer: observer
         )
         evidence.recordOffer()
@@ -1472,7 +1474,6 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
         )
     }
     func onDiagnostic(message: String) { marker("diagnostic=\(message)") }
-    func onRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool { false }
 
     @discardableResult
     private func locked<T>(_ operation: () -> T) -> T {
@@ -1483,6 +1484,13 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
 
     private func marker(_ message: String) {
         FileHandle.standardError.write(Data("[cross-device] Apple Manifest v2 \(message)\n".utf8))
+    }
+}
+
+private final class ManifestV2RejectingCredentialVault:
+    FfiRememberedCredentialVault, @unchecked Sendable {
+    func storeRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool {
+        false
     }
 }
 

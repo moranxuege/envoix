@@ -167,14 +167,10 @@ struct TransferStageView: View {
                         Image(systemName: "arrow.up.arrow.down.circle")
                             .font(.system(size: 36, weight: .medium))
                             .foregroundStyle(Theme.muted)
-                        Text(AppText.value("No transfers yet", "暂无传输", language: language))
+                        Text(AppText.localized("activity.empty.title", language: language))
                             .font(.headline)
                             .foregroundStyle(Theme.text)
-                        Text(AppText.value(
-                            "Prepared and active transfers will appear here.",
-                            "准备中和活动中的传输会显示在这里。",
-                            language: language
-                        ))
+                        Text(AppText.localized("activity.empty.detail", language: language))
                             .font(.subheadline)
                             .foregroundStyle(Theme.muted)
                             .multilineTextAlignment(.center)
@@ -241,23 +237,19 @@ struct TransferStageView: View {
             .accessibilityIdentifier("activity_room_\(group.id)")
             .accessibilityLabel(groupTitle(group))
             .accessibilityValue(isExpanded
-                ? AppText.value("Expanded", "已展开", language: language)
-                : AppText.value("Collapsed", "已收起", language: language))
+                ? AppText.localized("accessibility.expanded", language: language)
+                : AppText.localized("accessibility.collapsed", language: language))
             .accessibilityHint(isExpanded
-                ? AppText.value(
-                    "Double-tap to collapse transfer details.",
-                    "轻点两下以收起传输详情。",
-                    language: language
-                )
-                : AppText.value(
-                    "Double-tap to expand transfer details.",
-                    "轻点两下以展开传输详情。",
-                    language: language
-                ))
+                ? AppText.localized("activity.accessibility.collapse_hint", language: language)
+                : AppText.localized("activity.accessibility.expand_hint", language: language))
 
             HStack(spacing: 8) {
                 Label(
-                    stateText(group.summaryRecord),
+                    TransferActivityText.state(
+                        group.summaryRecord.state,
+                        direction: group.summaryRecord.direction,
+                        language: language
+                    ),
                     systemImage: icon(for: group.summaryRecord)
                 )
                 .foregroundStyle(tint(for: group.summaryRecord.state))
@@ -330,9 +322,7 @@ struct TransferStageView: View {
                         .foregroundStyle(Theme.muted)
                 }
                 Spacer(minLength: 8)
-                Text(record.direction == .send
-                    ? AppText.value("Send", "发送", language: language)
-                    : AppText.value("Receive", "接收", language: language))
+                Text(TransferActivityText.direction(record.direction, language: language))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(tint(for: record.state))
             }
@@ -385,26 +375,29 @@ struct TransferStageView: View {
 
             HStack(spacing: 8) {
                 if actions.canApprove {
-                    Button(AppText.value("Receive", "接收", language: language)) {
+                    Button(AppText.localized("common.receive", language: language)) {
                         _ = onApprove(record.activityId)
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("activity_receive_\(record.activityId)")
                 }
                 if actions.canPause {
-                    Button(AppText.value("Pause", "暂停", language: language)) {
+                    Button(AppText.localized("common.pause", language: language)) {
                         _ = onPause(record.activityId)
                     }
                     .accessibilityIdentifier("activity_pause_\(record.activityId)")
                 }
                 if actions.canResume, onCanResume(record.activityId) {
-                    Button(AppText.value("Resume", "恢复", language: language)) {
+                    Button(AppText.localized("common.resume", language: language)) {
                         _ = onResume(record.activityId)
                     }
                     .accessibilityIdentifier("activity_resume_\(record.activityId)")
                 }
                 if actions.canCancel {
-                    Button(AppText.value("Cancel", "取消", language: language), role: .destructive) {
+                    Button(
+                        AppText.localized("common.cancel", language: language),
+                        role: .destructive
+                    ) {
                         _ = onCancel(record.activityId)
                     }
                     .accessibilityIdentifier("activity_cancel_\(record.activityId)")
@@ -413,15 +406,15 @@ struct TransferStageView: View {
                 if developerMode || actions.canDelete {
                     Menu {
                         if developerMode {
-                            Button(AppText.value("Copy diagnostics", "复制诊断信息", language: language)) {
+                            Button(AppText.localized("activity.diagnostics.copy", language: language)) {
                                 copyWithToast(
                                     onCopyDiagnostics(record),
-                                    AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                    AppText.localized("activity.diagnostics.copied", language: language),
                                     language: language
                                 )
                             }
                             if let target = onRemoteLogTarget(record) {
-                                Button(AppText.value("Upload diagnostics", "上传诊断信息", language: language)) {
+                                Button(AppText.localized("activity.diagnostics.upload", language: language)) {
                                     Task {
                                         try? await RemoteLogUpload.upload(
                                             server: UserDefaults.standard.string(
@@ -433,10 +426,10 @@ struct TransferStageView: View {
                                     }
                                 }
                             }
-                            Button(AppText.value("Copy app diagnostics", "复制应用诊断信息", language: language)) {
+                            Button(AppText.localized("activity.diagnostics.copy_app", language: language)) {
                                 copyWithToast(
                                     onAppDiagnosticReport(),
-                                    AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                    AppText.localized("activity.diagnostics.copied", language: language),
                                     language: language
                                 )
                             }
@@ -480,8 +473,8 @@ struct TransferStageView: View {
             return label
         }
         return group.activityGroupID == nil
-            ? AppText.value("Standalone transfer", "独立传输", language: language)
-            : AppText.value("One-time Room", "一次性房间", language: language)
+            ? AppText.localized("activity.group.standalone", language: language)
+            : AppText.localized("activity.group.one_time_room", language: language)
     }
 
     private func roomSummary(_ group: ActivityRoomGroup) -> String {
@@ -494,7 +487,11 @@ struct TransferStageView: View {
 
     private func transferSummary(_ record: TransferActivityRecord) -> String {
         var parts = [
-            stateText(record),
+            TransferActivityText.state(
+                record.state,
+                direction: record.direction,
+                language: language
+            ),
             itemCountText(UInt64(record.itemCount)),
         ]
         if record.totalBytes > 0 {
@@ -505,17 +502,11 @@ struct TransferStageView: View {
     }
 
     private func itemCountText(_ count: UInt64) -> String {
-        if count == 1 {
-            return AppText.value("1 item", "1 个项目", language: language)
-        }
-        return AppText.value("\(count) items", "\(count) 个项目", language: language)
+        TransferActivityText.itemCount(count, language: language)
     }
 
     private func transferCountText(_ count: Int) -> String {
-        if count == 1 {
-            return AppText.value("1 transfer", "1 次传输", language: language)
-        }
-        return AppText.value("\(count) transfers", "\(count) 次传输", language: language)
+        TransferActivityText.transferCount(count, language: language)
     }
 
     private func updatedText(_ date: Date) -> String {
@@ -523,11 +514,7 @@ struct TransferStageView: View {
         formatter.unitsStyle = .abbreviated
         formatter.locale = Locale(identifier: language.hasPrefix("zh") ? "zh_Hans" : "en")
         let relative = formatter.localizedString(for: date, relativeTo: Date())
-        return AppText.value(
-            "Updated \(relative)",
-            "\(relative)更新",
-            language: language
-        )
+        return TransferActivityText.updated(relative, language: language)
     }
 
     private func aggregateMetrics(for group: ActivityRoomGroup) -> ActivityMetrics {
@@ -606,11 +593,7 @@ struct TransferStageView: View {
         if !samples.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Label(
-                    AppText.value(
-                        "Transfer timeline",
-                        "传输时间线",
-                        language: language
-                    ),
+                    AppText.localized("activity.timeline", language: language),
                     systemImage: "stopwatch"
                 )
                 .font(.caption.weight(.semibold))
@@ -623,7 +606,7 @@ struct TransferStageView: View {
                 ) {
                     ForEach(Array(samples.enumerated()), id: \.offset) { _, sample in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(stageTitle(sample.stage))
+                            Text(TransferActivityText.stage(sample.stage, language: language))
                                 .font(.caption2)
                                 .foregroundStyle(Theme.muted)
                                 .lineLimit(1)
@@ -657,26 +640,6 @@ struct TransferStageView: View {
         case .relay: return "point.3.connected.trianglepath.dotted"
         case .wifiAware: return "wifi"
         case .other: return "link"
-        }
-    }
-
-    private func stageTitle(_ stage: FfiTransferStage) -> String {
-        switch stage {
-        case .sessionStarted: return AppText.value("Started", "开始", language: language)
-        case .connectionReady: return AppText.value("Connected", "连接完成", language: language)
-        case .authenticationStarted:
-            return AppText.value("Authenticating", "开始认证", language: language)
-        case .authenticationComplete:
-            return AppText.value("Authenticated", "认证完成", language: language)
-        case .manifestOffer: return AppText.value("Offer", "清单送达", language: language)
-        case .manifestAccepted: return AppText.value("Accepted", "清单确认", language: language)
-        case .firstPayload: return AppText.value("First byte", "首个数据", language: language)
-        case .payloadComplete:
-            return AppText.value("Payload complete", "数据完成", language: language)
-        case .deliveryComplete:
-            return AppText.value("Delivered", "交付完成", language: language)
-        case .canceled: return AppText.value("Canceled", "已取消", language: language)
-        case .failed: return AppText.value("Failed", "失败", language: language)
         }
     }
 
@@ -721,7 +684,7 @@ struct TransferStageView: View {
                     }
                     ShareLink(item: firstURL) {
                         Label(
-                            AppText.value("Share", "分享", language: language),
+                            AppText.localized("common.share", language: language),
                             systemImage: "square.and.arrow.up"
                         )
                     }
@@ -730,7 +693,7 @@ struct TransferStageView: View {
                         receivedItemsPresentation = ReceivedItemsPresentation(urls: urls)
                     } label: {
                         Label(
-                            AppText.value("View received items", "查看已接收项目", language: language),
+                            AppText.localized("activity.saved.view_items", language: language),
                             systemImage: "square.stack"
                         )
                     }
@@ -745,17 +708,9 @@ struct TransferStageView: View {
     private func completedDestinationText(_ urls: [URL]) -> String {
         let parentPaths = Set(urls.map { $0.deletingLastPathComponent().path })
         if parentPaths.count == 1, let parent = urls.first?.deletingLastPathComponent() {
-            return AppText.value(
-                "Saved in \(parent.lastPathComponent)",
-                "已保存到 \(parent.lastPathComponent)",
-                language: language
-            )
+            return TransferActivityText.savedIn(parent.lastPathComponent, language: language)
         }
-        return AppText.value(
-            "Saved \(urls.count) items",
-            "已保存 \(urls.count) 个项目",
-            language: language
-        )
+        return TransferActivityText.savedItems(urls.count, language: language)
     }
 
     private func icon(for record: TransferActivityRecord) -> String {
@@ -785,36 +740,10 @@ struct TransferStageView: View {
         let count = Int(record.itemCount)
         if count == 0 {
             return record.direction == .send
-                ? AppText.value("Outgoing transfer", "待发送内容", language: language)
-                : AppText.value("Incoming transfer", "待接收内容", language: language)
+                ? AppText.localized("activity.outgoing", language: language)
+                : AppText.localized("activity.incoming", language: language)
         }
-        if count == 1 { return AppText.value("1 item", "1 个项目", language: language) }
-        return AppText.value("\(count) items", "\(count) 个项目", language: language)
-    }
-
-    private func stateText(_ record: TransferActivityRecord) -> String {
-        switch record.state {
-        case .preparing: return AppText.value("Preparing locally", "正在本地准备", language: language)
-        case .waitingForPeer: return AppText.value("Waiting for peer", "正在等待对端", language: language)
-        case .pairing: return AppText.value("Pairing", "正在配对", language: language)
-        case .connecting: return AppText.value("Connecting", "正在连接", language: language)
-        case .awaitingDecision: return AppText.value("Waiting for your decision", "等待你的确认", language: language)
-        case .transferring:
-            return record.direction == .send
-                ? AppText.value("Sending", "正在发送", language: language)
-                : AppText.value("Receiving", "正在接收", language: language)
-        case .verifying: return AppText.value("Verifying", "正在校验", language: language)
-        case .saving: return AppText.value("Saving to destination", "正在保存到目标位置", language: language)
-        case .waitingForReceiverSave: return AppText.value("Waiting for receiver to save", "等待接收方完成保存", language: language)
-        case .finalizingDelivery: return AppText.value("Saved; finalizing delivery", "已保存，正在完成交付确认", language: language)
-        case .paused: return AppText.value("Paused", "已暂停", language: language)
-        case .delivered:
-            return record.direction == .send
-                ? AppText.value("Delivered", "已送达", language: language)
-                : AppText.value("Received", "已接收", language: language)
-        case .failed: return AppText.value("Failed", "失败", language: language)
-        case .canceled: return AppText.value("Canceled", "已取消", language: language)
-        }
+        return TransferActivityText.itemCount(UInt64(count), language: language)
     }
 
     private func tint(for state: TransferActivityState) -> Color {

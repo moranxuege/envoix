@@ -30,6 +30,54 @@ The iOS app and Share Extension require App Group
 `group.com.envoix.app.shared`. A physical iPhone also needs the normal local
 network, camera, signing, and Share Extension entitlements.
 
+### macOS Agent helper
+
+The macOS application embeds `EnvoixEngineHelper.app` in
+`Contents/Library/LoginItems`. Users explicitly enable it from Settings; the
+GUI then talks to the shared API 25 `FfiAgentControlClient` over the helper's
+owner-only Unix socket. Only the helper starts `FfiAgentHost`, owns the durable
+Engine, and receives the Engine Keychain access group.
+
+Use `scripts/apple-dev.sh macos-build` for certificate-independent compile-only
+builds and `scripts/apple-dev.sh macos-helper-test` for isolated host/control
+tests. These Debug artifacts intentionally omit the production helper Keychain
+entitlement and cannot persist verified pairing credentials. For a locally
+usable Debug app, install an Apple Development identity for Team `6638TTB2SF`
+and run `scripts/apple-dev.sh macos-debug-signed`. Set
+`ENVOIX_MACOS_ALLOW_PROVISIONING_UPDATES=1` only when Xcode is allowed to create
+or download the required development signing assets. If the Mac is not already
+registered with the team, separately set
+`ENVOIX_MACOS_ALLOW_DEVICE_REGISTRATION=1` to permit that external account
+change. The signed Debug command fails closed unless the GUI has no Engine
+Keychain group and the embedded helper has exactly
+`6638TTB2SF.com.envoix.engine.credentials`. Signed Debug uses the isolated
+helper bundle identifier `com.envoix.app.engine-helper.debug`; this prevents
+macOS Background Task Management from reusing an incompatible ad-hoc helper
+registration while the production helper keeps `com.envoix.app.engine-helper`.
+
+This command validates the signed helper host, its Agent control surface, and
+helper-owned Keychain persistence. Agent protocol v12 keeps first-contact
+`join_pairing` behind that helper: when a foreground macOS Room receives a
+verification request, the GUI closes its unverified session and sends only the
+bounded invitation, label, and one-time code over the owner-only socket. The
+helper reconnects, verifies, commits the Relationship, and keeps the credential
+inside its Keychain-backed vault. The macOS paired-device list and its Send/drop
+entry points use the helper's typed `ListDevices` and `CreateTransfer` requests;
+the GUI receives only non-secret device summaries and transfer identifiers. The
+legacy active-Room presentation and helper transfer Activity/event projection
+remain separate pending their full Agent snapshot and event migration; they
+must not reopen or copy the helper credential.
+
+API 25 also exposes the Rust-owned deployment defaults to both Apple targets.
+Agent protocol v12 can update the broker and relay stored on an existing
+Relationship without exporting or rotating its credential.
+
+A distributable build must use `scripts/apple-dev.sh
+macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and
+`ENVOIX_MACOS_NOTARY_PROFILE`; the command fails closed unless Developer ID
+signing, nested entitlement checks, notarization, staple validation, and
+Gatekeeper assessment all succeed.
+
 ## Transfer model
 
 - Files, folders, Photos, and Share Extension representations all become roots
@@ -67,6 +115,15 @@ with reauthorization, accessible-only, and remove-root actions.
 macOS supports mixed multi-file/folder selection and drag/drop through the same
 job preparation API. Security-scoped source and destination access is retained
 for the lifetime of the active job.
+
+Helper-owned paired peers are presented as devices on macOS. A device's
+**Send** button opens the native multi-item picker, while dropping files or
+folders onto that device submits those roots directly to the helper. The helper
+validates and seals the sources before `CreateTransfer` succeeds. The app also
+advertises a Finder service named **Send with Envoix**. It imports all selected
+Finder URLs and brings the main window forward; choosing a paired helper device
+then queues that selection. Invoking the Finder service by itself never starts
+network transfer.
 
 ## Invitations
 

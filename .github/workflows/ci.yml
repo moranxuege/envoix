@@ -1,89 +1,228 @@
 name: ci
 
-# Enforce formatting, Rust tests, and Android build/lint checks on PRs or explicit runs.
+# One routine gate for shared Rust and Android product code. Documentation and
+# Apple-only changes are handled elsewhere and do not consume Linux runners.
 on:
-  pull_request:
+  push:
+    branches:
+      - '**'
+    paths:
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - '.gitleaksignore'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'deny.toml'
+      - 'rust-toolchain.toml'
+      - 'apps/envoix-agent/**'
+      - 'apps/envoix-cli/**'
+      - 'apps/envoix-rendezvous-server/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'android/**'
+      - 'scripts/check-android-jni-transfer-surface.sh'
+      - 'scripts/cross-device-transfer-matrix.sh'
+      - 'scripts/matrix_contract.py'
+      - 'scripts/windows-agent-lifecycle-test.ps1'
+      - 'scripts/tests/**'
+      - 'scripts/*.py'
+      - 'scripts/with-build-cache-guard.sh'
+      - 'scripts/build-cache-guard.sh'
+      - 'tests/e2e/matrix/**'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: 1.96.0
+  CARGO_AUDIT_VERSION: 0.22.2
+  ENVOIX_BUILD_CACHE_MIN_FREE_GIB: '1'
+  ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
+
 jobs:
-  matrix-contract:
-    name: test matrix contract
+  secret-scan:
+    name: secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan pushed Git history for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+
+  dependency-policy:
+    name: Rust license + source policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check Rust licenses and dependency sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --locked
+          command-arguments: licenses sources
+          rust-version: ${{ env.RUST_VERSION }}
+
+  core:
+    name: contracts + Rust + security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Validate matrix registry
+      - name: Set up pinned Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_VERSION"
+          rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Validate repository contracts
         run: |
           python3 scripts/matrix_contract.py validate-registry tests/e2e/matrix/cases.v1.json
-          python3 -m unittest discover -s scripts/tests -p 'test_matrix_contract.py'
+          python3 scripts/release_contract.py
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
           bash -n scripts/cross-device-transfer-matrix.sh
-      - name: Publish registry summary
-        run: |
-          python3 scripts/matrix_contract.py render-report \
-            tests/e2e/matrix/cases.v1.json \
-            --output "$RUNNER_TEMP/matrix-registry.md"
-          cat "$RUNNER_TEMP/matrix-registry.md" >> "$GITHUB_STEP_SUMMARY"
-
-  rust:
-    name: rust fmt + clippy + test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Rust
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup component add rustfmt clippy
-          rustc --version
-      - uses: Swatinem/rust-cache@v2
-      - name: rustfmt
+          if grep -R -n -E --include='*.rs' 'pub use envoix_(session|transfer)::\*' crates/envoix-client/src; then
+            echo 'envoix-client must not wildcard-export lower architectural layers' >&2
+            exit 1
+          fi
+      - name: Check Rust formatting
         run: cargo fmt --all -- --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: test
-        run: cargo test --workspace --all-targets
+      - name: Lint Rust
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test Rust
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo test --locked --workspace --all-targets --all-features
+      - name: Install pinned cargo-audit
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+      - name: Audit Rust dependencies
+        run: cargo audit --deny unsound
+
+  windows:
+    name: Windows CLI + Agent
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up pinned Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy
+          rustup default "$RUST_VERSION"
+          rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Lint Windows CLI and Agent
+        shell: bash
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo clippy --locked -p envoix-cli -p envoix-agent --all-targets -- -D warnings
+      - name: Test Windows CLI and Agent
+        shell: bash
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo test --locked -p envoix-cli -p envoix-agent --all-targets
+      - name: Build Windows lifecycle pair
+        shell: bash
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo build --locked -p envoix-cli -p envoix-agent
+      - name: Test Windows Agent lifecycle
+        shell: pwsh
+        run: >-
+          ./scripts/windows-agent-lifecycle-test.ps1
+          -Cli ./target/debug/envoix.exe
+          -Agent ./target/debug/envoix-agent.exe
 
   android:
-    name: android lint + JNI build
+    name: Android lint + unit test + debug build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           distribution: temurin
           java-version: '17'
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Set up Rust + Android target
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+      - name: Set up Rust and Android target
         run: |
-          rustup update stable
-          rustup default stable
-          rustup target add aarch64-linux-android
-      - uses: Swatinem/rust-cache@v2
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" aarch64-linux-android
+          rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --version 4.1.2 --locked
-      - name: Install NDK r26 + SDK components
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Install Android build components
         run: |
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
-      - name: Kotlin style
-        working-directory: android
-        run: ./gradlew :app:ktlintCheck --no-daemon --stacktrace
-      - name: Lint
-        working-directory: android
-        run: ./gradlew :app:lintDebug --no-daemon --stacktrace
       - name: Check Android JNI compatibility
         run: scripts/check-android-jni-transfer-surface.sh
-      - name: Run Android unit tests and build app/instrumentation APKs
+      - name: Test Android production-signing guard
+        working-directory: android
+        run: |
+          partial_log="$RUNNER_TEMP/android-signing-partial.log"
+          if ENVOIX_ANDROID_KEY_ALIAS=incomplete \
+            ../scripts/with-build-cache-guard.sh ./gradlew help --no-daemon \
+            >"$partial_log" 2>&1; then
+            echo 'partial Android signing configuration was accepted' >&2
+            exit 1
+          fi
+          grep -F 'Android production signing configuration is incomplete' "$partial_log"
+
+          required_log="$RUNNER_TEMP/android-signing-required.log"
+          if ../scripts/with-build-cache-guard.sh ./gradlew help \
+            -Penvoix.requireProductionSigning=true --no-daemon \
+            >"$required_log" 2>&1; then
+            echo 'required Android production signing was accepted without credentials' >&2
+            exit 1
+          fi
+          grep -F 'Android production signing is required' "$required_log"
+      - name: Lint, test, and build Android
         working-directory: android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
           ENVOIX_ANDROID_ABIS: arm64-v8a
-        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
-      - name: Verify Android test artifacts
+        run: >-
+          ../scripts/with-build-cache-guard.sh
+          ./gradlew
+          :app:ktlintCheck
+          :app:lintDebug
+          :app:testDebugUnitTest
+          :app:assembleDebug
+          :app:cyclonedxDirectBom
+          --no-daemon
+          --stacktrace
+      - name: Check Android dependency licenses
+        run: >-
+          python3 scripts/check_sbom_licenses.py
+          android/app/build/reports/cyclonedx-direct/envoix-android.cdx.json
+      - name: Verify packaged JNI library
         run: |
-          test -s android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-          unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fx 'lib/arm64-v8a/libenvoix_jni.so'
+          test -s android/app/build/outputs/apk/debug/app-debug.apk
+          unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fx 'lib/arm64-v8a/libenvoix_ffi.so'
+          if unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fq 'libenvoix_jni.so'; then
+            echo 'legacy libenvoix_jni.so must not be packaged' >&2
+            exit 1
+          fi

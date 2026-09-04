@@ -3,7 +3,9 @@ package dev.envoix.app
 import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import org.json.JSONObject
+import dev.envoix.app.ffi.FfiInviteRole
+import dev.envoix.app.ffi.makePairingInvite
+import dev.envoix.app.ffi.parseRoomControlInvite
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,6 +16,63 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NfcInvitationNdefInstrumentedTest {
+    @Test
+    fun transferInviteRoutingUsesTheTypedBinding() {
+        val invite = makePairingInvite(FfiInviteRole.SEND, TEST_BROKER, "")
+
+        val parsed = requireNotNull(InviteCodec.parseForRouting(invite.payload))
+
+        assertNull(parsed.reference)
+        assertEquals(TEST_BROKER, parsed.broker)
+        assertNull(parsed.relay)
+        assertEquals("send", parsed.creatorRole)
+        assertEquals("receive", parsed.joinerRole)
+        assertEquals(invite.expiresAt.toLong(), parsed.expiresAt)
+    }
+
+    @Test
+    fun transferInvitationLifecyclesUseTypedPrivateStateAndSecretFreeActivityIdentity() {
+        val creator = requireNotNull(InviteCodec.generate("send", TEST_BROKER, ""))
+
+        assertEquals(creator.roomCode, creator.reference)
+        val creatorActivity = InviteCodec.activityReference(creator.reference, "send", creator = true)
+        assertEquals(6, creatorActivity.length)
+        assertTrue(creatorActivity.all(Char::isDigit))
+
+        val receiverInvite = makePairingInvite(FfiInviteRole.RECEIVE, TEST_BROKER, "")
+        val joiner = requireNotNull(InviteCodec.parseForRole(receiverInvite.payload, "send"))
+        assertEquals(receiverInvite.payload, joiner.reference)
+        val joinerActivity =
+            InviteCodec.activityReference(
+                requireNotNull(joiner.reference),
+                "send",
+                creator = false,
+            )
+        assertEquals(6, joinerActivity.length)
+        assertTrue(joinerActivity.all(Char::isDigit))
+
+        val receiverCreator = requireNotNull(InviteCodec.generate("receive", TEST_BROKER, ""))
+        val receiverCreatorActivity =
+            InviteCodec.activityReference(
+                receiverCreator.reference,
+                "receive",
+                creator = true,
+            )
+        assertEquals(6, receiverCreatorActivity.length)
+        assertTrue(receiverCreatorActivity.all(Char::isDigit))
+
+        val senderInvite = makePairingInvite(FfiInviteRole.SEND, TEST_BROKER, "")
+        val receiverJoiner = requireNotNull(InviteCodec.parseForRole(senderInvite.payload, "receive"))
+        val receiverJoinerActivity =
+            InviteCodec.activityReference(
+                requireNotNull(receiverJoiner.reference),
+                "receive",
+                creator = false,
+            )
+        assertEquals(6, receiverJoinerActivity.length)
+        assertTrue(receiverJoinerActivity.all(Char::isDigit))
+    }
+
     @Test
     fun uriRecordUsesTheExactHttpsCarrier() {
         val message = requireNotNull(NfcInvitationNdefCodec.messageFor(INVITE))
@@ -57,19 +116,11 @@ class NfcInvitationNdefInstrumentedTest {
         val room =
             "envoix://room/123456-a1b2-c3d4" +
                 "?broker=test&relay=https%3A%2F%2Frelay.test&expires=9999999999"
-        val parsedRoom =
-            JSONObject(
-                Native.parseRoomControlInvite(
-                    room,
-                    "fallback",
-                    "",
-                ),
-            )
-        val parsedAsTransfer = JSONObject(Native.parseInvite(room))
+        val parsedRoom = parseRoomControlInvite(room, "fallback", "")
+        val parsedAsTransfer = InviteCodec.parseForRouting(room)
 
-        assertFalse(parsedRoom.toString(), parsedRoom.has("error"))
-        assertEquals(room, parsedRoom.getString("payload"))
-        assertTrue(parsedAsTransfer.toString(), parsedAsTransfer.has("error"))
+        assertEquals(room, parsedRoom.payload)
+        assertNull(parsedAsTransfer)
     }
 
     @Test
@@ -177,5 +228,8 @@ class NfcInvitationNdefInstrumentedTest {
 
     private companion object {
         const val INVITE = "envoix://invite/v2/abc_DEF-123"
+        const val TEST_BROKER =
+            "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff" +
+                "@67.230.187.238:8445"
     }
 }

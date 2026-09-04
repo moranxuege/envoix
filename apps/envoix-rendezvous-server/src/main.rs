@@ -143,16 +143,23 @@ struct Cli {
     geoip_asn: Option<PathBuf>,
     /// HTTP address for the per-room log-collection endpoint
     /// (`POST /logs/<room_id>?side=…`, `GET /logs/<room_id>`). Omit to disable.
+    /// A non-loopback bind requires `--tls-cert` and `--tls-key`; plain HTTP is
+    /// accepted only on loopback for local development or TLS proxying.
     #[arg(long)]
     log_bind: Option<SocketAddr>,
     /// How long (seconds) collected logs are kept after their last update.
     #[arg(long, default_value_t = 3600)]
     log_ttl: u64,
+    /// File holding the bearer token required for diagnostic uploads
+    /// (`POST /logs/<room>`). Without this option uploads are disabled. File
+    /// input keeps the token out of argv and process listings.
+    #[arg(long)]
+    log_upload_token_file: Option<PathBuf>,
     /// File holding the operator bearer token that gates report RETRIEVAL
-    /// (`GET /logs/<room>`); uploads stay open. A room id is a low-entropy
-    /// correlation key, not authorization. File (not argv) so the secret never
-    /// leaks via `ps`. Without this AND without `--unsafe-open-log-view`, report
-    /// retrieval is DISABLED (fail-closed).
+    /// (`GET /logs/<room>`). A room id is a low-entropy correlation key, not
+    /// authorization. File (not argv) so the secret never leaks via `ps`.
+    /// Without this AND without `--unsafe-open-log-view`, report retrieval is
+    /// DISABLED (fail-closed).
     #[arg(long)]
     log_view_token_file: Option<PathBuf>,
     /// Explicitly allow ANONYMOUS report retrieval (no token). Reads become
@@ -182,6 +189,7 @@ enum LogFormat {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let broker_config = cli.broker_config()?;
+    cli.validate_log_transport()?;
 
     // Pin the process-level rustls provider before anything touches TLS; with
     // both iroh and axum-server in the tree the automatic choice is ambiguous.
@@ -253,20 +261,27 @@ async fn main() -> Result<()> {
     // Optional per-room log-collection endpoint on its own HTTP(S) port. Off
     // unless --log-bind is given; a separate task that never touches the
     // pairing endpoint. With --tls-cert/--tls-key it terminates TLS itself
-    // (there is no proxy in front of this port).
+    // itself. A loopback-only HTTP listener may instead sit behind a TLS proxy;
+    // source rate limits then see the proxy as the peer and must also be applied
+    // at that proxy.
     if let Some(addr) = cli.log_bind {
+        let upload_auth = match &cli.log_upload_token_file {
+            Some(path) => {
+                logs::UploadAuth::Token(load_bearer_token(path, "--log-upload-token-file")?)
+            }
+            None => {
+                tracing::warn!(
+                    "diagnostic uploads (POST /logs/<room>) are DISABLED (fail-closed) — set \
+                     --log-upload-token-file to enable authenticated uploads"
+                );
+                logs::UploadAuth::Closed
+            }
+        };
         // How report retrieval (GET) is gated. A token file wins; else the
         // explicit --unsafe-open-log-view opens it; else fail-CLOSED (default).
         let view_auth = match (&cli.log_view_token_file, cli.unsafe_open_log_view) {
             (Some(path), _) => {
-                // Read from a file so it never appears in `ps`; empty ⇒ error.
-                let raw = std::fs::read_to_string(path)
-                    .with_context(|| format!("reading --log-view-token-file {}", path.display()))?;
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    anyhow::bail!("--log-view-token-file {} is empty", path.display());
-                }
-                logs::ViewAuth::Token(std::sync::Arc::from(trimmed))
+                logs::ViewAuth::Token(load_bearer_token(path, "--log-view-token-file")?)
             }
             (None, true) => {
                 tracing::warn!(
@@ -284,7 +299,7 @@ async fn main() -> Result<()> {
                 logs::ViewAuth::Closed
             }
         };
-        let router = logs::router(log_store.clone(), view_auth);
+        let router = logs::router(log_store.clone(), upload_auth, view_auth);
         if let (Some(cert), Some(key)) = (cli.tls_cert, cli.tls_key) {
             let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
                 .await
@@ -307,7 +322,7 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 tracing::info!(%addr, "log endpoint listening (https)");
                 if let Err(error) = axum_server::bind_rustls(addr, config)
-                    .serve(router.into_make_service())
+                    .serve(router.into_make_service_with_connect_info::<SocketAddr>())
                     .await
                 {
                     tracing::error!(%error, "log endpoint failed");
@@ -318,7 +333,12 @@ async fn main() -> Result<()> {
                 match tokio::net::TcpListener::bind(addr).await {
                     Ok(listener) => {
                         tracing::info!(%addr, "log endpoint listening (http)");
-                        if let Err(error) = axum::serve(listener, router).await {
+                        if let Err(error) = axum::serve(
+                            listener,
+                            router.into_make_service_with_connect_info::<SocketAddr>(),
+                        )
+                        .await
+                        {
                             tracing::error!(%error, "log endpoint failed");
                         }
                     }
@@ -339,7 +359,35 @@ async fn main() -> Result<()> {
     .await
 }
 
+fn load_bearer_token(path: &Path, option: &str) -> Result<Arc<str>> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {option} {}", path.display()))?;
+    let token = raw.trim();
+    if token.is_empty()
+        || token.len() > 1024
+        || !token.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        anyhow::bail!(
+            "{option} {} must contain 1..=1024 visible ASCII bytes",
+            path.display()
+        );
+    }
+    Ok(Arc::from(token))
+}
+
 impl Cli {
+    fn validate_log_transport(&self) -> Result<()> {
+        let Some(address) = self.log_bind else {
+            return Ok(());
+        };
+        if self.tls_cert.is_none() && !address.ip().is_loopback() {
+            anyhow::bail!(
+                "a non-loopback --log-bind requires --tls-cert and --tls-key; plain HTTP is local-only"
+            );
+        }
+        Ok(())
+    }
+
     fn broker_config(&self) -> Result<BrokerConfig> {
         let config = BrokerConfig {
             room_ttl: Duration::from_secs(self.room_ttl),

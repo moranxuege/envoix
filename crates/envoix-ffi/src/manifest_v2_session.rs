@@ -12,9 +12,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_client::api::{
     AuthenticationHandler, AuthenticationOutcome, DestinationDecisionV2, DestinationRequestV2,
     EventSink, InvitationConsumption, InvitationLease, PairingConfig, PeerSource,
-    PendingManifestV2Receive, PendingNativeManifestV2Receive, RendezvousCause, SessionError,
-    TransferCancelToken, TransferDirection as CoreTransferDirection, TransferEvent, TransferStage,
-    acquire_invitation, acquire_remembered_credential, acquire_shared_token, parse_broker_addr,
+    PendingManifestV2Receive, PendingNativeManifestV2Receive, SessionError, TransferCancelToken,
+    TransferDirection as CoreTransferDirection, TransferEvent, TransferStage, acquire_invitation,
+    acquire_remembered_credential, acquire_shared_token, parse_broker_addr,
     receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_over_datagram_transport,
     receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_remembered,
     receive_manifest_v2_offer_via_room_hybrid_with_authentication,
@@ -25,18 +25,29 @@ use envoix_client::api::{
     send_manifest_v2_via_room_hybrid_with_authentication,
     send_manifest_v2_via_room_with_authentication,
 };
+use envoix_client::failure::project_session_failure;
+use envoix_client::model::{
+    FailureCategory as AppFailureCategory, FailureCode as AppFailureCode,
+    FailureOrigin as AppFailureOrigin, FailureOutcome as AppFailureOutcome,
+    FailurePhase as AppFailurePhase, FailureSessionDisposition as AppFailureSessionDisposition,
+    RecoveryAction as AppRecoveryAction, RememberedAttemptOutcome, RememberedGenerationRole,
+    TransferDirection as AppTransferDirection, remembered_generation_attempts,
+};
 use envoix_types::{DataPath, PairingStep};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiConnectionPathEvent, FfiConnectionPathEventKind,
-    FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailurePhase,
-    FfiManifestV2Phase, FfiNativeDatagramTransport, FfiNativeDuplexTransport, FfiPathPolicy,
-    FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferMode,
-    FfiTransferRequest, FfiTransferStage, FfiTransferStageTiming, TransferObserver,
-    build_client_for_request, core_datagram_transport, core_native_transport, on_ffi_runtime,
-    op_err, peer_sources_for_request, spawn_on_ffi_runtime, transfer_options_for_request,
+    FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailureOutcome,
+    FfiFailurePhase, FfiFailureSessionDisposition, FfiManifestV2Phase, FfiNativeDatagramTransport,
+    FfiNativeDuplexTransport, FfiPathPolicy, FfiPlatformReceiveDestinationV2, FfiRecoveryAction,
+    FfiRememberedCredentialVault, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2,
+    FfiTransferMode, FfiTransferRequest, FfiTransferStage, FfiTransferStageTiming,
+    ManifestV2PlatformDestination, TransferObserver, build_client_for_request,
+    core_datagram_transport, core_native_transport, on_ffi_runtime, op_err,
+    peer_sources_for_request, prepare_platform_destination, spawn_on_ffi_runtime,
+    transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -88,6 +99,12 @@ pub struct FfiManifestV2Completion {
     pub delivery_proof_digest: Vec<u8>,
     /// Receiver-only final root paths. Sender completions keep this empty.
     pub saved_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiPlatformManifestV2Completion {
+    pub transfer: FfiManifestV2Completion,
+    pub saved_roots: Vec<super::FfiDestinationSavedRootV2>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -186,6 +203,44 @@ impl CorePendingManifestV2Receive {
             }
         }
     }
+
+    async fn receive_with_result_gate(
+        self,
+        destination: DestinationRequestV2,
+        state_directory: PathBuf,
+        result_gate: &dyn envoix_client::api::ManifestV2ResultGate,
+        cancellation: &TransferCancelToken,
+    ) -> Result<envoix_client::api::ReceiverManifestV2SessionSummary, SessionError> {
+        match self {
+            Self::Iroh(pending) => {
+                pending
+                    .receive_with_result_gate(
+                        destination,
+                        state_directory,
+                        result_gate,
+                        cancellation,
+                    )
+                    .await
+            }
+            Self::Native(pending) => {
+                pending
+                    .receive_with_result_gate(
+                        destination,
+                        state_directory,
+                        result_gate,
+                        cancellation,
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn close_with_failure(self) {
+        match self {
+            Self::Iroh(pending) => pending.close_with_failure().await,
+            Self::Native(pending) => pending.close_with_failure().await,
+        }
+    }
 }
 
 #[uniffi::export]
@@ -254,10 +309,8 @@ impl FfiPendingManifestV2Receive {
             observer.on_phase(FfiManifestV2Phase::Delivered);
             observer.on_completed(self.summary.total_plaintext_bytes);
             let saved_paths = summary
-                .destination_plan
-                .root_plans
+                .saved_root_paths
                 .iter()
-                .filter_map(|root| summary.destination_plan.target_path_for_root(root.root_id))
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect();
             Ok(FfiManifestV2Completion {
@@ -267,6 +320,84 @@ impl FfiPendingManifestV2Receive {
                 total_plaintext_bytes: self.summary.total_plaintext_bytes,
                 delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
                 saved_paths,
+            })
+        })
+        .await
+    }
+
+    /// Receives into Rust-owned verified staging, then awaits a typed
+    /// platform save before publishing receiver results or delivery proof.
+    pub async fn receive_with_platform_destination(
+        &self,
+        destination_request: FfiPlatformReceiveDestinationV2,
+        destination: Arc<dyn ManifestV2PlatformDestination>,
+        observer: Arc<dyn TransferObserver>,
+    ) -> Result<FfiPlatformManifestV2Completion, EnvoixError> {
+        on_ffi_runtime(async {
+            let pending =
+                self.pending
+                    .lock()
+                    .await
+                    .take()
+                    .ok_or_else(|| EnvoixError::Operation {
+                        reason: "this authenticated offer has already been continued".into(),
+                    })?;
+            let prepared = prepare_platform_destination(
+                &pending.offer().manifest,
+                destination_request,
+                destination,
+            )
+            .await;
+            let (destination_request, result_gate) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    pending.close_with_failure().await;
+                    report_v2_failure(
+                        observer.as_ref(),
+                        &error,
+                        FfiTransferDirection::Receive,
+                        FfiFailurePhase::Negotiating,
+                    );
+                    return Err(op_err(error));
+                }
+            };
+            observer.on_started(
+                u32::try_from(self.entries.len()).unwrap_or(u32::MAX),
+                self.summary.total_plaintext_bytes,
+            );
+            let summary = match pending
+                .receive_with_result_gate(
+                    destination_request,
+                    self.state_directory.clone(),
+                    &result_gate,
+                    &self.cancellation.token,
+                )
+                .await
+            {
+                Ok(summary) => summary,
+                Err(error) => {
+                    report_v2_failure(
+                        observer.as_ref(),
+                        &error,
+                        FfiTransferDirection::Receive,
+                        FfiFailurePhase::Committing,
+                    );
+                    return Err(op_err(error));
+                }
+            };
+            let saved_roots = result_gate.committed_roots().map_err(op_err)?;
+            observer.on_phase(FfiManifestV2Phase::Delivered);
+            observer.on_completed(self.summary.total_plaintext_bytes);
+            Ok(FfiPlatformManifestV2Completion {
+                transfer: FfiManifestV2Completion {
+                    job_id: self.summary.job_id.clone(),
+                    entry_count: u32::try_from(summary.data_plane.entry_results.len())
+                        .unwrap_or(u32::MAX),
+                    total_plaintext_bytes: self.summary.total_plaintext_bytes,
+                    delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
+                    saved_paths: Vec::new(),
+                },
+                saved_roots,
             })
         })
         .await
@@ -314,7 +445,7 @@ fn project_connection_path(
 }
 
 struct NativeAuthentication {
-    observer: Arc<dyn TransferObserver>,
+    vault: Arc<dyn FfiRememberedCredentialVault>,
     remember_consent: bool,
     rotation: Option<(Vec<u8>, u64)>,
     invitation_consumption: Option<InvitationConsumption>,
@@ -329,18 +460,28 @@ struct SendAttemptContext<'a> {
     events: Arc<dyn EventSink>,
     cancel: &'a TransferCancelToken,
     relay: Option<&'a str>,
+    vault: Arc<dyn FfiRememberedCredentialVault>,
+    remember_consent: bool,
+}
+
+struct ReceiveAttemptContext<'a> {
+    config: envoix_client::api::SessionConfig,
+    events: Arc<dyn EventSink>,
+    vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
+    cancel: &'a TransferCancelToken,
+    relay: Option<&'a str>,
     remember_consent: bool,
 }
 
 impl NativeAuthentication {
     fn invitation(
-        observer: Arc<dyn TransferObserver>,
+        vault: Arc<dyn FfiRememberedCredentialVault>,
         remember_consent: bool,
         invitation_consumption: InvitationConsumption,
     ) -> Self {
         Self {
-            observer,
+            vault,
             remember_consent,
             rotation: None,
             invitation_consumption: Some(invitation_consumption),
@@ -350,12 +491,12 @@ impl NativeAuthentication {
     }
 
     fn rotation(
-        observer: Arc<dyn TransferObserver>,
+        vault: Arc<dyn FfiRememberedCredentialVault>,
         opaque_credential: Vec<u8>,
         next_generation: u64,
     ) -> Self {
         Self {
-            observer,
+            vault,
             remember_consent: false,
             rotation: Some((opaque_credential, next_generation)),
             invitation_consumption: None,
@@ -392,7 +533,7 @@ impl AuthenticationHandler for NativeAuthentication {
         let Some((opaque, generation)) = credential else {
             return Ok(());
         };
-        if !self.observer.on_remembered_credential(opaque, generation) {
+        if !self.vault.store_remembered_credential(opaque, generation) {
             return Err(SessionError::Storage(
                 "protected remembered credential could not be persisted".into(),
             ));
@@ -400,14 +541,6 @@ impl AuthenticationHandler for NativeAuthentication {
         self.persisted.store(true, Ordering::Release);
         Ok(())
     }
-}
-
-fn should_stop_remembered_fallback<T>(
-    result: &Result<T, SessionError>,
-    authentication: &NativeAuthentication,
-    cancel: &TransferCancelToken,
-) -> bool {
-    result.is_ok() || authentication.authenticated() || cancel.is_cancelled()
 }
 
 impl EventSink for NativeSessionEvents {
@@ -511,6 +644,7 @@ pub async fn send_transfer_job_v2(
     request: FfiTransferRequest,
     state_directory: String,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<FfiManifestV2Completion, EnvoixError> {
     spawn_on_ffi_runtime(async move {
@@ -548,7 +682,7 @@ pub async fn send_transfer_job_v2(
                     events,
                     cancel: &cancellation.token,
                     relay: options.relay.as_deref(),
-                    observer: observer.clone(),
+                    vault: credential_vault.clone(),
                     remember_consent: request.remember_consent,
                 },
             )
@@ -611,6 +745,7 @@ pub async fn send_transfer_job_v2_nearby_hybrid(
     transport: Arc<dyn FfiNativeDatagramTransport>,
     maximum_datagram_size: u32,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<FfiManifestV2Completion, EnvoixError> {
     spawn_on_ffi_runtime(async move {
@@ -634,7 +769,7 @@ pub async fn send_transfer_job_v2_nearby_hybrid(
             observer: observer.clone(),
         });
         let authentication = NativeAuthentication::invitation(
-            observer.clone(),
+            credential_vault,
             request.remember_consent,
             lease.consumption(),
         );
@@ -810,6 +945,7 @@ pub async fn receive_transfer_offer_v2(
     request: FfiTransferRequest,
     state_directory: String,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
     spawn_on_ffi_runtime(async move {
@@ -826,6 +962,7 @@ pub async fn receive_transfer_offer_v2(
             attempts,
             state_directory,
             cancellation,
+            credential_vault,
             observer,
         )
         .await
@@ -835,6 +972,7 @@ pub async fn receive_transfer_offer_v2(
 
 /// Receives a Nearby Room offer on one iroh endpoint carrying Wi-Fi Aware,
 /// direct IP, and relay candidates.
+#[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub async fn receive_transfer_offer_v2_nearby_hybrid(
     settings: EnvoixRuntimeSettings,
@@ -843,6 +981,7 @@ pub async fn receive_transfer_offer_v2_nearby_hybrid(
     transport: Arc<dyn FfiNativeDatagramTransport>,
     maximum_datagram_size: u32,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
     spawn_on_ffi_runtime(async move {
@@ -857,7 +996,7 @@ pub async fn receive_transfer_offer_v2_nearby_hybrid(
             observer: observer.clone(),
         });
         let authentication = NativeAuthentication::invitation(
-            observer.clone(),
+            credential_vault,
             request.remember_consent,
             lease.consumption(),
         );
@@ -1002,6 +1141,7 @@ async fn receive_offer_from_attempts(
     attempts: Vec<super::RouteAttempt>,
     state_directory: PathBuf,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
     if attempts.len() == 1 {
@@ -1015,6 +1155,7 @@ async fn receive_offer_from_attempts(
             &settings,
             &request,
             attempt,
+            credential_vault,
             observer.clone(),
             &cancellation.token,
         )
@@ -1043,12 +1184,14 @@ async fn receive_offer_from_attempts(
         route_cancellations.push(route_cancellation.clone());
         let settings = settings.clone();
         let request = request.clone();
+        let credential_vault = credential_vault.clone();
         let observer = observer.clone();
         routes.spawn(async move {
             let result = receive_one_offer_attempt(
                 &settings,
                 &request,
                 attempt,
+                credential_vault,
                 observer,
                 &route_cancellation,
             )
@@ -1131,6 +1274,7 @@ async fn receive_one_offer_attempt(
     settings: &EnvoixRuntimeSettings,
     request: &FfiTransferRequest,
     attempt: super::RouteAttempt,
+    credential_vault: Arc<dyn FfiRememberedCredentialVault>,
     observer: Arc<dyn TransferObserver>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, SessionError> {
@@ -1144,12 +1288,15 @@ async fn receive_one_offer_attempt(
     });
     receive_offer_attempt(
         &attempt.source,
-        config,
-        events,
-        observer,
-        cancel,
-        options.relay.as_deref(),
-        request.remember_consent,
+        ReceiveAttemptContext {
+            config,
+            events,
+            vault: credential_vault,
+            observer,
+            cancel,
+            relay: options.relay.as_deref(),
+            remember_consent: request.remember_consent,
+        },
     )
     .await
 }
@@ -1213,7 +1360,7 @@ async fn send_attempt(
         events,
         cancel,
         relay,
-        observer,
+        vault,
         remember_consent,
     } = context;
     match source {
@@ -1237,7 +1384,7 @@ async fn send_attempt(
             let lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
             let authentication =
-                NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
+                NativeAuthentication::invitation(vault, remember_consent, lease.consumption());
             let result = send_manifest_v2_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
@@ -1262,12 +1409,12 @@ async fn send_attempt(
         } => {
             let credential = acquire_remembered_credential(credential_ref).map_err(op_err_core)?;
             let broker_addr = parse_broker_addr(broker, relay)?;
-            // Keep joining the receiver's fallback window before trying our
-            // own previous generation.
-            let mut generations = vec![*generation, *generation];
-            if let Some(previous) = previous_generation {
-                generations.push(*previous);
-            }
+            let generations = remembered_generation_attempts(
+                *generation,
+                *previous_generation,
+                RememberedGenerationRole::Connector,
+            )
+            .map_err(|error| SessionError::InvalidInput(error.to_string()))?;
             let mut last_error = None;
             for generation in generations {
                 let next_generation = generation.checked_add(1).ok_or_else(|| {
@@ -1276,7 +1423,7 @@ async fn send_attempt(
                     )
                 })?;
                 let authentication = NativeAuthentication::rotation(
-                    observer.clone(),
+                    vault.clone(),
                     credential.to_opaque(),
                     next_generation,
                 );
@@ -1292,7 +1439,13 @@ async fn send_attempt(
                     &authentication,
                 )
                 .await;
-                if should_stop_remembered_fallback(&result, &authentication, cancel) {
+                if (RememberedAttemptOutcome {
+                    succeeded: result.is_ok(),
+                    authenticated: authentication.authenticated(),
+                    canceled: cancel.is_cancelled(),
+                })
+                .should_stop_fallback()
+                {
                     return result;
                 }
                 last_error = result.err();
@@ -1324,13 +1477,17 @@ async fn send_attempt(
 
 async fn receive_offer_attempt(
     source: &PeerSource,
-    config: envoix_client::api::SessionConfig,
-    events: Arc<dyn EventSink>,
-    observer: Arc<dyn TransferObserver>,
-    cancel: &TransferCancelToken,
-    relay: Option<&str>,
-    remember_consent: bool,
+    context: ReceiveAttemptContext<'_>,
 ) -> Result<PendingManifestV2Receive, SessionError> {
+    let ReceiveAttemptContext {
+        config,
+        events,
+        vault,
+        observer,
+        cancel,
+        relay,
+        remember_consent,
+    } = context;
     let listen = config.clone();
     match source {
         PeerSource::ShowManual { token_ref } => {
@@ -1377,7 +1534,7 @@ async fn receive_offer_attempt(
             let lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
             let authentication =
-                NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
+                NativeAuthentication::invitation(vault, remember_consent, lease.consumption());
             let result = receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
@@ -1401,13 +1558,12 @@ async fn receive_offer_attempt(
         } => {
             let credential = acquire_remembered_credential(credential_ref).map_err(op_err_core)?;
             let broker_addr = parse_broker_addr(broker, relay)?;
-            // Offset the sender's current/current/previous schedule so either
-            // side of a one-generation crash can rendezvous.
-            let mut generations = vec![*generation];
-            if let Some(previous) = previous_generation {
-                generations.push(*previous);
-                generations.push(*generation);
-            }
+            let generations = remembered_generation_attempts(
+                *generation,
+                *previous_generation,
+                RememberedGenerationRole::Responder,
+            )
+            .map_err(|error| SessionError::InvalidInput(error.to_string()))?;
             let last_index = generations.len() - 1;
             let mut last_error = None;
             for (index, generation) in generations.into_iter().enumerate() {
@@ -1417,7 +1573,7 @@ async fn receive_offer_attempt(
                     )
                 })?;
                 let authentication = NativeAuthentication::rotation(
-                    observer.clone(),
+                    vault.clone(),
                     credential.to_opaque(),
                     next_generation,
                 );
@@ -1441,7 +1597,13 @@ async fn receive_offer_attempt(
                 } else {
                     receive.await
                 };
-                if should_stop_remembered_fallback(&result, &authentication, cancel) {
+                if (RememberedAttemptOutcome {
+                    succeeded: result.is_ok(),
+                    authenticated: authentication.authenticated(),
+                    canceled: cancel.is_cancelled(),
+                })
+                .should_stop_fallback()
+                {
                     return result;
                 }
                 last_error = result.err();
@@ -1563,336 +1725,151 @@ fn report_v2_failure(
     direction: FfiTransferDirection,
     fallback_phase: FfiFailurePhase,
 ) {
-    let (projected_error, invitation_consumed) = match error {
-        SessionError::InvitationConsumed(source) => (source.as_ref(), true),
-        error => (error, false),
-    };
-    let (code, category, phase, origin, retryable, mut recovery_action, message_key) =
-        match projected_error {
-            SessionError::Cause { cause, .. } => manifest_v2_cause_projection(cause.code()),
-            SessionError::Rendezvous { cause, .. } => rendezvous_cause_projection(*cause),
-            SessionError::Cancelled => (
-                FfiFailureCode::UserCanceled,
-                FfiFailureCategory::User,
-                fallback_phase,
-                FfiFailureOrigin::Local,
-                false,
-                FfiRecoveryAction::None,
-                "transfer.user_canceled",
-            ),
-            SessionError::Transport(_) | SessionError::Discovery(_) => (
-                FfiFailureCode::NetworkLost,
-                FfiFailureCategory::Network,
-                fallback_phase,
-                FfiFailureOrigin::Unknown,
-                true,
-                FfiRecoveryAction::Resume,
-                "transfer.network_lost",
-            ),
-            SessionError::Crypto(_) => (
-                FfiFailureCode::AuthenticationFailed,
-                FfiFailureCategory::Authentication,
-                FfiFailurePhase::Authenticating,
-                FfiFailureOrigin::Unknown,
-                true,
-                FfiRecoveryAction::RePair,
-                "transfer.authentication_failed",
-            ),
-            SessionError::Protocol(_) => (
-                FfiFailureCode::ProtocolOrIntegrityFailure,
-                FfiFailureCategory::Integrity,
-                FfiFailurePhase::Verifying,
-                FfiFailureOrigin::Unknown,
-                false,
-                FfiRecoveryAction::None,
-                "transfer.protocol_or_integrity_failure",
-            ),
-            SessionError::Io(_) | SessionError::Storage(_) => (
-                if direction == FfiTransferDirection::Receive {
-                    FfiFailureCode::ReceiverSaveFailed
-                } else {
-                    FfiFailureCode::SenderSourceUnavailable
-                },
-                FfiFailureCategory::Storage,
-                fallback_phase,
-                FfiFailureOrigin::Local,
-                true,
-                io_failure_recovery(direction),
-                if direction == FfiTransferDirection::Receive {
-                    "transfer.receiver_save_failed"
-                } else {
-                    "transfer.sender_source_unavailable"
-                },
-            ),
-            SessionError::InvalidInput(_) => (
-                FfiFailureCode::UnsupportedFeature,
-                FfiFailureCategory::Unsupported,
-                fallback_phase,
-                FfiFailureOrigin::Local,
-                false,
-                FfiRecoveryAction::None,
-                "transfer.unsupported_feature",
-            ),
-            SessionError::Transfer(_) => (
-                FfiFailureCode::InternalError,
-                FfiFailureCategory::Internal,
-                fallback_phase,
-                FfiFailureOrigin::Unknown,
-                true,
-                FfiRecoveryAction::Retry,
-                "transfer.internal_error",
-            ),
-            SessionError::InvitationConsumed(_) => {
-                unreachable!("consumed invitation was unwrapped")
-            }
-        };
-    if invitation_consumed && retryable {
-        recovery_action = FfiRecoveryAction::RePair;
-    }
+    let projection = project_session_failure(
+        error,
+        app_transfer_direction(direction),
+        app_failure_phase(fallback_phase),
+    );
+    let failure = projection.failure;
     observer.on_transfer_failed(FfiTransferFailure {
-        code,
-        category,
-        phase,
-        origin,
+        code: ffi_failure_code(failure.code),
+        category: ffi_failure_category(failure.code.category()),
+        phase: ffi_failure_phase(failure.phase),
+        origin: ffi_failure_origin(projection.origin),
         direction,
-        retryable,
-        recovery_action,
-        user_message_key: message_key.into(),
+        retryable: failure.retryable,
+        recovery_action: ffi_recovery_action(failure.recovery_action),
+        outcome: ffi_failure_outcome(failure.outcome()),
+        session_disposition: ffi_failure_session_disposition(failure.session_disposition()),
+        user_message_key: failure.code.user_message_key().into(),
         diagnostic_message: error.to_string(),
     });
 }
 
-#[allow(clippy::type_complexity)]
-fn rendezvous_cause_projection(
-    cause: RendezvousCause,
-) -> (
-    FfiFailureCode,
-    FfiFailureCategory,
-    FfiFailurePhase,
-    FfiFailureOrigin,
-    bool,
-    FfiRecoveryAction,
-    &'static str,
-) {
-    let (code, retryable, recovery, key) = match cause {
-        RendezvousCause::RoomNotFound => (
-            FfiFailureCode::RoomNotFound,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.room_not_found",
-        ),
-        RendezvousCause::RoomExpired => (
-            FfiFailureCode::RoomExpired,
-            true,
-            FfiRecoveryAction::RePair,
-            "transfer.room_expired",
-        ),
-        RendezvousCause::RoomFull => (
-            FfiFailureCode::RoomFull,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.room_full",
-        ),
-        RendezvousCause::RoomRateLimited => (
-            FfiFailureCode::RoomRateLimited,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.room_rate_limited",
-        ),
-        RendezvousCause::RoomUnderAttack => (
-            FfiFailureCode::RoomUnderAttack,
-            true,
-            FfiRecoveryAction::RePair,
-            "transfer.room_under_attack",
-        ),
-        RendezvousCause::EndpointRateLimited => (
-            FfiFailureCode::EndpointRateLimited,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.endpoint_rate_limited",
-        ),
-        RendezvousCause::IpRateLimited => (
-            FfiFailureCode::IpRateLimited,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.ip_rate_limited",
-        ),
-        RendezvousCause::ServerBusy => (
-            FfiFailureCode::ServerBusy,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.server_busy",
-        ),
-        RendezvousCause::MalformedJoin => (
-            FfiFailureCode::MalformedJoin,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.malformed_join",
-        ),
-        RendezvousCause::UnsupportedVersion => (
-            FfiFailureCode::UnsupportedRendezvousVersion,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.unsupported_rendezvous_version",
-        ),
-    };
-    (
-        code,
-        if matches!(
-            cause,
-            RendezvousCause::MalformedJoin | RendezvousCause::UnsupportedVersion
-        ) {
-            FfiFailureCategory::Unsupported
-        } else {
-            FfiFailureCategory::Network
-        },
-        FfiFailurePhase::Pairing,
-        FfiFailureOrigin::Unknown,
-        retryable,
-        recovery,
-        key,
-    )
-}
-
-fn io_failure_recovery(direction: FfiTransferDirection) -> FfiRecoveryAction {
-    if direction == FfiTransferDirection::Receive {
-        FfiRecoveryAction::Resume
-    } else {
-        FfiRecoveryAction::Retry
+fn app_transfer_direction(direction: FfiTransferDirection) -> AppTransferDirection {
+    match direction {
+        FfiTransferDirection::Send => AppTransferDirection::Send,
+        FfiTransferDirection::Receive => AppTransferDirection::Receive,
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn manifest_v2_cause_projection(
-    cause: &str,
-) -> (
-    FfiFailureCode,
-    FfiFailureCategory,
-    FfiFailurePhase,
-    FfiFailureOrigin,
-    bool,
-    FfiRecoveryAction,
-    &'static str,
-) {
-    let local = FfiFailureOrigin::Local;
-    match cause {
-        "nearby_hybrid_pre_auth_transport_failure" => (
-            FfiFailureCode::NetworkLost,
-            FfiFailureCategory::Network,
-            FfiFailurePhase::Connecting,
-            FfiFailureOrigin::Unknown,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.network_lost",
-        ),
-        "sender_source_unavailable" => (
-            FfiFailureCode::SenderSourceUnavailable,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Transferring,
-            local,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.sender_source_unavailable",
-        ),
-        "sender_permission_lost" => (
-            FfiFailureCode::SenderPermissionLost,
-            FfiFailureCategory::Permission,
-            FfiFailurePhase::Transferring,
-            local,
-            true,
-            FfiRecoveryAction::OpenSettings,
-            "transfer.sender_permission_lost",
-        ),
-        "sender_source_changed" => (
-            FfiFailureCode::SenderSourceChanged,
-            FfiFailureCategory::Integrity,
-            FfiFailurePhase::Verifying,
-            local,
-            true,
-            FfiRecoveryAction::Retry,
-            "transfer.sender_source_changed",
-        ),
-        "sender_item_removed" => (
-            FfiFailureCode::SenderItemRemoved,
-            FfiFailureCategory::User,
-            FfiFailurePhase::Transferring,
-            local,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.sender_item_removed",
-        ),
-        "sender_canceled" => (
-            FfiFailureCode::SenderCanceled,
-            FfiFailureCategory::User,
-            FfiFailurePhase::Transferring,
-            local,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.sender_canceled",
-        ),
-        "receiver_space_insufficient" => (
-            FfiFailureCode::ReceiverSpaceInsufficient,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Negotiating,
-            local,
-            true,
-            FfiRecoveryAction::ChooseFolder,
-            "transfer.receiver_space_insufficient",
-        ),
-        "receiver_destination_decision_required" => (
-            FfiFailureCode::ReceiverDestinationDecisionRequired,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Negotiating,
-            local,
-            true,
-            FfiRecoveryAction::ChooseFolder,
-            "transfer.receiver_destination_decision_required",
-        ),
-        "receiver_destination_unavailable" => (
-            FfiFailureCode::ReceiverDestinationUnavailable,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Committing,
-            local,
-            true,
-            FfiRecoveryAction::ChooseFolder,
-            "transfer.receiver_destination_unavailable",
-        ),
-        "receiver_save_failed" => (
-            FfiFailureCode::ReceiverSaveFailed,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Committing,
-            local,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.receiver_save_failed",
-        ),
-        "receiver_reused_object_lost" => (
-            FfiFailureCode::ReceiverReusedObjectLost,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Committing,
-            local,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.receiver_reused_object_lost",
-        ),
-        "receiver_finalization_outcome_unknown" => (
-            FfiFailureCode::ReceiverFinalizationOutcomeUnknown,
-            FfiFailureCategory::Storage,
-            FfiFailurePhase::Committing,
-            local,
-            true,
-            FfiRecoveryAction::Resume,
-            "transfer.receiver_finalization_outcome_unknown",
-        ),
-        _ => (
-            FfiFailureCode::ProtocolOrIntegrityFailure,
-            FfiFailureCategory::Integrity,
-            FfiFailurePhase::Verifying,
-            FfiFailureOrigin::Unknown,
-            false,
-            FfiRecoveryAction::None,
-            "transfer.protocol_or_integrity_failure",
-        ),
+fn app_failure_phase(phase: FfiFailurePhase) -> AppFailurePhase {
+    match phase {
+        FfiFailurePhase::Setup => AppFailurePhase::Setup,
+        FfiFailurePhase::Pairing => AppFailurePhase::Pairing,
+        FfiFailurePhase::Connecting => AppFailurePhase::Connecting,
+        FfiFailurePhase::Authenticating => AppFailurePhase::Authenticating,
+        FfiFailurePhase::Negotiating => AppFailurePhase::Negotiating,
+        FfiFailurePhase::Transferring => AppFailurePhase::Transferring,
+        FfiFailurePhase::Verifying => AppFailurePhase::Verifying,
+        FfiFailurePhase::Committing => AppFailurePhase::Committing,
+    }
+}
+
+fn ffi_failure_code(code: AppFailureCode) -> FfiFailureCode {
+    match code {
+        AppFailureCode::UserCanceled => FfiFailureCode::UserCanceled,
+        AppFailureCode::NetworkLost => FfiFailureCode::NetworkLost,
+        AppFailureCode::AuthenticationFailed => FfiFailureCode::AuthenticationFailed,
+        AppFailureCode::RoomNotFound => FfiFailureCode::RoomNotFound,
+        AppFailureCode::RoomExpired => FfiFailureCode::RoomExpired,
+        AppFailureCode::RoomFull => FfiFailureCode::RoomFull,
+        AppFailureCode::RoomRateLimited => FfiFailureCode::RoomRateLimited,
+        AppFailureCode::RoomUnderAttack => FfiFailureCode::RoomUnderAttack,
+        AppFailureCode::EndpointRateLimited => FfiFailureCode::EndpointRateLimited,
+        AppFailureCode::IpRateLimited => FfiFailureCode::IpRateLimited,
+        AppFailureCode::ServerBusy => FfiFailureCode::ServerBusy,
+        AppFailureCode::MalformedJoin => FfiFailureCode::MalformedJoin,
+        AppFailureCode::UnsupportedRendezvousVersion | AppFailureCode::UnsupportedVersion => {
+            FfiFailureCode::UnsupportedRendezvousVersion
+        }
+        AppFailureCode::UnsupportedFeature => FfiFailureCode::UnsupportedFeature,
+        AppFailureCode::InternalError | AppFailureCode::Internal => FfiFailureCode::InternalError,
+        AppFailureCode::SenderSourceUnavailable | AppFailureCode::SourceUnavailable => {
+            FfiFailureCode::SenderSourceUnavailable
+        }
+        AppFailureCode::SenderPermissionLost => FfiFailureCode::SenderPermissionLost,
+        AppFailureCode::SenderSourceChanged => FfiFailureCode::SenderSourceChanged,
+        AppFailureCode::SenderItemRemoved => FfiFailureCode::SenderItemRemoved,
+        AppFailureCode::SenderCanceled => FfiFailureCode::SenderCanceled,
+        AppFailureCode::ProtocolOrIntegrityFailure | AppFailureCode::IntegrityFailure => {
+            FfiFailureCode::ProtocolOrIntegrityFailure
+        }
+        AppFailureCode::ReceiverSpaceInsufficient => FfiFailureCode::ReceiverSpaceInsufficient,
+        AppFailureCode::ReceiverDestinationDecisionRequired => {
+            FfiFailureCode::ReceiverDestinationDecisionRequired
+        }
+        AppFailureCode::ReceiverDestinationUnavailable | AppFailureCode::DestinationUnavailable => {
+            FfiFailureCode::ReceiverDestinationUnavailable
+        }
+        AppFailureCode::ReceiverSaveFailed => FfiFailureCode::ReceiverSaveFailed,
+        AppFailureCode::ReceiverReusedObjectLost => FfiFailureCode::ReceiverReusedObjectLost,
+        AppFailureCode::ReceiverFinalizationOutcomeUnknown => {
+            FfiFailureCode::ReceiverFinalizationOutcomeUnknown
+        }
+    }
+}
+
+fn ffi_failure_category(category: AppFailureCategory) -> FfiFailureCategory {
+    match category {
+        AppFailureCategory::User => FfiFailureCategory::User,
+        AppFailureCategory::Network => FfiFailureCategory::Network,
+        AppFailureCategory::Authentication => FfiFailureCategory::Authentication,
+        AppFailureCategory::Permission => FfiFailureCategory::Permission,
+        AppFailureCategory::Storage => FfiFailureCategory::Storage,
+        AppFailureCategory::Integrity => FfiFailureCategory::Integrity,
+        AppFailureCategory::Unsupported => FfiFailureCategory::Unsupported,
+        AppFailureCategory::Internal => FfiFailureCategory::Internal,
+    }
+}
+
+fn ffi_failure_phase(phase: AppFailurePhase) -> FfiFailurePhase {
+    match phase {
+        AppFailurePhase::Setup => FfiFailurePhase::Setup,
+        AppFailurePhase::Pairing => FfiFailurePhase::Pairing,
+        AppFailurePhase::Connecting => FfiFailurePhase::Connecting,
+        AppFailurePhase::Authenticating => FfiFailurePhase::Authenticating,
+        AppFailurePhase::Negotiating => FfiFailurePhase::Negotiating,
+        AppFailurePhase::Transferring => FfiFailurePhase::Transferring,
+        AppFailurePhase::Verifying => FfiFailurePhase::Verifying,
+        AppFailurePhase::Committing => FfiFailurePhase::Committing,
+    }
+}
+
+fn ffi_failure_origin(origin: AppFailureOrigin) -> FfiFailureOrigin {
+    match origin {
+        AppFailureOrigin::Local => FfiFailureOrigin::Local,
+        AppFailureOrigin::Peer => FfiFailureOrigin::Peer,
+        AppFailureOrigin::Unknown => FfiFailureOrigin::Unknown,
+    }
+}
+
+fn ffi_recovery_action(action: AppRecoveryAction) -> FfiRecoveryAction {
+    match action {
+        AppRecoveryAction::Retry => FfiRecoveryAction::Retry,
+        AppRecoveryAction::Resume => FfiRecoveryAction::Resume,
+        AppRecoveryAction::ChooseFolder => FfiRecoveryAction::ChooseFolder,
+        AppRecoveryAction::OpenSettings => FfiRecoveryAction::OpenSettings,
+        AppRecoveryAction::RePair => FfiRecoveryAction::RePair,
+        AppRecoveryAction::None => FfiRecoveryAction::None,
+    }
+}
+
+fn ffi_failure_outcome(outcome: AppFailureOutcome) -> FfiFailureOutcome {
+    match outcome {
+        AppFailureOutcome::Canceled => FfiFailureOutcome::Canceled,
+        AppFailureOutcome::Failed => FfiFailureOutcome::Failed,
+    }
+}
+
+fn ffi_failure_session_disposition(
+    disposition: AppFailureSessionDisposition,
+) -> FfiFailureSessionDisposition {
+    match disposition {
+        AppFailureSessionDisposition::RetainForRecovery => {
+            FfiFailureSessionDisposition::RetainForRecovery
+        }
+        AppFailureSessionDisposition::Release => FfiFailureSessionDisposition::Release,
     }
 }
 
@@ -1905,7 +1882,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Mutex as StdMutex;
 
-    use envoix_error::TransferCause;
+    use envoix_error::{RendezvousCause, TransferCause};
 
     use super::*;
 
@@ -1967,10 +1944,33 @@ mod tests {
         fn on_diagnostic(&self, message: String) {
             self.diagnostics.lock().unwrap().push(message);
         }
+    }
 
-        fn on_remembered_credential(&self, _opaque_credential: Vec<u8>, _generation: u64) -> bool {
+    struct RejectingVault;
+
+    impl FfiRememberedCredentialVault for RejectingVault {
+        fn store_remembered_credential(
+            &self,
+            _opaque_credential: Vec<u8>,
+            _generation: u64,
+        ) -> bool {
             false
         }
+    }
+
+    fn reported_failure(
+        error: &SessionError,
+        direction: FfiTransferDirection,
+        phase: FfiFailurePhase,
+    ) -> FfiTransferFailure {
+        let observer = RecordingObserver::default();
+        report_v2_failure(&observer, error, direction, phase);
+        observer
+            .failure
+            .lock()
+            .expect("failure mutex")
+            .clone()
+            .expect("reported failure")
     }
 
     #[test]
@@ -1991,14 +1991,18 @@ mod tests {
 
     #[test]
     fn generic_io_recovery_matches_platform_resume_semantics() {
-        assert_eq!(
-            io_failure_recovery(FfiTransferDirection::Receive),
-            FfiRecoveryAction::Resume
+        let receive = reported_failure(
+            &SessionError::Io("write failed".into()),
+            FfiTransferDirection::Receive,
+            FfiFailurePhase::Transferring,
         );
-        assert_eq!(
-            io_failure_recovery(FfiTransferDirection::Send),
-            FfiRecoveryAction::Retry
+        assert_eq!(receive.recovery_action, FfiRecoveryAction::Resume);
+        let send = reported_failure(
+            &SessionError::Io("source unavailable".into()),
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
         );
+        assert_eq!(send.recovery_action, FfiRecoveryAction::Retry);
     }
 
     #[test]
@@ -2019,14 +2023,20 @@ mod tests {
 
     #[test]
     fn nearby_hybrid_pre_auth_transport_cause_projects_as_connecting_network_failure() {
-        let projection =
-            manifest_v2_cause_projection(TransferCause::NearbyHybridPreAuthTransportFailure.code());
+        let failure = reported_failure(
+            &SessionError::Cause {
+                cause: TransferCause::NearbyHybridPreAuthTransportFailure,
+                detail: "custom QUIC dial failed".into(),
+            },
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
+        );
 
-        assert_eq!(projection.0, FfiFailureCode::NetworkLost);
-        assert_eq!(projection.1, FfiFailureCategory::Network);
-        assert_eq!(projection.2, FfiFailurePhase::Connecting);
-        assert!(projection.4);
-        assert_eq!(projection.5, FfiRecoveryAction::Resume);
+        assert_eq!(failure.code, FfiFailureCode::NetworkLost);
+        assert_eq!(failure.category, FfiFailureCategory::Network);
+        assert_eq!(failure.phase, FfiFailurePhase::Connecting);
+        assert!(failure.retryable);
+        assert_eq!(failure.recovery_action, FfiRecoveryAction::Resume);
     }
 
     #[test]
@@ -2047,14 +2057,28 @@ mod tests {
 
     #[test]
     fn rendezvous_causes_project_without_parsing_diagnostics() {
-        let rate_limited = rendezvous_cause_projection(RendezvousCause::RoomRateLimited);
-        assert_eq!(rate_limited.0, FfiFailureCode::RoomRateLimited);
-        assert!(rate_limited.4);
-        assert_eq!(rate_limited.5, FfiRecoveryAction::Retry);
+        let rate_limited = reported_failure(
+            &SessionError::Rendezvous {
+                cause: RendezvousCause::RoomRateLimited,
+                retry_after: Some(5),
+            },
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Setup,
+        );
+        assert_eq!(rate_limited.code, FfiFailureCode::RoomRateLimited);
+        assert!(rate_limited.retryable);
+        assert_eq!(rate_limited.recovery_action, FfiRecoveryAction::Retry);
 
-        let exhausted = rendezvous_cause_projection(RendezvousCause::RoomUnderAttack);
-        assert_eq!(exhausted.0, FfiFailureCode::RoomUnderAttack);
-        assert_eq!(exhausted.5, FfiRecoveryAction::RePair);
+        let exhausted = reported_failure(
+            &SessionError::Rendezvous {
+                cause: RendezvousCause::RoomUnderAttack,
+                retry_after: None,
+            },
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Setup,
+        );
+        assert_eq!(exhausted.code, FfiFailureCode::RoomUnderAttack);
+        assert_eq!(exhausted.recovery_action, FfiRecoveryAction::RePair);
     }
 
     #[test]
@@ -2077,10 +2101,31 @@ mod tests {
 
         assert_eq!(failure.code, FfiFailureCode::NetworkLost);
         assert_eq!(failure.recovery_action, FfiRecoveryAction::RePair);
+        assert_eq!(failure.outcome, FfiFailureOutcome::Failed);
+        assert_eq!(
+            failure.session_disposition,
+            FfiFailureSessionDisposition::Release
+        );
         assert!(
             failure
                 .diagnostic_message
                 .contains("one-time invitation was consumed after authentication")
+        );
+    }
+
+    #[test]
+    fn cancellation_outcome_crosses_the_ffi_without_cause_classification() {
+        let failure = reported_failure(
+            &SessionError::Cancelled,
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
+        );
+
+        assert_eq!(failure.code, FfiFailureCode::UserCanceled);
+        assert_eq!(failure.outcome, FfiFailureOutcome::Canceled);
+        assert_eq!(
+            failure.session_disposition,
+            FfiFailureSessionDisposition::Release
         );
     }
 
@@ -2134,8 +2179,7 @@ mod tests {
 
     #[test]
     fn authentication_milestone_precedes_credential_persistence() {
-        let authentication =
-            NativeAuthentication::rotation(Arc::new(RecordingObserver::default()), vec![1], 1);
+        let authentication = NativeAuthentication::rotation(Arc::new(RejectingVault), vec![1], 1);
 
         let result = authentication.on_authenticated(AuthenticationOutcome {
             remember_secret: None,
@@ -2144,11 +2188,14 @@ mod tests {
         assert!(matches!(&result, Err(SessionError::Storage(_))));
         assert!(authentication.authenticated());
         assert!(!authentication.persisted());
-        assert!(should_stop_remembered_fallback(
-            &result,
-            &authentication,
-            &TransferCancelToken::new(),
-        ));
+        assert!(
+            (RememberedAttemptOutcome {
+                succeeded: result.is_ok(),
+                authenticated: authentication.authenticated(),
+                canceled: false,
+            })
+            .should_stop_fallback()
+        );
     }
 
     #[test]

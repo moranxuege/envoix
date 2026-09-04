@@ -3,7 +3,8 @@ package dev.envoix.app.ui
 import android.content.Context
 import dev.envoix.app.Direction
 import dev.envoix.app.InviteCodec
-import dev.envoix.app.Native
+import dev.envoix.app.ManifestV2JobGateway
+import dev.envoix.app.ManifestV2JobState
 import dev.envoix.app.RememberedPeerStore
 import dev.envoix.app.RoomOutboxEntry
 import dev.envoix.app.RoomOutboxState
@@ -33,7 +34,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONObject
 import java.io.File
 
 internal data class RememberedRoomTransferState(
@@ -601,6 +601,7 @@ internal class RememberedRoomTransferCoordinator private constructor(
                     qrPayload = null,
                     rememberLabel = null,
                     rememberedRelationshipId = null,
+                    invitationCreator = true,
                 )
             }.getOrElse { error ->
                 outbox.markNeedsAttention(
@@ -776,24 +777,21 @@ internal class RememberedRoomTransferCoordinator private constructor(
             }
     }
 
-    private fun sealAndValidate(entry: RoomOutboxEntry) {
+    private suspend fun sealAndValidate(entry: RoomOutboxEntry) {
         val snapshot =
-            JSONObject(
-                Native.sealManifestV2Job(
-                    TransferService.jobStoreDirectory(appContext).absolutePath,
-                    entry.jobId,
-                ),
+            ManifestV2JobGateway.shared.seal(
+                TransferService.jobStoreDirectory(appContext).absolutePath,
+                entry.jobId,
             )
-        snapshot.optString("error").takeIf(String::isNotBlank)?.let(::error)
-        check(snapshot.getString("job_id") == entry.jobId)
-        check(snapshot.getString("state") == "sealed")
+        check(snapshot.jobId == entry.jobId)
+        check(snapshot.state == ManifestV2JobState.Sealed)
         check(
-            snapshot.getInt("file_count") +
-                snapshot.getInt("directory_count") ==
+            snapshot.inventory.fileCount +
+                snapshot.inventory.directoryCount ==
                 entry.itemCount,
         )
-        check(snapshot.getInt("directory_count") == entry.directoryCount)
-        check(snapshot.getLong("total") == entry.totalBytes)
+        check(snapshot.inventory.directoryCount == entry.directoryCount)
+        check(snapshot.inventory.totalBytes == entry.totalBytes)
     }
 
     private fun deleteOwnedManifestArtifacts(entry: RoomOutboxEntry) {

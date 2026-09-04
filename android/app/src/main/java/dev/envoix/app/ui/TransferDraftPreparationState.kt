@@ -3,7 +3,8 @@ package dev.envoix.app.ui
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import dev.envoix.app.CreatedInvite
-import dev.envoix.app.Native
+import dev.envoix.app.ManifestV2JobGateway
+import dev.envoix.app.ManifestV2JobSnapshot
 import dev.envoix.app.PreparedManifestV2Source
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -11,7 +12,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.json.JSONObject
 import java.io.File
 
 /**
@@ -21,13 +21,14 @@ import java.io.File
 internal class TransferDraftPreparationState(
     initialRole: String = "send",
     showQrInitially: Boolean = false,
+    private val jobGateway: ManifestV2JobGateway = ManifestV2JobGateway.shared,
     private val onDiscard: (TransferDraftPreparationState) -> Unit = { it.launchCleanup() },
 ) {
     val preparedSources = mutableStateListOf<PreparedManifestV2Source>()
     val preparedJobId = mutableStateOf<String?>(null)
     val jobStoreDirectory = mutableStateOf<String?>(null)
     val stagingRootDirectory = mutableStateOf<String?>(null)
-    val summary = mutableStateOf<JSONObject?>(null)
+    val summary = mutableStateOf<ManifestV2JobSnapshot?>(null)
     val preparingCount = mutableStateOf(0)
     val error = mutableStateOf<String?>(null)
     val sourceAwaitingReauthorization = mutableStateOf<PreparedManifestV2Source?>(null)
@@ -105,7 +106,7 @@ internal class TransferDraftPreparationState(
                 val jobId = preparedJobId.value
                 val store = jobStoreDirectory.value
                 if (!jobId.isNullOrBlank() && !store.isNullOrBlank()) {
-                    runCatching { Native.cancelManifestV2Job(store, jobId) }
+                    runCatching { jobGateway.cancel(store, jobId) }
                 }
                 val stagingRoot = stagingRootDirectory.value?.let(::File)
                 if (jobId != null &&

@@ -4,8 +4,13 @@ import SwiftUI
 struct EnvoixApp: App {
     @StateObject private var model = AppModel.shared
     @AppStorage("envoix.language") private var language = "en"
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor
+    private var applicationDelegate: MacApplicationDelegate
+    #endif
 
     init() {
+        migrateRetiredDeploymentDefaults()
         UserDefaults.standard.removeObject(forKey: "envoix.token")
     }
 
@@ -29,7 +34,7 @@ struct EnvoixApp: App {
         }
         .menuBarExtraStyle(.window)
         #else
-        WindowGroup {
+        WindowGroup(id: "main") {
             rootView
         }
         #endif
@@ -51,5 +56,8 @@ struct EnvoixApp: App {
         ContentView()
             .environmentObject(model)
             .environment(\.appLanguage, language)
+            #if os(macOS)
+            .background(MacMainWindowRegistrationView())
+            #endif
     }
 }

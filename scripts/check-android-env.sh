@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 
-readonly MIN_RUST_VERSION="1.91.0"
+readonly MIN_RUST_VERSION="1.96.0"
 readonly MIN_BUILD_TOOLS_VERSION="34.0.0"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -112,7 +112,7 @@ fi
 if [ "${ENVOIX_CHECK_ANDROID_ENV_BUILD:-0}" = "1" ]; then
     answer="yes"
 else
-    printf 'Environment is ready. Build and stage the JNI libraries now? [y/N] '
+    printf 'Environment is ready. Build and stage the Android native core now? [y/N] '
     read -r answer || answer=""
 fi
 case "$answer" in
@@ -129,15 +129,15 @@ case "$answer" in
         export ANDROID_NDK_HOME="$android_ndk_home"
         cd "$repo_root"
         cargo ndk -t arm64-v8a -t x86_64 --platform 26 \
-            build --release -p envoix-android-jni
+            build --release -p envoix-ffi --features android-jni
         mkdir -p \
             android/app/src/main/jniLibs/arm64-v8a \
             android/app/src/main/jniLibs/x86_64
-        cp target/aarch64-linux-android/release/libenvoix_jni.so \
+        cp target/aarch64-linux-android/release/libenvoix_ffi.so \
             android/app/src/main/jniLibs/arm64-v8a/
-        cp target/x86_64-linux-android/release/libenvoix_jni.so \
+        cp target/x86_64-linux-android/release/libenvoix_ffi.so \
             android/app/src/main/jniLibs/x86_64/
-        printf 'JNI libraries built and staged under android/app/src/main/jniLibs/.\n'
+        printf 'Android native core built and staged under android/app/src/main/jniLibs/.\n'
         ;;
     *)
         printf 'Build skipped.\n'

@@ -51,6 +51,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.R
 import dev.envoix.app.RememberedPeerSummary
 import dev.envoix.app.RoomOutboxEntry
 import dev.envoix.app.RoomOutboxState
@@ -72,7 +73,7 @@ internal fun RememberedRoomsScreen(
             .background(colors.bg),
     ) {
         RememberedRoomsAppBar(
-            title = appText("Rooms", "房间"),
+            title = appString(R.string.hub_rooms),
             onBack = onBack,
         )
         LazyColumn(
@@ -82,10 +83,7 @@ internal fun RememberedRoomsScreen(
         ) {
             item {
                 Text(
-                    appText(
-                        "Saved devices can reconnect while Envoix is open.",
-                        "已保存的设备可在 Envoix 打开时重新连接。",
-                    ),
+                    appString(R.string.remembered_rooms_reconnect_explanation),
                     color = colors.muted,
                     fontSize = 14.sp,
                     modifier = Modifier.padding(bottom = 4.dp),
@@ -138,7 +136,7 @@ internal fun RememberedRoomDetailScreen(
     connection: RememberedRoomConnectionState?,
     transferState: RememberedRoomTransferState?,
     error: String?,
-    connectionManager: RememberedRoomConnectionManager,
+    onRoomOpenChanged: (relationshipId: String, open: Boolean) -> Unit,
     onBack: () -> Unit,
     onRetry: (String) -> Unit,
     onRename: (String, String, () -> Unit) -> Unit,
@@ -161,13 +159,16 @@ internal fun RememberedRoomDetailScreen(
     onShareReceived: (Transfer) -> Unit,
     onExternalActivityChanged: (Boolean) -> Unit,
     onDismissError: () -> Unit,
+    transferPreferences: TransferSetupPreferences,
+    sourcePreparationIntents: TransferSourcePreparationIntents,
+    onSaveTreePicked: (android.net.Uri) -> Unit,
 ) {
     val colors = Envoix.colors
     val relationshipId = peer?.relationshipId
     DisposableEffect(relationshipId) {
-        relationshipId?.let { connectionManager.setRoomOpen(it, true) }
+        relationshipId?.let { onRoomOpenChanged(it, true) }
         onDispose {
-            relationshipId?.let { connectionManager.setRoomOpen(it, false) }
+            relationshipId?.let { onRoomOpenChanged(it, false) }
         }
     }
     if (peer == null) {
@@ -178,14 +179,11 @@ internal fun RememberedRoomDetailScreen(
                 .background(colors.bg),
         ) {
             RememberedRoomsAppBar(
-                title = appText("Room", "房间"),
+                title = appString(R.string.remembered_room_title),
                 onBack = onBack,
             )
             Text(
-                appText(
-                    "This saved room is no longer available.",
-                    "此已保存房间已不可用。",
-                ),
+                appString(R.string.remembered_room_missing),
                 color = colors.muted,
                 modifier = Modifier.padding(24.dp),
             )
@@ -241,7 +239,7 @@ internal fun RememberedRoomDetailScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(
-                            appText("LATEST RECEIVED", "最近接收"),
+                            appString(R.string.remembered_latest_received_section),
                             color = colors.muted,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
@@ -249,6 +247,7 @@ internal fun RememberedRoomDetailScreen(
                         )
                         RoomTransferSummary(
                             transfer = transfer,
+                            defaultDestinationLabel = transferPreferences.saveLocationLabel,
                             onOpen = onOpenReceived,
                             onShare = onShareReceived,
                         )
@@ -271,13 +270,13 @@ internal fun RememberedRoomDetailScreen(
                 ) {
                     Icon(Icons.Default.Add, null, modifier = Modifier.size(19.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text(appText("Add files", "添加文件"))
+                    Text(appString(R.string.room_add_files))
                 }
             }
             if (transferState?.outbox?.isNotEmpty() == true) {
                 item {
                     Text(
-                        appText("OUTBOX", "发送队列"),
+                        appString(R.string.remembered_outbox_section),
                         color = colors.muted,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
@@ -301,13 +300,13 @@ internal fun RememberedRoomDetailScreen(
                                 .testTag("remembered_room_retry")
                                 .fillMaxWidth(),
                     ) {
-                        Text(appText("Try again", "重试"))
+                        Text(appString(R.string.common_retry))
                     }
                 }
             }
             item {
                 Text(
-                    appText("ROOM CONTROLS", "房间控制"),
+                    appString(R.string.remembered_room_controls_section),
                     color = colors.muted,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -321,7 +320,7 @@ internal fun RememberedRoomDetailScreen(
                 ) {
                     Icon(Icons.Default.Edit, null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text(appText("Rename room", "重命名房间"))
+                    Text(appString(R.string.remembered_rename_room))
                 }
             }
             item {
@@ -337,7 +336,7 @@ internal fun RememberedRoomDetailScreen(
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        appText("Forget this room", "忘记此房间"),
+                        appString(R.string.remembered_forget_room),
                         color = colors.danger,
                     )
                 }
@@ -361,6 +360,9 @@ internal fun RememberedRoomDetailScreen(
                 roomMode = true,
                 connectedRoom = true,
                 roomEndpoint = RoomControlEndpoint(peer.broker, peer.relay),
+                preferences = transferPreferences,
+                sourcePreparationIntents = sourcePreparationIntents,
+                onSaveTreePicked = onSaveTreePicked,
                 onReceive = { _, _, _, _, _, _, _ -> },
                 onSend = { _, _, _, _, _, _, _ -> },
                 onExternalActivityChanged = onExternalActivityChanged,
@@ -402,14 +404,9 @@ internal fun RememberedRoomDetailScreen(
     if (forgetOpen) {
         AlertDialog(
             onDismissRequest = { forgetOpen = false },
-            title = { Text(appText("Forget this room?", "忘记此房间？")) },
+            title = { Text(appString(R.string.remembered_forget_room_title)) },
             text = {
-                Text(
-                    appText(
-                        "This removes the protected relationship and its waiting or failed file jobs from this device. Active transfers must finish first.",
-                        "这会从此设备移除受保护的配对关系，以及等待中或失败的文件任务；进行中的传输必须先结束。",
-                    ),
-                )
+                Text(appString(R.string.remembered_forget_room_explanation))
             },
             confirmButton = {
                 TextButton(
@@ -420,12 +417,12 @@ internal fun RememberedRoomDetailScreen(
                         }
                     },
                 ) {
-                    Text(appText("Forget", "忘记"), color = colors.danger)
+                    Text(appString(R.string.remembered_forget_action), color = colors.danger)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { forgetOpen = false }) {
-                    Text(appText("Cancel", "取消"))
+                    Text(appString(R.string.common_cancel))
                 }
             },
         )
@@ -459,21 +456,25 @@ private fun RememberedIncomingOfferCard(
             .padding(18.dp),
     ) {
         Text(
-            appText("Incoming files", "收到文件邀请"),
+            appString(R.string.remembered_incoming_files),
             color = colors.text,
             fontSize = 17.sp,
             fontWeight = FontWeight.Bold,
         )
         Text(
             offer.rootNames.take(3).joinToString().ifBlank {
-                appText("Prepared items", "已准备的项目")
+                appString(R.string.remembered_prepared_items)
             },
             color = colors.muted,
             fontSize = 14.sp,
             modifier = Modifier.padding(top = 6.dp),
         )
         Text(
-            "${offer.itemCount} · ${humanBytes(offer.totalBytes)}",
+            appString(
+                R.string.remembered_item_size_summary,
+                offer.itemCount,
+                humanBytes(offer.totalBytes),
+            ),
             color = colors.muted,
             fontSize = 13.sp,
             modifier = Modifier.padding(top = 3.dp),
@@ -489,7 +490,7 @@ private fun RememberedIncomingOfferCard(
                 enabled = !busy,
                 modifier = Modifier.weight(1f),
             ) {
-                Text(appText("Decline", "拒绝"))
+                Text(appString(R.string.common_decline))
             }
             Button(
                 onClick = onAccept,
@@ -498,9 +499,9 @@ private fun RememberedIncomingOfferCard(
             ) {
                 Text(
                     if (busy) {
-                        appText("Preparing…", "正在准备…")
+                        appString(R.string.remembered_preparing)
                     } else {
-                        appText("Receive", "接收")
+                        appString(R.string.receive_action_title)
                     },
                 )
             }
@@ -527,7 +528,7 @@ private fun RememberedRoomOutboxCard(
     ) {
         Text(
             entry.rootNames.joinToString().ifBlank {
-                appText("Prepared items", "已准备的项目")
+                appString(R.string.remembered_prepared_items)
             },
             color = colors.text,
             fontWeight = FontWeight.SemiBold,
@@ -535,8 +536,12 @@ private fun RememberedRoomOutboxCard(
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            "${roomOutboxStateText(entry.state)} · " +
-                "${entry.itemCount} · ${humanBytes(entry.totalBytes)}",
+            appString(
+                R.string.remembered_outbox_summary,
+                roomOutboxStateText(entry.state),
+                entry.itemCount,
+                humanBytes(entry.totalBytes),
+            ),
             color =
                 if (entry.state == RoomOutboxState.NeedsAttention) {
                     colors.danger
@@ -562,11 +567,11 @@ private fun RememberedRoomOutboxCard(
         ) {
             if (entry.state == RoomOutboxState.NeedsAttention) {
                 TextButton(onClick = onRetry) {
-                    Text(appText("Retry", "重试"))
+                    Text(appString(R.string.common_retry))
                 }
             }
             TextButton(onClick = onRemove, enabled = !active) {
-                Text(appText("Remove", "移除"), color = colors.danger)
+                Text(appString(R.string.common_remove), color = colors.danger)
             }
         }
     }
@@ -575,11 +580,11 @@ private fun RememberedRoomOutboxCard(
 @Composable
 private fun roomOutboxStateText(state: RoomOutboxState): String =
     when (state) {
-        RoomOutboxState.Preparing -> appText("Queueing", "正在加入队列")
-        RoomOutboxState.Queued -> appText("Waiting for peer", "等待对端上线")
-        RoomOutboxState.Offering -> appText("Offering", "正在发送邀请")
-        RoomOutboxState.Transferring -> appText("Transferring", "正在传输")
-        RoomOutboxState.NeedsAttention -> appText("Needs attention", "需要处理")
+        RoomOutboxState.Preparing -> appString(R.string.remembered_outbox_queueing)
+        RoomOutboxState.Queued -> appString(R.string.remembered_outbox_waiting_peer)
+        RoomOutboxState.Offering -> appString(R.string.remembered_outbox_offering)
+        RoomOutboxState.Transferring -> appString(R.string.transfer_status_transferring)
+        RoomOutboxState.NeedsAttention -> appString(R.string.transfer_status_needs_attention)
     }
 
 @Composable
@@ -598,7 +603,7 @@ private fun RememberedRoomsAppBar(
         IconButton(onClick = onBack) {
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = appText("Back", "返回"),
+                contentDescription = appString(R.string.common_back),
                 tint = colors.accent,
             )
         }
@@ -631,15 +636,12 @@ private fun EmptyRememberedRooms() {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            appText("No saved rooms", "暂无已保存房间"),
+            appString(R.string.remembered_rooms_empty_title),
             color = colors.text,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            appText(
-                "Remember a device after a successful transfer.",
-                "成功传输后可保存设备。",
-            ),
+            appString(R.string.remembered_rooms_empty_explanation),
             color = colors.muted,
             fontSize = 13.sp,
             modifier = Modifier.padding(top = 6.dp),
@@ -690,9 +692,10 @@ private fun RememberedRoomRow(
             )
             transferState?.incomingOffer?.let { offer ->
                 Text(
-                    appText(
-                        "Incoming files · ${offer.itemCount} · ${humanBytes(offer.totalBytes)}",
-                        "收到文件 · ${offer.itemCount} 项 · ${humanBytes(offer.totalBytes)}",
+                    appString(
+                        R.string.remembered_incoming_files_summary,
+                        offer.itemCount,
+                        humanBytes(offer.totalBytes),
                     ),
                     color = colors.accentStrong,
                     fontSize = 13.sp,
@@ -709,7 +712,7 @@ private fun RememberedRoomRow(
         }
         Icon(
             Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = appText("Open", "打开"),
+            contentDescription = appString(R.string.common_open),
             tint = colors.muted,
         )
     }
@@ -770,13 +773,13 @@ private fun RenameRememberedRoomDialog(
     var label by remember(initialLabel) { mutableStateOf(initialLabel) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Rename room", "重命名房间")) },
+        title = { Text(appString(R.string.remembered_rename_room)) },
         text = {
             OutlinedTextField(
                 value = label,
                 onValueChange = { label = it },
                 singleLine = true,
-                label = { Text(appText("Room name", "房间名称")) },
+                label = { Text(appString(R.string.remembered_room_name)) },
             )
         },
         confirmButton = {
@@ -784,12 +787,12 @@ private fun RenameRememberedRoomDialog(
                 onClick = { onRename(label.trim()) },
                 enabled = label.isNotBlank(),
             ) {
-                Text(appText("Save", "保存"))
+                Text(appString(R.string.common_save))
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text(appText("Cancel", "取消"))
+                Text(appString(R.string.common_cancel))
             }
         },
     )
@@ -802,11 +805,11 @@ private fun RememberedRoomErrorDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(appText("Rooms unavailable", "房间不可用")) },
+        title = { Text(appString(R.string.remembered_rooms_unavailable)) },
         text = { Text(message) },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text(appText("OK", "确定"))
+                Text(appString(R.string.common_ok))
             }
         },
     )
@@ -815,41 +818,26 @@ private fun RememberedRoomErrorDialog(
 @Composable
 private fun rememberedConnectionText(phase: RememberedRoomConnectionPhase): String =
     when (phase) {
-        RememberedRoomConnectionPhase.Offline -> appText("Offline", "离线")
-        RememberedRoomConnectionPhase.Waiting -> appText("Waiting for device", "正在等待设备")
-        RememberedRoomConnectionPhase.Connecting -> appText("Connecting…", "正在连接…")
-        RememberedRoomConnectionPhase.Connected -> appText("Connected", "已连接")
-        RememberedRoomConnectionPhase.NeedsAttention -> appText("Needs attention", "需要处理")
+        RememberedRoomConnectionPhase.Offline -> appString(R.string.remembered_connection_offline)
+        RememberedRoomConnectionPhase.Waiting -> appString(R.string.remembered_connection_waiting)
+        RememberedRoomConnectionPhase.Connecting -> appString(R.string.remembered_connection_connecting)
+        RememberedRoomConnectionPhase.Connected -> appString(R.string.remembered_connection_connected)
+        RememberedRoomConnectionPhase.NeedsAttention -> appString(R.string.transfer_status_needs_attention)
     }
 
 @Composable
 private fun rememberedConnectionDescription(phase: RememberedRoomConnectionPhase): String =
     when (phase) {
         RememberedRoomConnectionPhase.Offline ->
-            appText(
-                "Open Envoix on both devices to reconnect.",
-                "请在两台设备上打开 Envoix 以重新连接。",
-            )
+            appString(R.string.remembered_connection_offline_description)
         RememberedRoomConnectionPhase.Waiting ->
-            appText(
-                "Envoix is ready. Open this room on the other device.",
-                "Envoix 已就绪；请在另一台设备上打开此房间。",
-            )
+            appString(R.string.remembered_connection_waiting_description)
         RememberedRoomConnectionPhase.Connecting ->
-            appText(
-                "Authenticating the protected relationship.",
-                "正在验证受保护的配对关系。",
-            )
+            appString(R.string.remembered_connection_connecting_description)
         RememberedRoomConnectionPhase.Connected ->
-            appText(
-                "The protected control connection is active.",
-                "受保护的控制连接已建立。",
-            )
+            appString(R.string.remembered_connection_connected_description)
         RememberedRoomConnectionPhase.NeedsAttention ->
-            appText(
-                "The relationship was preserved. Retry when both devices are available.",
-                "配对关系仍已保留；请在两台设备都可用时重试。",
-            )
+            appString(R.string.remembered_connection_attention_description)
     }
 
 @Composable

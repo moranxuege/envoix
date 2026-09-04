@@ -126,13 +126,11 @@ internal class DiscoveryViewModel(
         publishPeers()
     }
 
-    /** Compatibility for the retired standalone discovery screen. */
     fun start() {
         setMode(DiscoveryMode.BrowseNearby)
         setForeground(true)
     }
 
-    /** Compatibility for the retired standalone discovery screen. */
     fun stop() {
         setForeground(false)
         setMode(DiscoveryMode.Off)
@@ -214,7 +212,7 @@ internal class DiscoveryViewModel(
             .forEach { provider -> provider.setNfcReadinessOffer(null) }
     }
 
-    fun restart() {
+    private fun restart() {
         stopProviders()
         reconcile()
     }

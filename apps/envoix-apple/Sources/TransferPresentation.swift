@@ -36,40 +36,527 @@ enum ConnectionPathPresentationPolicy {
     static func label(for path: FfiDataPathKind, language: String) -> String {
         switch path {
         case .direct:
-            return AppText.value("Data path · Direct", "数据路径 · 直连", language: language)
+            return AppText.localized("transfer.path.direct", language: language)
         case .directIpv4:
-            return AppText.value(
-                "Data path · Direct · IPv4",
-                "数据路径 · 直连 · IPv4",
-                language: language
-            )
+            return AppText.localized("transfer.path.direct_ipv4", language: language)
         case .directIpv6:
-            return AppText.value(
-                "Data path · Direct · IPv6",
-                "数据路径 · 直连 · IPv6",
-                language: language
-            )
+            return AppText.localized("transfer.path.direct_ipv6", language: language)
         case .relay:
-            return AppText.value("Data path · Relay", "数据路径 · 中继", language: language)
+            return AppText.localized("transfer.path.relay", language: language)
         case .wifiAware:
-            return AppText.value(
-                "Data path · Wi‑Fi Aware",
-                "数据路径 · Wi‑Fi Aware",
-                language: language
-            )
+            return AppText.localized("transfer.path.wifi_aware", language: language)
         case .other:
-            return AppText.value("Data path · Other", "数据路径 · 其他", language: language)
+            return AppText.localized("transfer.path.other", language: language)
         }
     }
 
     static func label(for event: FfiConnectionPathEvent, language: String) -> String {
         let path = label(for: event.pathKind, language: language)
         guard event.eventKind == .changed else { return path }
-        return AppText.value(
-            "\(path) · changed",
-            "\(path) · 已切换",
+        let changed = AppText.localized("transfer.path.changed", language: language)
+        return "\(path) · \(changed)"
+    }
+}
+
+enum TransferActivityText {
+    static func direction(_ direction: FfiTransferDirection, language: String) -> String {
+        switch direction {
+        case .send:
+            return AppText.localized("transfer.direction.send", language: language)
+        case .receive:
+            return AppText.localized("transfer.direction.receive", language: language)
+        }
+    }
+
+    static func state(
+        _ state: TransferActivityState,
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        let key: String
+        switch state {
+        case .preparing: key = "transfer.state.preparing"
+        case .waitingForPeer: key = "transfer.state.waiting_for_peer"
+        case .pairing: key = "transfer.state.pairing"
+        case .connecting: key = "transfer.state.connecting"
+        case .awaitingDecision: key = "transfer.state.awaiting_decision"
+        case .transferring:
+            key = direction == .send
+                ? "transfer.state.sending"
+                : "transfer.state.receiving"
+        case .verifying: key = "transfer.state.verifying"
+        case .saving: key = "transfer.state.saving"
+        case .waitingForReceiverSave: key = "transfer.state.waiting_for_receiver_save"
+        case .finalizingDelivery: key = "transfer.state.finalizing_delivery"
+        case .paused: key = "transfer.state.paused"
+        case .delivered:
+            key = direction == .send
+                ? "transfer.state.delivered"
+                : "transfer.state.received"
+        case .failed: key = "transfer.state.failed"
+        case .canceled: key = "transfer.state.canceled"
+        }
+        return AppText.localized(key, language: language)
+    }
+
+    static func stage(_ stage: FfiTransferStage, language: String) -> String {
+        let key: String
+        switch stage {
+        case .sessionStarted: key = "transfer.stage.started"
+        case .connectionReady: key = "transfer.stage.connected"
+        case .authenticationStarted: key = "transfer.stage.authenticating"
+        case .authenticationComplete: key = "transfer.stage.authenticated"
+        case .manifestOffer: key = "transfer.stage.offer"
+        case .manifestAccepted: key = "transfer.stage.accepted"
+        case .firstPayload: key = "transfer.stage.first_byte"
+        case .payloadComplete: key = "transfer.stage.payload_complete"
+        case .deliveryComplete: key = "transfer.stage.delivered"
+        case .canceled: key = "transfer.stage.canceled"
+        case .failed: key = "transfer.stage.failed"
+        }
+        return AppText.localized(key, language: language)
+    }
+
+    static func itemCount(_ count: UInt64, language: String) -> String {
+        let displayCount = Int64(min(count, UInt64(Int64.max)))
+        return AppText.localized(
+            "activity.item_count",
+            defaultValue: "\(displayCount) items",
             language: language
         )
+    }
+
+    static func transferCount(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "activity.transfer_count",
+            defaultValue: "\(displayCount) transfers",
+            language: language
+        )
+    }
+
+    static func updated(_ relative: String, language: String) -> String {
+        AppText.localized(
+            "activity.updated",
+            defaultValue: "Updated \(relative)",
+            language: language
+        )
+    }
+
+    static func savedIn(_ destination: String, language: String) -> String {
+        AppText.localized(
+            "activity.saved.in_folder",
+            defaultValue: "Saved in \(destination)",
+            language: language
+        )
+    }
+
+    static func savedItems(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "activity.saved.item_count",
+            defaultValue: "Saved \(displayCount) items",
+            language: language
+        )
+    }
+}
+
+enum TransferContentText {
+    static func rootCount(_ count: UInt32, language: String) -> String {
+        let displayCount = Int64(count)
+        return AppText.localized(
+            "transfer.content.root_count",
+            defaultValue: "\(displayCount) roots",
+            language: language
+        )
+    }
+
+    static func fileCount(_ count: UInt32, language: String) -> String {
+        let displayCount = Int64(count)
+        return AppText.localized(
+            "transfer.content.file_count",
+            defaultValue: "\(displayCount) files",
+            language: language
+        )
+    }
+
+    static func folderCount(_ count: UInt32, language: String) -> String {
+        let displayCount = Int64(count)
+        return AppText.localized(
+            "transfer.content.folder_count",
+            defaultValue: "\(displayCount) folders",
+            language: language
+        )
+    }
+}
+
+enum TransferWorkflowStatus: CaseIterable {
+    case preparingSelection
+    case restoringInterrupted
+    case canceled
+    case queuedForRoom
+    case pausedRetained
+    case waitingForSender
+    case waitingForPeer
+    case pairing
+    case connecting
+    case transferring
+    case verifyingReceived
+    case savingSelected
+    case waitingForReceiverSave
+    case finalizingDelivery
+    case delivered
+    case previousSendActive
+    case sourceRequired
+    case sourceWarnings
+    case reviewExceptional
+    case readyToSend
+    case sourceDecisionRequired
+}
+
+enum TransferWorkflowText {
+    static func status(_ status: TransferWorkflowStatus, language: String) -> String {
+        let key: String
+        switch status {
+        case .preparingSelection: key = "transfer.workflow.preparing_selection"
+        case .restoringInterrupted: key = "transfer.workflow.restoring_interrupted"
+        case .canceled: key = "transfer.state.canceled"
+        case .queuedForRoom: key = "transfer.workflow.queued_for_room"
+        case .pausedRetained: key = "transfer.workflow.paused_retained"
+        case .waitingForSender: key = "transfer.workflow.waiting_for_sender"
+        case .waitingForPeer: key = "transfer.state.waiting_for_peer"
+        case .pairing: key = "transfer.state.pairing"
+        case .connecting: key = "transfer.state.connecting"
+        case .transferring: key = "transfer.workflow.transferring"
+        case .verifyingReceived: key = "transfer.workflow.verifying_received"
+        case .savingSelected: key = "transfer.workflow.saving_selected"
+        case .waitingForReceiverSave: key = "transfer.state.waiting_for_receiver_save"
+        case .finalizingDelivery: key = "transfer.workflow.finalizing_delivery"
+        case .delivered: key = "transfer.state.delivered"
+        case .previousSendActive: key = "transfer.workflow.previous_send_active"
+        case .sourceRequired: key = "transfer.workflow.source_required"
+        case .sourceWarnings: key = "transfer.workflow.source_warnings"
+        case .reviewExceptional: key = "transfer.workflow.review_exceptional"
+        case .readyToSend: key = "transfer.workflow.ready_to_send"
+        case .sourceDecisionRequired: key = "transfer.workflow.source_decision_required"
+        }
+        return AppText.localized(key, language: language)
+    }
+
+    static func itemCount(_ count: UInt32, language: String) -> String {
+        TransferActivityText.itemCount(UInt64(count), language: language)
+    }
+}
+
+enum TransferPairingText {
+    static func guidance(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.guidance"
+                : "transfer.pairing.receive.guidance",
+            language: language
+        )
+    }
+
+    static func scanPrompt(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.scan_prompt"
+                : "transfer.pairing.receive.scan_prompt",
+            language: language
+        )
+    }
+
+    static func scanAction(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.scan_action"
+                : "transfer.pairing.receive.scan_action",
+            language: language
+        )
+    }
+
+    static func qrAccessibility(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.qr_accessibility"
+                : "transfer.pairing.receive.qr_accessibility",
+            language: language
+        )
+    }
+
+    static func desktopDetail(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.desktop_detail"
+                : "transfer.pairing.receive.desktop_detail",
+            language: language
+        )
+    }
+
+    static func joinOtherTitle(
+        direction: FfiTransferDirection,
+        language: String
+    ) -> String {
+        AppText.localized(
+            direction == .send
+                ? "transfer.pairing.send.join_receiver"
+                : "transfer.pairing.receive.join_sender",
+            language: language
+        )
+    }
+
+    static func inputAccepted(scanned: Bool, language: String) -> String {
+        AppText.localized(
+            scanned
+                ? "transfer.pairing.input_scanned"
+                : "transfer.pairing.input_pasted",
+            language: language
+        )
+    }
+}
+
+struct TransferFailurePresentationCopy: Equatable {
+    let title: String
+    let detail: String
+}
+
+enum TransferStatusText {
+    static func additionalManifestItems(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "transfer.status.inventory.additional_count",
+            defaultValue: "\(displayCount) more items are included in the authenticated manifest.",
+            language: language
+        )
+    }
+
+    static func inventorySummary(
+        rootCount: UInt32,
+        fileCount: UInt32,
+        folderCount: UInt32,
+        byteDescription: String,
+        language: String
+    ) -> String {
+        let roots = TransferContentText.rootCount(rootCount, language: language)
+        let files = TransferContentText.fileCount(fileCount, language: language)
+        let folders = TransferContentText.folderCount(folderCount, language: language)
+        return AppText.localized(
+            "transfer.status.inventory.summary",
+            defaultValue: "\(roots) · \(files) · \(folders) · \(byteDescription)",
+            language: language
+        )
+    }
+
+    static func viewItems(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "transfer.status.completed.view_item_count",
+            defaultValue: "View \(displayCount) Items",
+            language: language
+        )
+    }
+
+    static func receivedItems(_ count: Int, language: String) -> String {
+        let displayCount = Int64(max(count, 0))
+        return AppText.localized(
+            "transfer.status.completed.received_item_count",
+            defaultValue: "\(displayCount) received items",
+            language: language
+        )
+    }
+
+    static func savedAs(_ fileName: String, language: String) -> String {
+        AppText.localized(
+            "transfer.status.completed.saved_as",
+            defaultValue: "Saved as \(fileName)",
+            language: language
+        )
+    }
+
+    static func title(
+        state: TransferActivityState?,
+        direction: FfiTransferDirection?,
+        fileName: String,
+        failureTitle: String? = nil,
+        language: String
+    ) -> String {
+        switch state {
+        case nil:
+            return AppText.localized("transfer.status.title.selection", language: language)
+        case .waitingForPeer?:
+            return AppText.localized("transfer.status.title.waiting_for_peer", language: language)
+        case .pairing?:
+            return AppText.localized("transfer.status.title.pairing", language: language)
+        case .awaitingDecision?:
+            return AppText.localized("transfer.status.title.review_incoming", language: language)
+        case .transferring?:
+            if !fileName.isEmpty { return fileName }
+            return TransferActivityText.state(
+                .transferring,
+                direction: direction ?? .receive,
+                language: language
+            )
+        case .saving?:
+            return AppText.localized("transfer.status.title.saving", language: language)
+        case .finalizingDelivery?:
+            return AppText.localized("transfer.status.title.finalizing", language: language)
+        case .paused?:
+            return AppText.localized("transfer.status.title.paused", language: language)
+        case .delivered?:
+            return TransferActivityText.state(
+                .delivered,
+                direction: direction ?? .send,
+                language: language
+            )
+        case .canceled?:
+            return AppText.localized("transfer.status.title.canceled", language: language)
+        case .failed?:
+            return failureTitle
+                ?? AppText.localized("transfer.failure.title.generic", language: language)
+        case let state?:
+            return TransferActivityText.state(
+                state,
+                direction: direction ?? .receive,
+                language: language
+            )
+        }
+    }
+
+    static func detail(
+        state: TransferActivityState?,
+        direction: FfiTransferDirection?,
+        statusText: String,
+        failureDetail: String? = nil,
+        language: String
+    ) -> String? {
+        switch state {
+        case nil:
+            return statusText.isEmpty ? nil : statusText
+        case .preparing?:
+            return AppText.localized("transfer.status.detail.preparing", language: language)
+        case .waitingForPeer?:
+            return AppText.localized("transfer.status.detail.waiting_for_peer", language: language)
+        case .pairing?, .connecting?:
+            return AppText.localized("transfer.status.detail.connecting", language: language)
+        case .awaitingDecision?:
+            return statusText.isEmpty
+                ? AppText.localized("transfer.status.detail.review_incoming", language: language)
+                : statusText
+        case .transferring?:
+            return AppText.localized("transfer.status.detail.transferring", language: language)
+        case .verifying?:
+            return AppText.localized("transfer.status.detail.verifying", language: language)
+        case .saving?, .waitingForReceiverSave?, .finalizingDelivery?:
+            return AppText.localized("transfer.status.detail.finalizing", language: language)
+        case .paused?:
+            return AppText.localized("transfer.status.detail.paused", language: language)
+        case .delivered?:
+            return AppText.localized(
+                direction == .receive
+                    ? "transfer.status.detail.received"
+                    : "transfer.status.detail.delivered",
+                language: language
+            )
+        case .canceled?:
+            return AppText.localized("transfer.status.detail.canceled", language: language)
+        case .failed?:
+            return failureDetail ?? (statusText.isEmpty ? nil : statusText)
+        }
+    }
+
+    static func lastStep(
+        state: TransferActivityState?,
+        statusText: String,
+        language: String
+    ) -> String? {
+        let text = statusText.trimmed
+        guard state == .failed, !text.isEmpty else { return nil }
+        return AppText.localized(
+            "transfer.status.last_step",
+            defaultValue: "Last step: \(text)",
+            language: language
+        )
+    }
+
+    static func failureTitle(_ code: FfiFailureCode, language: String) -> String {
+        let key: String
+        switch code {
+        case .userCanceled, .senderCanceled:
+            key = "transfer.status.title.canceled"
+        case .networkLost:
+            key = "transfer.failure.title.connection"
+        case .authenticationFailed:
+            key = "transfer.failure.title.pairing"
+        case .roomNotFound:
+            key = "transfer.failure.title.room_unavailable"
+        case .roomExpired:
+            key = "transfer.failure.title.room_expired"
+        case .roomFull:
+            key = "transfer.failure.title.room_in_use"
+        case .roomRateLimited, .endpointRateLimited, .ipRateLimited:
+            key = "transfer.failure.title.try_later"
+        case .roomUnderAttack:
+            key = "transfer.failure.title.new_room"
+        case .serverBusy:
+            key = "transfer.failure.title.service_busy"
+        case .malformedJoin, .unsupportedRendezvousVersion, .unsupportedFeature:
+            key = "transfer.failure.title.update_required"
+        case .internalError:
+            key = "transfer.failure.title.generic"
+        case .senderSourceUnavailable, .senderPermissionLost, .senderSourceChanged,
+             .senderItemRemoved:
+            key = "transfer.failure.title.source_unavailable"
+        case .protocolOrIntegrityFailure:
+            key = "transfer.failure.title.verification"
+        case .receiverSpaceInsufficient:
+            key = "transfer.failure.title.space"
+        case .receiverDestinationDecisionRequired, .receiverDestinationUnavailable,
+             .receiverSaveFailed, .receiverReusedObjectLost,
+             .receiverFinalizationOutcomeUnknown:
+            key = "transfer.failure.title.save"
+        }
+        return AppText.localized(key, language: language)
+    }
+
+    static func fallbackFailure(reason: String, language: String) -> TransferFailurePresentationCopy {
+        let cleanReason = reason.trimmed
+        let lower = cleanReason.lowercased()
+        if lower.contains("mdns") && lower.contains("peers discovered") {
+            return TransferFailurePresentationCopy(
+                title: AppText.localized(
+                    "transfer.failure.title.local_network",
+                    language: language
+                ),
+                detail: AppText.localized(
+                    "transfer.failure.local_network.detail",
+                    language: language
+                )
+            )
+        }
+        let title = AppText.localized("transfer.failure.title.generic", language: language)
+        if cleanReason.isEmpty {
+            return TransferFailurePresentationCopy(
+                title: title,
+                detail: AppText.localized("transfer.failure.retry.detail", language: language)
+            )
+        }
+        return TransferFailurePresentationCopy(title: title, detail: cleanReason)
     }
 }
 
@@ -187,6 +674,17 @@ enum TransferPresentationPolicy {
     static func allowsInPlaceResume(_ failure: FfiTransferFailure?) -> Bool {
         guard let failure, failure.retryable else { return false }
         return failure.recoveryAction == .retry || failure.recoveryAction == .resume
+    }
+
+    static func terminalState(for failure: FfiTransferFailure) -> TransferActivityState {
+        switch failure.outcome {
+        case .canceled: return .canceled
+        case .failed: return .failed
+        }
+    }
+
+    static func shouldReleaseSession(after failure: FfiTransferFailure) -> Bool {
+        failure.sessionDisposition == .release
     }
 
     static func progress(for state: TransferActivityState) -> TransferProgressPresentation {

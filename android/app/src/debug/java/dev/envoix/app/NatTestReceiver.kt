@@ -4,8 +4,7 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import org.json.JSONArray
-import org.json.JSONObject
+import kotlinx.coroutines.runBlocking
 import java.io.File
 
 /**
@@ -42,22 +41,24 @@ class NatTestReceiver : BroadcastReceiver() {
     ) {
         val broker = intent.getStringExtra(EXTRA_BROKER).orEmpty()
         val relay = intent.getStringExtra(EXTRA_RELAY).orEmpty()
-        val invitation = JSONObject(Native.generateInvite("receive", broker, relay))
-        invitation.throwNativeError()
+        val invitation =
+            requireNotNull(InviteCodec.generate("receive", broker, relay)) {
+                "Could not create receiver invitation"
+            }
 
-        val invitePayload = invitation.getString("payload")
         TransferService.startReceive(
             context = context,
-            room = invitation.getString("reference"),
+            room = invitation.reference,
             broker = broker,
             relay = relay,
             qrPayload = null,
             destinationCopyApproved = true,
             rememberLabel = intent.getStringExtra(EXTRA_REMEMBER_LABEL),
             rememberedRelationshipId = null,
+            invitationCreator = true,
         )
         resultCode = Activity.RESULT_OK
-        resultData = invitePayload
+        resultData = invitation.payload
     }
 
     private fun startSender(
@@ -75,8 +76,8 @@ class NatTestReceiver : BroadcastReceiver() {
             if (remembered == null) {
                 val invite = intent.getStringExtra(EXTRA_INVITATION).orEmpty()
                 require(invite.isNotBlank()) { "Complete InviteV2 URI is missing" }
-                JSONObject(Native.parseInviteForRole(invite, "send")).also {
-                    it.throwNativeError()
+                requireNotNull(InviteCodec.parseForRole(invite, "send")) {
+                    "Complete InviteV2 URI is invalid for a sender"
                 }
             } else {
                 null
@@ -85,23 +86,26 @@ class NatTestReceiver : BroadcastReceiver() {
         val store = TransferService.jobStoreDirectory(context).absolutePath
         // Keep the NAT path active long enough to observe relay-to-direct
         // migration even when the supplied test fixture is highly compressible.
-        val job = JSONObject(Native.createManifestV2Job(store, "never"))
-        job.throwNativeError()
-        val jobId = job.getString("job_id")
-        val roots =
-            JSONArray()
-                .put(
-                    JSONObject()
-                        .put("path", source.absolutePath)
-                        .put("requested_name", source.name)
-                        .put("origin", "file_provider")
-                        .put("issues", JSONArray()),
+        val jobId =
+            runBlocking {
+                val created = ManifestV2JobGateway.shared.create(store, "never")
+                ManifestV2JobGateway.shared.addStagedProviderRoot(
+                    store,
+                    created.jobId,
+                    ManifestV2StagedProviderRoot(
+                        path = source.absolutePath,
+                        requestedName = source.name,
+                        origin = ManifestV2SourceOrigin.FileProvider,
+                        issues = emptyList(),
+                    ),
                 )
-        JSONObject(Native.prepareManifestV2Job(store, jobId, roots.toString())).throwNativeError()
+                created.jobId
+            }
         if (remembered == null) {
+            val invitationReference = requireNotNull(invitation?.reference)
             TransferService.startSend(
                 context = context,
-                room = requireNotNull(invitation).getString("reference"),
+                room = invitationReference,
                 broker = intent.getStringExtra(EXTRA_BROKER).orEmpty(),
                 relay = intent.getStringExtra(EXTRA_RELAY).orEmpty(),
                 jobId = jobId,
@@ -184,10 +188,6 @@ class NatTestReceiver : BroadcastReceiver() {
                 else -> error("field must be state, peer, or error")
             }
         resultCode = Activity.RESULT_OK
-    }
-
-    private fun JSONObject.throwNativeError() {
-        optString("error").takeIf(String::isNotEmpty)?.let(::error)
     }
 
     private companion object {

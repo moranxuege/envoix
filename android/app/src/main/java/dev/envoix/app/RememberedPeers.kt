@@ -2,19 +2,26 @@ package dev.envoix.app
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
+import android.security.keystore.UserNotAuthenticatedException
+import dev.envoix.app.ffi.FfiApplicationEngine
+import dev.envoix.app.ffi.FfiApplicationVault
+import dev.envoix.app.ffi.FfiApplicationVaultException
+import dev.envoix.app.ffi.FfiRememberedRelationship
+import dev.envoix.app.ffi.envoixApplicationBindingInfo
+import dev.envoix.app.ffi.envoixCoreInfo
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import org.json.JSONArray
-import org.json.JSONObject
+import java.io.Closeable
 import java.io.File
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.util.UUID
-import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -31,7 +38,6 @@ data class RememberedPeerSummary(
 
 internal data class PendingRememberedPeer(
     val relationshipId: String,
-    val credentialReference: String,
     val label: String,
     val broker: String,
     val relay: String,
@@ -42,58 +48,14 @@ internal data class LoadedRememberedPeer(
     val opaqueCredential: ByteArray,
 )
 
-private data class RememberedPeerRecord(
-    val relationshipId: String,
-    val credentialReference: String,
-    val label: String,
-    val generation: Long,
-    val previousGeneration: Long?,
-    val broker: String,
-    val relay: String,
-) {
-    fun summary() =
-        RememberedPeerSummary(
-            relationshipId,
-            label,
-            generation,
-            previousGeneration,
-            broker,
-            relay,
-        )
-
-    fun toJson() =
-        JSONObject()
-            .put("relationship_id", relationshipId)
-            .put("credential_reference", credentialReference)
-            .put("label", label)
-            .put("generation", generation)
-            .put("previous_generation", previousGeneration ?: JSONObject.NULL)
-            .put("broker", broker)
-            .put("relay", relay)
-
-    companion object {
-        fun fromJson(value: JSONObject) =
-            RememberedPeerRecord(
-                relationshipId = value.getString("relationship_id"),
-                credentialReference = value.getString("credential_reference"),
-                label = value.getString("label"),
-                generation = value.getLong("generation"),
-                previousGeneration =
-                    value.optLong("previous_generation", -1).takeIf { it >= 0 },
-                broker = value.getString("broker"),
-                relay = value.optString("relay"),
-            )
-    }
-}
-
 /**
- * Android's protected remembered-credential backend. Metadata contains only a
- * random reference; opaque Rust bytes are AES-GCM wrapped by a non-exportable
- * Android Keystore key and stored under noBackupFilesDir.
+ * Thin Android host for the Engine-owned Relationship state. The Engine owns
+ * labels, endpoints, generations, and durable references; Android owns only
+ * the protected credential bytes and transient in-process session leases.
  */
 internal class RememberedPeerStore private constructor(
-    private val context: Context,
-) {
+    private val engine: FfiApplicationEngine,
+) : Closeable {
     private val activeRelationships = mutableSetOf<String>()
     private val mutableChanges =
         MutableSharedFlow<Unit>(
@@ -108,27 +70,37 @@ internal class RememberedPeerStore private constructor(
         broker: String,
         relay: String,
     ): PendingRememberedPeer {
-        require(label.trim().isNotEmpty()) { "Device label is required" }
+        val normalized = label.trim()
+        require(normalized.isNotEmpty()) { "Device label is required" }
+        val prepared = engine.prepareRelationship(normalized, broker, relay)
         return PendingRememberedPeer(
-            relationshipId = UUID.randomUUID().toString(),
-            credentialReference = UUID.randomUUID().toString(),
-            label = label.trim(),
+            relationshipId = prepared.relationshipId,
+            label = prepared.label,
             broker = broker,
             relay = relay,
         )
     }
 
     @Synchronized
-    fun peers(): List<RememberedPeerSummary> =
-        readRecords()
-            .sortedBy { it.label.lowercase() }
-            .map(RememberedPeerRecord::summary)
+    fun discard(pending: PendingRememberedPeer) {
+        engine.discardPreparedRelationship(pending.relationshipId)
+    }
 
     @Synchronized
-    fun load(relationshipId: String): LoadedRememberedPeer? {
-        val record = readRecords().firstOrNull { it.relationshipId == relationshipId } ?: return null
-        return LoadedRememberedPeer(record.summary(), loadCredential(record))
-    }
+    fun peers(): List<RememberedPeerSummary> =
+        engine
+            .relationships()
+            .map { it.summary() }
+            .sortedBy { it.label.lowercase() }
+
+    @Synchronized
+    fun load(relationshipId: String): LoadedRememberedPeer? =
+        engine.loadRelationship(relationshipId)?.let {
+            LoadedRememberedPeer(
+                summary = it.relationship.summary(),
+                opaqueCredential = it.opaqueCredential,
+            )
+        }
 
     @Synchronized
     fun create(
@@ -136,27 +108,9 @@ internal class RememberedPeerStore private constructor(
         opaqueCredential: ByteArray,
         generation: Long,
     ): Boolean {
-        val records = readRecords().toMutableList()
-        if (records.any { it.relationshipId == pending.relationshipId }) return false
-        val record =
-            RememberedPeerRecord(
-                pending.relationshipId,
-                pending.credentialReference,
-                pending.label,
-                generation,
-                null,
-                pending.broker,
-                pending.relay,
-            )
+        val ffiGeneration = generation.asFfiGeneration() ?: return false
         return runCatching {
-            writeCredential(record, opaqueCredential)
-            try {
-                records += record
-                writeRecords(records)
-            } catch (error: Throwable) {
-                deleteCredentialFiles(record.credentialReference)
-                throw error
-            }
+            engine.commitRelationship(pending.relationshipId, opaqueCredential, ffiGeneration)
             true
         }.getOrDefault(false).also { created ->
             if (created) mutableChanges.tryEmit(Unit)
@@ -169,28 +123,11 @@ internal class RememberedPeerStore private constructor(
         opaqueCredential: ByteArray,
         generation: Long,
     ): Boolean {
-        val records = readRecords().toMutableList()
-        val index = records.indexOfFirst { it.relationshipId == relationshipId }
-        if (index < 0) return false
-        val previous = records[index]
-        if (generation <= previous.generation) return generation == previous.generation
-        val rotated =
-            previous.copy(
-                generation = generation,
-                previousGeneration = previous.generation,
-            )
+        val ffiGeneration = generation.asFfiGeneration() ?: return false
         return runCatching {
-            writeCredential(rotated, opaqueCredential)
-            records[index] = rotated
-            writeRecords(records)
-            previous.previousGeneration?.let {
-                credentialFile(previous.credentialReference, it).delete()
-            }
+            engine.rotateRelationship(relationshipId, opaqueCredential, ffiGeneration)
             true
-        }.getOrElse {
-            credentialFile(rotated.credentialReference, rotated.generation).delete()
-            false
-        }.also { persisted ->
+        }.getOrDefault(false).also { persisted ->
             if (persisted) mutableChanges.tryEmit(Unit)
         }
     }
@@ -206,7 +143,7 @@ internal class RememberedPeerStore private constructor(
         opaqueCredential: ByteArray,
         authenticatedGeneration: Long,
     ): Boolean {
-        val record = readRecords().firstOrNull { it.relationshipId == relationshipId } ?: return false
+        val record = load(relationshipId)?.summary ?: return false
         val nextGeneration =
             runCatching { Math.addExact(authenticatedGeneration, 1L) }
                 .getOrNull()
@@ -227,13 +164,8 @@ internal class RememberedPeerStore private constructor(
     ): Boolean {
         val normalized = label.trim()
         if (normalized.isEmpty()) return false
-        val records = readRecords().toMutableList()
-        val index = records.indexOfFirst { it.relationshipId == relationshipId }
-        if (index < 0) return false
-        if (records[index].label == normalized) return true
-        records[index] = records[index].copy(label = normalized)
         return runCatching {
-            writeRecords(records)
+            engine.renameRelationship(relationshipId, normalized)
             true
         }.getOrDefault(false).also { persisted ->
             if (persisted) mutableChanges.tryEmit(Unit)
@@ -245,11 +177,8 @@ internal class RememberedPeerStore private constructor(
         check(relationshipId !in activeRelationships) {
             "This remembered room is still active"
         }
-        val records = readRecords().toMutableList()
-        val record = records.firstOrNull { it.relationshipId == relationshipId } ?: return
-        records.remove(record)
-        writeRecords(records)
-        deleteCredentialFiles(record.credentialReference)
+        if (engine.relationships().none { it.relationshipId == relationshipId }) return
+        engine.revokeRelationship(relationshipId)
         mutableChanges.tryEmit(Unit)
     }
 
@@ -261,88 +190,153 @@ internal class RememberedPeerStore private constructor(
         activeRelationships.remove(relationshipId)
     }
 
-    private fun loadCredential(record: RememberedPeerRecord): ByteArray {
-        val generations = listOfNotNull(record.generation, record.previousGeneration)
-        val failures = mutableListOf<Throwable>()
-        for (generation in generations) {
-            try {
-                return decrypt(
-                    credentialFile(record.credentialReference, generation).readBytes(),
-                    aad(record, generation),
-                )
-            } catch (error: Throwable) {
-                failures += error
+    override fun close() = engine.close()
+
+    companion object {
+        private const val ENGINE_DIRECTORY = "application-engine-v2"
+        private const val VAULT_DIRECTORY = "application-vault-v2"
+        private const val KEY_ALIAS = "dev.envoix.application-vault.v2"
+
+        @Volatile
+        private var instance: RememberedPeerStore? = null
+
+        fun get(context: Context): RememberedPeerStore =
+            instance ?: synchronized(this) {
+                instance ?: openForApplication(context.applicationContext).also { instance = it }
             }
+
+        internal fun openForTesting(
+            stateDirectory: File,
+            vaultDirectory: File,
+            keyAlias: String,
+        ): RememberedPeerStore = open(stateDirectory, AndroidApplicationVault(vaultDirectory, keyAlias))
+
+        private fun open(
+            stateDirectory: File,
+            vault: FfiApplicationVault,
+        ): RememberedPeerStore {
+            validateApplicationBinding(envoixCoreInfo(), envoixApplicationBindingInfo())
+            return RememberedPeerStore(
+                FfiApplicationEngine.openPersistent(stateDirectory.absolutePath, vault),
+            )
         }
-        throw IllegalStateException(
-            "remembered credential is temporarily unavailable; the relationship was preserved",
-            failures.lastOrNull(),
-        ).also { failure ->
-            failures.dropLast(1).forEach(failure::addSuppressed)
+
+        private fun openForApplication(context: Context): RememberedPeerStore {
+            val stateDirectory = File(context.noBackupFilesDir, ENGINE_DIRECTORY)
+            val legacyMetadata = File(context.filesDir, "remembered-peers/relationships-v1.json")
+            val currentState = File(stateDirectory, "engine-state-v2.json")
+            if (legacyMetadata.isFile && !currentState.exists()) {
+                LogStore.append(
+                    "Android Relationship v1 state was retained but is not imported; re-pair for v0.3",
+                )
+            }
+            return open(
+                stateDirectory = stateDirectory,
+                vault =
+                    AndroidApplicationVault(
+                        File(context.noBackupFilesDir, VAULT_DIRECTORY),
+                        KEY_ALIAS,
+                    ),
+            )
+        }
+    }
+}
+
+/** AES-GCM envelope storage backed by a non-exportable Android Keystore key. */
+internal class AndroidApplicationVault(
+    private val directory: File,
+    private val keyAlias: String,
+) : FfiApplicationVault {
+    @Synchronized
+    override fun contains(reference: String): Boolean =
+        vaultOperation {
+            val file = credentialFile(reference)
+            if (file.exists() && !file.isFile) {
+                throw FfiApplicationVaultException.CorruptData()
+            }
+            file.isFile
+        }
+
+    @Synchronized
+    override fun store(
+        reference: String,
+        opaqueCredential: ByteArray,
+    ) {
+        vaultOperation {
+            if (opaqueCredential.isEmpty() || opaqueCredential.size > MAX_SECRET_BYTES) {
+                throw FfiApplicationVaultException.InvalidRequest()
+            }
+            val encrypted = encrypt(opaqueCredential, aad(reference))
+            atomicWrite(credentialFile(reference), encrypted)
         }
     }
 
-    private fun writeCredential(
-        record: RememberedPeerRecord,
-        opaqueCredential: ByteArray,
-    ) {
-        atomicWrite(
-            credentialFile(record.credentialReference, record.generation),
-            encrypt(opaqueCredential, aad(record, record.generation)),
-        )
+    @Synchronized
+    override fun load(reference: String): ByteArray? =
+        vaultOperation {
+            val file = credentialFile(reference)
+            if (!file.exists()) return@vaultOperation null
+            if (!file.isFile) {
+                throw FfiApplicationVaultException.CorruptData()
+            }
+            if (file.length() !in minEnvelopeBytes..maxEnvelopeBytes) {
+                throw FfiApplicationVaultException.CorruptData()
+            }
+            decrypt(file.readBytes(), aad(reference))
+        }
+
+    @Synchronized
+    override fun delete(reference: String) {
+        vaultOperation {
+            val file = credentialFile(reference)
+            if (file.exists() && !file.isFile) {
+                throw FfiApplicationVaultException.CorruptData()
+            }
+            Files.deleteIfExists(file.toPath())
+        }
     }
 
     private fun encrypt(
         plaintext: ByteArray,
         aad: ByteArray,
-    ): ByteArray {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, encryptionKey())
-        val nonce = cipher.iv
-        require(nonce.size == NONCE_BYTES)
-        cipher.updateAAD(aad)
-        return byteArrayOf(FORMAT_VERSION) + nonce + cipher.doFinal(plaintext)
-    }
+    ): ByteArray =
+        vaultOperation {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, encryptionKey())
+            val nonce = cipher.iv
+            if (nonce.size != NONCE_BYTES) {
+                throw FfiApplicationVaultException.Unavailable()
+            }
+            cipher.updateAAD(aad)
+            byteArrayOf(FORMAT_VERSION) + nonce + cipher.doFinal(plaintext)
+        }
 
     private fun decrypt(
         envelope: ByteArray,
         aad: ByteArray,
-    ): ByteArray {
-        require(envelope.size >= 1 + NONCE_BYTES + TAG_BITS / 8)
-        require(envelope[0] == FORMAT_VERSION)
-        val nonce = envelope.copyOfRange(1, 1 + NONCE_BYTES)
-        val ciphertext = envelope.copyOfRange(1 + NONCE_BYTES, envelope.size)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, decryptionKey(), GCMParameterSpec(TAG_BITS, nonce))
-        cipher.updateAAD(aad)
-        return try {
-            cipher.doFinal(ciphertext)
-        } catch (error: AEADBadTagException) {
-            throw IllegalStateException("remembered credential authentication failed", error)
-        }
-    }
-
-    private fun aad(
-        record: RememberedPeerRecord,
-        generation: Long,
     ): ByteArray =
-        listOf(
-            AAD_SCHEMA,
-            record.credentialReference,
-            record.relationshipId,
-            generation.toString(),
-        ).joinToString("\u0000").toByteArray(Charsets.UTF_8)
+        vaultOperation(corruptData = true) {
+            if (envelope.size < 1 + NONCE_BYTES + TAG_BITS / 8 || envelope[0] != FORMAT_VERSION) {
+                throw FfiApplicationVaultException.CorruptData()
+            }
+            val nonce = envelope.copyOfRange(1, 1 + NONCE_BYTES)
+            val ciphertext = envelope.copyOfRange(1 + NONCE_BYTES, envelope.size)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, decryptionKey(), GCMParameterSpec(TAG_BITS, nonce))
+            cipher.updateAAD(aad)
+            cipher.doFinal(ciphertext)
+        }
 
     private fun encryptionKey(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        (store.getKey(keyAlias, null) as? SecretKey)?.let { return it }
         return KeyGenerator
             .getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
             .apply {
                 init(
                     KeyGenParameterSpec
                         .Builder(
-                            KEY_ALIAS,
+                            keyAlias,
                             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
                         ).setKeySize(256)
                         .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -354,90 +348,102 @@ internal class RememberedPeerStore private constructor(
 
     private fun decryptionKey(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        return store.getKey(KEY_ALIAS, null) as? SecretKey
-            ?: throw IllegalStateException("remembered credential key is unavailable")
+        return store.getKey(keyAlias, null) as? SecretKey
+            ?: throw FfiApplicationVaultException.CorruptData()
     }
 
-    private fun readRecords(): List<RememberedPeerRecord> {
-        val file = metadataFile()
-        if (!file.exists()) return emptyList()
-        return try {
-            val values = JSONArray(file.readText())
-            (0 until values.length()).map {
-                RememberedPeerRecord.fromJson(values.getJSONObject(it))
-            }
-        } catch (error: Throwable) {
-            throw IllegalStateException(
-                "remembered-device metadata is temporarily unavailable; no records were changed",
-                error,
-            )
+    private fun credentialFile(reference: String): File {
+        if (reference.isEmpty() ||
+            reference.length > MAX_REFERENCE_BYTES ||
+            reference.any { !it.isAsciiReferenceCharacter() }
+        ) {
+            throw FfiApplicationVaultException.InvalidRequest()
         }
+        return File(directory, "$reference.bin")
     }
 
-    private fun writeRecords(records: List<RememberedPeerRecord>) {
-        val values = JSONArray()
-        records.forEach { values.put(it.toJson()) }
-        atomicWrite(metadataFile(), values.toString().toByteArray(Charsets.UTF_8))
-    }
-
-    private fun deleteCredentialFiles(reference: String) {
-        credentialDirectory()
-            .listFiles()
-            ?.filter { it.name.startsWith("$reference-") }
-            ?.forEach(File::delete)
-    }
-
-    private fun credentialFile(
-        reference: String,
-        generation: Long,
-    ): File {
-        UUID.fromString(reference)
-        return File(credentialDirectory(), "$reference-$generation.bin")
-    }
-
-    private fun credentialDirectory() = File(context.noBackupFilesDir, "remembered-credentials-v1").apply { mkdirs() }
-
-    private fun metadataFile() =
-        File(context.filesDir, "remembered-peers/relationships-v1.json").apply {
-            parentFile?.mkdirs()
-        }
+    private fun aad(reference: String): ByteArray = "$AAD_SCHEMA\u0000$reference".toByteArray(Charsets.UTF_8)
 
     private fun atomicWrite(
         target: File,
         bytes: ByteArray,
     ) {
-        target.parentFile?.mkdirs()
-        val temporary = File(target.parentFile, "${target.name}.${UUID.randomUUID()}.tmp")
-        temporary.writeBytes(bytes)
-        runCatching {
-            Files.move(
-                temporary.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.ATOMIC_MOVE,
-            )
-        }.getOrElse {
-            Files.move(
-                temporary.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-            )
+        if ((!directory.exists() && !directory.mkdirs()) || !directory.isDirectory) {
+            throw FfiApplicationVaultException.Unavailable()
+        }
+        val temporary = File(directory, "${target.name}.${UUID.randomUUID()}.tmp")
+        try {
+            temporary.writeBytes(bytes)
+            try {
+                Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+        } finally {
+            temporary.delete()
         }
     }
 
+    private inline fun <T> vaultOperation(
+        corruptData: Boolean = false,
+        operation: () -> T,
+    ): T =
+        try {
+            operation()
+        } catch (error: FfiApplicationVaultException) {
+            throw error
+        } catch (_: UserNotAuthenticatedException) {
+            throw FfiApplicationVaultException.InteractionRequired()
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            throw FfiApplicationVaultException.CorruptData()
+        } catch (_: SecurityException) {
+            throw FfiApplicationVaultException.PermissionDenied()
+        } catch (_: Throwable) {
+            if (corruptData) {
+                throw FfiApplicationVaultException.CorruptData()
+            }
+            throw FfiApplicationVaultException.Unavailable()
+        }
+
     companion object {
-        private const val KEY_ALIAS = "dev.envoix.remembered-credential.v1"
-        private const val AAD_SCHEMA = "dev.envoix.app/remembered-credential/v1"
-        private const val FORMAT_VERSION: Byte = 1
+        private const val AAD_SCHEMA = "dev.envoix.app/application-vault/v2"
+        private const val FORMAT_VERSION: Byte = 2
         private const val NONCE_BYTES = 12
         private const val TAG_BITS = 128
-
-        @Volatile
-        private var instance: RememberedPeerStore? = null
-
-        fun get(context: Context): RememberedPeerStore =
-            instance ?: synchronized(this) {
-                instance ?: RememberedPeerStore(context.applicationContext).also { instance = it }
-            }
+        private const val MAX_REFERENCE_BYTES = 128
+        private const val MAX_SECRET_BYTES = 64 * 1024
+        private val minEnvelopeBytes = (1 + NONCE_BYTES + TAG_BITS / 8).toLong()
+        private val maxEnvelopeBytes = MAX_SECRET_BYTES.toLong() + minEnvelopeBytes
     }
 }
+
+private fun FfiRememberedRelationship.summary() =
+    RememberedPeerSummary(
+        relationshipId = relationshipId,
+        label = label,
+        generation = generation.asAndroidGeneration(),
+        previousGeneration = previousGeneration?.asAndroidGeneration(),
+        broker = broker,
+        relay = relay,
+    )
+
+private fun Long.asFfiGeneration(): ULong? = takeIf { it >= 0 }?.toULong()
+
+private fun ULong.asAndroidGeneration(): Long {
+    if (this > Long.MAX_VALUE.toULong()) {
+        throw IllegalStateException("Relationship generation exceeds the Android host range")
+    }
+    return toLong()
+}
+
+private fun Char.isAsciiReferenceCharacter(): Boolean =
+    this in 'a'..'z' || this in 'A'..'Z' || this in '0'..'9' || this == '-' || this == '_'

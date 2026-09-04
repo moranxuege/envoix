@@ -4,15 +4,18 @@ import Foundation
 enum RemoteLogUpload {
     static let bodyMaxBytes = 480 * 1024
     private static let developerModeKey = "envoix.developerMode"
+    private static let uploadTokenEnvironment = "ENVOIX_DIAGNOSTIC_UPLOAD_TOKEN"
+    private static let tokenMaxBytes = 1024
 
     struct Target {
         let roomID: String
         let side: String
     }
 
-    enum UploadError: LocalizedError {
+    enum UploadError: LocalizedError, Equatable {
         case invalidServer
         case invalidRoomID
+        case authenticationRequired
         case developerModeRequired
         case bodyTooLarge
         case unexpectedResponse(Int)
@@ -23,6 +26,8 @@ enum RemoteLogUpload {
                 return "Invalid diagnostic log server URL."
             case .invalidRoomID:
                 return "Invalid room ID for diagnostic upload."
+            case .authenticationRequired:
+                return "A diagnostic upload token is required."
             case .developerModeRequired:
                 return "Enable Developer Mode to upload diagnostics."
             case .bodyTooLarge:
@@ -68,32 +73,46 @@ enum RemoteLogUpload {
         guard UserDefaults.standard.bool(forKey: developerModeKey) else {
             throw UploadError.developerModeRequired
         }
-        guard body.utf8.count <= bodyMaxBytes else { throw UploadError.bodyTooLarge }
-        let servers = uploadServers(startingWith: server)
-        for (index, server) in servers.enumerated() {
-            do {
-                try await uploadOnce(server: server, target: target, body: body)
-                return
-            } catch {
-                guard index + 1 < servers.count, shouldFallback(after: error) else {
-                    throw error
-                }
-            }
-        }
-        throw UploadError.invalidServer
+        let token = ProcessInfo.processInfo.environment[uploadTokenEnvironment]
+        let request = try request(
+            server: server,
+            target: target,
+            body: body,
+            bearerToken: token ?? ""
+        )
+        try await upload(request)
         #else
         throw UploadError.invalidServer
         #endif
     }
 
-    private static func uploadOnce(server: String, target: Target, body: String) async throws {
+    static func request(
+        server: String,
+        target: Target,
+        body: String,
+        bearerToken: String
+    ) throws -> URLRequest {
+        guard body.utf8.count <= bodyMaxBytes else { throw UploadError.bodyTooLarge }
+        let token = bearerToken.trimmed
+        guard
+            !token.isEmpty,
+            token.utf8.count <= tokenMaxBytes,
+            token.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7e })
+        else {
+            throw UploadError.authenticationRequired
+        }
+
         let url = try uploadURL(server: server, target: target)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = Data(body.utf8)
         request.timeoutInterval = 8
         request.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
 
+    private static func upload(_ request: URLRequest) async throws {
         let (_, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse else {
             throw UploadError.unexpectedResponse(-1)
@@ -101,33 +120,6 @@ enum RemoteLogUpload {
         guard (200...299).contains(response.statusCode) else {
             throw UploadError.unexpectedResponse(response.statusCode)
         }
-    }
-
-    /// Prefer HTTPS even when an older HTTP address remains in user settings.
-    private static func uploadServers(startingWith server: String) -> [String] {
-        let configuredServer = server.trimmed
-        let preferredServer = deprecatedLogServers.contains(configuredServer) ? defaultLogServer : configuredServer
-        guard
-            var components = URLComponents(string: preferredServer),
-            let scheme = components.scheme?.lowercased(),
-            scheme == "http" || scheme == "https"
-        else {
-            return [preferredServer]
-        }
-
-        components.scheme = "https"
-        let https = components.url?.absoluteString
-        components.scheme = "http"
-        let http = components.url?.absoluteString
-        return [https, http].compactMap { $0 }.reduce(into: []) { servers, candidate in
-            if !servers.contains(candidate) { servers.append(candidate) }
-        }
-    }
-
-    private static func shouldFallback(after error: Error) -> Bool {
-        guard let uploadError = error as? UploadError else { return true }
-        guard case let .unexpectedResponse(status) = uploadError else { return false }
-        return status < 0 || status >= 500
     }
 
     private static func uploadURL(server: String, target: Target) throws -> URL {
@@ -141,16 +133,27 @@ enum RemoteLogUpload {
         guard
             var components = URLComponents(string: server.trimmed),
             let scheme = components.scheme?.lowercased(),
-            scheme == "http" || scheme == "https",
-            components.host != nil
+            scheme == "https",
+            components.host != nil,
+            components.user == nil,
+            components.password == nil,
+            components.query == nil,
+            components.fragment == nil
         else {
             throw UploadError.invalidServer
         }
-        guard !target.side.trimmed.isEmpty else { throw UploadError.invalidRoomID }
+        let side = target.side.trimmed
+        guard
+            !side.isEmpty,
+            side.utf8.count <= 16,
+            side.unicodeScalars.allSatisfy({ $0.isASCII && CharacterSet.alphanumerics.contains($0) })
+        else {
+            throw UploadError.invalidRoomID
+        }
 
         let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         components.path = "/" + ([basePath, "logs", target.roomID].filter { !$0.isEmpty }.joined(separator: "/"))
-        components.queryItems = [URLQueryItem(name: "side", value: target.side.trimmed)]
+        components.queryItems = [URLQueryItem(name: "side", value: side)]
         guard let url = components.url else { throw UploadError.invalidServer }
         return url
     }

@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use envoix_client::api::{
     CanonicalTransferJob, CompressionPolicyV2, InventoryCursor, InventoryItem, JobIdV2,
-    JobLifecycle, LocalSourceOrigin, ManifestEntryKindV2, SourceDecision, SourceIssue,
-    SourceIssueKind, SourceItemId, SourceSelectionInfo, SourceSelectionState, TransferJobStore,
+    JobLifecycle, LocalSourceOrigin, ManifestEntryKindV2, ProviderSourceIssue, SourceDecision,
+    SourceIssue, SourceIssueKind, SourceItemId, SourceSelectionInfo, SourceSelectionState,
+    TransferJobStore,
 };
 use tokio::sync::Mutex;
 
@@ -42,6 +43,28 @@ pub enum FfiSourceOriginV2 {
     Share,
     ContentUri,
     FileProvider,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiProviderSourceIssueKindV2 {
+    PermissionDenied,
+    Unavailable,
+    InvalidName,
+    SpecialFile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiProviderSourceIssueV2 {
+    pub relative_components: Vec<String>,
+    pub kind: FfiProviderSourceIssueKindV2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiStagedProviderRootV2 {
+    pub path: String,
+    pub requested_name: String,
+    pub origin: FfiSourceOriginV2,
+    pub issues: Vec<FfiProviderSourceIssueV2>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -220,6 +243,66 @@ impl FfiTransferJobV2 {
         .await
     }
 
+    /// Attaches provider content that a trusted platform port has already
+    /// stabilized in private storage. Provider completeness facts are retained
+    /// so a copied partial directory cannot be mistaken for a complete source.
+    pub async fn add_staged_provider_roots(
+        &self,
+        roots: Vec<FfiStagedProviderRootV2>,
+    ) -> Result<FfiTransferJobSnapshotV2, EnvoixError> {
+        on_ffi_runtime(async {
+            if roots.is_empty()
+                || roots.iter().any(|root| {
+                    root.path.trim().is_empty() || root.requested_name.trim().is_empty()
+                })
+            {
+                return Err(EnvoixError::Operation {
+                    reason: "staged roots must contain a path and requested name".into(),
+                });
+            }
+            let mut job = self.job.lock().await;
+            for root in roots {
+                job.add_provider_path(
+                    PathBuf::from(root.path),
+                    root.requested_name,
+                    core_source_origin(root.origin),
+                    root.issues.into_iter().map(core_provider_issue).collect(),
+                )
+                .await
+                .map_err(op_err)?;
+                self.store.save(&job).await.map_err(op_err)?;
+            }
+            Ok(snapshot(&job))
+        })
+        .await
+    }
+
+    pub async fn reauthorize_staged_provider_source(
+        &self,
+        root_item_id: u64,
+        source_path: String,
+        issues: Vec<FfiProviderSourceIssueV2>,
+    ) -> Result<FfiTransferJobSnapshotV2, EnvoixError> {
+        on_ffi_runtime(async {
+            if source_path.trim().is_empty() {
+                return Err(EnvoixError::Operation {
+                    reason: "reauthorized provider path must not be empty".into(),
+                });
+            }
+            let mut job = self.job.lock().await;
+            job.reauthorize_provider_source(
+                SourceItemId(root_item_id),
+                PathBuf::from(source_path),
+                issues.into_iter().map(core_provider_issue).collect(),
+            )
+            .await
+            .map_err(op_err)?;
+            self.store.save(&job).await.map_err(op_err)?;
+            Ok(snapshot(&job))
+        })
+        .await
+    }
+
     pub async fn resolve_source_issue(
         &self,
         root_item_id: u64,
@@ -288,7 +371,9 @@ impl FfiTransferJobV2 {
     pub async fn seal_for_send(&self) -> Result<FfiManifestSealV2, EnvoixError> {
         on_ffi_runtime(async {
             let mut job = self.job.lock().await;
-            job.seal_for_send().map_err(op_err)?;
+            if job.lifecycle() != JobLifecycle::Sealed {
+                job.seal_for_send().map_err(op_err)?;
+            }
             self.store.save(&job).await.map_err(op_err)?;
             let digest = job
                 .structural_digest()
@@ -551,6 +636,18 @@ fn core_source_origin(origin: FfiSourceOriginV2) -> LocalSourceOrigin {
     }
 }
 
+fn core_provider_issue(issue: FfiProviderSourceIssueV2) -> ProviderSourceIssue {
+    ProviderSourceIssue {
+        relative_components: issue.relative_components,
+        kind: match issue.kind {
+            FfiProviderSourceIssueKindV2::PermissionDenied => SourceIssueKind::PermissionDenied,
+            FfiProviderSourceIssueKindV2::Unavailable => SourceIssueKind::Unavailable,
+            FfiProviderSourceIssueKindV2::InvalidName => SourceIssueKind::InvalidName,
+            FfiProviderSourceIssueKindV2::SpecialFile => SourceIssueKind::SpecialFile,
+        },
+    }
+}
+
 fn core_compression_policy(policy: FfiCompressionPolicyV2) -> CompressionPolicyV2 {
     match policy {
         FfiCompressionPolicyV2::Never => CompressionPolicyV2::Never,
@@ -588,4 +685,103 @@ fn decode_job_id(value: &str) -> Result<JobIdV2, EnvoixError> {
         });
     }
     Ok(JobIdV2(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_info_advertises_typed_staged_provider_jobs_in_ffi_v25() {
+        let info = crate::envoix_core_info();
+        assert_eq!(info.ffi_api_version, 25);
+        assert!(
+            info.capabilities
+                .contains(&"typed_staged_provider_job_v1".to_string())
+        );
+    }
+
+    #[test]
+    fn staged_provider_issues_survive_the_typed_boundary_and_reauthorization() {
+        let temporary = tempfile::tempdir().expect("temporary provider job store");
+        let original = temporary.path().join("original");
+        let replacement = temporary.path().join("replacement");
+        std::fs::create_dir(&original).expect("create original root");
+        std::fs::create_dir(&replacement).expect("create replacement root");
+        std::fs::write(original.join("visible.txt"), b"visible").expect("write original");
+        std::fs::write(replacement.join("complete.txt"), b"complete").expect("write replacement");
+
+        crate::ffi_runtime().block_on(async {
+            let job = create_transfer_job_v2(
+                temporary.path().join("jobs").to_string_lossy().into_owned(),
+                FfiCompressionPolicyV2::Smart,
+            )
+            .await
+            .expect("create typed job");
+            let snapshot = job
+                .add_staged_provider_roots(vec![FfiStagedProviderRootV2 {
+                    path: original.to_string_lossy().into_owned(),
+                    requested_name: "Shared folder".into(),
+                    origin: FfiSourceOriginV2::ContentUri,
+                    issues: vec![FfiProviderSourceIssueV2 {
+                        relative_components: vec!["hidden.txt".into()],
+                        kind: FfiProviderSourceIssueKindV2::PermissionDenied,
+                    }],
+                }])
+                .await
+                .expect("attach staged provider root");
+
+            assert_eq!(snapshot.state, FfiTransferJobStateV2::NeedsSourceDecision);
+            assert_eq!(snapshot.selections.len(), 1);
+            assert_eq!(snapshot.selections[0].issues.len(), 1);
+            assert_eq!(
+                snapshot.selections[0].issues[0].kind,
+                FfiSourceIssueKindV2::PermissionDenied
+            );
+
+            let root_item_id = snapshot.selections[0].root_item_id;
+            let repaired = job
+                .reauthorize_staged_provider_source(
+                    root_item_id,
+                    replacement.to_string_lossy().into_owned(),
+                    Vec::new(),
+                )
+                .await
+                .expect("reauthorize staged provider root");
+            assert_eq!(repaired.state, FfiTransferJobStateV2::ReadyToSend);
+            assert_eq!(repaired.selections[0].root_item_id, root_item_id);
+            assert!(repaired.selections[0].issues.is_empty());
+        });
+    }
+
+    #[test]
+    fn typed_seal_is_idempotent_after_a_lost_response() {
+        let temporary = tempfile::tempdir().expect("temporary provider job store");
+        let source = temporary.path().join("payload.txt");
+        std::fs::write(&source, b"payload").expect("write source");
+
+        crate::ffi_runtime().block_on(async {
+            let job = create_transfer_job_v2(
+                temporary.path().join("jobs").to_string_lossy().into_owned(),
+                FfiCompressionPolicyV2::Never,
+            )
+            .await
+            .expect("create typed job");
+            job.add_staged_provider_roots(vec![FfiStagedProviderRootV2 {
+                path: source.to_string_lossy().into_owned(),
+                requested_name: "payload.txt".into(),
+                origin: FfiSourceOriginV2::Share,
+                issues: Vec::new(),
+            }])
+            .await
+            .expect("attach staged file");
+
+            let first = job.seal_for_send().await.expect("seal typed job");
+            let repeated = job.seal_for_send().await.expect("repeat typed seal");
+            assert_eq!(repeated.job_id, first.job_id);
+            assert_eq!(repeated.selection_revision, first.selection_revision);
+            assert_eq!(repeated.structural_digest, first.structural_digest);
+            assert_eq!(repeated.offer_bytes, first.offer_bytes);
+        });
+    }
 }

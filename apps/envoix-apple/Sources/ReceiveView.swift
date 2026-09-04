@@ -214,7 +214,10 @@ struct ReceiveView: View {
     #if os(macOS)
     private var rememberedPeerSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value("Remembered devices", "已记住的设备", language: uiLanguage))
+            Text(AppText.localized(
+                "transfer.pairing.remembered_devices",
+                language: uiLanguage
+            ))
                 .font(.headline.weight(.semibold))
             ForEach(rememberedPeers) { peer in
                 HStack {
@@ -236,9 +239,8 @@ struct ReceiveView: View {
                         Image(systemName: "trash")
                     }
                     .disabled(viewModel.isBusy)
-                    .accessibilityLabel(AppText.value(
-                        "Forget device",
-                        "忘记设备",
+                    .accessibilityLabel(AppText.localized(
+                        "transfer.pairing.forget_device",
                         language: uiLanguage
                     ))
                 }
@@ -251,13 +253,13 @@ struct ReceiveView: View {
     private var rememberConsentSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle(
-                AppText.value("Remember this device", "记住此设备", language: uiLanguage),
+                AppText.localized("transfer.pairing.remember_device", language: uiLanguage),
                 isOn: $rememberAfterPairing
             )
             .disabled(viewModel.isBusy)
             if rememberAfterPairing {
                 TextField(
-                    AppText.value("Device label", "设备名称", language: uiLanguage),
+                    AppText.localized("transfer.pairing.device_label", language: uiLanguage),
                     text: $rememberLabel
                 )
                 .textFieldStyle(.roundedBorder)
@@ -269,7 +271,10 @@ struct ReceiveView: View {
 
     @ViewBuilder private var footerMessage: some View {
         if concurrencyBlocked {
-            Text(AppText.value("Finish sending before starting a receive.", "请先完成发送任务，再开始接收。", language: uiLanguage))
+            Text(AppText.localized(
+                "receive.concurrent.finish_send",
+                language: uiLanguage
+            ))
                 .font(.callout)
                 .foregroundStyle(Theme.muted)
                 .padding(.bottom, 8)
@@ -317,7 +322,7 @@ struct ReceiveView: View {
 
     private var outputSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(AppText.value("Save to", "保存到", language: uiLanguage))
+            Text(AppText.localized("receive.destination.title", language: uiLanguage))
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.text)
             #if os(iOS)
@@ -355,7 +360,10 @@ struct ReceiveView: View {
                     Button {
                         resetOutputFolder()
                     } label: {
-                        Label(AppText.value("Reset", "重置", language: uiLanguage), systemImage: "arrow.uturn.backward")
+                        Label(
+                            AppText.localized("receive.destination.reset", language: uiLanguage),
+                            systemImage: "arrow.uturn.backward"
+                        )
                             .labelStyle(.iconOnly)
                             .frame(width: 30, height: 30)
                             .contentShape(Rectangle())
@@ -376,7 +384,10 @@ struct ReceiveView: View {
                 Button {
                     selectMacOutputFolder(startAfterSelection: false)
                 } label: {
-                    Label(AppText.value("Select", "选择", language: uiLanguage), systemImage: "folder")
+                    Label(
+                        AppText.localized("receive.destination.select", language: uiLanguage),
+                        systemImage: "folder"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -385,27 +396,32 @@ struct ReceiveView: View {
             #endif
 
             Divider().overlay(Theme.line.opacity(0.5))
-            Text(AppText.value("Save method", "保存方式", language: uiLanguage))
+            Text(AppText.localized(
+                "receive.destination.method_title",
+                language: uiLanguage
+            ))
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Theme.text)
-            Picker("Save method", selection: $destinationSaveMode) {
-                Text(AppText.value("Save directly", "直接保存", language: uiLanguage)).tag("direct")
-                Text(AppText.value("Verify, then copy", "校验后复制", language: uiLanguage)).tag("copy")
+            Picker(
+                AppText.localized("receive.destination.method_title", language: uiLanguage),
+                selection: $destinationSaveMode
+            ) {
+                Text(AppText.localized(
+                    "receive.destination.method_direct",
+                    language: uiLanguage
+                )).tag("direct")
+                Text(AppText.localized(
+                    "receive.destination.method_copy",
+                    language: uiLanguage
+                )).tag("copy")
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .disabled(viewModel.isBusy)
-            Text(destinationSaveMode == "copy"
-                 ? AppText.value(
-                    "Uses additional temporary space and saving time for destinations that cannot safely finalize the same object.",
-                    "适用于无法安全原地完成保存的目标；会额外占用临时空间和保存时间。",
-                    language: uiLanguage
-                 )
-                 : AppText.value(
-                    "Writes once on the selected storage and reveals the verified object when ready.",
-                    "在所选存储上只写入一次，校验完成后直接显示文件。",
-                    language: uiLanguage
-                 ))
+            Text(ReceivePresentationText.saveMethodDetail(
+                usesCopy: destinationSaveMode == "copy",
+                language: uiLanguage
+            ))
                 .font(.footnote)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -420,67 +436,51 @@ struct ReceiveView: View {
                 return outputDirDisplayName
             }
             guard let outputDir else {
-                return AppText.value("Selected Files folder unavailable", "已选 Files 文件夹不可用", language: uiLanguage)
+                return AppText.localized(
+                    "receive.destination.ios_unavailable",
+                    language: uiLanguage
+                )
             }
             return outputDir.lastPathComponent.isEmpty ? outputDir.path : outputDir.lastPathComponent
         }
-        return AppText.value("On My iPhone / Envoix / Downloads", "我的 iPhone / Envoix / Downloads", language: uiLanguage)
+        return AppText.localized("receive.destination.ios_default", language: uiLanguage)
         #else
         if UserDefaults.standard.data(forKey: outputDirBookmarkKey) != nil,
            outputDir == nil {
-            return AppText.value(
-                "Selected folder unavailable — choose again",
-                "已选文件夹不可用——请重新选择",
+            return AppText.localized(
+                "receive.destination.macos_unavailable",
                 language: uiLanguage
             )
         }
         return outputDir?.path
-            ?? AppText.value("Choose a save folder", "请选择保存文件夹", language: uiLanguage)
+            ?? AppText.localized("receive.destination.macos_choose", language: uiLanguage)
         #endif
     }
 
     #if os(iOS)
     private var outputFolderChooseLabel: String {
-        hasUnavailableCustomOutputDir
-            ? AppText.value("Choose Again", "重新选择", language: uiLanguage)
-            : AppText.value("Choose", "选择", language: uiLanguage)
+        ReceivePresentationText.folderAction(
+            isUnavailable: hasUnavailableCustomOutputDir,
+            language: uiLanguage
+        )
     }
 
     private var outputFolderHelperText: String {
-        if hasUnavailableCustomOutputDir {
-            return AppText.value(
-                "The selected Files folder permission expired. Choose it again or reset to the default folder.",
-                "已选择的 Files 文件夹权限已失效。请重新选择，或重置为默认文件夹。",
-                language: uiLanguage
-            )
-        }
-        return AppText.value(
-            "Default saves to Files > On My iPhone > Envoix > Downloads. Choose a Files folder to save elsewhere.",
-            "默认保存到 Files > On My iPhone > Envoix > Downloads。也可以选择其他 Files 文件夹。",
+        ReceivePresentationText.folderHelper(
+            isUnavailable: hasUnavailableCustomOutputDir,
             language: uiLanguage
         )
     }
     #endif
 
     private var primaryLabel: String {
-        if isAcceptingRoomOffer {
-            return AppText.value("Accepting offer…", "正在接受邀请…", language: uiLanguage)
-        }
-        if nearbyInviteDelivery.isDelivering {
-            return AppText.value("Delivering Invitation…", "正在发送邀请码…", language: uiLanguage)
-        }
-        if canStartAnotherReceive {
-            return AppText.value("Start Another Receive", "再开启一个接收", language: uiLanguage)
-        }
-        if viewModel.isBusy {
-            return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage)
-        }
-        switch mode {
-        case .invite:
-            return AppText.value("Start Receiving", "开始接收", language: uiLanguage)
-        default:
-            return AppText.value("Start Receiving", "开始接收", language: uiLanguage)
-        }
+        ReceivePresentationText.primaryAction(
+            isAcceptingOffer: isAcceptingRoomOffer,
+            isDeliveringInvitation: nearbyInviteDelivery.isDelivering,
+            canStartAnother: canStartAnotherReceive,
+            isBusy: viewModel.isBusy,
+            language: uiLanguage
+        )
     }
 
     @ViewBuilder private var inviteSection: some View {
@@ -488,14 +488,10 @@ struct ReceiveView: View {
             Image(systemName: "checkmark.shield.fill")
                 .font(.system(size: 42))
                 .foregroundStyle(Theme.success)
-            Text(AppText.value("InviteV2 verified", "InviteV2 已验证", language: uiLanguage))
+            Text(AppText.localized("receive.invite.verified", language: uiLanguage))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.text)
-            Text(AppText.value(
-                "This invitation assigns this device the Receive role.",
-                "此邀请已将本设备指定为接收端。",
-                language: uiLanguage
-            ))
+            Text(AppText.localized("receive.invite.role", language: uiLanguage))
             .font(.body)
             .foregroundStyle(Theme.muted)
             .multilineTextAlignment(.center)
@@ -515,11 +511,7 @@ struct ReceiveView: View {
     private var mobileRoomSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             PairingPanelSelector(selection: $pairingPanel, disabled: viewModel.isBusy)
-            Text(AppText.value(
-                "Show your receive QR, or scan the other device's send QR.",
-                "可以显示本机接收码，也可以扫描另一台设备的发送码。",
-                language: uiLanguage
-            ))
+            Text(TransferPairingText.guidance(direction: .receive, language: uiLanguage))
             .font(.footnote)
             .foregroundStyle(Theme.muted)
             .fixedSize(horizontal: false, vertical: true)
@@ -531,13 +523,22 @@ struct ReceiveView: View {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: 48, weight: .medium))
                             .foregroundStyle(Theme.accentStrong)
-                        Text(AppText.value("Scan a send QR", "扫描发送码", language: uiLanguage))
+                        Text(TransferPairingText.scanPrompt(
+                            direction: .receive,
+                            language: uiLanguage
+                        ))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
                         Button {
                             isQRScannerPresented = true
                         } label: {
-                            Label(AppText.value("Open scanner", "打开扫描器", language: uiLanguage), systemImage: "camera")
+                            Label(
+                                AppText.localized(
+                                    "transfer.pairing.open_scanner",
+                                    language: uiLanguage
+                                ),
+                                systemImage: "camera"
+                            )
                                 .frame(maxWidth: .infinity, minHeight: 48)
                         }
                         .buttonStyle(.borderedProminent)
@@ -550,10 +551,16 @@ struct ReceiveView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 42))
                             .foregroundStyle(Theme.success)
-                        Text(AppText.value("InviteV2 link ready", "InviteV2 链接已就绪", language: uiLanguage))
+                        Text(AppText.localized(
+                            "transfer.pairing.link_ready",
+                            language: uiLanguage
+                        ))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
-                        Button(AppText.value("Clear and show my QR", "清除并显示我的二维码", language: uiLanguage)) {
+                        Button(AppText.localized(
+                            "transfer.pairing.clear_show_qr",
+                            language: uiLanguage
+                        )) {
                             joiningInvite = ""
                         }
                         .buttonStyle(.bordered)
@@ -563,19 +570,28 @@ struct ReceiveView: View {
                     VStack(spacing: 12) {
                         if let image = roomQRCodeImage {
                             QRCard(image: image, size: 184)
-                                .accessibilityLabel(AppText.value("Receive QR code", "接收二维码", language: uiLanguage))
+                                .accessibilityLabel(TransferPairingText.qrAccessibility(
+                                    direction: .receive,
+                                    language: uiLanguage
+                                ))
                         } else {
                             qrPlaceholder
                         }
                         Button {
                             copyWithToast(
                                 pairingInvite?.payload ?? "",
-                                AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                                AppText.localized(
+                                    "transfer.pairing.link_copied",
+                                    language: uiLanguage
+                                ),
                                 language: uiLanguage
                             )
                         } label: {
                             Label(
-                                AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage),
+                                AppText.localized(
+                                    "transfer.pairing.copy_link",
+                                    language: uiLanguage
+                                ),
                                 systemImage: "doc.on.doc"
                             )
                             .frame(maxWidth: .infinity, minHeight: 40)
@@ -591,7 +607,10 @@ struct ReceiveView: View {
             RoomCodeField(
                 code: joiningInviteBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Or enter a complete InviteV2 link", "或输入完整 InviteV2 链接", language: uiLanguage),
+                title: AppText.localized(
+                    "transfer.pairing.enter_complete_link",
+                    language: uiLanguage
+                ),
                 placeholder: "envoix://invite/v2/…",
                 pasteAction: pastePairingInput,
                 helper: "",
@@ -605,10 +624,16 @@ struct ReceiveView: View {
     private var desktopRoomSection: some View {
         VStack(alignment: .center, spacing: 16) {
             VStack(spacing: 4) {
-                Text(AppText.value("Share this QR or invite link", "分享二维码或邀请链接", language: uiLanguage))
+                Text(AppText.localized(
+                    "transfer.pairing.share_title",
+                    language: uiLanguage
+                ))
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value("The sender can scan this QR or paste the complete InviteV2 link.", "发送方可以扫描此二维码或粘贴完整 InviteV2 链接。", language: uiLanguage))
+                Text(TransferPairingText.desktopDetail(
+                    direction: .receive,
+                    language: uiLanguage
+                ))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
                     .multilineTextAlignment(.center)
@@ -616,7 +641,10 @@ struct ReceiveView: View {
 
             if let image = roomQRCodeImage {
                 QRCard(image: image, size: 208)
-                    .accessibilityLabel(AppText.value("Receive QR code", "接收二维码", language: uiLanguage))
+                    .accessibilityLabel(TransferPairingText.qrAccessibility(
+                        direction: .receive,
+                        language: uiLanguage
+                    ))
             } else {
                 qrPlaceholder
             }
@@ -625,11 +653,17 @@ struct ReceiveView: View {
                 Button {
                     copyWithToast(
                         pairingInvite?.payload ?? "",
-                        AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                        AppText.localized(
+                            "transfer.pairing.link_copied",
+                            language: uiLanguage
+                        ),
                         language: uiLanguage
                     )
                 } label: {
-                    Label(AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage), systemImage: "doc.on.doc")
+                    Label(
+                        AppText.localized("transfer.pairing.copy_link", language: uiLanguage),
+                        systemImage: "doc.on.doc"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -639,7 +673,10 @@ struct ReceiveView: View {
                     joiningInvite = ""
                     refreshPairingInvite()
                 } label: {
-                    Label(AppText.value("New", "新建", language: uiLanguage), systemImage: "arrow.clockwise")
+                    Label(
+                        AppText.localized("common.new", language: uiLanguage),
+                        systemImage: "arrow.clockwise"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -650,7 +687,10 @@ struct ReceiveView: View {
             RoomCodeField(
                 code: joiningInviteBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Join sender instead", "改为加入发送端", language: uiLanguage),
+                title: TransferPairingText.joinOtherTitle(
+                    direction: .receive,
+                    language: uiLanguage
+                ),
                 placeholder: "envoix://invite/v2/…",
                 helper: "",
                 accessibilityIdentifier: "receive_invite_input"
@@ -660,7 +700,10 @@ struct ReceiveView: View {
                 Button {
                     pastePairingInput()
                 } label: {
-                    Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
+                    Label(
+                        AppText.localized("common.paste", language: uiLanguage),
+                        systemImage: "doc.on.clipboard"
+                    )
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
@@ -670,7 +713,13 @@ struct ReceiveView: View {
                 Button {
                     isQRScannerPresented = true
                 } label: {
-                    Label(AppText.value("Scan sender QR", "扫描发送端二维码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                    Label(
+                        TransferPairingText.scanAction(
+                            direction: .receive,
+                            language: uiLanguage
+                        ),
+                        systemImage: "qrcode.viewfinder"
+                    )
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
@@ -695,7 +744,7 @@ struct ReceiveView: View {
             Image(systemName: "qrcode")
                 .font(.system(size: 72, weight: .medium))
                 .foregroundStyle(Theme.muted)
-            Text(AppText.value("QR code", "二维码", language: uiLanguage))
+            Text(AppText.localized("transfer.pairing.qr_placeholder", language: uiLanguage))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
         }
@@ -716,10 +765,13 @@ struct ReceiveView: View {
             Button {
                 revealAddress.toggle()
             } label: {
-                Label(revealAddress
-                      ? AppText.value("Hide address", "隐藏地址", language: uiLanguage)
-                      : AppText.value("Show address", "显示地址", language: uiLanguage),
-                      systemImage: revealAddress ? "eye.slash" : "eye")
+                Label(
+                    ReceivePresentationText.addressAction(
+                        isRevealed: revealAddress,
+                        language: uiLanguage
+                    ),
+                    systemImage: revealAddress ? "eye.slash" : "eye"
+                )
                     .contentShape(Rectangle())
             }
             .controlSize(.small)
@@ -824,7 +876,10 @@ struct ReceiveView: View {
 
     private func pastePairingInput() {
         guard let value = pasteboardString()?.trimmed, !value.isEmpty else {
-            ToastCenter.shared.show(AppText.value("Clipboard is empty", "剪贴板为空", language: uiLanguage))
+            ToastCenter.shared.show(AppText.localized(
+                "transfer.pairing.clipboard_empty",
+                language: uiLanguage
+            ))
             return
         }
         _ = applyPairingInput(value, source: .paste)
@@ -835,25 +890,25 @@ struct ReceiveView: View {
         let input = value.trimmed
         do {
             guard input.hasPrefix(inviteV2URLPrefix) else {
-                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                throw RuntimeSettingsError(AppText.localized(
+                    "transfer.pairing.enter_complete_error",
+                    language: uiLanguage
+                ))
             }
             _ = try parsePairingInviteForRole(input: input, localRole: .receive)
             joiningInvite = input
             mode = .invite
-            let message = source == .scan
-                ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
-                : AppText.value("Invitation pasted", "邀请已粘贴", language: uiLanguage)
+            let message = TransferPairingText.inputAccepted(
+                scanned: source == .scan,
+                language: uiLanguage
+            )
             ToastCenter.shared.show(message)
             return nil
         } catch {
             let message = if error is RuntimeSettingsError {
                 error.localizedDescription
             } else {
-                AppText.value(
-                    "This is not a valid complete Envoix InviteV2 link.",
-                    "这不是有效的完整 Envoix InviteV2 链接。",
-                    language: uiLanguage
-                )
+                AppText.localized("transfer.pairing.invalid_link", language: uiLanguage)
             }
             ToastCenter.shared.show(message)
             return message
@@ -924,9 +979,8 @@ struct ReceiveView: View {
                     localRole: .receive
                 )
             case .room, .remembered, .token:
-                throw RuntimeSettingsError(AppText.value(
-                    "This room offer needs a new InviteV2 invitation.",
-                    "此房间邀请需要新的 InviteV2 邀请。",
+                throw RuntimeSettingsError(AppText.localized(
+                    "receive.error.room_offer_needs_invite",
                     language: uiLanguage
                 ))
             }
@@ -956,9 +1010,8 @@ struct ReceiveView: View {
                 )
                 isAcceptingRoomOffer = false
                 if case .offerUnavailable = result {
-                    ToastCenter.shared.show(AppText.value(
-                        "The file offer is no longer available.",
-                        "此文件邀请已不可用。",
+                    ToastCenter.shared.show(AppText.localized(
+                        "receive.error.offer_unavailable",
                         language: uiLanguage
                     ))
                 }
@@ -968,7 +1021,10 @@ struct ReceiveView: View {
             viewModel.handleFailed(error.localizedDescription)
         }
         #else
-        viewModel.handleFailed("Room control receive is unavailable on this platform.")
+        viewModel.handleFailed(AppText.localized(
+            "receive.error.room_control_unavailable",
+            language: uiLanguage
+        ))
         #endif
     }
 
@@ -1059,7 +1115,10 @@ struct ReceiveView: View {
     private func startReceiveWithInvite() {
         do {
             guard joiningInvite.trimmed.hasPrefix(inviteV2URLPrefix) else {
-                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                throw RuntimeSettingsError(AppText.localized(
+                    "transfer.pairing.enter_complete_error",
+                    language: uiLanguage
+                ))
             }
             let parsed = try parsePairingInviteForRole(
                 input: joiningInvite,
@@ -1157,9 +1216,8 @@ struct ReceiveView: View {
         do {
             let access = SecurityScopedResourceAccess(url: url)
             guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
-                throw RuntimeSettingsError(AppText.value(
-                    "macOS did not grant access to the selected folder. Choose it again and confirm the system prompt.",
-                    "macOS 未授予所选文件夹访问权限。请重新选择并确认系统授权提示。",
+                throw RuntimeSettingsError(AppText.localized(
+                    "receive.destination.error.macos_access_denied",
                     language: uiLanguage
                 ))
             }
@@ -1169,9 +1227,8 @@ struct ReceiveView: View {
             outputDirPath = url.path
             outputDirDisplayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
             model.retainDestinationAccessForAppLifetime(access)
-            ToastCenter.shared.show(AppText.value(
-                "Save folder authorized",
-                "保存文件夹已授权",
+            ToastCenter.shared.show(AppText.localized(
+                "receive.destination.authorized",
                 language: uiLanguage
             ))
             if startAfterSelection {
@@ -1189,23 +1246,24 @@ struct ReceiveView: View {
         guard let url = outputDir else {
             #if os(iOS)
             if hasCustomOutputDir {
-                throw RuntimeSettingsError(AppText.value(
-                    "The selected Files folder is unavailable. Choose it again or reset to the default save folder.",
-                    "已选择的 Files 文件夹不可用。请重新选择，或重置为默认保存位置。",
+                throw RuntimeSettingsError(AppText.localized(
+                    "receive.destination.error.ios_unavailable",
                     language: uiLanguage
                 ))
             }
             #endif
-            throw RuntimeSettingsError(AppText.value("Choose a save folder first.", "请先选择保存文件夹。", language: uiLanguage))
+            throw RuntimeSettingsError(AppText.localized(
+                "receive.destination.error.choose_first",
+                language: uiLanguage
+            ))
         }
         #if os(iOS)
         let access: AnyObject?
         if hasCustomOutputDir {
             let scopedAccess = SecurityScopedResourceAccess(url: url)
             guard scopedAccess.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
-                throw RuntimeSettingsError(AppText.value(
-                    "Envoix cannot write to the selected Files folder. Choose it again or reset to the default save folder.",
-                    "Envoix 无法写入已选择的 Files 文件夹。请重新选择，或重置为默认保存位置。",
+                throw RuntimeSettingsError(AppText.localized(
+                    "receive.destination.error.ios_not_writable",
                     language: uiLanguage
                 ))
             }
@@ -1215,17 +1273,15 @@ struct ReceiveView: View {
         }
         #else
         guard UserDefaults.standard.data(forKey: outputDirBookmarkKey) != nil else {
-            throw RuntimeSettingsError(AppText.value(
-                "Choose the save folder once to grant macOS access before receiving.",
-                "接收前请先选择一次保存文件夹，以授予 macOS 访问权限。",
+            throw RuntimeSettingsError(AppText.localized(
+                "receive.destination.error.macos_grant_first",
                 language: uiLanguage
             ))
         }
         let scopedAccess = SecurityScopedResourceAccess(url: url)
         guard scopedAccess.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
-            throw RuntimeSettingsError(AppText.value(
-                "The save-folder permission is unavailable. Choose the folder again.",
-                "保存文件夹权限不可用。请重新选择该文件夹。",
+            throw RuntimeSettingsError(AppText.localized(
+                "receive.destination.error.permission_unavailable",
                 language: uiLanguage
             ))
         }
@@ -1234,9 +1290,8 @@ struct ReceiveView: View {
         do {
             try validateWritableDirectoryAccess(url)
         } catch {
-            throw RuntimeSettingsError(AppText.value(
-                "Envoix cannot write to the selected save folder. Choose it again or check its permissions.",
-                "Envoix 无法写入所选保存文件夹。请重新选择或检查文件夹权限。",
+            throw RuntimeSettingsError(AppText.localized(
+                "receive.destination.error.not_writable",
                 language: uiLanguage
             ))
         }
@@ -1255,7 +1310,10 @@ struct ReceiveView: View {
             UserDefaults.standard.set(bookmark, forKey: outputDirBookmarkKey)
             outputDirDisplayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
             isFolderPickerPresented = false
-            ToastCenter.shared.show(AppText.value("Save folder selected", "已选择保存文件夹", language: uiLanguage))
+            ToastCenter.shared.show(AppText.localized(
+                "receive.destination.selected",
+                language: uiLanguage
+            ))
             if shouldStartAfterFolderPick {
                 shouldStartAfterFolderPick = false
                 DispatchQueue.main.async {
@@ -1272,7 +1330,10 @@ struct ReceiveView: View {
     private func resetOutputFolder() {
         UserDefaults.standard.removeObject(forKey: outputDirBookmarkKey)
         outputDirDisplayName = ""
-        ToastCenter.shared.show(AppText.value("Default save folder restored", "已恢复默认保存位置", language: uiLanguage))
+        ToastCenter.shared.show(AppText.localized(
+            "receive.destination.default_restored",
+            language: uiLanguage
+        ))
     }
     #endif
 }

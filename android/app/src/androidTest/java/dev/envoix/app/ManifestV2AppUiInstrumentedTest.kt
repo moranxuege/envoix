@@ -12,7 +12,7 @@ import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
-import dev.envoix.app.ui.AppText
+import dev.envoix.app.ui.AppLanguage
 import dev.envoix.app.ui.RoomCloseReason
 import dev.envoix.app.ui.RoomControlEndpoint
 import dev.envoix.app.ui.RoomControlEvent
@@ -37,7 +37,7 @@ class ManifestV2AppUiInstrumentedTest {
         val originalLanguage = SettingsStore.settings.value.language
         val originalGateway = RoomControlGatewayProvider.gateway
         val gateway = ImmediatelyConnectedRoomGateway()
-        SettingsStore.update { it.copy(language = AppText.ENGLISH) }
+        SettingsStore.update { it.copy(language = AppLanguage.ENGLISH) }
         RoomControlGatewayProvider.gateway = gateway
         val device = UiDevice.getInstance(instrumentation)
 
@@ -63,7 +63,7 @@ class ManifestV2AppUiInstrumentedTest {
                     ),
             )
 
-            SettingsStore.update { it.copy(language = AppText.SIMPLIFIED_CHINESE) }
+            SettingsStore.update { it.copy(language = AppLanguage.SIMPLIFIED_CHINESE) }
             exerciseConnectionFirstFlow(
                 device = device,
                 gateway = gateway,

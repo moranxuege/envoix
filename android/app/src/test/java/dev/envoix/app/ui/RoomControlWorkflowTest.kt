@@ -105,7 +105,7 @@ class RoomControlWorkflowTest {
 
             assertEquals(RoomControlPhase.Failed, workflow.state.phase)
             assertFalse(workflow.state.live)
-            assertEquals("invalid broker", workflow.state.error)
+            assertEquals(UiMessage.Dynamic("invalid broker"), workflow.state.error)
         }
 
     @Test
@@ -149,7 +149,7 @@ class RoomControlWorkflowTest {
 
             assertEquals(RoomControlPhase.Hosting, workflow.state.phase)
             assertEquals(invite, workflow.state.invite)
-            assertEquals("refresh failed", workflow.state.error)
+            assertEquals(UiMessage.Dynamic("refresh failed"), workflow.state.error)
         }
 
     @Test

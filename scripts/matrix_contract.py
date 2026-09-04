@@ -230,7 +230,7 @@ ENDPOINT_RESULT_KEYS = {
     "metrics",
 }
 ENDPOINT_ROLES = {"sender", "receiver"}
-ENDPOINT_DRIVERS = {"direct_jni", "direct_ffi", "product_activity"}
+ENDPOINT_DRIVERS = {"direct_ffi", "product_activity"}
 ENDPOINT_PHASES = {
     "waiting_for_peer",
     "pairing",
@@ -608,14 +608,11 @@ def validate_endpoint_result(
         "endpoint result.driver",
         errors,
     )
-    if actual_driver == "direct_jni" and (
-        actual_platform != "android" or actual_layer != "l1_native"
-    ):
-        errors.append("direct_jni endpoint results must be Android L1 evidence")
     if actual_driver == "direct_ffi" and (
-        actual_platform not in {"ios", "macos"} or actual_layer != "l1_native"
+        actual_platform not in {"android", "ios", "macos"}
+        or actual_layer != "l1_native"
     ):
-        errors.append("direct_ffi endpoint results must be Apple L1 evidence")
+        errors.append("direct_ffi endpoint results must be Android or Apple L1 evidence")
     if actual_driver == "product_activity" and actual_layer != "l2_physical":
         errors.append("product_activity endpoint results must be L2 evidence")
     actual_build_variant = _check_enum(

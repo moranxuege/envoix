@@ -1,6 +1,8 @@
 package dev.envoix.app.ui
 
+import dev.envoix.app.CreatedInvite
 import dev.envoix.app.ParsedInvite
+import dev.envoix.app.R
 import dev.envoix.app.Settings
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyInviteRoute
@@ -102,7 +104,14 @@ class ConnectionWorkflowViewModelTest {
 
     @Test
     fun `completed transfer attaches only to its current room`() {
-        val viewModel = ConnectionWorkflowViewModel()
+        var activityRequest: Triple<String, String, Boolean>? = null
+        val viewModel =
+            ConnectionWorkflowViewModel(
+                invitationActivityReference = { reference, role, creator ->
+                    activityRequest = Triple(reference, role, creator)
+                    "654321"
+                },
+            )
         viewModel.openRoom(DeviceRoomDraft(displayName = "First"))
         viewModel.beginTransfer("send", usesPendingAction = false)
         assertTrue(
@@ -112,8 +121,9 @@ class ConnectionWorkflowViewModelTest {
         )
         viewModel.completeTransferDraft("1234-alpha-beta", consumePendingShares = false)
 
+        assertEquals(Triple("1234-alpha-beta", "send", false), activityRequest)
         assertEquals(
-            setOf("1234-alpha-beta"),
+            setOf("654321"),
             viewModel.uiState.value.room
                 ?.transferCodes,
         )
@@ -123,6 +133,48 @@ class ConnectionWorkflowViewModelTest {
         viewModel.openRoom(DeviceRoomDraft(displayName = "Second"))
         assertEquals(
             emptySet<String>(),
+            viewModel.uiState.value.room
+                ?.transferCodes,
+        )
+    }
+
+    @Test
+    fun `completed receive uses the same secret-free activity identity`() {
+        var activityRequest: Triple<String, String, Boolean>? = null
+        val viewModel =
+            ConnectionWorkflowViewModel(
+                invitationActivityReference = { reference, role, creator ->
+                    activityRequest = Triple(reference, role, creator)
+                    "654321"
+                },
+            )
+        viewModel.openRoom(DeviceRoomDraft(displayName = "Phone"))
+        viewModel.beginTransfer("receive", usesPendingAction = false)
+        viewModel.uiState.value.transferDraft
+            ?.preparation
+            ?.generatedInvite
+            ?.value =
+            CreatedInvite(
+                roomCode = "123456-a1b2-c3d4",
+                payload = "envoix://invite/v2/secret",
+                reference = "123456-a1b2-c3d4",
+                broker = "broker.example",
+                relay = null,
+                creatorRole = "receive",
+                joinerRole = "send",
+                expiresAt = 1,
+            )
+        assertTrue(
+            viewModel.uiState.value.transferDraft
+                ?.preparation
+                ?.transferOwnership() == true,
+        )
+
+        viewModel.completeTransferDraft("123456-a1b2-c3d4", consumePendingShares = false)
+
+        assertEquals(Triple("123456-a1b2-c3d4", "receive", true), activityRequest)
+        assertEquals(
+            setOf("654321"),
             viewModel.uiState.value.room
                 ?.transferCodes,
         )
@@ -566,7 +618,7 @@ class ConnectionWorkflowViewModelTest {
             assertFalse(receiverPrepared)
             assertEquals(TEST_TRANSFER_OFFER.id to false, gateway.respondedOffer)
             assertEquals(
-                "This file offer does not belong to the current room.",
+                UiMessage.Resource(R.string.room_file_offer_wrong_room),
                 viewModel.uiState.value.control.error,
             )
             assertNull(viewModel.uiState.value.control.incomingOffer)
@@ -636,7 +688,12 @@ class ConnectionWorkflowViewModelTest {
                 directoryCount = 0,
                 totalBytes = 42,
             )
-        val TEST_SETTINGS = Settings(nearbyDisplayName = "Android phone")
+        val TEST_SETTINGS =
+            Settings(
+                broker = TEST_ROOM_ENDPOINT.broker,
+                relay = TEST_ROOM_ENDPOINT.relay,
+                nearbyDisplayName = "Android phone",
+            )
     }
 }
 

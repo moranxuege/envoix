@@ -1,5 +1,6 @@
 package dev.envoix.app
 
+import dev.envoix.app.ffi.envoixDeploymentEndpoints
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -186,10 +187,10 @@ object TransferRepository {
 
 /** Deployed Envoix broker + relay defaults (overridable in Settings later). */
 object Endpoints {
-    const val BROKER =
-        "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
-    const val RELAY = "https://envoix.chkxwlyh.us:8444"
+    private val deployment = envoixDeploymentEndpoints()
+    val BROKER = deployment.broker
+    val RELAY = deployment.relay
 
-    /** Per-room log-collection + diagnostic log endpoint on the rdz box (TLS). */
-    const val LOG_SERVER = "https://rdz.chkxwlyh.us:8460"
+    /** Empty until a dedicated diagnostic collector is deployed. */
+    const val LOG_SERVER = ""
 }

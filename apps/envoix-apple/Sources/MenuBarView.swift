@@ -1,6 +1,62 @@
+import EnvoixCore
+import Foundation
+
+enum MenuBarPresentationText {
+    static func transferTitle(_ direction: FfiTransferDirection, language: String) -> String {
+        TransferActivityText.direction(direction, language: language)
+    }
+
+    static func openAppAction(language: String) -> String {
+        AppText.localized("menu_bar.action.open", language: language)
+    }
+
+    static func quitAppAction(language: String) -> String {
+        AppText.localized("menu_bar.action.quit", language: language)
+    }
+
+    static func summary(
+        state: TransferActivityState?,
+        progressFraction: Double,
+        bytesPerSecond: Double,
+        language: String
+    ) -> String {
+        guard let state else {
+            return AppText.localized("menu_bar.status.idle", language: language)
+        }
+        if state == .transferring {
+            let finiteFraction = progressFraction.isFinite ? progressFraction : 0
+            let percentage = Int((min(max(finiteFraction, 0), 1) * 100).rounded())
+            guard bytesPerSecond.isFinite, bytesPerSecond > 0 else {
+                return "\(percentage)%"
+            }
+            return "\(percentage)% · \(rateString(bytesPerSecond))"
+        }
+
+        let key: String
+        switch state {
+        case .preparing: key = "menu_bar.status.preparing"
+        case .waitingForPeer: key = "menu_bar.status.waiting"
+        case .pairing: key = "menu_bar.status.pairing"
+        case .connecting: key = "menu_bar.status.connecting"
+        case .awaitingDecision: key = "menu_bar.status.review"
+        case .verifying: key = "menu_bar.status.verifying"
+        case .saving: key = "menu_bar.status.saving"
+        case .waitingForReceiverSave: key = "menu_bar.status.receiver_saving"
+        case .finalizingDelivery: key = "menu_bar.status.finalizing"
+        case .paused: key = "menu_bar.status.paused"
+        case .delivered: key = "menu_bar.status.delivered"
+        case .canceled: key = "menu_bar.status.canceled"
+        case .failed: key = "menu_bar.status.failed"
+        case .transferring:
+            preconditionFailure("Transferring is handled before the localized state lookup")
+        }
+        return AppText.localized(key, language: language)
+    }
+}
+
 #if os(macOS)
-import SwiftUI
 import AppKit
+import SwiftUI
 
 /// Compact status shown in the menu-bar popover. Mirrors the live transfer state
 /// and offers a one-click way to bring the main window forward.
@@ -14,23 +70,23 @@ struct MenuBarView: View {
             Text("Envoix").font(.headline)
 
             TransferMenuRow(
-                title: AppText.value("Receiving", "接收", language: language),
+                title: MenuBarPresentationText.transferTitle(.receive, language: language),
                 viewModel: model.receive,
                 language: language
             )
             TransferMenuRow(
-                title: AppText.value("Sending", "发送", language: language),
+                title: MenuBarPresentationText.transferTitle(.send, language: language),
                 viewModel: model.send,
                 language: language
             )
 
             Divider()
 
-            Button(AppText.value("Open Envoix", "打开 Envoix", language: language)) {
+            Button(MenuBarPresentationText.openAppAction(language: language)) {
                 openWindow(id: "main")
                 NSApp.activate(ignoringOtherApps: true)
             }
-            Button(AppText.value("Quit Envoix", "退出 Envoix", language: language)) { NSApp.terminate(nil) }
+            Button(MenuBarPresentationText.quitAppAction(language: language)) { NSApp.terminate(nil) }
         }
         .padding(14)
         .frame(width: 240)
@@ -52,27 +108,12 @@ private struct TransferMenuRow: View {
     }
 
     private var summary: String {
-        switch viewModel.presentationState {
-        case nil: return AppText.value("Idle", "空闲", language: language)
-        case .preparing?: return AppText.value("Preparing…", "准备中…", language: language)
-        case .waitingForPeer?: return AppText.value("Waiting…", "等待中…", language: language)
-        case .pairing?: return AppText.value("Pairing…", "配对中…", language: language)
-        case .connecting?: return AppText.value("Connecting…", "连接中…", language: language)
-        case .awaitingDecision?: return AppText.value("Review", "待确认", language: language)
-        case .transferring?:
-            let pct = Int((viewModel.progressFraction * 100).rounded())
-            return viewModel.bytesPerSec > 0
-                ? "\(pct)% · \(rateString(viewModel.bytesPerSec))"
-                : "\(pct)%"
-        case .verifying?: return AppText.value("Verifying…", "校验中…", language: language)
-        case .saving?: return AppText.value("Saving…", "保存中…", language: language)
-        case .waitingForReceiverSave?: return AppText.value("Receiver saving…", "接收端保存中…", language: language)
-        case .finalizingDelivery?: return AppText.value("Finalizing…", "确认送达中…", language: language)
-        case .paused?: return AppText.value("Paused", "已暂停", language: language)
-        case .delivered?: return AppText.value("Delivered", "已送达", language: language)
-        case .canceled?: return AppText.value("Canceled", "已取消", language: language)
-        case .failed?: return AppText.value("Failed", "失败", language: language)
-        }
+        MenuBarPresentationText.summary(
+            state: viewModel.presentationState,
+            progressFraction: viewModel.progressFraction,
+            bytesPerSecond: viewModel.bytesPerSec,
+            language: language
+        )
     }
 }
 #endif

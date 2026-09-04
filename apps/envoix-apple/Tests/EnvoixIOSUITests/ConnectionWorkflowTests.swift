@@ -734,11 +734,60 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 13)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 25)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
         XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v5")
         XCTAssertTrue(info.capabilities.contains(expectedNearbyInviteCoreCapability))
         XCTAssertEqual(expectedNearbyInviteCoreCapability, "nearby_invite_inbox_v1")
+        XCTAssertTrue(info.capabilities.contains(expectedFailureProjectionCoreCapability))
+        XCTAssertEqual(
+            expectedFailureProjectionCoreCapability,
+            "canonical_failure_projection_v1"
+        )
+        XCTAssertTrue(info.capabilities.contains(expectedRoomControlErrorCoreCapability))
+        XCTAssertEqual(
+            expectedRoomControlErrorCoreCapability,
+            "typed_room_control_errors_v1"
+        )
+        XCTAssertTrue(info.capabilities.contains(expectedRememberedCredentialVaultCapability))
+        XCTAssertEqual(
+            expectedRememberedCredentialVaultCapability,
+            "typed_remembered_credential_vault_v1"
+        )
+        XCTAssertTrue(info.capabilities.contains(expectedTypedApplicationCapability))
+        XCTAssertEqual(
+            expectedTypedApplicationCapability,
+            "typed_application_contract_v6"
+        )
+        XCTAssertTrue(
+            info.capabilities.contains(expectedPersistentApplicationEngineCapability)
+        )
+        XCTAssertEqual(
+            expectedPersistentApplicationEngineCapability,
+            "persistent_application_engine_v1"
+        )
+        XCTAssertTrue(info.capabilities.contains(expectedAgentHostControlCapability))
+        XCTAssertEqual(expectedAgentHostControlCapability, "agent_host_control_v2")
+    }
+
+    func testTypedRoomControlErrorsDoNotUseDiagnosticTextForDisposition() {
+        let rejected = roomControlOperationError(from: .Rejected(
+            reason: "network lost appears only in this diagnostic"
+        ))
+        let networkLost = roomControlOperationError(from: .NetworkLost(
+            reason: "request rejected appears only in this diagnostic"
+        ))
+
+        XCTAssertEqual(
+            rejected,
+            .rejected("network lost appears only in this diagnostic")
+        )
+        XCTAssertTrue(rejected.roomRemainsUsable)
+        XCTAssertEqual(
+            networkLost,
+            .networkLost("request rejected appears only in this diagnostic")
+        )
+        XCTAssertFalse(networkLost.roomRemainsUsable)
     }
 
     func testBackgroundScenePreservesRoomWhileHidingInvitationAndDiscovery() {
@@ -1004,6 +1053,89 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(gateway.preparedVerification?.label, "Nearby iPad")
         XCTAssertEqual(gateway.preparedVerification?.endpoint, endpoint)
         await Task.yield()
+    }
+
+    func testOrdinaryRoomCanAuthorizePersistenceWithOneVerificationRequest() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: "https://relay.example.test"
+        )
+
+        XCTAssertNil(workflow.joinRoomControl(
+            input: "123456-test-room",
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My Mac",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        ))
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "WSL",
+            creator: false,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        gateway.emit(.verificationRequested)
+        await Task.yield()
+
+        XCTAssertTrue(workflow.verificationRequested)
+        XCTAssertNil(workflow.submitDeviceVerification("012345"))
+        await Task.yield()
+
+        XCTAssertEqual(gateway.preparedVerification?.label, "WSL")
+        XCTAssertEqual(gateway.preparedVerification?.endpoint, endpoint)
+        XCTAssertEqual(gateway.submittedVerificationCodes, ["012345"])
+        XCTAssertFalse(workflow.verificationRequested)
+    }
+
+    func testDurablePairingHandsVerificationToAgentOwner() async {
+        let gateway = RecordingRoomControlGateway()
+        let coordinator = RecordingDurablePairingCoordinator()
+        let workflow = ConnectionWorkflowState(
+            gateway: gateway,
+            durablePairingCoordinator: coordinator
+        )
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: "https://relay.example.test"
+        )
+
+        XCTAssertNil(workflow.joinRoomControl(
+            input: "123456-test-room",
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My Mac",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        ))
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "WSL",
+            creator: false,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        gateway.emit(.verificationRequested)
+        await Task.yield()
+
+        XCTAssertNil(workflow.submitDeviceVerification("012345"))
+        for _ in 0..<4 { await Task.yield() }
+
+        XCTAssertEqual(gateway.submittedVerificationCodes, [])
+        XCTAssertEqual(gateway.preparedVerification?.label, nil)
+        XCTAssertEqual(gateway.closeReasons.last, .userEnded)
+        XCTAssertEqual(coordinator.requests, [
+            RecordingDurablePairingCoordinator.Request(
+                label: "WSL",
+                invitation: "envoix://room/123456-test-room",
+                verificationCode: "012345"
+            ),
+        ])
+        XCTAssertEqual(workflow.durablePairingCompletedLabel, "WSL")
+        XCTAssertEqual(workflow.controlPhase, .ended(.userEnded))
     }
 
     func testHostingInvitationScopeCannotBeReassignedBeforeConnected() async {
@@ -1329,6 +1461,64 @@ final class ConnectionWorkflowTests: XCTestCase {
 
         XCTAssertEqual(workflow.roomLifetimePolicy, .untilForegroundEnds)
         XCTAssertNil(workflow.idleDeadline)
+    }
+
+    func testRejectedLifetimeCommandKeepsConnectedRoomUsable() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        _ = workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        )
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Peer",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        let closeCount = gateway.closeReasons.count
+        gateway.lifetimePolicyError = RoomControlOperationError.rejected(
+            "the authoritative deadline changed"
+        )
+
+        workflow.setKeepOpen(true)
+        await Task.yield()
+
+        XCTAssertEqual(workflow.controlPhase, .connected)
+        XCTAssertNotNil(workflow.room)
+        XCTAssertEqual(gateway.closeReasons.count, closeCount)
+    }
+
+    func testNetworkLossDuringLifetimeCommandClosesConnectedRoom() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        _ = workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        )
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Peer",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+        gateway.lifetimePolicyError = RoomControlOperationError.networkLost(
+            "request rejected appears only in this diagnostic"
+        )
+
+        workflow.setKeepOpen(true)
+        await Task.yield()
+
+        XCTAssertEqual(workflow.controlPhase, .ended(.networkLost))
+        XCTAssertEqual(gateway.closeReasons.last, .networkLost)
     }
 
     func testLocalTransferEdgesApplyTheCreatorsReturnedLifetime() async {
@@ -1670,6 +1860,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     var suspendAcceptance = false
     var rejectIdleExpiry = false
     var invitationError: Error?
+    var lifetimePolicyError: Error?
     var localTransferLifetime: ((Bool) -> RoomControlLifetimeState?)?
     var rememberedConnectHandler: RememberedConnectHandler?
     var currentLifetime = RoomControlLifetimeState(
@@ -1684,6 +1875,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     private(set) var idleExpiryAttempts = 0
     private(set) var closeReasons: [RoomControlCloseReason] = []
     private(set) var preparedVerification: (label: String, endpoint: RoomControlEndpoint)?
+    private(set) var submittedVerificationCodes: [String] = []
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         if let invitationError {
@@ -1711,6 +1903,10 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
         endpoint: RoomControlEndpoint
     ) throws {
         preparedVerification = (label, endpoint)
+    }
+
+    func submitVerificationCode(_ code: String) async throws {
+        submittedVerificationCodes.append(code)
     }
 
     func host(
@@ -1777,6 +1973,9 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     func setLifetimePolicy(
         _ policy: RoomControlLifetimePolicy
     ) async throws -> RoomControlLifetimeState? {
+        if let lifetimePolicyError {
+            throw lifetimePolicyError
+        }
         currentLifetime = RoomControlLifetimeState(
             revision: currentLifetime.revision + 1,
             policy: policy,
@@ -1797,7 +1996,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     func expireIdleDeadline() async throws {
         idleExpiryAttempts += 1
         if rejectIdleExpiry {
-            throw RuntimeSettingsError("authoritative deadline changed")
+            throw RoomControlOperationError.rejected("authoritative deadline changed")
         }
     }
 
@@ -1812,6 +2011,30 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
     func finishAcceptance() {
         acceptanceContinuation?.resume()
         acceptanceContinuation = nil
+    }
+}
+
+@MainActor
+private final class RecordingDurablePairingCoordinator: DurablePairingCoordinating {
+    struct Request: Equatable {
+        let label: String
+        let invitation: String
+        let verificationCode: String
+    }
+
+    private(set) var requests: [Request] = []
+
+    func joinPairing(
+        label: String,
+        invitation: String,
+        verificationCode: String
+    ) async throws -> DurablePairedDevice {
+        requests.append(Request(
+            label: label,
+            invitation: invitation,
+            verificationCode: verificationCode
+        ))
+        return DurablePairedDevice(id: "dev_wsl", label: label)
     }
 }
 

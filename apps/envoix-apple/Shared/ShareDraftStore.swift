@@ -204,6 +204,7 @@ enum ShareDraftLink {
 
 enum ShareDraftStoreError: LocalizedError, Equatable {
     case appGroupUnavailable
+    case applicationSupportUnavailable
     case itemCountExceeded(limit: Int)
     case sourceIsNotRegularFile
     case sourceIsUnreadable
@@ -215,6 +216,8 @@ enum ShareDraftStoreError: LocalizedError, Equatable {
         switch self {
         case .appGroupUnavailable:
             return "The Envoix shared container is unavailable."
+        case .applicationSupportUnavailable:
+            return "The Envoix application support directory is unavailable."
         case let .itemCountExceeded(limit):
             return "Select between 1 and \(limit) items."
         case .sourceIsNotRegularFile:
@@ -294,13 +297,26 @@ struct ShareDraftStore {
     }
 
     static func live(fileManager: FileManager = .default) throws -> ShareDraftStore {
+        #if os(macOS)
+        guard let container = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw ShareDraftStoreError.applicationSupportUnavailable
+        }
+        let root = container
+            .appendingPathComponent("envoix", isDirectory: true)
+            .appendingPathComponent(directoryName, isDirectory: true)
+        #else
         guard let container = fileManager.containerURL(
             forSecurityApplicationGroupIdentifier: appGroupIdentifier
         ) else {
             throw ShareDraftStoreError.appGroupUnavailable
         }
+        let root = container.appendingPathComponent(directoryName, isDirectory: true)
+        #endif
         return ShareDraftStore(
-            rootDirectory: container.appendingPathComponent(directoryName, isDirectory: true),
+            rootDirectory: root,
             fileManager: fileManager
         )
     }
@@ -320,6 +336,28 @@ struct ShareDraftStore {
                 preferredFileName: preferredFileName
             )
         ])
+    }
+
+    @discardableResult
+    func stage(
+        data: Data,
+        contentTypeIdentifier: String,
+        mediaKind: ShareDraftDescriptor.MediaKind,
+        preferredFileName: String
+    ) throws -> ShareDraft {
+        let staging = try beginStaging(expectedItemCount: 1)
+        do {
+            try staging.append(
+                data: data,
+                contentTypeIdentifier: contentTypeIdentifier,
+                mediaKind: mediaKind,
+                preferredFileName: preferredFileName
+            )
+            return try staging.finalize()
+        } catch {
+            staging.cancel()
+            throw error
+        }
     }
 
     @discardableResult
@@ -583,7 +621,16 @@ struct ShareDraftStore {
     }
 
     private func prepareRootDirectory() throws {
+        let existed = fileManager.fileExists(atPath: rootDirectory.path)
         try fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
+        #if os(macOS)
+        if !existed {
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: rootDirectory.path
+            )
+        }
+        #endif
     }
 
     private func draftDirectories() throws -> [URL] {
@@ -790,10 +837,12 @@ final class ShareDraftStagingSession {
             } catch {
                 throw normalizedCopyError(error, requiredBytes: byteCount)
             }
+            #if os(iOS)
             try fileManager.setAttributes(
                 [.protectionKey: FileProtectionType.completeUnlessOpen],
                 ofItemAtPath: payloadURL.path
             )
+            #endif
             let copiedValues = try payloadURL.resourceValues(forKeys: [
                 .isRegularFileKey,
                 .isSymbolicLinkKey,
@@ -809,6 +858,64 @@ final class ShareDraftStagingSession {
                 descriptor: ShareDraftItemDescriptor(
                     mediaKind: item.mediaKind,
                     contentTypeIdentifier: item.contentTypeIdentifier,
+                    fileName: fileName,
+                    byteCount: byteCount,
+                    stagedRelativePath: "\(id.uuidString)/\(ShareDraftStore.payloadDirectoryName)/\(fileName)"
+                ),
+                payloadURL: payloadURL
+            )
+        } catch {
+            failOperation()
+            throw error
+        }
+    }
+
+    func append(
+        data: Data,
+        contentTypeIdentifier: String,
+        mediaKind: ShareDraftDescriptor.MediaKind,
+        preferredFileName: String
+    ) throws {
+        try beginOperation()
+        do {
+            guard !data.isEmpty,
+                  !contentTypeIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ShareDraftStoreError.invalidDraft
+            }
+            let byteCount = UInt64(data.count)
+            if let available = availableCapacity(payloadDirectory),
+               available >= 0,
+               UInt64(available) < byteCount {
+                throw ShareDraftStoreError.insufficientStorage(
+                    requiredBytes: byteCount,
+                    availableBytes: UInt64(available)
+                )
+            }
+
+            let fileName = uniqueFileName(preferredFileName)
+            let payloadURL = payloadDirectory.appendingPathComponent(fileName, isDirectory: false)
+            do {
+                try data.write(
+                    to: payloadURL,
+                    options: [.atomic, .completeFileProtectionUnlessOpen]
+                )
+            } catch {
+                throw normalizedCopyError(error, requiredBytes: byteCount)
+            }
+            let writtenValues = try payloadURL.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+                .fileSizeKey,
+            ])
+            guard writtenValues.isRegularFile == true,
+                  writtenValues.isSymbolicLink != true,
+                  UInt64(max(0, writtenValues.fileSize ?? 0)) == byteCount else {
+                throw ShareDraftStoreError.invalidDraft
+            }
+            try finishAppend(
+                descriptor: ShareDraftItemDescriptor(
+                    mediaKind: mediaKind,
+                    contentTypeIdentifier: contentTypeIdentifier,
                     fileName: fileName,
                     byteCount: byteCount,
                     stagedRelativePath: "\(id.uuidString)/\(ShareDraftStore.payloadDirectoryName)/\(fileName)"

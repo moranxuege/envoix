@@ -443,13 +443,33 @@ mod tests {
         opaque.extend_from_slice(&[0xa5; 32]);
         let source = PeerSource::remembered(&opaque, 9, Some(8), "broker".into())
             .expect("remembered source");
+        let PeerSource::Remembered { credential_ref, .. } = &source else {
+            panic!("expected remembered source")
+        };
+        let reference = credential_ref.as_str();
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(reference)
+                .expect("random reference must be base64url")
+                .len(),
+            16
+        );
         let encoded = serde_json::to_string(&source).expect("serialize source");
 
-        assert!(!encoded.contains("a5"));
         assert!(
             !encoded.contains(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(opaque))
         );
-        assert!(encoded.contains("\"generation\":9"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+            serde_json::json!({
+                "Remembered": {
+                    "credential_ref": reference,
+                    "generation": 9,
+                    "previous_generation": 8,
+                    "broker": "broker",
+                }
+            })
+        );
     }
 
     #[test]

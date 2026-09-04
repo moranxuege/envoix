@@ -22,6 +22,27 @@ fn wrong_length_key_file_errors() {
 }
 
 #[test]
+fn bearer_token_file_is_trimmed_and_cannot_be_empty() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("upload.token");
+
+    std::fs::write(&path, "  upload-token\n").unwrap();
+    assert_eq!(
+        &*load_bearer_token(&path, "--test-token").unwrap(),
+        "upload-token",
+    );
+
+    std::fs::write(&path, " \n").unwrap();
+    assert!(load_bearer_token(&path, "--test-token").is_err());
+
+    std::fs::write(&path, "token\nforged").unwrap();
+    assert!(load_bearer_token(&path, "--test-token").is_err());
+
+    std::fs::write(&path, "x".repeat(1025)).unwrap();
+    assert!(load_bearer_token(&path, "--test-token").is_err());
+}
+
+#[test]
 fn broker_cli_values_populate_and_validate_policy() {
     let cli = Cli::try_parse_from([
         "envoix-rendezvous-server",
@@ -47,4 +68,30 @@ fn invalid_zero_rate_is_rejected() {
     let cli =
         Cli::try_parse_from(["envoix-rendezvous-server", "--endpoint-rate-events", "0"]).unwrap();
     assert!(cli.broker_config().is_err());
+}
+
+#[test]
+fn diagnostic_transport_rejects_public_plain_http() {
+    let cli =
+        Cli::try_parse_from(["envoix-rendezvous-server", "--log-bind", "0.0.0.0:8460"]).unwrap();
+    assert!(cli.validate_log_transport().is_err());
+}
+
+#[test]
+fn diagnostic_transport_allows_loopback_http_and_public_tls() {
+    let loopback =
+        Cli::try_parse_from(["envoix-rendezvous-server", "--log-bind", "127.0.0.1:8460"]).unwrap();
+    assert!(loopback.validate_log_transport().is_ok());
+
+    let tls = Cli::try_parse_from([
+        "envoix-rendezvous-server",
+        "--log-bind",
+        "0.0.0.0:8460",
+        "--tls-cert",
+        "cert.pem",
+        "--tls-key",
+        "key.pem",
+    ])
+    .unwrap();
+    assert!(tls.validate_log_transport().is_ok());
 }

@@ -1,19 +1,30 @@
 use std::error::Error;
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+mod agent_service;
 mod args;
 
-use args::{Cli, Command, SaveModeArg, SourceIssueActionArg, TransferPlan};
+use args::{
+    AgentCommand, Cli, Command, DevicesCommand, InboxCommand, SaveModeArg, SourceIssueActionArg,
+    TransferPlan, TransfersCommand,
+};
 use clap::Parser;
+use envoix_client::agent_control::AgentControlClient;
 use envoix_client::api::{
     self, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
     InvitationConsumption, PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision,
     SourceSelectionState, TransferEvent, TransferJobStore, acquire_invitation,
+};
+use envoix_client::model::TransferDirection;
+use envoix_client::product::{
+    AgentEventCursor, AgentOfferDecision, AgentPairingInput, AgentPathKind, AgentRequest,
+    AgentResponse, AgentTransferPath,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 
@@ -64,10 +75,700 @@ fn init_tracing(verbosity: u8) {
 
 async fn run(cli: Cli) -> CliResult<()> {
     let json = cli.json;
+    let agent_endpoint = cli.agent_endpoint;
     match cli.command {
         Command::Send(args) => send(args.into_plan()?, json).await,
         Command::Receive(args) => receive(args.into_plan()?, json).await,
+        Command::Agent(args) => match args.command {
+            AgentCommand::Status => show_agent_status(
+                call_agent(agent_endpoint, AgentRequest::Status).await?,
+                json,
+            ),
+            AgentCommand::Snapshot { inbox_limit } => show_agent_snapshot(
+                call_agent(agent_endpoint, AgentRequest::Snapshot { inbox_limit }).await?,
+                json,
+            ),
+            AgentCommand::Events {
+                instance_id,
+                after,
+                limit,
+            } => show_agent_events(
+                call_agent(
+                    agent_endpoint,
+                    AgentRequest::Events {
+                        after: AgentEventCursor {
+                            instance_id,
+                            sequence: after,
+                        },
+                        limit,
+                    },
+                )
+                .await?,
+                json,
+            ),
+            AgentCommand::Diagnostics => show_agent_diagnostics(
+                call_agent(agent_endpoint, AgentRequest::Diagnostics).await?,
+                json,
+            ),
+            AgentCommand::Install {
+                inbox,
+                device_name,
+                agent_binary,
+                broker,
+                relay,
+            } => install_agent(inbox, device_name, agent_binary, broker, relay, json),
+            AgentCommand::Configure { broker, relay } => configure_agent(broker, relay, json),
+            AgentCommand::Start => manage_agent_service("started", agent_service::start, json),
+            AgentCommand::Stop => manage_agent_service("stopped", agent_service::stop, json),
+            AgentCommand::Restart => {
+                manage_agent_service("restarted", agent_service::restart, json)
+            }
+            AgentCommand::Update { agent_binary } => update_agent(agent_binary, json),
+            AgentCommand::Uninstall {
+                delete_state,
+                yes: _,
+            } => uninstall_agent(delete_state, json),
+            AgentCommand::Pair { name } => show_pairing(
+                call_agent(agent_endpoint, AgentRequest::Pair { label: name }).await?,
+                json,
+            ),
+            AgentCommand::JoinPairing { name, room } => {
+                let verification_code = read_verification_code()?;
+                show_paired_device(
+                    call_agent(
+                        agent_endpoint,
+                        AgentRequest::JoinPairing {
+                            pairing: AgentPairingInput {
+                                label: name,
+                                invitation: room,
+                                verification_code,
+                            },
+                        },
+                    )
+                    .await?,
+                    json,
+                )
+            }
+        },
+        Command::Devices(args) => match args.command {
+            DevicesCommand::List => show_devices(
+                call_agent(agent_endpoint, AgentRequest::ListDevices).await?,
+                json,
+            ),
+            DevicesCommand::Forget { device, yes: _ } => show_revoked_device(
+                call_agent(agent_endpoint, AgentRequest::RevokeDevice { device }).await?,
+                json,
+            ),
+            DevicesCommand::SetRoute {
+                device,
+                broker,
+                relay,
+            } => show_updated_device_route(
+                call_agent(
+                    agent_endpoint,
+                    AgentRequest::UpdateDeviceRoute {
+                        device,
+                        broker,
+                        relay: parse_relay_argument(&relay),
+                    },
+                )
+                .await?,
+                json,
+            ),
+        },
+        Command::Transfers(args) => match args.command {
+            TransfersCommand::Create { device, paths } => {
+                let paths = canonicalize_agent_sources(paths).await?;
+                show_created_transfer(
+                    call_agent(
+                        agent_endpoint,
+                        AgentRequest::CreateTransfer { device, paths },
+                    )
+                    .await?,
+                    json,
+                )
+            }
+            TransfersCommand::List => show_transfers(
+                call_agent(agent_endpoint, AgentRequest::ListTransfers).await?,
+                json,
+            ),
+            TransfersCommand::Show { transfer_id } => show_transfer(
+                call_agent(agent_endpoint, AgentRequest::GetTransfer { transfer_id }).await?,
+                json,
+            ),
+            TransfersCommand::Paths => show_transfer_paths(
+                call_agent(agent_endpoint, AgentRequest::ListTransferPaths).await?,
+                json,
+            ),
+            TransfersCommand::Pending => show_pending_offers(
+                call_agent(agent_endpoint, AgentRequest::ListPendingOffers).await?,
+                json,
+            ),
+            TransfersCommand::Approve { offer_id } => show_pending_offer_decision(
+                call_agent(
+                    agent_endpoint,
+                    AgentRequest::DecidePendingOffer {
+                        offer_id,
+                        decision: AgentOfferDecision::Approve,
+                    },
+                )
+                .await?,
+                json,
+            ),
+            TransfersCommand::Reject { offer_id } => show_pending_offer_decision(
+                call_agent(
+                    agent_endpoint,
+                    AgentRequest::DecidePendingOffer {
+                        offer_id,
+                        decision: AgentOfferDecision::Reject,
+                    },
+                )
+                .await?,
+                json,
+            ),
+        },
+        Command::Inbox(args) => match args.command {
+            InboxCommand::List { limit } => show_inbox(
+                call_agent(agent_endpoint, AgentRequest::ListInbox { limit }).await?,
+                json,
+            ),
+            InboxCommand::Latest => show_latest_inbox(
+                call_agent(agent_endpoint, AgentRequest::LatestInbox).await?,
+                json,
+            ),
+        },
     }
+}
+
+async fn canonicalize_agent_sources(paths: Vec<PathBuf>) -> CliResult<Vec<PathBuf>> {
+    let mut canonical = Vec::with_capacity(paths.len());
+    for path in paths {
+        canonical.push(tokio::fs::canonicalize(&path).await.map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot resolve Transfer source {}: {error}", path.display()),
+            )
+        })?);
+    }
+    Ok(canonical)
+}
+
+async fn call_agent(endpoint: Option<PathBuf>, request: AgentRequest) -> CliResult<AgentResponse> {
+    let client = match endpoint {
+        Some(endpoint) => AgentControlClient::new(endpoint),
+        None => AgentControlClient::for_current_user()?,
+    };
+    Ok(client.call(request).await?)
+}
+
+fn install_agent(
+    inbox: Option<PathBuf>,
+    device_name: String,
+    agent_binary: Option<PathBuf>,
+    broker: String,
+    relay: String,
+    json: bool,
+) -> CliResult<()> {
+    let installed = agent_service::install(agent_service::InstallOptions {
+        inbox,
+        device_name,
+        agent_binary,
+        broker,
+        relay: parse_relay_argument(&relay),
+    })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_installed",
+                "agent_binary": installed.agent_binary,
+                "cli_binary": installed.cli_binary,
+                "service_definition": installed.service_definition,
+                "settings_file": installed.settings_file,
+            })
+        );
+    } else {
+        println!("Agent installed and started.");
+        println!("agent: {}", installed.agent_binary.display());
+        println!("cli: {}", installed.cli_binary.display());
+        println!("settings: {}", installed.settings_file.display());
+        println!("service: {}", installed.service_definition.display());
+    }
+    Ok(())
+}
+
+fn configure_agent(broker: String, relay: String, json: bool) -> CliResult<()> {
+    let configured = agent_service::configure(agent_service::ConfigureOptions {
+        broker,
+        relay: parse_relay_argument(&relay),
+    })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_configured",
+                "settings_file": configured.settings_file,
+            })
+        );
+    } else {
+        println!("Agent broker and relay updated; service restarted.");
+        println!("settings: {}", configured.settings_file.display());
+    }
+    Ok(())
+}
+
+fn parse_relay_argument(value: &str) -> Option<String> {
+    match value.trim() {
+        "" | "none" | "off" => None,
+        value => Some(value.to_string()),
+    }
+}
+
+fn update_agent(agent_binary: Option<PathBuf>, json: bool) -> CliResult<()> {
+    let installed = agent_service::update(agent_service::UpdateOptions { agent_binary })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_updated",
+                "agent_binary": installed.agent_binary,
+                "cli_binary": installed.cli_binary,
+                "service_definition": installed.service_definition,
+                "settings_file": installed.settings_file,
+            })
+        );
+    } else {
+        println!("Agent binaries updated and service restarted.");
+        println!("agent: {}", installed.agent_binary.display());
+        println!("cli: {}", installed.cli_binary.display());
+    }
+    Ok(())
+}
+
+fn uninstall_agent(delete_state: bool, json: bool) -> CliResult<()> {
+    let uninstalled = agent_service::uninstall(agent_service::UninstallOptions { delete_state })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_uninstalled",
+                "state_directory": uninstalled.state_directory,
+                "state_cleared": uninstalled.state_cleared,
+                "inbox_preserved": true,
+            })
+        );
+    } else {
+        println!("Agent service and installed binaries removed.");
+        if uninstalled.state_cleared {
+            println!("Engine state and credentials removed; Inbox files preserved.");
+        } else {
+            println!(
+                "Settings and data preserved; Agent state remains under {}.",
+                uninstalled.state_directory.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn manage_agent_service(
+    completed: &str,
+    operation: impl FnOnce() -> io::Result<()>,
+    json: bool,
+) -> CliResult<()> {
+    operation()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "agent_service_changed",
+                "state": completed,
+            })
+        );
+    } else {
+        println!("Agent service {completed}.");
+    }
+    Ok(())
+}
+
+fn agent_error(response: AgentResponse) -> CliResult<AgentResponse> {
+    match response {
+        AgentResponse::Error { code, message } => Err(format!("Agent {code}: {message}").into()),
+        response => Ok(response),
+    }
+}
+
+fn show_agent_status(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Status { status } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("agent: running (pid {})", status.pid);
+    println!("device: {}", status.device_name);
+    println!("inbox: {}", status.inbox_directory);
+    println!(
+        "devices: {} paired, {} listening, {} pairing",
+        status.paired_devices, status.active_receivers, status.active_pairings
+    );
+    println!("pending offers: {}", status.pending_offers);
+    println!("active paths: {}", status.active_paths);
+    println!("broker: {}", status.broker);
+    println!("relay: {}", status.relay.as_deref().unwrap_or("disabled"));
+    Ok(())
+}
+
+fn show_agent_snapshot(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Snapshot { snapshot } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("engine sequence: {}", snapshot.engine.last_sequence);
+    println!("relationships: {}", snapshot.engine.relationships.len());
+    println!("rooms: {}", snapshot.engine.rooms.len());
+    println!("transfers: {}", snapshot.engine.transfers.len());
+    println!("inbox: {}", snapshot.inbox.len());
+    println!("pending offers: {}", snapshot.pending_offers.len());
+    println!("active paths: {}", snapshot.active_paths.len());
+    for path in &snapshot.active_paths {
+        print_agent_transfer_path(path);
+    }
+    println!(
+        "event cursor: {}:{}",
+        snapshot.event_cursor.instance_id, snapshot.event_cursor.sequence
+    );
+    Ok(())
+}
+
+fn show_agent_events(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    match response {
+        AgentResponse::Events { cursor, events } => {
+            for event in events {
+                println!("{}\t{:?}", event.sequence, event.event);
+            }
+            println!("event cursor: {}:{}", cursor.instance_id, cursor.sequence);
+            Ok(())
+        }
+        AgentResponse::SnapshotRequired { cursor } => Err(format!(
+            "Agent event cursor is no longer usable; fetch a new snapshot (current cursor {}:{})",
+            cursor.instance_id, cursor.sequence
+        )
+        .into()),
+        _ => Err("Agent returned an unexpected response".into()),
+    }
+}
+
+fn show_agent_diagnostics(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Diagnostics { diagnostics } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("platform: {}", diagnostics.platform);
+    println!(
+        "contracts: Agent v{}, application v{}, Engine schema v{}",
+        diagnostics.agent_protocol_version,
+        diagnostics.application_contract_version,
+        diagnostics.engine_schema_version
+    );
+    println!("control: {:?}", diagnostics.control_transport);
+    println!("credentials: {:?}", diagnostics.credential_protection);
+    println!("engine sequence: {}", diagnostics.engine_sequence);
+    println!(
+        "state: {} relationships, {} Transfers, {} Inbox items, {} active paths, {} pending offers",
+        diagnostics.relationships,
+        diagnostics.transfers,
+        diagnostics.inbox_items,
+        diagnostics.active_paths,
+        diagnostics.pending_offers
+    );
+    Ok(())
+}
+
+fn show_pairing(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Pairing { pairing } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Room code: {}", pairing.room_code);
+    println!("Verification code: {}", pairing.verification_code);
+    eprintln!(
+        "On the Mac, enter the room code in Envoix, then enter the six-digit verification code when prompted."
+    );
+    eprintln!("Keep envoix-agent running until the device appears in `envoix devices list`.");
+    Ok(())
+}
+
+fn read_verification_code() -> CliResult<String> {
+    eprint!("Verification code: ");
+    io::stderr().flush()?;
+    let mut code = String::new();
+    io::stdin().read_line(&mut code)?;
+    Ok(code.trim().to_string())
+}
+
+fn show_paired_device(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::DevicePaired { device } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Paired device: {} ({})", device.label, device.id);
+    Ok(())
+}
+
+fn show_devices(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Devices { devices } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if devices.is_empty() {
+        println!("No remembered devices.");
+        return Ok(());
+    }
+    for device in devices {
+        println!(
+            "{}\t{}\tgeneration {}",
+            device.id, device.label, device.generation
+        );
+    }
+    Ok(())
+}
+
+fn show_revoked_device(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::DeviceRevoked { device } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Revoked device: {} ({})", device.label, device.id);
+    Ok(())
+}
+
+fn show_updated_device_route(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::DeviceRouteUpdated { device } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Updated route: {} ({})", device.label, device.id);
+    println!("broker: {}", device.broker);
+    println!("relay: {}", device.relay.as_deref().unwrap_or("disabled"));
+    Ok(())
+}
+
+fn show_created_transfer(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::TransferCreated { transfer } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Created Transfer: {}", transfer.id);
+    println!("state: {}", transfer.state.wire_name());
+    println!("bytes: {}", transfer.total_bytes);
+    Ok(())
+}
+
+fn show_transfers(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Transfers { transfers } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if transfers.is_empty() {
+        println!("No Transfers.");
+        return Ok(());
+    }
+    for transfer in transfers {
+        println!(
+            "{}\t{}\t{} / {} bytes",
+            transfer.id,
+            transfer.state.wire_name(),
+            transfer.transferred_bytes,
+            transfer.total_bytes
+        );
+    }
+    Ok(())
+}
+
+fn show_transfer(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Transfer { transfer } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    println!("Transfer: {}", transfer.id);
+    println!("relationship: {}", transfer.relationship_id);
+    println!("direction: {:?}", transfer.direction);
+    println!("state: {}", transfer.state.wire_name());
+    println!(
+        "progress: {} / {} bytes",
+        transfer.transferred_bytes, transfer.total_bytes
+    );
+    Ok(())
+}
+
+fn show_transfer_paths(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::TransferPaths { paths } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if paths.is_empty() {
+        println!("No active transfer paths.");
+        return Ok(());
+    }
+    for path in &paths {
+        print_agent_transfer_path(path);
+    }
+    Ok(())
+}
+
+fn print_agent_transfer_path(path: &AgentTransferPath) {
+    let direction = match path.direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "receive",
+    };
+    let path_name = match path.path {
+        AgentPathKind::Lan => "lan",
+        AgentPathKind::Direct => "tailnet/direct",
+        AgentPathKind::Relay => "relay",
+        AgentPathKind::WifiAware => "wifi_aware",
+        AgentPathKind::Other => "other",
+    };
+    println!("{}\t{direction}\t{path_name}", path.transfer_id);
+}
+
+fn show_pending_offers(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::PendingOffers { offers } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if offers.is_empty() {
+        println!("No pending offers.");
+        return Ok(());
+    }
+    for offer in offers {
+        println!(
+            "{}\t{}\t{} items\t{} bytes\t{} bytes allocatable\t{}",
+            offer.offer_id,
+            offer.from_device_label,
+            offer.item_count,
+            offer.total_bytes,
+            offer.allocatable_bytes,
+            offer.root_names.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn show_pending_offer_decision(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::PendingOfferDecided { offer, decision } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    let action = match decision {
+        AgentOfferDecision::Approve => "Approved",
+        AgentOfferDecision::Reject => "Rejected",
+    };
+    println!("{action} pending offer: {}", offer.offer_id);
+    Ok(())
+}
+
+fn show_inbox(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Inbox { items } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    if items.is_empty() {
+        println!("Inbox is empty.");
+        return Ok(());
+    }
+    for item in items {
+        let paths = item
+            .roots
+            .iter()
+            .map(|root| root.path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{}\t{}\t{} bytes\t{}",
+            item.received_at_unix_ms, item.from_device_label, item.total_bytes, paths
+        );
+    }
+    Ok(())
+}
+
+fn show_latest_inbox(response: AgentResponse, json: bool) -> CliResult<()> {
+    let response = agent_error(response)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    let AgentResponse::Latest { item } = response else {
+        return Err("Agent returned an unexpected response".into());
+    };
+    let item = item.ok_or("Inbox is empty")?;
+    for root in item.roots {
+        println!("{}", root.path);
+    }
+    Ok(())
 }
 
 async fn send(plan: TransferPlan, json: bool) -> CliResult<()> {

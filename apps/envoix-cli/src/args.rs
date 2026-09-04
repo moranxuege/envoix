@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use envoix_client::api;
 use envoix_client::api::TransferError;
-use envoix_client::{BindAddrs, IdentityConfig, PeerDescriptor};
+use envoix_client::{
+    BindAddrs, DEFAULT_RELAY_URL, DEFAULT_RENDEZVOUS_BROKER, IdentityConfig, PeerDescriptor,
+};
 use envoix_qr::render_terminal_qr;
 
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
@@ -35,6 +37,9 @@ pub(crate) struct Cli {
     /// internals (path selection, hole-punching). RUST_LOG overrides both.
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true)]
     pub(crate) verbose: u8,
+    /// Override the local Agent Unix socket or Windows Named Pipe.
+    #[arg(long, visible_alias = "agent-socket", global = true)]
+    pub(crate) agent_endpoint: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
@@ -45,6 +50,187 @@ pub(crate) enum Command {
     Send(SendArgs),
     /// Receive one transfer job into an output directory.
     Receive(ReceiveArgs),
+    /// Inspect or pair with the persistent local Agent.
+    Agent(AgentArgs),
+    /// Manage remembered devices owned by the local Agent.
+    Devices(DevicesArgs),
+    /// Create and inspect durable Transfers owned by the local Agent.
+    Transfers(TransfersArgs),
+    /// Inspect files received by the local Agent.
+    Inbox(InboxArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AgentArgs {
+    #[command(subcommand)]
+    pub(crate) command: AgentCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AgentCommand {
+    /// Show whether the Agent is running and listening for remembered peers.
+    Status,
+    /// Print the Agent's immutable Engine and Inbox snapshot.
+    Snapshot {
+        /// Maximum number of recent Inbox entries to include.
+        #[arg(long, default_value_t = 20)]
+        inbox_limit: usize,
+    },
+    /// Read Agent events after a snapshot or prior event cursor.
+    Events {
+        /// Agent instance ID returned by `agent snapshot` or a prior poll.
+        #[arg(long)]
+        instance_id: String,
+        /// Last consumed event sequence.
+        #[arg(long)]
+        after: u64,
+        /// Maximum number of events to return.
+        #[arg(long, default_value_t = 64)]
+        limit: usize,
+    },
+    /// Print a secret-free Agent and Engine health report.
+    Diagnostics,
+    /// Install and start the Agent as a managed per-user service.
+    Install {
+        /// Inbox directory; defaults to the Agent state directory's Inbox.
+        #[arg(long)]
+        inbox: Option<PathBuf>,
+        /// Name shown to sending devices.
+        #[arg(long, default_value = "Envoix Agent")]
+        device_name: String,
+        /// Prebuilt envoix-agent binary; defaults to the CLI's directory or PATH.
+        #[arg(long)]
+        agent_binary: Option<PathBuf>,
+        /// Broker persisted in the managed Agent settings.
+        #[arg(long, default_value = DEFAULT_RENDEZVOUS_BROKER)]
+        broker: String,
+        /// Relay persisted in settings; use `none` to disable it.
+        #[arg(long, default_value = DEFAULT_RELAY_URL)]
+        relay: String,
+    },
+    /// Replace the managed Agent's broker and relay, then restart it.
+    Configure {
+        #[arg(long)]
+        broker: String,
+        /// Relay URL, or `none` to disable relay use.
+        #[arg(long)]
+        relay: String,
+    },
+    /// Start the installed Agent service.
+    Start,
+    /// Stop the installed Agent service.
+    Stop,
+    /// Restart the installed Agent service.
+    Restart,
+    /// Replace the installed CLI and Agent binaries without changing settings or state.
+    Update {
+        /// Prebuilt envoix-agent binary; defaults to the CLI's directory or PATH.
+        #[arg(long)]
+        agent_binary: Option<PathBuf>,
+    },
+    /// Remove the managed service and installed binaries.
+    Uninstall {
+        /// Also remove Envoix Engine state and credentials; received Inbox files are preserved.
+        #[arg(long, requires = "yes")]
+        delete_state: bool,
+        /// Confirm deletion requested by --delete-state.
+        #[arg(long, requires = "delete_state")]
+        yes: bool,
+    },
+    /// Create a one-time receive invitation that becomes a remembered device.
+    Pair {
+        /// Name for the Mac or other sending device.
+        #[arg(long)]
+        name: String,
+    },
+    /// Join another Agent's one-time room and keep the verified relationship.
+    JoinPairing {
+        /// Name for the remote Agent shown in the remembered device list.
+        #[arg(long)]
+        name: String,
+        /// Room URI or room code printed by the remote Agent.
+        #[arg(long)]
+        room: String,
+    },
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct DevicesArgs {
+    #[command(subcommand)]
+    pub(crate) command: DevicesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum DevicesCommand {
+    /// List devices that can reconnect without a new invitation.
+    List,
+    /// Revoke one remembered device and delete its credential.
+    Forget {
+        /// Device ID or exact label shown by `devices list`.
+        device: String,
+        /// Confirm Relationship revocation and credential deletion.
+        #[arg(long, required = true)]
+        yes: bool,
+    },
+    /// Move one existing trusted relationship to another broker and relay.
+    SetRoute {
+        /// Device ID or exact label shown by `devices list`.
+        device: String,
+        #[arg(long)]
+        broker: String,
+        /// Relay URL, or `none` to disable relay use.
+        #[arg(long)]
+        relay: String,
+    },
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct TransfersArgs {
+    #[command(subcommand)]
+    pub(crate) command: TransfersCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum TransfersCommand {
+    /// Prepare content and create a durable queued Transfer.
+    Create {
+        /// Device ID or exact label shown by `devices list`.
+        #[arg(long)]
+        device: String,
+        /// One or more files or directories on this Agent host.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
+    /// List durable Transfers.
+    List,
+    /// Show one durable Transfer by ID.
+    Show { transfer_id: String },
+    /// List the network paths selected by active Agent transfers.
+    Paths,
+    /// List incoming offers waiting for an explicit size approval.
+    Pending,
+    /// Approve one pending incoming offer before payload starts.
+    Approve { offer_id: String },
+    /// Reject one pending incoming offer.
+    Reject { offer_id: String },
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct InboxArgs {
+    #[command(subcommand)]
+    pub(crate) command: InboxCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum InboxCommand {
+    /// List newest completed transfers.
+    List {
+        /// Maximum number of transfers to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Print the saved path(s) from the newest completed transfer.
+    Latest,
 }
 
 /// Arguments for `envoix send`.
@@ -417,6 +603,7 @@ fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
 mod tests {
     use super::Cli;
     use clap::Parser;
+    use std::path::PathBuf;
 
     #[test]
     fn naked_room_code_flag_is_retired() {
@@ -446,5 +633,117 @@ mod tests {
             ])
             .is_ok()
         );
+        assert!(Cli::try_parse_from(["envoix", "agent", "diagnostics"]).is_ok());
+    }
+
+    #[test]
+    fn agent_and_inbox_commands_are_available_without_transfer_flags() {
+        assert!(Cli::try_parse_from(["envoix", "agent", "status"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["envoix", "agent", "snapshot", "--inbox-limit", "10"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "agent",
+                "events",
+                "--instance-id",
+                "agent_fixture",
+                "--after",
+                "0",
+                "--limit",
+                "32",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "agent",
+                "install",
+                "--inbox",
+                "./inbox",
+                "--device-name",
+                "Dev WSL",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "agent", "start"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "agent", "stop"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "agent", "restart"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "agent",
+                "configure",
+                "--broker",
+                "fixture@127.0.0.1:8445",
+                "--relay",
+                "none",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "agent", "update"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "agent",
+                "update",
+                "--agent-binary",
+                "/tmp/envoix-agent",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "agent", "uninstall"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["envoix", "agent", "uninstall", "--delete-state", "--yes",])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "agent", "uninstall", "--delete-state"]).is_err());
+        assert!(Cli::try_parse_from(["envoix", "agent", "uninstall", "--yes"]).is_err());
+        assert!(Cli::try_parse_from(["envoix", "agent", "pair", "--name", "MacBook"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "devices", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook", "--yes"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "devices", "forget", "MacBook"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "devices",
+                "set-route",
+                "MacBook",
+                "--broker",
+                "fixture@127.0.0.1:8445",
+                "--relay",
+                "https://relay.example.test",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "transfers",
+                "create",
+                "--device",
+                "MacBook",
+                "/tmp/hello.txt",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["envoix", "transfers", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "show", "transfer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "paths"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "pending"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "approve", "offer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "transfers", "reject", "offer_1"]).is_ok());
+        assert!(Cli::try_parse_from(["envoix", "inbox", "latest"]).is_ok());
+    }
+
+    #[test]
+    fn agent_control_endpoint_accepts_the_new_name_and_socket_alias() {
+        for option in ["--agent-endpoint", "--agent-socket"] {
+            let cli = Cli::try_parse_from(["envoix", option, "local-control", "agent", "status"])
+                .unwrap();
+            assert_eq!(cli.agent_endpoint, Some(PathBuf::from("local-control")));
+        }
     }
 }

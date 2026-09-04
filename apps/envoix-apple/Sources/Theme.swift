@@ -51,7 +51,7 @@ extension Color {
     }
 }
 
-// MARK: - Design tokens (from the reference demo)
+// MARK: - Semantic design tokens
 
 enum Theme {
     static let bg = Color(light: 0xf8fafd, dark: 0x061126)
@@ -64,6 +64,7 @@ enum Theme {
     static let accentStrong = Color(light: 0x0d47a1, dark: 0xa8ceff)
     static let accentSoft = Color(light: 0xeaf2ff, dark: 0x142f55)
     static let success = Color(light: 0x147a4b, dark: 0x61d69a)
+    static let successSoft = Color(light: 0xddf3e7, dark: 0x16362a)
     static let warning = Color(light: 0xa05a00, dark: 0xffc166)
     static let danger = Color(light: 0xe74c3c, dark: 0xf07167)
     static let dangerStrong = Color(light: 0xb42318, dark: 0xffb4aa)

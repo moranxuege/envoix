@@ -1,4 +1,6 @@
 use super::*;
+use axum::http::HeaderValue;
+use std::net::{IpAddr, Ipv4Addr};
 
 #[test]
 fn timeline_epoch_parses_envelope_and_rejects_raw() {
@@ -62,4 +64,78 @@ fn constant_time_eq_matches_and_rejects() {
     assert!(!constant_time_eq(b"operator-token", b"operator-toke")); // length differs
     assert!(!constant_time_eq(b"operator-token", b"operator-tokeX")); // last byte differs
     assert!(!constant_time_eq(b"", b"x"));
+}
+
+#[test]
+fn upload_auth_requires_the_exact_bearer_token() {
+    let auth = UploadAuth::Token(Arc::from("upload-token"));
+    let mut headers = HeaderMap::new();
+
+    assert_eq!(
+        authorize_upload(&headers, &auth),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer wrong-token"),
+    );
+    assert_eq!(
+        authorize_upload(&headers, &auth),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer upload-token"),
+    );
+    assert_eq!(authorize_upload(&headers, &auth), Ok(()));
+}
+
+#[test]
+fn upload_auth_is_closed_without_a_configured_token() {
+    assert_eq!(
+        authorize_upload(&HeaderMap::new(), &UploadAuth::Closed),
+        Err(StatusCode::FORBIDDEN),
+    );
+}
+
+#[test]
+fn diagnostic_rate_limits_are_bounded_and_operation_specific() {
+    let limits = LogRateLimits::default();
+    let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let started = Instant::now();
+
+    for _ in 0..UPLOAD_RATE_BURST {
+        assert!(
+            limits
+                .allow_at(source, LogOperation::Upload, started)
+                .is_ok()
+        );
+    }
+    let retry_after = limits
+        .allow_at(source, LogOperation::Upload, started)
+        .unwrap_err();
+    assert_eq!(retry_after, 20);
+    assert!(
+        limits.allow_at(source, LogOperation::View, started).is_ok(),
+        "view and upload budgets must be independent"
+    );
+    assert!(
+        limits
+            .allow_at(
+                source,
+                LogOperation::Upload,
+                started + Duration::from_secs(retry_after),
+            )
+            .is_ok(),
+        "one upload token should replenish after retry_after"
+    );
+}
+
+#[test]
+fn rate_limited_response_includes_retry_after() {
+    let response = rate_limited_response(17);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "17");
 }

@@ -2379,11 +2379,7 @@ struct AppleWifiAwarePairingControls: View {
                             access: .permanent
                         ) {
                             Label(
-                                AppText.value(
-                                    "Show this device and code",
-                                    "显示本机与验证码",
-                                    language: language
-                                ),
+                                pairingText(.showDevice),
                                 systemImage: "number.circle"
                             )
                             .frame(maxWidth: .infinity)
@@ -2418,11 +2414,7 @@ struct AppleWifiAwarePairingControls: View {
                             )
                         } label: {
                             Label(
-                                AppText.value(
-                                    "Find the other device",
-                                    "查找另一台设备",
-                                    language: language
-                                ),
+                                pairingText(.findDevice),
                                 systemImage: "magnifyingglass"
                             )
                             .frame(maxWidth: .infinity)
@@ -2434,11 +2426,7 @@ struct AppleWifiAwarePairingControls: View {
                     }
                 }
             } else {
-                Text(AppText.value(
-                    "Nearby pairing is unavailable in this build.",
-                    "此版本无法使用附近设备配对。",
-                    language: language
-                ))
+                Text(pairingText(.buildUnavailable))
                 .font(.footnote)
                 .foregroundStyle(Theme.danger)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2459,40 +2447,27 @@ struct AppleWifiAwarePairingControls: View {
             HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
-                Text(AppText.value(
-                    "Checking Apple paired devices…",
-                    "正在检查 Apple 配对设备…",
-                    language: language
-                ))
+                Text(pairingText(.checking))
             }
             .font(.footnote)
             .foregroundStyle(Theme.muted)
 
         case .guidance(.newPair):
-            Text(AppText.value(
-                "For the first pair, tap “Show this device and code” on one device. On the other, tap “Find the other device”, select it, then enter or confirm the six-digit code. The two devices must use opposite buttons.",
-                "首次配对时，请在一台设备上点“显示本机与验证码”；在另一台设备上点“查找另一台设备”，选择前一台设备，再输入或确认六位码。两台设备必须使用不同的按钮。",
-                language: language
-            ))
+            Text(pairingText(.firstPairGuidance))
             .font(.footnote)
             .foregroundStyle(Theme.muted)
             .fixedSize(horizontal: false, vertical: true)
 
         case .guidance(.existingPairs(let count)):
-            Text(AppText.value(
-                "\(count) Apple-paired device\(count == 1 ? "" : "s") already available. Existing pairs do not show another six-digit code; tap Done to resume automatic discovery. Use the controls below only to add a new device.",
-                "已有 \(count) 台 Apple 系统配对设备。已有配对不会再次显示六位码；点“完成”即可恢复自动发现。仅在添加新设备时使用下方按钮。",
-                language: language
-            ))
+            Text(WifiAwarePairingPresentationText.existingPairs(count, language: language))
             .font(.footnote)
             .foregroundStyle(Theme.muted)
             .fixedSize(horizontal: false, vertical: true)
 
         case .success(.pairedDevicesObserved(_, let totalCount)):
             Label(
-                AppText.value(
-                    "New pairing detected · \(totalCount) total",
-                    "已检测到新配对 · 共 \(totalCount) 台",
+                WifiAwarePairingPresentationText.newPairing(
+                    totalCount: totalCount,
                     language: language
                 ),
                 systemImage: "checkmark.circle.fill"
@@ -2512,14 +2487,10 @@ struct AppleWifiAwarePairingControls: View {
 
         case .observationFailed:
             VStack(alignment: .leading, spacing: 8) {
-                Text(AppText.value(
-                    "Envoix could not read Apple's paired-device list. No pairing record was changed.",
-                    "Envoix 无法读取 Apple 的配对设备列表；现有配对记录未被更改。",
-                    language: language
-                ))
-                .font(.footnote)
-                .foregroundStyle(Theme.danger)
-                Button(AppText.value("Retry", "重试", language: language)) {
+                Text(pairingText(.observationFailed))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.danger)
+                Button(pairingText(.retry)) {
                     observationAttempt += 1
                 }
                 .buttonStyle(.bordered)
@@ -2538,25 +2509,9 @@ struct AppleWifiAwarePairingControls: View {
     }
 
     private func pickerSuccessText(snapshotConfirmed: Bool) -> String {
-        let name = pickerSelectedDisplayName?.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        let resolvedName: String
-        if let name, !name.isEmpty {
-            resolvedName = name
-        } else {
-            resolvedName = AppText.value("device", "设备", language: language)
-        }
-        if snapshotConfirmed {
-            return AppText.value(
-                "\(resolvedName) is paired and ready",
-                "\(resolvedName) 已配对并可使用",
-                language: language
-            )
-        }
-        return AppText.value(
-            "\(resolvedName) selected; waiting for Apple's pairing list",
-            "已选择 \(resolvedName)；正在等待 Apple 配对列表更新",
+        WifiAwarePairingPresentationText.pickerResult(
+            displayName: pickerSelectedDisplayName,
+            snapshotConfirmed: snapshotConfirmed,
             language: language
         )
     }
@@ -2638,8 +2593,12 @@ struct AppleWifiAwarePairingControls: View {
     }
 
     private var pairingUnavailable: some View {
-        Text(AppText.value("Pairing unavailable", "配对不可用", language: language))
+        Text(pairingText(.unavailable))
             .frame(maxWidth: .infinity)
+    }
+
+    private func pairingText(_ copy: WifiAwarePairingCopy) -> String {
+        WifiAwarePairingPresentationText.value(copy, language: language)
     }
 }
 #endif

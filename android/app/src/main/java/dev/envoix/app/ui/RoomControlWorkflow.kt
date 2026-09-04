@@ -34,7 +34,7 @@ internal data class RoomControlUiState(
     val outgoingOfferPending: Boolean = false,
     val replacementRequested: Boolean = false,
     val closeReason: RoomCloseReason? = null,
-    val error: String? = null,
+    val error: UiMessage? = null,
 ) {
     val connected: Boolean
         get() = phase == RoomControlPhase.Connected
@@ -292,6 +292,10 @@ internal class RoomControlWorkflow(
     }
 
     fun showError(message: String) {
+        showError(UiMessage.Dynamic(message))
+    }
+
+    fun showError(message: UiMessage) {
         update { it.copy(error = message) }
     }
 
@@ -412,7 +416,7 @@ internal class RoomControlWorkflow(
                         incomingOffer = null,
                         outgoingOfferPending = false,
                         idleDeadlineEpochMs = null,
-                        error = event.message,
+                        error = UiMessage.Dynamic(event.message),
                     )
                 }
                 // A native terminal failure is also the final lifecycle
@@ -442,7 +446,7 @@ internal class RoomControlWorkflow(
                 incomingOffer = null,
                 outgoingOfferPending = false,
                 idleDeadlineEpochMs = null,
-                error = message,
+                error = UiMessage.Dynamic(message),
             )
         }
     }

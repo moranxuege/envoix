@@ -874,20 +874,31 @@ impl RoomRegistry {
 
     fn expire_room(&self, room_id: &str, waiter_id: u64, now: Instant) {
         let mut state = self.state.lock().expect("registry mutex");
-        let Some(room) = state.rooms.get_mut(room_id) else {
-            return;
-        };
-        if room
-            .waiter
-            .as_ref()
-            .is_some_and(|waiter| waiter.id == waiter_id)
+        let mut release_remembered_room = false;
+        if let Some(room) = state.rooms.get_mut(room_id)
+            && room
+                .waiter
+                .as_ref()
+                .is_some_and(|waiter| waiter.id == waiter_id)
             && matches!(room.status, RoomStatus::Live)
         {
             room.waiter.take();
-            room.status = RoomStatus::Expired {
-                purge_at: now + self.config.room_tombstone_ttl,
-            };
             self.metrics.expired_rooms.fetch_add(1, Ordering::Relaxed);
+            // A tombstone tells a human Room code holder that their code is
+            // gone rather than silently reopening it. A remembered locator has
+            // no code to explain and no attempt budget to protect, so its
+            // tombstone only blocks the same pair from parking again for the
+            // tombstone TTL. Release it like a disconnected responder instead.
+            release_remembered_room =
+                is_remembered_room_id(room_id) && room.active_connections <= 1;
+            if !release_remembered_room {
+                room.status = RoomStatus::Expired {
+                    purge_at: now + self.config.room_tombstone_ttl,
+                };
+            }
+        }
+        if release_remembered_room {
+            state.rooms.remove(room_id);
         }
     }
 
@@ -901,11 +912,19 @@ impl RoomRegistry {
     }
 
     fn sweep_rooms(&self, state: &mut RegistryState, now: Instant) {
-        for room in state.rooms.values_mut() {
+        for (room_id, room) in state.rooms.iter_mut() {
             if matches!(room.status, RoomStatus::Live) && !room.consumed && now >= room.expires_at {
                 room.waiter.take();
+                // Remembered locators carry no Room code to explain and no
+                // attempt budget to protect, so they expire without a
+                // tombstone and the retain below drops them immediately.
+                let tombstone_ttl = if is_remembered_room_id(room_id) {
+                    Duration::ZERO
+                } else {
+                    self.config.room_tombstone_ttl
+                };
                 room.status = RoomStatus::Expired {
-                    purge_at: now + self.config.room_tombstone_ttl,
+                    purge_at: now + tombstone_ttl,
                 };
                 self.metrics.expired_rooms.fetch_add(1, Ordering::Relaxed);
             }

@@ -7,11 +7,18 @@ import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import dev.envoix.app.Native
-import dev.envoix.app.NearbyInviteCallback
 import dev.envoix.app.OpLog
-import org.json.JSONArray
-import org.json.JSONObject
+import dev.envoix.app.ffi.FfiNearbyInvite
+import dev.envoix.app.ffi.FfiNearbyInviteEndpoint
+import dev.envoix.app.ffi.FfiNearbyInviteInbox
+import dev.envoix.app.ffi.startNearbyInviteInbox
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.net.DatagramSocket
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicLong
@@ -32,7 +39,7 @@ internal class MdnsDiscoveryProvider(
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private val resolveFailures = mutableMapOf<String, Int>()
     private val resolvedObservations = mutableMapOf<String, DiscoveryObservation>()
-    private val pendingOffers = mutableMapOf<String, (String?) -> Unit>()
+    private val inboxScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var listener: DiscoveryListener? = null
     private var active = false
@@ -45,6 +52,11 @@ internal class MdnsDiscoveryProvider(
     private var resolving = false
     private var resolvingServiceName: String? = null
     private var inboxSessionId: Long? = null
+    private var inbox: FfiNearbyInviteInbox? = null
+    private var inboxStartJob: Job? = null
+    private var inboxEventJob: Job? = null
+    private var outboundJob: Job? = null
+    private var outboundCompletion: ((String?) -> Unit)? = null
     private var inboxReady = false
     private var inboxSettled = false
     private var failureDetail: String? = null
@@ -242,10 +254,15 @@ internal class MdnsDiscoveryProvider(
         }
         active = false
         handler.removeCallbacks(refreshRunnable)
-        val stoppedSessionId = inboxSessionId
         inboxSessionId = null
-        stoppedSessionId?.let { id -> runCatching { Native.stopNearbyInviteInbox(id) } }
-        completePendingOffers("Local-network discovery stopped")
+        inboxStartJob?.cancel()
+        inboxStartJob = null
+        inboxEventJob?.cancel()
+        inboxEventJob = null
+        val stoppedInbox = inbox
+        inbox = null
+        stoppedInbox?.let { value -> inboxScope.launch { closeInbox(value) } }
+        completePendingOffer("Local-network discovery stopped")
         if (discoveryRequested) runCatching { nsdManager?.stopServiceDiscovery(discoveryListener) }
         if (registrationRequested) runCatching { nsdManager?.unregisterService(registrationListener) }
         releaseResources()
@@ -259,6 +276,7 @@ internal class MdnsDiscoveryProvider(
         completion: (String?) -> Unit,
     ) {
         val id = inboxSessionId
+        val activeInbox = inbox
         val route =
             selection.nearbyInviteRoute?.let {
                 NearbyInviteRoute.normalized(
@@ -267,7 +285,7 @@ internal class MdnsDiscoveryProvider(
                     directAddresses = it.directAddresses,
                 )
             }
-        if (!active || !inboxReady || id == null) {
+        if (!active || !inboxReady || id == null || activeInbox == null) {
             completion("Secure local-network invitation delivery is not ready")
             return
         }
@@ -281,139 +299,146 @@ internal class MdnsDiscoveryProvider(
             completion("The selected device is no longer available on the local network")
             return
         }
-        if (pendingOffers.isNotEmpty()) {
+        if (outboundJob != null) {
             completion("Another local-network invitation is already being delivered")
             return
         }
 
-        val requestId = nextRequestId.getAndIncrement().toULong().toString(16)
-        pendingOffers[requestId] = completion
-        val response =
-            runCatching {
-                JSONObject(
-                    Native.sendNearbyInvite(
-                        id = id,
-                        requestId = requestId,
-                        routeJson = route.toNativeJson(),
-                        invite = invite,
-                    ),
-                )
-            }.getOrElse { error ->
-                pendingOffers.remove(requestId)
-                completion(error.message ?: "Local-network invitation delivery could not start")
-                return
+        outboundCompletion = completion
+        val job =
+            inboxScope.launch(start = CoroutineStart.LAZY) {
+                val error =
+                    try {
+                        activeInbox.sendInvite(route.toFfiNearbyInviteEndpoint(), invite)
+                        null
+                    } catch (_: CancellationException) {
+                        return@launch
+                    } catch (error: Exception) {
+                        error.message ?: "Local-network invitation delivery failed"
+                    }
+                finishOutbound(id, activeInbox, error)
             }
-        response.optString("error").takeIf(String::isNotBlank)?.let { error ->
-            pendingOffers.remove(requestId)
-            completion(error)
-            return
-        }
-        if (!response.optBoolean("queued")) {
-            pendingOffers.remove(requestId)
-            completion("Local-network invitation delivery was not queued")
-        }
+        outboundJob = job
+        job.start()
     }
 
     private fun startInbox() {
         val id = nextSessionId.getAndIncrement()
         inboxSessionId = id
-        val params =
-            JSONObject()
-                .put("peer_key", localIdentity.peerKey)
-                .put("display_name", localIdentity.displayName)
-                .put("relay", relay)
-        runCatching {
-            Native.startNearbyInviteInbox(
-                id,
-                params.toString(),
-                object : NearbyInviteCallback {
-                    override fun onEvent(json: String) {
-                        handler.post { handleInboxEvent(id, json) }
+        val job =
+            inboxScope.launch(start = CoroutineStart.LAZY) {
+                var startedInbox: FfiNearbyInviteInbox? = null
+                var retained = false
+                try {
+                    startedInbox =
+                        startNearbyInviteInbox(
+                            relay = relay,
+                            peerKey = localIdentity.peerKey,
+                            displayName = localIdentity.displayName,
+                        )
+                    if (!active || inboxSessionId != id) return@launch
+                    val route = startedInbox.endpoint().toNearbyInviteRoute()
+                    if (route == null) {
+                        inboxStartJob = null
+                        inboxSessionId = null
+                        failInbox("Secure local-network invitations returned an unusable route")
+                        return@launch
                     }
-                },
-            )
-        }.onFailure { error ->
-            inboxSessionId = null
-            inboxSettled = true
-            registrationSettled = true
-            failureDetail = error.message ?: "Secure local-network invitations could not start"
-        }
-    }
-
-    private fun handleInboxEvent(
-        id: Long,
-        json: String,
-    ) {
-        if (!active || inboxSessionId != id) return
-        val event =
-            runCatching { JSONObject(json) }
-                .getOrElse {
-                    failInbox("Secure local-network invitations returned an invalid event")
-                    return
+                    inbox = startedInbox
+                    retained = true
+                    inboxReady = true
+                    inboxSettled = true
+                    inboxStartJob = null
+                    if (advertiseEnabled) registerPresence(route)
+                    startInboxEventLoop(id, startedInbox)
+                    emitOperationalStatus()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    if (active && inboxSessionId == id) {
+                        inboxStartJob = null
+                        inboxSessionId = null
+                        failInbox(error.message ?: "Secure local-network invitations could not start")
+                    }
+                } finally {
+                    if (!retained) {
+                        startedInbox?.let { value -> inboxScope.launch { closeInbox(value) } }
+                    }
                 }
-        when (event.optString("event")) {
-            "ready" -> {
-                val route = event.nearbyInviteRoute()
-                if (route == null) {
-                    failInbox("Secure local-network invitations returned an unusable route")
-                    return
-                }
-                inboxReady = true
-                inboxSettled = true
-                if (advertiseEnabled) registerPresence(route)
-                emitOperationalStatus()
             }
-            "incoming" -> handleIncomingInvite(event)
-            "send_result" -> handleSendResult(event)
-            "failed" ->
-                failInbox(
-                    event.optString("message").ifBlank {
-                        "Secure local-network invitations failed"
-                    },
-                )
-        }
+        inboxStartJob = job
+        job.start()
     }
 
-    private fun handleIncomingInvite(event: JSONObject) {
-        val requestId =
-            event
-                .optString("request_id")
-                .trim()
-                .takeIf { it.isNotEmpty() && it.length <= MAX_REQUEST_ID_LENGTH }
-                ?: return
-        val endpointId = normalizeNearbyInboxEndpointId(event.optString("sender_endpoint_id")) ?: return
+    private fun startInboxEventLoop(
+        id: Long,
+        activeInbox: FfiNearbyInviteInbox,
+    ) {
+        inboxEventJob?.cancel()
+        val job =
+            inboxScope.launch(start = CoroutineStart.LAZY) {
+                while (active && inboxSessionId == id && inbox === activeInbox) {
+                    val invite =
+                        try {
+                            activeInbox.nextInvite()
+                        } catch (_: CancellationException) {
+                            return@launch
+                        } catch (error: Exception) {
+                            if (active && inboxSessionId == id && inbox === activeInbox) {
+                                inbox = null
+                                inboxEventJob = null
+                                inboxSessionId = null
+                                failInbox(error.message ?: "Secure local-network invitations failed")
+                                inboxScope.launch { closeInbox(activeInbox) }
+                            }
+                            return@launch
+                        }
+                    if (active && inboxSessionId == id && inbox === activeInbox) {
+                        handleIncomingInvite(invite)
+                    }
+                }
+            }
+        inboxEventJob = job
+        job.start()
+    }
+
+    private fun handleIncomingInvite(invite: FfiNearbyInvite) {
+        val requestId = invite.requestId.toString(16).padStart(16, '0')
+        val endpointId = normalizeNearbyInboxEndpointId(invite.senderEndpointId) ?: return
         val peerKey =
-            DiscoveryPeerRegistry.normalizePeerKey(event.optString("sender_peer_key"))
+            DiscoveryPeerRegistry.normalizePeerKey(invite.senderPeerKey)
                 ?: return
         val knownPeer = resolvedObservations.values.any { it.peerKey == peerKey }
         if (knownPeer && uniqueRouteForPeer(peerKey)?.endpointId != endpointId) {
             OpLog.add("DISCOVERY provider=mdns state=inbox_identity_mismatch")
             return
         }
-        val invite = event.optString("invite").trim().takeIf { it.isNotEmpty() } ?: return
+        val payload = invite.invite.trim().takeIf(String::isNotEmpty) ?: return
         listener?.onRendezvousOffer(
             NearbyRendezvousOffer(
                 requestId = requestId,
                 senderPeerKey = peerKey,
                 senderDisplayName =
                     DiscoveryPeerRegistry.sanitizeDisplayName(
-                        event.optString("sender_display_name").takeIf(String::isNotBlank),
+                        invite.senderDisplayName.takeIf(String::isNotBlank),
                     ),
-                invite = invite,
+                invite = payload,
                 senderEndpointId = endpointId,
                 source = source,
             ),
         )
     }
 
-    private fun handleSendResult(event: JSONObject) {
-        val requestId = event.optString("request_id")
-        val completion = pendingOffers.remove(requestId) ?: return
-        val error =
-            event
-                .optString("error")
-                .takeIf { !event.isNull("error") && it.isNotBlank() }
-        completion(error)
+    private fun finishOutbound(
+        id: Long,
+        activeInbox: FfiNearbyInviteInbox,
+        error: String?,
+    ) {
+        if (!active || inboxSessionId != id || inbox !== activeInbox) return
+        outboundJob = null
+        val completion = outboundCompletion
+        outboundCompletion = null
+        completion?.invoke(error)
     }
 
     private fun failInbox(message: String) {
@@ -426,14 +451,26 @@ internal class MdnsDiscoveryProvider(
             registered = false
             runCatching { nsdManager?.unregisterService(registrationListener) }
         }
-        completePendingOffers(message)
+        completePendingOffer(message)
         emitOperationalStatus()
     }
 
-    private fun completePendingOffers(error: String) {
-        val completions = pendingOffers.values.toList()
-        pendingOffers.clear()
-        completions.forEach { completion -> completion(error) }
+    private fun completePendingOffer(error: String) {
+        outboundJob?.cancel()
+        outboundJob = null
+        val completion = outboundCompletion
+        outboundCompletion = null
+        completion?.invoke(error)
+    }
+
+    private suspend fun closeInbox(activeInbox: FfiNearbyInviteInbox) {
+        try {
+            activeInbox.shutdown()
+        } catch (_: Exception) {
+            // Shutdown is best-effort; closing the UniFFI handle is mandatory.
+        } finally {
+            activeInbox.close()
+        }
     }
 
     private fun registerPresence(route: NearbyInviteRoute) {
@@ -650,9 +687,7 @@ internal class MdnsDiscoveryProvider(
         private const val OBSERVATION_REFRESH_MS = 5_000L
         private const val MAX_RESOLVE_ATTEMPTS = 4
         private const val RESOLVE_RETRY_BASE_MS = 350L
-        private const val MAX_REQUEST_ID_LENGTH = 128
         private val nextSessionId = AtomicLong(1L)
-        private val nextRequestId = AtomicLong(1L)
     }
 }
 
@@ -678,20 +713,16 @@ internal fun parseNearbyInviteTxtAttributes(attribute: (String) -> String?): Nea
                 .mapNotNull { index -> attribute("$TXT_INBOX_ADDRESS_PREFIX$index") },
     )
 
-private fun JSONObject.nearbyInviteRoute(): NearbyInviteRoute? {
-    val addresses = optJSONArray("direct_addresses") ?: JSONArray()
-    return NearbyInviteRoute.normalized(
-        endpointId = optString("endpoint_id"),
-        relayUrl = if (isNull("relay_url")) null else optString("relay_url"),
-        directAddresses =
-            (0 until minOf(addresses.length(), MAX_NEARBY_DIRECT_ADDRESSES))
-                .mapNotNull { index -> addresses.optString(index).takeIf(String::isNotBlank) },
+internal fun FfiNearbyInviteEndpoint.toNearbyInviteRoute(): NearbyInviteRoute? =
+    NearbyInviteRoute.normalized(
+        endpointId = endpointId,
+        relayUrl = relayUrl,
+        directAddresses = directAddresses.take(MAX_NEARBY_DIRECT_ADDRESSES),
     )
-}
 
-private fun NearbyInviteRoute.toNativeJson(): String =
-    JSONObject()
-        .put("endpoint_id", endpointId)
-        .put("relay_url", relayUrl ?: JSONObject.NULL)
-        .put("direct_addresses", JSONArray(directAddresses))
-        .toString()
+internal fun NearbyInviteRoute.toFfiNearbyInviteEndpoint() =
+    FfiNearbyInviteEndpoint(
+        endpointId = endpointId,
+        relayUrl = relayUrl,
+        directAddresses = directAddresses,
+    )

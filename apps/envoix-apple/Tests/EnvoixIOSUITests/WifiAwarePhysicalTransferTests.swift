@@ -66,7 +66,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                         request,
                         over: transport
                     )
-                    try await transport.close()
+                    try await transport.shutdown()
                     return response
                 }
             }
@@ -80,7 +80,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                     let received = try await Self.receiveDatagram(from: transport)
                     let response = try WifiAwareProbeProtocol.makeResponse(for: received)
                     try await transport.sendDatagram(bytes: response)
-                    try await transport.close()
+                    try await transport.shutdown()
                 }
             }
             Self.marker("raw receiver completed run=\(context.runID) bytes=\(request.count)")
@@ -280,6 +280,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                                         transport: transport,
                                         maximumDatagramSize: maximumDatagramSize,
                                         cancellation: cancellation,
+                                        credentialVault: WifiAwareRejectingCredentialVault(),
                                         observer: observer
                                     )
                                 }
@@ -298,6 +299,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                             request: route.request,
                             stateDirectory: stateDirectory.path,
                             cancellation: cancellation,
+                            credentialVault: WifiAwareRejectingCredentialVault(),
                             observer: observer,
                             performanceObserver: { sample in
                                 timeline.record(sample)
@@ -404,6 +406,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                                         transport: transport,
                                         maximumDatagramSize: maximumDatagramSize,
                                         cancellation: cancellation,
+                                        credentialVault: WifiAwareRejectingCredentialVault(),
                                         observer: observer
                                     )
                                     let destinationRequest = try Self.destinationRequest(
@@ -432,6 +435,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                             request: route.request,
                             stateDirectory: stateDirectory.path,
                             cancellation: cancellation,
+                            credentialVault: WifiAwareRejectingCredentialVault(),
                             observer: observer,
                             performanceObserver: { sample in
                                 timeline.record(sample)
@@ -687,7 +691,7 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
                 try await Task<Never, Never>.sleep(for: .milliseconds(50))
             }
             timeline.mark("fault_injection=wifi_aware_datagram_close requested")
-            try await transport.close()
+            try await transport.shutdown()
             timeline.mark("fault_injection=wifi_aware_datagram_close completed")
         }
         do {
@@ -1503,7 +1507,11 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
         }
         timeline.mark("diagnostic=\(message)")
     }
-    func onRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool {
+}
+
+private final class WifiAwareRejectingCredentialVault:
+    FfiRememberedCredentialVault, @unchecked Sendable {
+    func storeRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool {
         false
     }
 }

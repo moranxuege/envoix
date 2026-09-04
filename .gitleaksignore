@@ -1,0 +1,14 @@
+# Stable Keychain service identifier; this is a public namespace, not a credential.
+f2a8aaf80382f4d4b49aa178d049d5d3063c51eb:apps/envoix-apple/Sources/AppleApplicationVault.swift:generic-api-key:9
+
+# Deterministic peer identity fixtures used only to verify identity mismatch and display behavior.
+c1fd443679a449bb84b271c87f2581f61397daab:apps/envoix-apple/Tests/EnvoixIOSUITests/AppleWifiAwareRendezvousChannelTests.swift:generic-api-key:45
+c1fd443679a449bb84b271c87f2581f61397daab:apps/envoix-apple/Tests/EnvoixIOSUITests/NearbyDiscoveryTests.swift:generic-api-key:570
+66658fa91e85928b6446ed0074a9d449afc9a887:apps/envoix-apple/Tests/EnvoixIOSUITests/AppleWifiAwareRendezvousChannelTests.swift:generic-api-key:45
+66658fa91e85928b6446ed0074a9d449afc9a887:apps/envoix-apple/Tests/EnvoixIOSUITests/NearbyDiscoveryTests.swift:generic-api-key:570
+
+# Deliberately fake password fixtures used to prove redaction and room-code parsing.
+97bc440d75c87543036cf2515c392954865f3c3c:apps/envoix-flutter/test/frontend_test.dart:generic-api-key:2075
+19cc513e1d510f8c0209b8097c81c380b63f6dbe:crates/envoix-rendezvous-iroh/src/code_tests.rs:generic-api-key:9
+8f261b38e0adb2447d17c3b2f30f0e1cc6c41b26:crates/envoix-rendezvous-iroh/src/code.rs:generic-api-key:62
+b0e979d6e5c4b4bb5c023b9c9b9478fb2322242e:crates/envoix-rendezvous-iroh/src/code.rs:generic-api-key:62

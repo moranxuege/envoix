@@ -1,5 +1,6 @@
 package dev.envoix.app.ui
 
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -35,11 +36,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -47,7 +46,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -58,21 +56,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.InviteCodec
-import dev.envoix.app.ManifestV2Source
-import dev.envoix.app.ManifestV2SourceStager
-import dev.envoix.app.ManifestV2StageResult
-import dev.envoix.app.Native
-import dev.envoix.app.PreparedManifestV2Source
 import dev.envoix.app.R
-import dev.envoix.app.SettingsStore
-import dev.envoix.app.TransferService
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyPairingSelection
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.util.UUID
 
 internal typealias PrepareReceiveBeforeDecision = (
@@ -92,6 +78,15 @@ internal typealias QueuePreparedSend = (
     totalBytes: Long,
     completion: (String?) -> Unit,
 ) -> Unit
+
+internal data class TransferSetupPreferences(
+    val broker: String,
+    val relay: String,
+    val defaultRole: String,
+    val compressionPolicy: String,
+    val saveLocationLabel: String,
+    val savePickerInitialUri: Uri,
+)
 
 /**
  * Role-specific transfer setup. Scanning an invite may switch to the opposite
@@ -120,6 +115,9 @@ internal fun NewTransferSheet(
         rememberLabel: String?,
         rememberedRelationshipId: String?,
     ) -> Unit,
+    preferences: TransferSetupPreferences,
+    sourcePreparationIntents: TransferSourcePreparationIntents,
+    onSaveTreePicked: (Uri) -> Unit,
     nearbySelection: NearbyPairingSelection? = null,
     nearbyDeliveryAvailable: Boolean = true,
     initialPairingInput: String? = null,
@@ -139,23 +137,26 @@ internal fun NewTransferSheet(
 ) {
     val colors = Envoix.colors
     val clipboard = LocalClipboardManager.current
-    val context = LocalContext.current
-    val settings by SettingsStore.settings.collectAsState()
-    val language = LocalAppLanguage.current
-
-    fun text(
-        english: String,
-        simplifiedChinese: String,
-    ) = AppText.value(english, simplifiedChinese, language)
     val switchedToSendNotice = appString(R.string.switched_to_send_notice)
     val switchedToReceiveNotice = appString(R.string.switched_to_receive_notice)
-    val broker = roomEndpoint?.broker ?: settings.broker
-    val relay = roomEndpoint?.relay ?: settings.relay
+    val invalidInvitationError = appString(R.string.transfer_setup_complete_invitation_required)
+    val clipboardEmptyError = appString(R.string.hub_clipboard_empty)
+    val invalidFlowError = appString(R.string.transfer_setup_invalid_invitation_flow)
+    val receiveSetupClosedError = appString(R.string.transfer_setup_receive_closed)
+    val sourcePreparationMessages =
+        TransferSourcePreparationMessages(
+            prepareFailed = appString(R.string.transfer_setup_prepare_source_failed),
+            removeFailed = appString(R.string.transfer_setup_remove_source_failed),
+            selectionChanged = appString(R.string.transfer_setup_selection_changed),
+            authorizationFailed = appString(R.string.transfer_setup_authorize_folder_failed),
+        )
+    val broker = roomEndpoint?.broker ?: preferences.broker
+    val relay = roomEndpoint?.relay ?: preferences.relay
 
     val fallbackPreparation =
         remember(draftId) {
             TransferDraftPreparationState(
-                initialRole = initialRole ?: settings.defaultRole,
+                initialRole = initialRole ?: preferences.defaultRole,
                 showQrInitially = showQrInitially,
             )
         }
@@ -169,8 +170,6 @@ internal fun NewTransferSheet(
     var scannedRelay by preparation.scannedRelay
     val preparedSources = preparation.preparedSources
     var preparedJobId by preparation.preparedJobId
-    var jobStoreDirectory by preparation.jobStoreDirectory
-    var stagingRootDirectory by preparation.stagingRootDirectory
     var preparationSummary by preparation.summary
     var preparingCount by preparation.preparingCount
     var preparationError by preparation.error
@@ -185,213 +184,34 @@ internal fun NewTransferSheet(
     var rememberLabel by remember { mutableStateOf("") }
     var pairingInputError by remember(draftId) { mutableStateOf<String?>(null) }
 
-    val preparationScope = rememberCoroutineScope()
-    val preparationMutex = preparation.mutex
-
     DisposableEffect(preparation, preparationState) {
         onDispose {
             if (preparationState == null) preparation.discard()
         }
     }
 
-    fun addSources(sources: List<ManifestV2Source>) {
-        if (sources.isEmpty()) return
-        preparationScope.launch {
-            preparationMutex.withLock {
-                if (!preparation.acceptsPreparationChanges()) return@withLock
-                val fresh =
-                    sources.filter { candidate ->
-                        preparedSources.none { it.source.uri == candidate.uri }
-                    }
-                if (fresh.isEmpty()) return@withLock
-                preparingCount += fresh.size
-                preparationError = null
-                try {
-                    val store = TransferService.jobStoreDirectory(context).absolutePath
-                    jobStoreDirectory = store
-                    val jobId =
-                        preparedJobId ?: withContext(Dispatchers.IO) {
-                            val response =
-                                JSONObject(
-                                    Native.createManifestV2Job(store, settings.compressionPolicy),
-                                )
-                            response.optString("error").takeIf(String::isNotEmpty)?.let(::error)
-                            response.getString("job_id")
-                        }.also {
-                            preparedJobId = it
-                            stagingRootDirectory =
-                                java.io.File(context.filesDir, "manifest-v2/source-staging/$it").absolutePath
-                        }
-                    for (source in fresh) {
-                        val staged = ManifestV2SourceStager.stage(context, jobId, source)
-                        var attached = false
-                        try {
-                            val response =
-                                withContext(Dispatchers.IO) {
-                                    Native.prepareManifestV2Job(
-                                        store,
-                                        jobId,
-                                        ManifestV2SourceStager.rootsJson(source, staged),
-                                    )
-                                }
-                            val parsed = JSONObject(response)
-                            parsed.optString("error").takeIf(String::isNotEmpty)?.let(::error)
-                            attached = true
-                            preparationSummary = parsed
-                            preparedSources +=
-                                ManifestV2SourceStager.parsePreparedSnapshot(source, staged.root, response)
-                        } catch (error: Throwable) {
-                            if (!attached) staged.root.parentFile?.deleteRecursively()
-                            throw error
-                        }
-                    }
-                } catch (error: Throwable) {
-                    preparationError =
-                        error.message ?: text(
-                            "Could not prepare the selected source",
-                            "无法准备所选内容",
-                        )
-                } finally {
-                    preparingCount -= fresh.size
-                }
-            }
-        }
-    }
-
-    fun removeSource(source: PreparedManifestV2Source) {
-        val jobId = preparedJobId ?: return
-        preparationScope.launch {
-            preparationMutex.withLock {
-                if (!preparation.acceptsPreparationChanges()) return@withLock
-                preparingCount += 1
-                try {
-                    val store = TransferService.jobStoreDirectory(context).absolutePath
-                    val response =
-                        withContext(Dispatchers.IO) {
-                            Native.resolveManifestV2Source(
-                                store,
-                                jobId,
-                                source.rootItemId,
-                                "remove_selection",
-                                "",
-                            )
-                        }
-                    val error = JSONObject(response).optString("error")
-                    if (error.isEmpty()) {
-                        preparedSources.remove(source)
-                        source.localRoot.parentFile?.deleteRecursively()
-                        preparationSummary = JSONObject(response)
-                    } else {
-                        preparationError = error
-                    }
-                } catch (error: Throwable) {
-                    preparationError =
-                        error.message ?: text(
-                            "Could not remove the selected source",
-                            "无法移除所选来源",
-                        )
-                } finally {
-                    preparingCount -= 1
-                }
-            }
-        }
-    }
-
-    fun approvePartial(source: PreparedManifestV2Source) {
-        val jobId = preparedJobId ?: return
-        preparationScope.launch {
-            preparationMutex.withLock {
-                if (!preparation.acceptsPreparationChanges()) return@withLock
-                val response =
-                    withContext(Dispatchers.IO) {
-                        Native.resolveManifestV2Source(
-                            TransferService.jobStoreDirectory(context).absolutePath,
-                            jobId,
-                            source.rootItemId,
-                            "approve_partial",
-                            "",
-                        )
-                    }
-                val parsed = JSONObject(response)
-                val error = parsed.optString("error")
-                if (error.isEmpty()) {
-                    val index = preparedSources.indexOf(source)
-                    if (index >= 0) preparedSources[index] = source.copy(partialApproved = true)
-                    preparationSummary = parsed
-                    preparationError = null
-                } else {
-                    preparationError = error
-                }
-            }
-        }
-    }
-
-    fun reauthorizeSource(
-        previous: PreparedManifestV2Source,
-        uri: android.net.Uri,
-    ) {
-        val jobId = preparedJobId ?: return
-        preparationScope.launch {
-            preparationMutex.withLock {
-                if (!preparation.acceptsPreparationChanges()) return@withLock
-                preparingCount += 1
-                preparationError = null
-                val source = ManifestV2SourceStager.sourceFromUri(context, uri, true)
-                var staged: ManifestV2StageResult? = null
-                var committed = false
-                try {
-                    val stagedResult = ManifestV2SourceStager.stage(context, jobId, source)
-                    staged = stagedResult
-                    val response =
-                        withContext(Dispatchers.IO) {
-                            Native.reauthorizeManifestV2ProviderSource(
-                                TransferService.jobStoreDirectory(context).absolutePath,
-                                jobId,
-                                previous.rootItemId,
-                                ManifestV2SourceStager.rootsJson(source, stagedResult),
-                            )
-                        }
-                    val parsed = JSONObject(response)
-                    parsed.optString("error").takeIf(String::isNotEmpty)?.let(::error)
-                    committed = true
-                    val replacement =
-                        ManifestV2SourceStager.parsePreparedSnapshot(
-                            source,
-                            stagedResult.root,
-                            response,
-                            previous.rootItemId,
-                        )
-                    val index = preparedSources.indexOf(previous)
-                    check(index >= 0) {
-                        text("Source selection changed while authorizing", "授权期间所选内容发生了变化")
-                    }
-                    preparedSources[index] = replacement
-                    previous.localRoot.parentFile?.deleteRecursively()
-                    preparationSummary = parsed
-                } catch (error: Throwable) {
-                    if (!committed) staged?.root?.parentFile?.deleteRecursively()
-                    preparationError =
-                        error.message ?: text(
-                            "Could not authorize the selected folder",
-                            "无法授权所选文件夹",
-                        )
-                } finally {
-                    preparingCount -= 1
-                }
-            }
-        }
-    }
-
     val filePicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             onExternalActivityChanged(false)
-            addSources(uris.map { ManifestV2SourceStager.sourceFromUri(context, it, false) })
+            sourcePreparationIntents.addSources(
+                preparation,
+                uris,
+                false,
+                preferences.compressionPolicy,
+                sourcePreparationMessages,
+            )
         }
     val sourceFolderPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             onExternalActivityChanged(false)
             uri?.let {
-                addSources(listOf(ManifestV2SourceStager.sourceFromUri(context, it, true)))
+                sourcePreparationIntents.addSources(
+                    preparation,
+                    listOf(it),
+                    true,
+                    preferences.compressionPolicy,
+                    sourcePreparationMessages,
+                )
             }
         }
     val sourceReauthorizationPicker =
@@ -399,19 +219,32 @@ internal fun NewTransferSheet(
             onExternalActivityChanged(false)
             val previous = sourceAwaitingReauthorization
             sourceAwaitingReauthorization = null
-            if (uri != null && previous != null) reauthorizeSource(previous, uri)
+            if (uri != null && previous != null) {
+                sourcePreparationIntents.reauthorizeSource(
+                    preparation,
+                    previous,
+                    uri,
+                    sourcePreparationMessages,
+                )
+            }
         }
     val saveFolderPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             onExternalActivityChanged(false)
-            if (uri != null) SettingsStore.setSaveTree(context, uri)
+            if (uri != null) onSaveTreePicked(uri)
         }
     val joining = invitationInput != null || typed.isNotBlank()
 
     LaunchedEffect(draftId, initialSources, initialRole) {
         if (initialSources.isNotEmpty()) {
             role = "send"
-            addSources(initialSources.map { ManifestV2SourceStager.sourceFromUri(context, it, false) })
+            sourcePreparationIntents.addSources(
+                preparation,
+                initialSources,
+                false,
+                preferences.compressionPolicy,
+                sourcePreparationMessages,
+            )
         }
     }
 
@@ -445,12 +278,6 @@ internal fun NewTransferSheet(
         return true
     }
 
-    fun invalidInvitationError() =
-        text(
-            "Paste or scan a complete Envoix invitation link",
-            "请粘贴或扫描完整的 Envoix 邀请链接",
-        )
-
     fun applyPairingInput(input: String): Boolean {
         pairingInputError = null
         if (input.startsWith("envoix:") && applyScanned(input)) {
@@ -466,7 +293,7 @@ internal fun NewTransferSheet(
     LaunchedEffect(draftId, initialPairingInput) {
         if (!initialPairingInputApplied) {
             initialPairingInput?.takeIf(String::isNotBlank)?.let {
-                if (!applyPairingInput(it)) pairingInputError = invalidInvitationError()
+                if (!applyPairingInput(it)) pairingInputError = invalidInvitationError
             }
             initialPairingInputApplied = true
         }
@@ -509,9 +336,9 @@ internal fun NewTransferSheet(
     ) {
         Text(
             if (roomMode && role == "send") {
-                text("Offer files", "发送文件")
+                appString(R.string.transfer_setup_offer_files)
             } else if (roomMode) {
-                text("Receive files", "接收文件")
+                appString(R.string.transfer_setup_receive_files)
             } else if (role == "send") {
                 appString(R.string.send_action_title)
             } else {
@@ -524,9 +351,9 @@ internal fun NewTransferSheet(
         )
         Text(
             if (roomMode && role == "send") {
-                text("Choose what to share with this device.", "选择要发送给此设备的内容。")
+                appString(R.string.transfer_setup_offer_files_explanation)
             } else if (roomMode) {
-                text("Confirm where incoming files will be saved.", "确认接收文件的保存位置。")
+                appString(R.string.transfer_setup_receive_files_explanation)
             } else if (role == "send") {
                 appString(R.string.send_setup_subtitle)
             } else {
@@ -635,11 +462,11 @@ internal fun NewTransferSheet(
                             Text(
                                 when {
                                     prepared.partialApproved ->
-                                        text("Folder · accessible content only", "文件夹 · 仅发送可访问内容")
+                                        appString(R.string.transfer_setup_folder_accessible_only)
                                     prepared.issueCount > 0 ->
-                                        text("Folder · source decision required", "文件夹 · 需要处理来源访问问题")
-                                    prepared.source.directory -> text("Folder", "文件夹")
-                                    else -> text("File", "文件")
+                                        appString(R.string.transfer_setup_folder_decision_required)
+                                    prepared.source.directory -> appString(R.string.activity_folder_label)
+                                    else -> appString(R.string.activity_file_label)
                                 },
                                 color = if (prepared.issueCount > 0 && !prepared.partialApproved) colors.warning else colors.muted,
                                 fontSize = 11.sp,
@@ -647,7 +474,7 @@ internal fun NewTransferSheet(
                         }
                         if (prepared.issueCount > 0 && !prepared.partialApproved) {
                             Text(
-                                text("Authorize again", "重新授权"),
+                                appString(R.string.transfer_setup_authorize_again),
                                 color = colors.accent,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
@@ -662,40 +489,47 @@ internal fun NewTransferSheet(
                             )
                             if (prepared.canApprovePartial) {
                                 Text(
-                                    text("Send accessible", "发送可访问内容"),
+                                    appString(R.string.transfer_setup_send_accessible),
                                     color = colors.accent,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     modifier =
                                         Modifier
                                             .clip(RoundedCornerShape(7.dp))
-                                            .clickable(enabled = !startSubmitted) { approvePartial(prepared) }
-                                            .padding(horizontal = 7.dp, vertical = 5.dp),
+                                            .clickable(enabled = !startSubmitted) {
+                                                sourcePreparationIntents.approvePartial(preparation, prepared)
+                                            }.padding(horizontal = 7.dp, vertical = 5.dp),
                                 )
                             }
                         }
                         Icon(
                             Icons.Default.Close,
                             contentDescription =
-                                text(
-                                    "Remove ${prepared.source.displayName}",
-                                    "移除 ${prepared.source.displayName}",
+                                appString(
+                                    R.string.transfer_setup_remove_source,
+                                    prepared.source.displayName,
                                 ),
                             tint = colors.muted,
                             modifier =
                                 Modifier
                                     .clip(CircleShape)
-                                    .clickable(enabled = !startSubmitted) { removeSource(prepared) }
-                                    .padding(7.dp)
+                                    .clickable(enabled = !startSubmitted) {
+                                        sourcePreparationIntents.removeSource(
+                                            preparation,
+                                            prepared,
+                                            sourcePreparationMessages,
+                                        )
+                                    }.padding(7.dp)
                                     .size(17.dp),
                         )
                     }
                 }
                 if (preparingCount > 0) {
                     Text(
-                        text(
-                            "Preparing $preparingCount selected source(s)…",
-                            "正在准备 $preparingCount 个所选来源…",
+                        appQuantityString(
+                            R.plurals.transfer_setup_preparing_sources,
+                            preparingCount,
+                            preparingCount,
                         ),
                         color = colors.accent,
                         fontSize = 12.sp,
@@ -703,9 +537,9 @@ internal fun NewTransferSheet(
                     )
                 }
                 preparationSummary?.takeIf { preparedSources.isNotEmpty() }?.let { summary ->
-                    val files = summary.optInt("file_count")
-                    val directories = summary.optInt("directory_count")
-                    val size = dev.envoix.app.humanBytes(summary.optLong("total"))
+                    val files = summary.inventory.fileCount
+                    val directories = summary.inventory.directoryCount
+                    val size = dev.envoix.app.humanBytes(summary.inventory.totalBytes)
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -715,18 +549,21 @@ internal fun NewTransferSheet(
                             .padding(horizontal = 12.dp, vertical = 9.dp),
                     ) {
                         Text(
-                            text(
-                                "${preparedSources.size} selected root(s)",
-                                "已选择 ${preparedSources.size} 个根项目",
+                            appQuantityString(
+                                R.plurals.transfer_setup_selected_roots,
+                                preparedSources.size,
+                                preparedSources.size,
                             ),
                             color = colors.accentStrong,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                         )
                         Text(
-                            text(
-                                "$files files · $directories folders · $size",
-                                "$files 个文件 · $directories 个文件夹 · $size",
+                            appString(
+                                R.string.room_offer_summary_format,
+                                appQuantityString(R.plurals.room_file_count, files, files),
+                                appQuantityString(R.plurals.room_folder_count, directories, directories),
+                                size,
                             ),
                             color = colors.muted,
                             fontSize = 12.sp,
@@ -742,9 +579,9 @@ internal fun NewTransferSheet(
                     )
                 }
             } else {
-                PathRow(appString(R.string.save_to), SettingsStore.saveLabel(context), placeholder = false) {
+                PathRow(appString(R.string.save_to), preferences.saveLocationLabel, placeholder = false) {
                     onExternalActivityChanged(true)
-                    saveFolderPicker.launch(SettingsStore.savePickerInitialUri())
+                    saveFolderPicker.launch(preferences.savePickerInitialUri)
                 }
             }
 
@@ -789,17 +626,25 @@ internal fun NewTransferSheet(
                             InlineScanner(
                                 onScanned = {
                                     if (!applyScanned(it)) {
-                                        pairingInputError = invalidInvitationError()
+                                        pairingInputError = invalidInvitationError
                                     }
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         } else if (joining) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(text("You'll join", "即将加入"), color = colors.muted, fontSize = 13.sp)
+                                Text(
+                                    appString(R.string.transfer_setup_joining_preview),
+                                    color = colors.muted,
+                                    fontSize = 13.sp,
+                                )
                                 Spacer(Modifier.height(6.dp))
                                 Text(
-                                    if (invitationInput == null) typed else text("Invitation ready", "邀请已就绪"),
+                                    if (invitationInput == null) {
+                                        typed
+                                    } else {
+                                        appString(R.string.transfer_setup_invitation_ready)
+                                    },
                                     color = colors.accent,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold,
@@ -807,10 +652,7 @@ internal fun NewTransferSheet(
                                 )
                                 Spacer(Modifier.height(6.dp))
                                 Text(
-                                    text(
-                                        "Clear the invitation link below to show your own",
-                                        "清空下方邀请链接即可显示自己的二维码",
-                                    ),
+                                    appString(R.string.transfer_setup_clear_invitation_hint),
                                     color = colors.muted,
                                     fontSize = 11.sp,
                                 )
@@ -830,7 +672,7 @@ internal fun NewTransferSheet(
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
                                         Text(
-                                            text("Copy invite link", "复制邀请链接"),
+                                            appString(R.string.activity_copy_invite_link),
                                             color = colors.muted,
                                             fontSize = 13.sp,
                                         )
@@ -868,9 +710,9 @@ internal fun NewTransferSheet(
                                 ?.trim()
                                 .orEmpty()
                         if (pasted.isEmpty()) {
-                            pairingInputError = text("Clipboard is empty", "剪贴板为空")
+                            pairingInputError = clipboardEmptyError
                         } else if (!applyPairingInput(pasted)) {
-                            pairingInputError = invalidInvitationError()
+                            pairingInputError = invalidInvitationError
                         }
                     },
                     modifier =
@@ -878,7 +720,7 @@ internal fun NewTransferSheet(
                             .align(Alignment.End)
                             .testTag("transfer_code_paste"),
                 ) {
-                    Text(text("Paste", "粘贴"))
+                    Text(appString(R.string.common_paste))
                 }
                 pairingInputError?.let { error ->
                     Text(
@@ -903,13 +745,13 @@ internal fun NewTransferSheet(
                         checked = rememberAfterPairing,
                         onCheckedChange = { rememberAfterPairing = it },
                     )
-                    Text(text("Remember this device", "记住此设备"), color = colors.text)
+                    Text(appString(R.string.transfer_setup_remember_device), color = colors.text)
                 }
                 if (rememberAfterPairing) {
                     OutlinedTextField(
                         value = rememberLabel,
                         onValueChange = { rememberLabel = it },
-                        placeholder = { Text(text("Device label", "设备名称")) },
+                        placeholder = { Text(appString(R.string.transfer_setup_device_label)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -940,10 +782,9 @@ internal fun NewTransferSheet(
                         onQueuePreparedSend(
                             jobId,
                             preparedSources.map { it.source.displayName }.take(3),
-                            summary.optInt("file_count") +
-                                summary.optInt("directory_count"),
-                            summary.optInt("directory_count"),
-                            summary.optLong("total"),
+                            summary.inventory.fileCount + summary.inventory.directoryCount,
+                            summary.inventory.directoryCount,
+                            summary.inventory.totalBytes,
                         ) { error ->
                             rendezvousBusy = false
                             if (error != null) {
@@ -959,8 +800,7 @@ internal fun NewTransferSheet(
                         if (joining) {
                             InviteCodec.parseForRole(invitationInput ?: typed, role)
                                 ?: run {
-                                    rendezvousError =
-                                        text("The invitation is invalid for this flow", "邀请与当前传输方向不匹配")
+                                    rendezvousError = invalidFlowError
                                     startSubmitted = false
                                     return@clickable
                                 }
@@ -1023,11 +863,11 @@ internal fun NewTransferSheet(
                                                 .map { it.source.displayName }
                                                 .take(3),
                                         itemCount =
-                                            (summary?.optInt("file_count") ?: 0) +
-                                                (summary?.optInt("directory_count") ?: 0),
+                                            (summary?.inventory?.fileCount ?: 0) +
+                                                (summary?.inventory?.directoryCount ?: 0),
                                         directoryCount =
-                                            summary?.optInt("directory_count") ?: 0,
-                                        totalBytes = summary?.optLong("total") ?: 0L,
+                                            summary?.inventory?.directoryCount ?: 0,
+                                        totalBytes = summary?.inventory?.totalBytes ?: 0L,
                                     ),
                                 ) { error ->
                                     rendezvousBusy = false
@@ -1057,11 +897,7 @@ internal fun NewTransferSheet(
                             } else if (!preparation.transferOwnership()) {
                                 onCancelPreparedReceive(receiveId)
                                 rendezvousBusy = false
-                                rendezvousError =
-                                    text(
-                                        "The receive setup was already closed",
-                                        "接收设置已关闭",
-                                    )
+                                rendezvousError = receiveSetupClosedError
                                 startSubmitted = false
                             } else {
                                 beforeStart { decisionError ->
@@ -1098,15 +934,15 @@ internal fun NewTransferSheet(
             Text(
                 when {
                     rendezvousBusy && role == "receive" ->
-                        text("Preparing receiver…", "正在准备接收…")
+                        appString(R.string.room_preparing_receiver)
                     rendezvousBusy && onQueuePreparedSend != null ->
-                        text("Queueing files…", "正在加入队列…")
-                    rendezvousBusy -> text("Delivering invite…", "正在发送邀请…")
-                    onQueuePreparedSend != null -> text("Queue files", "加入发送队列")
-                    roomMode && role == "send" -> text("Offer files", "发送文件")
-                    roomMode -> text("Receive", "接收")
-                    role == "send" -> text("Send", "发送")
-                    else -> text("Receive", "接收")
+                        appString(R.string.transfer_setup_queueing_files)
+                    rendezvousBusy -> appString(R.string.transfer_setup_delivering_invite)
+                    onQueuePreparedSend != null -> appString(R.string.transfer_setup_queue_files)
+                    roomMode && role == "send" -> appString(R.string.transfer_setup_offer_files)
+                    roomMode -> appString(R.string.receive_action_title)
+                    role == "send" -> appString(R.string.send_action_title)
+                    else -> appString(R.string.receive_action_title)
                 },
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
@@ -1130,7 +966,7 @@ private fun RoomConnectionSummary(
             .padding(14.dp),
     ) {
         Text(
-            appText("TRANSFER SETUP READY", "传输设置已就绪"),
+            appString(R.string.transfer_setup_ready_section),
             color = colors.accentStrong,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
@@ -1140,16 +976,10 @@ private fun RoomConnectionSummary(
         Text(
             when {
                 nearbySelection != null ->
-                    appText(
-                        "The invite will be delivered to the nearby device when you start.",
-                        "开始后，邀请会发送到附近设备。",
-                    )
+                    appString(R.string.transfer_setup_nearby_invite_delivery)
                 !initialPairingInput.isNullOrBlank() ->
-                    appText(
-                        "The shared invite will be used for this transfer.",
-                        "此传输将使用已分享的邀请。",
-                    )
-                else -> appText("Connection details are ready.", "连接信息已就绪。")
+                    appString(R.string.transfer_setup_shared_invite)
+                else -> appString(R.string.transfer_setup_connection_ready)
             },
             color = colors.muted,
             fontSize = 12.sp,
@@ -1164,12 +994,6 @@ private fun NearbyPairingContext(
     nearbyDeliveryAvailable: Boolean,
 ) {
     val colors = Envoix.colors
-    val language = LocalAppLanguage.current
-
-    fun text(
-        english: String,
-        simplifiedChinese: String,
-    ) = AppText.value(english, simplifiedChinese, language)
     val sourceText =
         selection.sources
             .sortedBy(DiscoverySource::ordinal)
@@ -1191,36 +1015,28 @@ private fun NearbyPairingContext(
             .padding(14.dp),
     ) {
         Text(
-            selection.displayName ?: text("Nearby Envoix device", "附近的 Envoix 设备"),
+            selection.displayName ?: appString(R.string.nearby_envoix_device),
             color = colors.text,
             fontWeight = FontWeight.Bold,
             fontSize = 16.sp,
         )
         if (sourceText.isNotEmpty()) {
-            Text(text("Found over $sourceText", "通过 $sourceText 发现"), color = colors.muted, fontSize = 12.sp)
+            Text(
+                appString(R.string.transfer_setup_found_over, sourceText),
+                color = colors.muted,
+                fontSize = 12.sp,
+            )
         }
         Spacer(Modifier.height(6.dp))
         Text(
             if (!nearbyDeliveryAvailable) {
-                text(
-                    "This device is not visible right now. Keep this sheet open; offering files becomes available after it reappears.",
-                    "当前无法发现此设备。请保持此页面打开；设备重新出现后即可发送文件。",
-                )
+                appString(R.string.transfer_setup_nearby_not_visible)
             } else if (secureLocalDelivery) {
-                text(
-                    "The room invitation will be encrypted to the selected local-network endpoint. The public device name is still unverified.",
-                    "房间邀请将加密发送到所选局域网端点；公开的设备名称仍未经验证。",
-                )
+                appString(R.string.transfer_setup_secure_local_delivery)
             } else if (DiscoverySource.Bluetooth in selection.sources) {
-                text(
-                    "Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device.",
-                    "实验性非安全 BLE 配对：邀请未经对端身份认证。附近的攻击者可能冒充或中继此设备。",
-                )
+                appString(R.string.transfer_setup_insecure_ble_warning)
             } else {
-                text(
-                    "This device is not currently reachable over BLE. Use QR or paste a complete invitation link.",
-                    "当前无法通过 BLE 连接此设备。请使用二维码或粘贴完整邀请链接。",
-                )
+                appString(R.string.transfer_setup_ble_unreachable)
             },
             color = colors.muted,
             fontSize = 12.sp,

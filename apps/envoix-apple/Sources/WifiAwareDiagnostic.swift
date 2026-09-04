@@ -676,7 +676,7 @@ struct AppleWifiAwareDeveloperPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value("Wi-Fi Aware connection probe", "Wi-Fi Aware 连接探针", language: language))
+            Text(probeText(.title))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
@@ -690,7 +690,7 @@ struct AppleWifiAwareDeveloperPanel: View {
             pairingControls
 
             HStack(spacing: 8) {
-                Button(AppText.value("Receive probe", "接收探针", language: language)) {
+                Button(probeText(.receive)) {
                     controller.startPublisherProbe()
                 }
                 .buttonStyle(.borderedProminent)
@@ -700,7 +700,7 @@ struct AppleWifiAwareDeveloperPanel: View {
                 )
                 .accessibilityIdentifier("settings_wifi_aware_probe_receive")
 
-                Button(AppText.value("Send probe", "发送探针", language: language)) {
+                Button(probeText(.send)) {
                     controller.startSubscriberProbe()
                 }
                 .buttonStyle(.bordered)
@@ -710,7 +710,7 @@ struct AppleWifiAwareDeveloperPanel: View {
                 )
                 .accessibilityIdentifier("settings_wifi_aware_probe_send")
 
-                Button(AppText.value("Stop", "停止", language: language)) {
+                Button(probeText(.stop)) {
                     controller.stop()
                 }
                 .buttonStyle(.bordered)
@@ -731,16 +731,12 @@ struct AppleWifiAwareDeveloperPanel: View {
     @ViewBuilder
     private var targetPicker: some View {
         if controller.pairedDevices.isEmpty {
-            Text(AppText.value(
-                "Pair and select one device before starting a probe.",
-                "开始探针前，请先配对并选择一台设备。",
-                language: language
-            ))
+            Text(probeText(.selectFirst))
             .font(.footnote)
             .foregroundStyle(Theme.muted)
         } else {
             Picker(
-                AppText.value("Probe target", "探针目标", language: language),
+                probeText(.target),
                 selection: Binding(
                     get: { controller.selectedDeviceID },
                     set: { controller.selectDevice(id: $0) }
@@ -758,11 +754,7 @@ struct AppleWifiAwareDeveloperPanel: View {
     @ViewBuilder
     private var pairingControls: some View {
         if !controller.serviceAccessAvailable {
-            Text(AppText.value(
-                "Waiting for Wi-Fi Aware access…",
-                "正在等待 Wi-Fi Aware 访问权限…",
-                language: language
-            ))
+            Text(probeText(.waitingAccess))
             .font(.footnote)
             .foregroundStyle(Theme.muted)
         } else if let publishable = WAPublishableService.allServices[envoixWifiAwareProbeService],
@@ -773,11 +765,11 @@ struct AppleWifiAwareDeveloperPanel: View {
                     access: .permanent
                 ) {
                     Label(
-                        AppText.value("Allow device", "允许设备", language: language),
+                        probeText(.allowDevice),
                         systemImage: "plus"
                     )
                 } fallback: {
-                    Text(AppText.value("Pairing unavailable", "配对不可用", language: language))
+                    Text(WifiAwarePairingPresentationText.value(.unavailable, language: language))
                 }
                 .buttonStyle(.bordered)
 
@@ -788,25 +780,25 @@ struct AppleWifiAwareDeveloperPanel: View {
                     controller.pairingEndpointSelected()
                 } label: {
                     Label(
-                        AppText.value("Add device", "添加设备", language: language),
+                        probeText(.addDevice),
                         systemImage: "plus"
                     )
                 } fallback: {
-                    Text(AppText.value("Picker unavailable", "选择器不可用", language: language))
+                    Text(probeText(.pickerUnavailable))
                 }
                 .buttonStyle(.bordered)
             }
             .controlSize(.small)
             .disabled(controller.diagnosticNetworkOperationActive)
         } else {
-            Text(AppText.value(
-                "The TCP probe service is missing from Info.plist.",
-                "Info.plist 中缺少 TCP 探针服务。",
-                language: language
-            ))
+            Text(probeText(.serviceMissing))
             .font(.footnote)
             .foregroundStyle(Theme.danger)
         }
+    }
+
+    private func probeText(_ copy: WifiAwareProbeCopy) -> String {
+        WifiAwareDeveloperPresentationText.value(copy, language: language)
     }
 }
 #endif

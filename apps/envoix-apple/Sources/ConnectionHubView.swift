@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import SwiftUI
+import UniformTypeIdentifiers
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -29,6 +30,22 @@ enum RoomInvitationLayout {
     }
 }
 
+enum RememberedDeviceSendPolicy {
+    static func canSend(status: RememberedRoomConnectionStatus) -> Bool {
+        if case .needsRepair = status { return false }
+        return true
+    }
+
+    static func acceptsDrop(
+        providerCount: Int,
+        status: RememberedRoomConnectionStatus
+    ) -> Bool {
+        canSend(status: status)
+            && providerCount > 0
+            && providerCount <= ShareDraftStore.maxItemCount
+    }
+}
+
 struct ConnectionHubView: View {
     @Environment(\.appLanguage) private var language
     @ObservedObject var coordinator: NearbyDiscoveryCoordinator
@@ -38,7 +55,8 @@ struct ConnectionHubView: View {
     let roomInvitation: RoomControlInvitation?
     let roomInvitationIsRevealed: Bool
     let roomInvitationIsStarting: Bool
-    let rememberedRooms: [RememberedPeerSummary]
+    let rememberedRooms: [PairedDevicePresentation]
+    let pendingSendItemCount: Int
     let rememberedRoomStatus: (String) -> RememberedRoomConnectionStatus
     let incomingRememberedRelationshipID: String?
     let onScanQRCode: () -> Void
@@ -53,6 +71,8 @@ struct ConnectionHubView: View {
     let onSetVisibility: (NearbyVisibilityMode) -> Void
     let onRename: (String) -> Bool
     let onSelectRememberedRoom: (String) -> Void
+    let onSendToRememberedRoom: (String) -> Void
+    let onSendDroppedItems: (String, [URL]) -> Void
     let onPrepareNearbyPairing: () async -> Bool
     let onFinishNearbyPairing: () -> Void
     let onModalPresentationChanged: (Bool) -> Void
@@ -62,6 +82,7 @@ struct ConnectionHubView: View {
     @State private var isNearbyPairingPresented = false
     @State private var isPreparingNearbyPairing = false
     @State private var editedDisplayName = ""
+    @State private var rememberedDropTargetID: String?
 
     var body: some View {
         ScrollView {
@@ -75,9 +96,8 @@ struct ConnectionHubView: View {
                     if coordinator.state.statuses[.bluetooth]?.availability == .permissionRequired {
                         Button(action: openSettings) {
                             Label(
-                                AppText.value(
-                                    "Open Bluetooth settings",
-                                    "打开蓝牙设置",
+                                AppText.localized(
+                                    "connection.nearby.open_bluetooth_settings",
                                     language: language
                                 ),
                                 systemImage: "gearshape"
@@ -108,15 +128,12 @@ struct ConnectionHubView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(!invitationAvailable)
-                                .accessibilityHint(AppText.value(
-                                    invitationAvailable
-                                        ? "Open an unverified one-time room"
-                                        : "Waiting for a secure invitation path",
-                                    invitationAvailable
-                                        ? "打开未经验证的一次性房间"
-                                        : "正在等待安全邀请路径",
-                                    language: language
-                                ))
+                                .accessibilityHint(
+                                    ConnectionHubPresentationText.peerInvitationHint(
+                                        isAvailable: invitationAvailable,
+                                        language: language
+                                    )
+                                )
                                 .accessibilityIdentifier("nearby_peer_card")
                             }
                         }
@@ -141,7 +158,7 @@ struct ConnectionHubView: View {
             NavigationStack {
                 VStack(alignment: .leading, spacing: 16) {
                     TextField(
-                        AppText.value("Visible name", "显示名称", language: language),
+                        AppText.localized("connection.identity.name_field", language: language),
                         text: $editedDisplayName
                     )
                     #if os(iOS)
@@ -150,9 +167,8 @@ struct ConnectionHubView: View {
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("nearby_display_name_input")
 
-                    Text(AppText.value(
-                        "This name is visible to nearby Envoix users.",
-                        "附近的 Envoix 用户会看到这个名称。",
+                    Text(AppText.localized(
+                        "connection.identity.name_help",
                         language: language
                     ))
                     .font(.footnote)
@@ -162,18 +178,21 @@ struct ConnectionHubView: View {
                 }
                 .padding(20)
                 .background(Theme.bg)
-                .navigationTitle(AppText.value("Device name", "设备名称", language: language))
+                .navigationTitle(AppText.localized(
+                    "connection.identity.name_title",
+                    language: language
+                ))
                 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
                 #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button(AppText.value("Cancel", "取消", language: language)) {
+                        Button(AppText.localized("common.cancel", language: language)) {
                             isNameEditorPresented = false
                         }
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button(AppText.value("Save", "保存", language: language)) {
+                        Button(AppText.localized("common.save", language: language)) {
                             if onRename(editedDisplayName) {
                                 isNameEditorPresented = false
                             }
@@ -211,109 +230,197 @@ struct ConnectionHubView: View {
         if !rememberedRooms.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text(AppText.value("Rooms", "房间", language: language))
+                    Text(AppText.localized("connection.devices.title", language: language))
                         .font(.headline.weight(.semibold))
                     Spacer()
-                    Text(AppText.value(
-                        "\(rememberedRooms.count) saved",
-                        "已保存 \(rememberedRooms.count) 个",
+                    Text(ConnectionHubPresentationText.rememberedDeviceCount(
+                        rememberedRooms.count,
                         language: language
                     ))
                     .font(.caption)
                     .foregroundStyle(Theme.muted)
                 }
 
+                if pendingSendItemCount > 0 {
+                    Label(
+                        ConnectionHubPresentationText.pendingItemCount(
+                            pendingSendItemCount,
+                            language: language
+                        ),
+                        systemImage: "tray.and.arrow.up.fill"
+                    )
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(Theme.accentStrong)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityIdentifier("pending_device_send")
+                }
+
                 ForEach(rememberedRooms) { room in
+                    let status = rememberedRoomStatus(room.id)
                     let hasIncomingOffer =
-                        incomingRememberedRelationshipID == room.relationshipID
-                    Button {
-                        onSelectRememberedRoom(room.relationshipID)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: rememberedRoomIcon(
-                                rememberedRoomStatus(room.relationshipID)
-                            ))
-                            .font(.title3)
-                            .foregroundStyle(rememberedRoomTint(
-                                rememberedRoomStatus(room.relationshipID)
+                        incomingRememberedRelationshipID == room.id
+                    let canSend = RememberedDeviceSendPolicy.canSend(status: status)
+                    HStack(spacing: 10) {
+                        Button {
+                            onSelectRememberedRoom(room.id)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: rememberedRoomIcon(status))
+                                    .font(.title3)
+                                    .foregroundStyle(rememberedRoomTint(status))
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(room.label)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Theme.text)
+                                        .lineLimit(1)
+                                    Text(hasIncomingOffer
+                                         ? AppText.localized(
+                                             "connection.devices.incoming",
+                                             language: language
+                                         )
+                                         : ConnectionHubPresentationText.rememberedRoomStatus(
+                                             status,
+                                             language: language
+                                         ))
+                                    .font(.caption)
+                                    .foregroundStyle(
+                                        hasIncomingOffer ? Theme.accentStrong : Theme.muted
+                                    )
+                                    .lineLimit(1)
+                                }
+                                Spacer()
+                                if hasIncomingOffer {
+                                    Text(AppText.localized(
+                                        "connection.devices.open_offer",
+                                        language: language
+                                    ))
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(Theme.accentStrong)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Theme.accentSoft, in: Capsule())
+                                    .accessibilityHidden(true)
+                                }
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Theme.muted)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityValue(hasIncomingOffer
+                            ? AppText.localized(
+                                "connection.devices.incoming_accessibility",
+                                language: language
+                            )
+                            : ConnectionHubPresentationText.rememberedRoomStatus(
+                                status,
+                                language: language
                             ))
 
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(room.label)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(Theme.text)
-                                    .lineLimit(1)
-                                Text(hasIncomingOffer
-                                     ? AppText.value(
-                                         "Incoming files",
-                                         "收到文件邀请",
-                                         language: language
-                                     )
-                                     : rememberedRoomStatusText(
-                                         rememberedRoomStatus(room.relationshipID)
-                                     ))
-                                .font(.caption)
-                                .foregroundStyle(
-                                    hasIncomingOffer ? Theme.accentStrong : Theme.muted
-                                )
-                                .lineLimit(1)
-                            }
-                            Spacer()
-                            if hasIncomingOffer {
-                                Text(AppText.value(
-                                    "Open",
-                                    "查看",
-                                    language: language
-                                ))
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(Theme.accentStrong)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    Theme.accentSoft,
-                                    in: Capsule()
-                                )
-                                .accessibilityHidden(true)
-                            }
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(Theme.muted)
+                        Button {
+                            onSendToRememberedRoom(room.id)
+                        } label: {
+                            Label(
+                                AppText.localized("home.send.title", language: language),
+                                systemImage: "paperplane.fill"
+                            )
                         }
-                        .frame(maxWidth: .infinity, minHeight: 48)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accentStrong)
+                        .disabled(!canSend)
+                        .accessibilityIdentifier("remembered_device_send_\(room.id)")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityValue(hasIncomingOffer
-                        ? AppText.value(
-                            "Incoming files waiting for your decision",
-                            "有文件邀请等待处理",
-                            language: language
+                    .padding(10)
+                    .background(
+                        rememberedDropTargetID == room.id
+                            ? Theme.accentSoft
+                            : Theme.surfaceRaised,
+                        in: RoundedRectangle(cornerRadius: 12)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(
+                                rememberedDropTargetID == room.id
+                                    ? Theme.accentStrong
+                                    : Theme.line.opacity(0.55),
+                                lineWidth: rememberedDropTargetID == room.id ? 2 : 0.5
+                            )
+                    }
+                    .onDrop(
+                        of: [.fileURL],
+                        isTargeted: rememberedDropBinding(for: room.id)
+                    ) { providers in
+                        guard RememberedDeviceSendPolicy.acceptsDrop(
+                            providerCount: providers.count,
+                            status: status
+                        ) else { return false }
+                        loadRememberedDeviceDrop(
+                            providers,
+                            relationshipID: room.id
                         )
-                        : rememberedRoomStatusText(
-                            rememberedRoomStatus(room.relationshipID)
-                        ))
-                    .accessibilityIdentifier("remembered_room_\(room.relationshipID)")
+                        return true
+                    }
+                    .accessibilityIdentifier("remembered_room_\(room.id)")
                 }
+
+                #if os(macOS)
+                Text(AppText.localized(
+                    "connection.devices.drop_hint",
+                    language: language
+                ))
+                .font(.caption)
+                .foregroundStyle(Theme.muted)
+                #endif
             }
             .card(padding: 14)
             .accessibilityIdentifier("remembered_rooms")
         }
     }
 
-    private func rememberedRoomStatusText(
-        _ status: RememberedRoomConnectionStatus
-    ) -> String {
-        switch status {
-        case .offline:
-            return AppText.value("Available when both apps are open", "双方打开应用时可连接", language: language)
-        case .connecting:
-            return AppText.value("Connecting…", "正在连接…", language: language)
-        case .waiting:
-            return AppText.value("Available to the other device…", "正在等待另一台设备…", language: language)
-        case .connected:
-            return AppText.value("Connected", "已连接", language: language)
-        case .needsRepair:
-            return AppText.value("Pair again to reconnect", "请重新配对后连接", language: language)
+    private func rememberedDropBinding(for relationshipID: String) -> Binding<Bool> {
+        Binding(
+            get: { rememberedDropTargetID == relationshipID },
+            set: { isTargeted in
+                if isTargeted {
+                    rememberedDropTargetID = relationshipID
+                } else if rememberedDropTargetID == relationshipID {
+                    rememberedDropTargetID = nil
+                }
+            }
+        )
+    }
+
+    private func loadRememberedDeviceDrop(
+        _ providers: [NSItemProvider],
+        relationshipID: String
+    ) {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var loaded = Array<URL?>(repeating: nil, count: providers.count)
+        for (index, provider) in providers.enumerated() {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                lock.lock()
+                loaded[index] = url
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            let urls = loaded.compactMap { $0 }
+            guard urls.count == providers.count else {
+                ToastCenter.shared.show(AppText.localized(
+                    "connection.devices.drop_failed",
+                    language: language
+                ))
+                return
+            }
+            onSendDroppedItems(relationshipID, urls)
         }
     }
 
@@ -322,6 +429,7 @@ struct ConnectionHubView: View {
     ) -> String {
         switch status {
         case .offline: return "bubble.left.and.bubble.right"
+        case .available: return "paperplane.circle.fill"
         case .connecting: return "arrow.triangle.2.circlepath"
         case .waiting: return "antenna.radiowaves.left.and.right"
         case .connected: return "checkmark.circle.fill"
@@ -333,7 +441,7 @@ struct ConnectionHubView: View {
         _ status: RememberedRoomConnectionStatus
     ) -> Color {
         switch status {
-        case .connected: return Theme.success
+        case .available, .connected: return Theme.success
         case .connecting, .waiting: return Theme.accentStrong
         case .needsRepair: return Theme.danger
         case .offline: return Theme.muted
@@ -344,7 +452,7 @@ struct ConnectionHubView: View {
         VStack(alignment: .leading, spacing: RoomInvitationLayout.cardSpacing) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(AppText.value("Room", "房间", language: language))
+                    Text(AppText.localized("connection.room.title", language: language))
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(Theme.text)
 
@@ -372,9 +480,8 @@ struct ConnectionHubView: View {
                         Button {
                             copyWithToast(
                                 roomInvitation.code,
-                                AppText.value(
-                                    "Room code copied",
-                                    "房间码已复制",
+                                AppText.localized(
+                                    "connection.room.code_copied",
                                     language: language
                                 ),
                                 language: language
@@ -385,9 +492,8 @@ struct ConnectionHubView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(AppText.value(
-                            "Copy room code",
-                            "复制房间码",
+                        .accessibilityLabel(AppText.localized(
+                            "connection.room.copy_code",
                             language: language
                         ))
                         .accessibilityIdentifier("room_code_copy")
@@ -401,9 +507,8 @@ struct ConnectionHubView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(roomInvitationIsStarting)
-                        .accessibilityLabel(AppText.value(
-                            "Renew room invitation",
-                            "更新房间邀请",
+                        .accessibilityLabel(AppText.localized(
+                            "connection.room.renew_invitation",
                             language: language
                         ))
                         .accessibilityIdentifier("room_invitation_renew")
@@ -417,7 +522,10 @@ struct ConnectionHubView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(AppText.value("Close room", "关闭房间", language: language))
+                        .accessibilityLabel(AppText.localized(
+                            "connection.room.close",
+                            language: language
+                        ))
                         .accessibilityIdentifier("room_end")
                     }
                 }
@@ -476,28 +584,26 @@ struct ConnectionHubView: View {
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .accessibilityLabel(AppText.value(
-            "Hide room QR",
-            "隐藏房间二维码",
+        .accessibilityLabel(AppText.localized(
+            "connection.room.hide_qr",
             language: language
         ))
-        .accessibilityHint(AppText.value(
-            "Hides the invitation without ending the room.",
-            "隐藏邀请，但不会结束房间。",
+        .accessibilityHint(AppText.localized(
+            "connection.room.hide_qr_hint",
             language: language
         ))
-        .accessibilityValue(AppText.value("Revealed", "已显示", language: language))
+        .accessibilityValue(AppText.localized("accessibility.revealed", language: language))
         .accessibilityIdentifier("room_qr_toggle")
     }
 
     private var roomConnectionMethods: some View {
         VStack(spacing: 10) {
             methodButton(
-                roomInvitationIsStarting
-                    ? AppText.value("Creating invitation…", "正在创建邀请…", language: language)
-                    : roomInvitation == nil
-                        ? AppText.value("Create room", "创建房间", language: language)
-                        : AppText.value("Reveal QR", "显示二维码", language: language),
+                ConnectionHubPresentationText.roomAction(
+                    isStarting: roomInvitationIsStarting,
+                    hasInvitation: roomInvitation != nil,
+                    language: language
+                ),
                 systemImage: roomInvitation == nil ? "plus.viewfinder" : "qrcode",
                 identifier: "room_qr_toggle",
                 isBusy: roomInvitationIsStarting,
@@ -508,13 +614,13 @@ struct ConnectionHubView: View {
             #if os(iOS)
             HStack(spacing: 10) {
                 methodButton(
-                    AppText.value("Scan QR", "扫描二维码", language: language),
+                    AppText.localized("connection.room.action.scan_qr", language: language),
                     systemImage: "qrcode.viewfinder",
                     identifier: "connect_scan_qr",
                     action: onScanQRCode
                 )
                 methodButton(
-                    AppText.value("Enter code", "输入房间码", language: language),
+                    AppText.localized("connection.room.action.enter_code", language: language),
                     systemImage: "keyboard",
                     identifier: "connect_enter_code",
                     action: onEnterCode
@@ -522,7 +628,7 @@ struct ConnectionHubView: View {
             }
             #else
             methodButton(
-                AppText.value("Enter code", "输入房间码", language: language),
+                AppText.localized("connection.room.action.enter_code", language: language),
                 systemImage: "keyboard",
                 identifier: "connect_enter_code",
                 action: onEnterCode
@@ -532,17 +638,11 @@ struct ConnectionHubView: View {
     }
 
     private var roomStatusText: String {
-        if roomInvitationIsStarting {
-            return AppText.value("Creating invitation…", "正在创建邀请…", language: language)
-        }
-        if roomInvitation != nil {
-            return AppText.value(
-                "Ready · Waiting for another device",
-                "已就绪 · 正在等待另一台设备",
-                language: language
-            )
-        }
-        return AppText.value("No active room", "没有活动房间", language: language)
+        ConnectionHubPresentationText.roomStatus(
+            isStarting: roomInvitationIsStarting,
+            hasInvitation: roomInvitation != nil,
+            language: language
+        )
     }
 
     private func methodButton(
@@ -603,7 +703,10 @@ struct ConnectionHubView: View {
                         .font(.title3)
                         .foregroundStyle(Theme.accentStrong)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(AppText.value("Visible as", "显示为", language: language))
+                        Text(AppText.localized(
+                            "connection.identity.visible_as",
+                            language: language
+                        ))
                             .font(.caption)
                             .foregroundStyle(Theme.muted)
                         Text(presence.displayName)
@@ -648,9 +751,10 @@ struct ConnectionHubView: View {
     }
 
     private var nearbyStatusTitle: String {
-        presence.visibility == .hidden
-            ? AppText.value("Nearby off", "附近已关闭", language: language)
-            : AppText.value("Nearby on", "附近已开启", language: language)
+        ConnectionHubPresentationText.nearbyStatus(
+            visibility: presence.visibility,
+            language: language
+        )
     }
 
     private var visibilityIcon: String {
@@ -662,14 +766,7 @@ struct ConnectionHubView: View {
     }
 
     private func visibilityOptionTitle(_ value: NearbyVisibilityMode) -> String {
-        switch value {
-        case .hidden:
-            return AppText.value("Turn Nearby off", "关闭附近功能", language: language)
-        case .everyoneTenMinutes:
-            return AppText.value("On for 10 minutes", "开启 10 分钟", language: language)
-        case .whileAppOpen:
-            return AppText.value("On while app is open", "应用打开时开启", language: language)
-        }
+        ConnectionHubPresentationText.visibilityOption(value, language: language)
     }
 
     private var nearbyHeader: some View {
@@ -681,9 +778,8 @@ struct ConnectionHubView: View {
             }
 
             #if os(macOS)
-            Text(AppText.value(
-                "Discovery uses Bluetooth and the local network. Wi‑Fi Aware and NFC phone scanning are not available on macOS.",
-                "通过蓝牙和局域网发现设备；macOS 暂不支持 Wi‑Fi Aware 和手机 NFC 扫描。",
+            Text(AppText.localized(
+                "connection.nearby.macos_note",
                 language: language
             ))
                 .font(.caption)
@@ -696,7 +792,7 @@ struct ConnectionHubView: View {
     }
 
     private var nearbyHeaderTitle: some View {
-        Text(AppText.value("Nearby devices", "附近设备", language: language))
+        Text(AppText.localized("connection.nearby.title", language: language))
             .font(.title3.weight(.semibold))
             .foregroundStyle(Theme.text)
             .lineLimit(1)
@@ -709,7 +805,7 @@ struct ConnectionHubView: View {
             #if os(iOS)
             if wifiAwarePairingIsAvailable {
                 nearbyHeaderButton(
-                    AppText.value("Aware", "感知", language: language),
+                    AppText.localized("connection.nearby.aware", language: language),
                     systemImage: "wifi",
                     isBusy: isPreparingNearbyPairing,
                     identifier: "nearby_wifi_aware",
@@ -775,12 +871,14 @@ struct ConnectionHubView: View {
         #if os(iOS) && canImport(DeviceDiscoveryUI) && canImport(WiFiAware)
         if #available(iOS 26.0, *) {
             VStack(alignment: .leading, spacing: 18) {
-                Text(AppText.value("Wi‑Fi Aware", "Wi‑Fi Aware", language: language))
+                Text(AppText.localized(
+                    "connection.nearby.wifi_aware.title",
+                    language: language
+                ))
                     .font(.title2.weight(.bold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value(
-                    "Pair once using Apple's system controls. Paired Envoix devices are then discovered automatically when both apps are open.",
-                    "使用 Apple 系统控件完成一次配对。之后双方打开 Envoix 时，已配对设备会被自动发现。",
+                Text(AppText.localized(
+                    "connection.nearby.wifi_aware.detail",
                     language: language
                 ))
                 .font(.body)
@@ -789,7 +887,7 @@ struct ConnectionHubView: View {
                 Button {
                     isNearbyPairingPresented = false
                 } label: {
-                    Text(AppText.value("Done", "完成", language: language))
+                    Text(AppText.localized("common.done", language: language))
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.bordered)
@@ -846,7 +944,7 @@ struct ConnectionHubView: View {
             if !coordinator.state.isActive || !hasReadyProvider {
                 Button(action: coordinator.restart) {
                     Label(
-                        AppText.value("Try again", "重试", language: language),
+                        AppText.localized("connection.nearby.try_again", language: language),
                         systemImage: "arrow.clockwise"
                     )
                 }
@@ -861,13 +959,11 @@ struct ConnectionHubView: View {
     }
 
     private var nearbyEmptyText: String {
-        guard coordinator.state.isActive else {
-            return AppText.value("Nearby is paused.", "附近发现已暂停。", language: language)
-        }
-        guard hasReadyProvider else {
-            return AppText.value("Nearby is unavailable.", "附近发现不可用。", language: language)
-        }
-        return AppText.value("Looking for devices…", "正在搜索设备…", language: language)
+        ConnectionHubPresentationText.nearbyEmptyState(
+            isActive: coordinator.state.isActive,
+            hasReadyProvider: hasReadyProvider,
+            language: language
+        )
     }
 
     private var hasReadyProvider: Bool {
@@ -891,9 +987,8 @@ struct ConnectionHubView: View {
                 Text(nearbyPeerDisplayName(
                     peer,
                     among: coordinator.state.peers,
-                    fallback: AppText.value(
-                        "Nearby Envoix device",
-                        "附近的 Envoix 设备",
+                    fallback: AppText.localized(
+                        "connection.nearby.peer.fallback",
                         language: language
                     )
                 ))
@@ -906,25 +1001,13 @@ struct ConnectionHubView: View {
                     .foregroundStyle(Theme.muted)
                     .lineLimit(2)
 
-                Text(invitationAvailable
-                    ? AppText.value(
-                        peer.sources.contains(.bluetooth)
-                            && peer.inviteRoute == nil
-                            && peer.nearbyWifiAwareDeviceID == nil
-                            ? "Tap to verify"
-                            : "Unverified",
-                        peer.sources.contains(.bluetooth)
-                            && peer.inviteRoute == nil
-                            && peer.nearbyWifiAwareDeviceID == nil
-                            ? "轻触验证"
-                            : "未经验证",
-                        language: language
-                    )
-                    : AppText.value(
-                        "Invitation path not ready",
-                        "邀请路径尚未就绪",
-                        language: language
-                    ))
+                Text(ConnectionHubPresentationText.peerTrust(
+                    invitationAvailable: invitationAvailable,
+                    requiresTapToVerify: peer.sources.contains(.bluetooth)
+                        && peer.inviteRoute == nil
+                        && peer.nearbyWifiAwareDeviceID == nil,
+                    language: language
+                ))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(invitationAvailable ? Theme.warning : Theme.muted)
             }
@@ -945,30 +1028,7 @@ struct ConnectionHubView: View {
     }
 
     private func discoverySourcesText(_ sources: Set<NearbyDiscoverySource>) -> String {
-        let labels = NearbyDiscoverySource.allCases.compactMap { source -> String? in
-            guard sources.contains(source) else { return nil }
-            switch source {
-            case .bluetooth:
-                return AppText.value("Bluetooth", "蓝牙", language: language)
-            case .mdns:
-                return AppText.value("Local network", "局域网", language: language)
-            case .wifiAware:
-                return "Wi‑Fi Aware"
-            }
-        }
-        guard !labels.isEmpty else {
-            return AppText.value(
-                "Discovery path unavailable",
-                "发现路径不可用",
-                language: language
-            )
-        }
-        let paths = labels.joined(separator: " · ")
-        return AppText.value(
-            "Discovered via \(paths)",
-            "发现路径：\(paths)",
-            language: language
-        )
+        ConnectionHubPresentationText.discoverySources(sources, language: language)
     }
 
     private func openSettings() {

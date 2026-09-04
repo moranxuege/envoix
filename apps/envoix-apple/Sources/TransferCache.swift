@@ -47,7 +47,6 @@ struct TransferCacheStore {
             protectingActivityIDs: protectingActivityIDs,
             createdBefore: createdBefore
         )
-        #if os(iOS)
         if includeSharedDrafts {
             try ShareDraftStore.live(fileManager: fileManager).reconcileCache(
                 protectingDraftIDs: protectingDraftIDs,
@@ -55,7 +54,6 @@ struct TransferCacheStore {
                 createdBefore: createdBefore
             )
         }
-        #endif
     }
 
     func cleanUnprotected(
@@ -67,7 +65,6 @@ struct TransferCacheStore {
             protectingActivityIDs: protectingActivityIDs,
             createdBefore: createdBefore
         )
-        #if os(iOS)
         if includeSharedDrafts {
             try ShareDraftStore.live(fileManager: fileManager).cleanUnprotected(
                 protectingDraftIDs: protectingDraftIDs,
@@ -75,7 +72,6 @@ struct TransferCacheStore {
                 createdBefore: createdBefore
             )
         }
-        #endif
     }
 
     func summary(
@@ -83,7 +79,6 @@ struct TransferCacheStore {
         protectingActivityIDs: Set<String>
     ) throws -> TransferCacheSummary {
         var summary = receiveStagingSummary(protectingActivityIDs: protectingActivityIDs)
-        #if os(iOS)
         if includeSharedDrafts {
             let share = try ShareDraftStore.live(fileManager: fileManager).cacheSummary(
                 protectingDraftIDs: protectingDraftIDs,
@@ -91,7 +86,6 @@ struct TransferCacheStore {
             )
             summary.include(total: share.totalBytes, protected: share.protectedBytes)
         }
-        #endif
         return summary
     }
 

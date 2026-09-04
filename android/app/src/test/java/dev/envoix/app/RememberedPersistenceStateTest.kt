@@ -10,7 +10,6 @@ class RememberedPersistenceStateTest {
         val pending =
             PendingRememberedPeer(
                 relationshipId = "relationship",
-                credentialReference = "credential",
                 label = "peer",
                 broker = "broker",
                 relay = "relay",

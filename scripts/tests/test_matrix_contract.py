@@ -45,7 +45,7 @@ class MatrixContractTests(unittest.TestCase):
             "role": "sender",
             "platform": "android",
             "test_layer": "l1_native",
-            "driver": "direct_jni",
+            "driver": "direct_ffi",
             "build_variant": "debug",
             "app_version": "0.2.0",
             "core_version": None,
@@ -142,11 +142,11 @@ class MatrixContractTests(unittest.TestCase):
         value["os_version"] = "iOS 18.5"
         self.assertEqual(matrix_contract.validate_endpoint_result(value), [])
 
-    def test_direct_ffi_endpoint_result_requires_apple_l1(self) -> None:
+    def test_direct_ffi_endpoint_result_requires_l1(self) -> None:
         value = self.endpoint_result()
-        value["driver"] = "direct_ffi"
+        value["test_layer"] = "l2_physical"
         errors = matrix_contract.validate_endpoint_result(value)
-        self.assert_error(errors, "direct_ffi endpoint results must be Apple L1")
+        self.assert_error(errors, "direct_ffi endpoint results must be Android or Apple L1")
 
     def test_product_activity_endpoint_result_is_valid(self) -> None:
         self.assertEqual(

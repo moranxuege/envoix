@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 struct RememberedPeerSummary: Equatable, Identifiable, CustomDebugStringConvertible {
@@ -50,11 +51,13 @@ struct PendingRememberedPeer {
     let relay: String
 }
 
-enum RememberedPeerStoreError: LocalizedError {
+enum RememberedPeerStoreError: LocalizedError, Equatable {
     case invalidLabel
     case missingCredential
     case activeTransfer
     case inactiveSession
+    case credentialStorageUnavailable
+    case credentialInteractionRequired
     case keychain(OSStatus)
     case corruptMetadata
 
@@ -68,6 +71,10 @@ enum RememberedPeerStoreError: LocalizedError {
             return "This remembered device is already in use."
         case .inactiveSession:
             return "This remembered-device session is no longer active."
+        case .credentialStorageUnavailable:
+            return "Local credential storage is unavailable."
+        case .credentialInteractionRequired:
+            return "This remembered device must be paired again before Envoix can use it."
         case .keychain:
             return "Protected credential storage is unavailable."
         case .corruptMetadata:
@@ -76,7 +83,28 @@ enum RememberedPeerStoreError: LocalizedError {
     }
 }
 
-final class RememberedPeerStore: @unchecked Sendable {
+protocol RememberedPeerStoring: AnyObject, Sendable {
+    func prepare(label: String, broker: String, relay: String) throws -> PendingRememberedPeer
+    func discardPrepared(_ pending: PendingRememberedPeer) throws
+    func peers() throws -> [RememberedPeerSummary]
+    func credential(for peer: RememberedPeerSummary) throws -> Data
+    func sessionMaterial(relationshipID: String) throws -> RememberedPeerSessionMaterial
+    func acquireSession(_ relationshipID: String) throws
+    func releaseSession(_ relationshipID: String)
+    func create(
+        _ pending: PendingRememberedPeer,
+        opaqueCredential: Data,
+        generation: UInt64
+    ) throws
+    func rotate(
+        relationshipID: String,
+        opaqueCredential: Data,
+        generation: UInt64
+    ) throws
+    func delete(_ peer: RememberedPeerSummary) throws
+}
+
+final class RememberedPeerStore: RememberedPeerStoring, @unchecked Sendable {
     static let shared = RememberedPeerStore()
 
     private let lock = NSLock()
@@ -85,11 +113,15 @@ final class RememberedPeerStore: @unchecked Sendable {
     private var activeRelationships = Set<String>()
 
     init(
-        credentialStore: RememberedCredentialStoring = AppleCredentialStore(),
+        credentialStore: RememberedCredentialStoring? = nil,
         metadataFileURL: URL? = nil
     ) {
-        self.credentialStore = credentialStore
+        self.credentialStore = credentialStore ?? Self.makeDefaultCredentialStore()
         self.metadataFileURL = metadataFileURL
+    }
+
+    static func makeDefaultCredentialStore() -> RememberedCredentialStoring {
+        AppleCredentialStore()
     }
 
     func prepare(label: String, broker: String, relay: String) throws -> PendingRememberedPeer {
@@ -106,25 +138,11 @@ final class RememberedPeerStore: @unchecked Sendable {
         )
     }
 
+    func discardPrepared(_: PendingRememberedPeer) throws {}
+
     func peers() throws -> [RememberedPeerSummary] {
         try lock.withEnvoixLock {
-            var peers = try readMetadata()
-            var removedMissingCredential = false
-            peers.removeAll { peer in
-                do {
-                    _ = try credentialStore.get(peer.credentialReference)
-                    return false
-                } catch RememberedPeerStoreError.missingCredential {
-                    removedMissingCredential = true
-                    return true
-                } catch {
-                    return false
-                }
-            }
-            if removedMissingCredential {
-                try writeMetadata(peers)
-            }
-            return peers
+            try readMetadata()
                 .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
                 .map(\.summary)
         }
@@ -294,25 +312,44 @@ final class RememberPersistenceContext: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+    private let store: RememberedPeerStoring
     private let target: Target
     private let relationshipLease: String?
     private var createdRelationshipID: String?
 
-    init(pending: PendingRememberedPeer) throws {
-        try RememberedPeerStore.shared.acquireSession(pending.relationshipID)
+    init(
+        pending: PendingRememberedPeer,
+        store: RememberedPeerStoring = RememberedPeerStore.shared
+    ) throws {
+        try store.acquireSession(pending.relationshipID)
+        self.store = store
         target = .pending(pending)
         relationshipLease = pending.relationshipID
     }
 
-    init(peer: RememberedPeerSummary) throws {
-        try RememberedPeerStore.shared.acquireSession(peer.relationshipID)
+    init(
+        peer: RememberedPeerSummary,
+        store: RememberedPeerStoring = RememberedPeerStore.shared
+    ) throws {
+        try store.acquireSession(peer.relationshipID)
+        self.store = store
         target = .relationship(peer.relationshipID)
         relationshipLease = peer.relationshipID
     }
 
     deinit {
+        let pending = lock.withEnvoixLock { () -> PendingRememberedPeer? in
+            guard createdRelationshipID == nil,
+                  case let .pending(pending) = target else {
+                return nil
+            }
+            return pending
+        }
+        if let pending {
+            try? store.discardPrepared(pending)
+        }
         if let relationshipLease {
-            RememberedPeerStore.shared.releaseSession(relationshipLease)
+            store.releaseSession(relationshipLease)
         }
     }
 
@@ -320,7 +357,7 @@ final class RememberPersistenceContext: @unchecked Sendable {
         lock.withEnvoixLock {
             do {
                 if let createdRelationshipID {
-                    try RememberedPeerStore.shared.rotate(
+                    try store.rotate(
                         relationshipID: createdRelationshipID,
                         opaqueCredential: opaqueCredential,
                         generation: generation
@@ -328,14 +365,14 @@ final class RememberPersistenceContext: @unchecked Sendable {
                 } else {
                     switch target {
                     case let .pending(pending):
-                        try RememberedPeerStore.shared.create(
+                        try store.create(
                             pending,
                             opaqueCredential: opaqueCredential,
                             generation: generation
                         )
                         createdRelationshipID = pending.relationshipID
                     case let .relationship(relationshipID):
-                        try RememberedPeerStore.shared.rotate(
+                        try store.rotate(
                             relationshipID: relationshipID,
                             opaqueCredential: opaqueCredential,
                             generation: generation
@@ -356,8 +393,88 @@ protocol RememberedCredentialStoring {
     func delete(_ reference: String) throws
 }
 
+#if os(macOS) && DEBUG
+/// Development and test-only credential storage. Production code must use the
+/// non-interactive Keychain store and may not fall back here.
+final class MacOSFileCredentialStore: RememberedCredentialStoring {
+    private static let directoryPermissions = 0o700
+    private static let credentialPermissions = 0o600
+
+    private let directoryURL: URL
+
+    init(directoryURL: URL) {
+        self.directoryURL = directoryURL
+    }
+
+    func put(_ reference: String, _ credential: Data) throws {
+        let url = try credentialURL(reference)
+        do {
+            try credential.write(to: url, options: [.atomic, .completeFileProtection])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: Self.credentialPermissions],
+                ofItemAtPath: url.path
+            )
+        } catch {
+            throw RememberedPeerStoreError.credentialStorageUnavailable
+        }
+    }
+
+    func get(_ reference: String) throws -> Data {
+        let url = try credentialURL(reference)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw RememberedPeerStoreError.missingCredential
+        }
+        do {
+            return try Data(contentsOf: url)
+        } catch {
+            throw RememberedPeerStoreError.credentialStorageUnavailable
+        }
+    }
+
+    func delete(_ reference: String) throws {
+        let url = try credentialURL(reference)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            throw RememberedPeerStoreError.credentialStorageUnavailable
+        }
+    }
+
+    private func credentialURL(_ reference: String) throws -> URL {
+        guard UUID(uuidString: reference) != nil else {
+            throw RememberedPeerStoreError.corruptMetadata
+        }
+        try prepareDirectory()
+        return directoryURL.appendingPathComponent(reference, isDirectory: false)
+    }
+
+    private func prepareDirectory() throws {
+        do {
+            try FileManager.default.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: Self.directoryPermissions]
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: Self.directoryPermissions],
+                ofItemAtPath: directoryURL.path
+            )
+        } catch {
+            throw RememberedPeerStoreError.credentialStorageUnavailable
+        }
+    }
+}
+#endif
+
 final class AppleCredentialStore: RememberedCredentialStoring {
-    private let service = "com.envoix.remembered-credential.v1"
+    private static let service = "com.envoix.remembered-credential.v1"
+
+    private let keychain: AppleKeychainAccessing
+
+    init(keychain: AppleKeychainAccessing? = nil) {
+        self.keychain = keychain ?? SystemAppleKeychainAccess()
+    }
 
     func put(_ reference: String, _ credential: Data) throws {
         let query = baseQuery(reference)
@@ -365,16 +482,16 @@ final class AppleCredentialStore: RememberedCredentialStoring {
             kSecValueData: credential,
             kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
-        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        let updateStatus = keychain.update(query, attributes: update)
         if updateStatus == errSecSuccess { return }
         guard updateStatus == errSecItemNotFound else {
-            throw RememberedPeerStoreError.keychain(updateStatus)
+            throw credentialError(for: updateStatus)
         }
         var item = query
         update.forEach { item[$0] = $1 }
-        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        let addStatus = keychain.add(item)
         guard addStatus == errSecSuccess else {
-            throw RememberedPeerStoreError.keychain(addStatus)
+            throw credentialError(for: addStatus)
         }
     }
 
@@ -382,31 +499,46 @@ final class AppleCredentialStore: RememberedCredentialStoring {
         var query = baseQuery(reference)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let (status, data) = keychain.copyMatching(query)
         if status == errSecItemNotFound {
             throw RememberedPeerStoreError.missingCredential
         }
-        guard status == errSecSuccess, let data = result as? Data else {
-            throw RememberedPeerStoreError.keychain(status)
+        guard status == errSecSuccess, let data else {
+            throw credentialError(for: status)
         }
         return data
     }
 
     func delete(_ reference: String) throws {
-        let status = SecItemDelete(baseQuery(reference) as CFDictionary)
+        let status = keychain.delete(baseQuery(reference))
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw RememberedPeerStoreError.keychain(status)
+            throw credentialError(for: status)
         }
     }
 
     private func baseQuery(_ reference: String) -> [CFString: Any] {
-        [
+        let authenticationContext = LAContext()
+        authenticationContext.interactionNotAllowed = true
+        return [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
+            kSecAttrService: Self.service,
             kSecAttrAccount: reference,
             kSecAttrSynchronizable: false,
+            kSecUseAuthenticationContext: authenticationContext,
+            kSecUseDataProtectionKeychain: true,
         ]
+    }
+
+    private func credentialError(for status: OSStatus) -> RememberedPeerStoreError {
+        switch status {
+        case errSecInteractionNotAllowed,
+             errSecInteractionRequired,
+             errSecAuthFailed,
+             errSecUserCanceled:
+            return .credentialInteractionRequired
+        default:
+            return .keychain(status)
+        }
     }
 }
 

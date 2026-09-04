@@ -89,17 +89,54 @@ enum RoomControlCloseReason: Equatable {
     case protocolFailure
 }
 
+enum RoomControlOperationError: LocalizedError, Equatable {
+    case rejected(String)
+    case networkLost(String)
+    case canceled(String)
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .rejected(let reason),
+             .networkLost(let reason),
+             .canceled(let reason),
+             .failed(let reason):
+            return reason
+        }
+    }
+
+    var roomRemainsUsable: Bool {
+        if case .rejected = self { return true }
+        return false
+    }
+}
+
+func roomControlOperationError(
+    from error: FfiRoomControlError
+) -> RoomControlOperationError {
+    switch error {
+    case .Rejected(let reason): return .rejected(reason)
+    case .NetworkLost(let reason): return .networkLost(reason)
+    case .Canceled(let reason): return .canceled(reason)
+    case .Failed(let reason): return .failed(reason)
+    }
+}
+
 enum RoomControlEvent: Equatable {
     case connected(
         peerDisplayName: String,
         creator: Bool,
         lifetime: RoomControlLifetimeState
     )
+    case verificationRequested
+    case verificationSucceeded
+    case verificationFailed
     case incomingOffer(RoomControlTransferOffer)
     case offerAccepted(id: String)
     case offerRejected(id: String)
     case lifetimeChanged(RoomControlLifetimeState)
     case closed(RoomControlCloseReason)
+    case failed(String)
 }
 
 /// Native boundary for the shared room-control implementation. A room may be
@@ -117,6 +154,7 @@ protocol RoomControlGateway: AnyObject {
         label: String,
         endpoint: RoomControlEndpoint
     ) throws
+    func submitVerificationCode(_ code: String) async throws
     func host(
         invitation: RoomControlInvitation,
         displayName: String,
@@ -173,6 +211,10 @@ final class UnavailableRoomControlGateway: RoomControlGateway {
         label: String,
         endpoint: RoomControlEndpoint
     ) throws {
+        throw RoomControlUnavailableError()
+    }
+
+    func submitVerificationCode(_ code: String) async throws {
         throw RoomControlUnavailableError()
     }
 
@@ -247,6 +289,11 @@ final class LiveRoomControlGateway: RoomControlGateway {
     private var session: FfiRoomControlSession?
     private var cancellation: FfiRoomControlCancellation?
     private var verificationPersistence: PendingDeviceVerification?
+    private let rememberedStore: RememberedPeerStoring
+
+    init(rememberedStore: RememberedPeerStoring = RememberedPeerStore.shared) {
+        self.rememberedStore = rememberedStore
+    }
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         project(try makeRoomControlInvite(broker: broker, relay: relay))
@@ -416,7 +463,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
                 }
                 token.cancel()
                 clearIfCurrent(token)
-                onEvent(.closed(.networkLost))
+                onEvent(.failed(error.localizedDescription))
             }
         } catch {
             token.cancel()
@@ -429,39 +476,61 @@ final class LiveRoomControlGateway: RoomControlGateway {
         _ offer: RoomControlTransferOffer
     ) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.offerTransfer(offer: FfiRoomTransferOffer(
-            offerId: offer.id,
-            transferInvite: offer.transferInvite,
-            rootNames: Array(offer.rootNames.prefix(3)),
-            itemCount: offer.itemCount,
-            directoryCount: offer.directoryCount,
-            totalBytes: offer.totalBytes
-        )).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.offerTransfer(offer: FfiRoomTransferOffer(
+                offerId: offer.id,
+                transferInvite: offer.transferInvite,
+                rootNames: Array(offer.rootNames.prefix(3)),
+                itemCount: offer.itemCount,
+                directoryCount: offer.directoryCount,
+                totalBytes: offer.totalBytes
+            ))
+        }
+        return lifetime.map(project)
+    }
+
+    func submitVerificationCode(_ code: String) async throws {
+        guard let session else { throw RoomControlUnavailableError() }
+        try await performRoomControlOperation {
+            try await session.submitVerificationCode(code: code)
+        }
     }
 
     func acceptOffer(id: String) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.acceptOffer(offerId: id).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.acceptOffer(offerId: id)
+        }
+        return lifetime.map(project)
     }
 
     func rejectOffer(id: String) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.rejectOffer(
-            offerId: id,
-            reason: .declined
-        ).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.rejectOffer(
+                offerId: id,
+                reason: .declined
+            )
+        }
+        return lifetime.map(project)
     }
 
     func setLifetimePolicy(
         _ policy: RoomControlLifetimePolicy
     ) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.setPolicy(policy: ffiPolicy(policy)).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.setPolicy(policy: ffiPolicy(policy))
+        }
+        return lifetime.map(project)
     }
 
     func setLocalTransferActive(_ active: Bool) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        return try await session.setLocalTransferActive(active: active).map(project)
+        let lifetime = try await performRoomControlOperation {
+            try await session.setLocalTransferActive(active: active)
+        }
+        return lifetime.map(project)
     }
 
     func lifetimeSnapshot() -> RoomControlLifetimeState? {
@@ -471,7 +540,9 @@ final class LiveRoomControlGateway: RoomControlGateway {
     func expireIdleDeadline() async throws {
         guard let activeSession = session else { throw RoomControlUnavailableError() }
         let activeCancellation = cancellation
-        try await activeSession.close(reason: .idleExpired)
+        try await performRoomControlOperation {
+            try await activeSession.close(reason: .idleExpired)
+        }
         activeCancellation?.cancel()
         if let activeCancellation {
             clearIfCurrent(activeCancellation)
@@ -527,34 +598,17 @@ final class LiveRoomControlGateway: RoomControlGateway {
             }
             let snapshot = connectedSession.snapshot()
             if let pendingVerification {
-                let credential = Data(snapshot.pairingCredential)
-                let persisted: Bool
-                if credential.isEmpty {
-                    persisted = false
-                } else {
-                    do {
-                        let authenticatedLabel = snapshot.peerName
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        let pending = try RememberedPeerStore.shared.prepare(
-                            label: authenticatedLabel.isEmpty
-                                ? pendingVerification.fallbackLabel
-                                : authenticatedLabel,
-                            broker: pendingVerification.endpoint.broker,
-                            relay: pendingVerification.endpoint.relay
-                        )
-                        let persistence = try RememberPersistenceContext(pending: pending)
-                        persisted = persistence.persist(credential, generation: 0)
-                    } catch {
-                        persisted = false
-                    }
-                }
-                guard persisted else {
+                do {
+                    try persistVerifiedDevice(
+                        session: connectedSession,
+                        snapshot: snapshot,
+                        pending: pendingVerification
+                    )
+                } catch {
                     token.cancel()
                     try? await connectedSession.close(reason: .protocolFailure)
                     clearIfCurrent(token)
-                    throw RuntimeSettingsError(
-                        "The verified device credential could not be protected on this device."
-                    )
+                    throw error
                 }
             }
             session = connectedSession
@@ -581,7 +635,45 @@ final class LiveRoomControlGateway: RoomControlGateway {
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws {
         while cancellation === token, !Task.isCancelled {
-            let event = try await connectedSession.nextEvent()
+            let event: FfiRoomControlEvent
+            do {
+                event = try await connectedSession.nextEvent()
+            } catch let error as FfiRoomControlError {
+                if Task.isCancelled {
+                    token.cancel()
+                    clearIfCurrent(token)
+                    throw CancellationError()
+                }
+                guard cancellation === token else { return }
+                let operationError = roomControlOperationError(from: error)
+                switch operationError {
+                case .rejected:
+                    continue
+                case .networkLost:
+                    onEvent(.closed(.networkLost))
+                case .canceled:
+                    onEvent(.closed(.userEnded))
+                case .failed(let reason):
+                    onEvent(.failed(reason))
+                }
+                clearIfCurrent(token)
+                return
+            }
+            if event.kind == .verificationSucceeded {
+                guard let pending = verificationPersistence else {
+                    throw RuntimeSettingsError(
+                        "Device verification completed without local approval."
+                    )
+                }
+                try persistVerifiedDevice(
+                    session: connectedSession,
+                    snapshot: connectedSession.snapshot(),
+                    pending: pending
+                )
+                verificationPersistence = nil
+            } else if event.kind == .verificationFailed {
+                verificationPersistence = nil
+            }
             if let projected = project(event) {
                 onEvent(projected)
                 if case .closed = projected {
@@ -595,11 +687,43 @@ final class LiveRoomControlGateway: RoomControlGateway {
         clearIfCurrent(token)
     }
 
+    private func performRoomControlOperation<T>(
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await operation()
+        } catch let error as FfiRoomControlError {
+            if case .Canceled = error, Task.isCancelled {
+                throw CancellationError()
+            }
+            throw roomControlOperationError(from: error)
+        }
+    }
+
     private func clearIfCurrent(_ token: FfiRoomControlCancellation) {
         guard cancellation === token else { return }
         verificationPersistence = nil
         session = nil
         cancellation = nil
+    }
+
+    private func persistVerifiedDevice(
+        session: FfiRoomControlSession,
+        snapshot: FfiRoomControlSnapshot,
+        pending: PendingDeviceVerification
+    ) throws {
+        let authenticatedLabel = snapshot.peerName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let vault = try RoomControlCredentialVault(
+            label: authenticatedLabel.isEmpty ? pending.fallbackLabel : authenticatedLabel,
+            endpoint: pending.endpoint,
+            store: rememberedStore
+        )
+        guard session.storePairingCredential(vault: vault) else {
+            throw RuntimeSettingsError(
+                "The verified device credential could not be protected on this device."
+            )
+        }
     }
 
     private func project(_ invitation: FfiRoomControlInvite) -> RoomControlInvitation {
@@ -618,6 +742,12 @@ final class LiveRoomControlGateway: RoomControlGateway {
 
     private func project(_ event: FfiRoomControlEvent) -> RoomControlEvent? {
         switch event.kind {
+        case .verificationRequested:
+            return .verificationRequested
+        case .verificationSucceeded:
+            return .verificationSucceeded
+        case .verificationFailed:
+            return .verificationFailed
         case .incomingOffer:
             guard let offer = event.offer else { return nil }
             return .incomingOffer(RoomControlTransferOffer(
@@ -701,15 +831,45 @@ final class LiveRoomControlGateway: RoomControlGateway {
     }
 }
 
+final class RoomControlCredentialVault: FfiRememberedCredentialVault, @unchecked Sendable {
+    private let persistence: RememberPersistenceContext
+
+    init(
+        label: String,
+        endpoint: RoomControlEndpoint,
+        store: RememberedPeerStoring = RememberedPeerStore.shared
+    ) throws {
+        let prepared = try store.prepare(
+            label: label,
+            broker: endpoint.broker,
+            relay: endpoint.relay
+        )
+        do {
+            persistence = try RememberPersistenceContext(pending: prepared, store: store)
+        } catch {
+            try? store.discardPrepared(prepared)
+            throw error
+        }
+    }
+
+    func storeRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
+        generation == 0
+            && !opaqueCredential.isEmpty
+            && persistence.persist(opaqueCredential, generation: generation)
+    }
+}
+
 @MainActor
 enum RoomControlGatewayFactory {
-    static func make() -> RoomControlGateway {
+    static func make(
+        rememberedStore: RememberedPeerStoring = RememberedPeerStore.shared
+    ) -> RoomControlGateway {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--ui-testing-discovery-fixtures") {
             return FixtureRoomControlGateway()
         }
         #endif
-        return LiveRoomControlGateway()
+        return LiveRoomControlGateway(rememberedStore: rememberedStore)
     }
 }
 
@@ -745,6 +905,10 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
         label: String,
         endpoint: RoomControlEndpoint
     ) throws {}
+
+    func submitVerificationCode(_ code: String) async throws {
+        onEvent?(.verificationSucceeded)
+    }
 
     func host(
         invitation: RoomControlInvitation,

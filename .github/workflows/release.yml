@@ -1,211 +1,430 @@
 name: release
 
-# Builds the envoix CLI (Linux / macOS arm64+x86_64 / Windows), the Windows /
-# Linux graphical desktop demo, and the Android APK (multi-ABI: arm64-v8a +
-# x86_64, test-signed release build).
+# Builds the paired CLI and Agent for Linux/Windows, the standalone CLI for
+# macOS arm64+x86_64, and the Linux broker. Tag builds additionally require the
+# protected Android production key and publish verified APK/AAB artifacts.
 #   - push a tag `vX.Y.Z`  -> builds everything and attaches it to a GitHub Release
-#   - run manually (Actions -> release -> Run workflow) -> builds everything as
-#     downloadable run artifacts, without publishing a release
+#   - run manually (Actions -> release -> Run workflow) -> builds, attests, and
+#     uploads rehearsal artifacts without publishing a release
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
-      source_ref:
-        description: Source ref to package (for release repair, use the immutable tag)
-        required: false
-        type: string
+      include_android:
+        description: Build Android with the protected production key
+        required: true
+        default: false
+        type: boolean
 
 permissions:
-  contents: write # needed to create the release
+  contents: read
+
+env:
+  RUST_VERSION: 1.96.0
+  CARGO_CYCLONEDX_VERSION: 0.5.9
+  ENVOIX_BUILD_CACHE_MIN_FREE_GIB: '1'
+  ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
 
 jobs:
+  contract:
+    name: validate immutable release contract
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release_contract.outputs.version }}
+      build_number: ${{ steps.release_contract.outputs.build_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate version, tag, and pinned actions
+        id: release_contract
+        env:
+          ENVOIX_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          args=(--github-output "$GITHUB_OUTPUT")
+          if [ -n "$ENVOIX_RELEASE_TAG" ]; then
+            args+=(--tag "$ENVOIX_RELEASE_TAG")
+          fi
+          python3 scripts/release_contract.py "${args[@]}"
+
   cli:
-    name: build CLI ${{ matrix.name }}
+    name: build desktop binaries ${{ matrix.artifact }}
+    needs: [contract]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            name: envoix-cli-linux-x86_64
+            artifact: envoix-linux-x86_64
+            cli_name: envoix-cli-linux-x86_64
+            agent_package: -p envoix-agent
+            agent_name: envoix-agent-linux-x86_64
           - os: macos-14
             target: aarch64-apple-darwin
-            name: envoix-cli-macos-aarch64
+            artifact: envoix-cli-macos-aarch64
+            cli_name: envoix-cli-macos-aarch64
+            agent_package: ''
+            agent_name: ''
           - os: macos-14
             target: x86_64-apple-darwin
-            name: envoix-cli-macos-x86_64
+            artifact: envoix-cli-macos-x86_64
+            cli_name: envoix-cli-macos-x86_64
+            agent_package: ''
+            agent_name: ''
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            name: envoix-cli-windows-x86_64.exe
+            artifact: envoix-windows-x86_64
+            cli_name: envoix-cli-windows-x86_64.exe
+            agent_package: -p envoix-agent
+            agent_name: envoix-agent-windows-x86_64.exe
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Rust (iroh needs >= 1.91)
+      - name: Set up pinned Rust
         shell: bash
         run: |
-          rustup update stable
-          rustup default stable
-          rustup target add ${{ matrix.target }}
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" ${{ matrix.target }}
           rustc --version
 
       - name: Build envoix CLI
-        run: cargo build --locked --release -p envoix-cli --target ${{ matrix.target }}
+        shell: bash
+        run: >-
+          scripts/with-build-cache-guard.sh
+          cargo build --locked --release -p envoix-cli ${{ matrix.agent_package }}
+          --target ${{ matrix.target }}
 
       - name: Stage binary
         shell: bash
         run: |
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/envoix.exe" "dist/${{ matrix.name }}"
+            cp "target/${{ matrix.target }}/release/envoix.exe" "dist/${{ matrix.cli_name }}"
+            cp "target/${{ matrix.target }}/release/envoix-agent.exe" "dist/${{ matrix.agent_name }}"
           else
-            cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.name }}"
+            cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.cli_name }}"
+            if [ -n "${{ matrix.agent_name }}" ]; then
+              cp "target/${{ matrix.target }}/release/envoix-agent" "dist/${{ matrix.agent_name }}"
+            fi
           fi
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Attest binary build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          name: ${{ matrix.name }}
-          path: dist/${{ matrix.name }}
-          if-no-files-found: error
-
-  desktop:
-    name: build desktop ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            name: Envoix-Desktop-Linux-x86_64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            name: Envoix-Desktop-Windows-x86_64.exe
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
-
-      - name: Set up Rust (iroh needs >= 1.91)
-        shell: bash
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup target add ${{ matrix.target }}
-          rustc --version
-
-      - name: Install Linux desktop build dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-3-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
-
-      - name: Build graphical desktop app
-        run: cargo build --locked --release -p envoix-desktop --target ${{ matrix.target }}
-
-      - name: Stage desktop binary
-        shell: bash
-        run: |
-          mkdir -p dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/envoix-desktop.exe" "dist/${{ matrix.name }}"
-          else
-            cp "target/${{ matrix.target }}/release/envoix-desktop" "dist/${{ matrix.name }}"
-          fi
+          subject-path: dist/*
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ matrix.name }}
-          path: dist/${{ matrix.name }}
+          name: ${{ matrix.artifact }}
+          path: dist/*
           if-no-files-found: error
+
+  broker:
+    name: build Linux broker
+    needs: [contract]
+    uses: ./.github/workflows/rendezvous-server-artifact.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
 
   android:
-    name: build android apk
+    name: build signed Android packages
+    needs: [contract]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.include_android
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      ENVOIX_ANDROID_ABIS: arm64-v8a,x86_64
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Rust + Android targets
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+
+      - name: Set up pinned Rust and Android targets
+        shell: bash
         run: |
-          rustup update stable
-          rustup default stable
-          rustup target add aarch64-linux-android x86_64-linux-android
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" \
+            aarch64-linux-android x86_64-linux-android
           rustc --version
 
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --version 4.1.2 --locked
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK r26 + SDK components
+      - name: Install pinned Android build components
+        shell: bash
         run: |
+          scripts/with-build-cache-guard.sh \
+            cargo install cargo-ndk --version 4.1.2 --locked
+          scripts/with-build-cache-guard.sh \
+            cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager --install \
+            "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Test, lint, and build release APK
+      - name: Load protected Android signing key
+        env:
+          ENVOIX_ANDROID_KEYSTORE_BASE64: ${{ secrets.ENVOIX_ANDROID_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          if [ -z "$ENVOIX_ANDROID_KEYSTORE_BASE64" ]; then
+            echo 'required Android release setting is missing: ENVOIX_ANDROID_KEYSTORE_BASE64' >&2
+            exit 1
+          fi
+          keystore="$RUNNER_TEMP/envoix-android-release.keystore"
+          umask 077
+          printf '%s' "$ENVOIX_ANDROID_KEYSTORE_BASE64" | base64 --decode >"$keystore"
+          test -s "$keystore"
+          echo "ENVOIX_ANDROID_KEYSTORE_PATH=$keystore" >>"$GITHUB_ENV"
+
+      - name: Build signed APK, AAB, and Android dependency SBOM
         working-directory: android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
-          ENVOIX_ANDROID_ABIS: arm64-v8a,x86_64
-        run: ./gradlew testReleaseUnitTest lintRelease assembleRelease --no-daemon --stacktrace
+          ENVOIX_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ENVOIX_ANDROID_KEYSTORE_PASSWORD }}
+          ENVOIX_ANDROID_KEY_ALIAS: ${{ secrets.ENVOIX_ANDROID_KEY_ALIAS }}
+          ENVOIX_ANDROID_KEY_PASSWORD: ${{ secrets.ENVOIX_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: >-
+          ../scripts/with-build-cache-guard.sh
+          ./gradlew
+          :app:assembleRelease
+          :app:bundleRelease
+          :app:cyclonedxDirectBom
+          -Penvoix.requireProductionSigning=true
+          --no-daemon
+          --stacktrace
 
-      - name: Stage APK
+      - name: Remove decoded Android signing key
+        if: always()
+        shell: bash
         run: |
-          mkdir -p dist
-          cp android/app/build/outputs/apk/release/app-release.apk dist/envoix-android.apk
+          if [ -n "${ENVOIX_ANDROID_KEYSTORE_PATH:-}" ]; then
+            rm -f -- "$ENVOIX_ANDROID_KEYSTORE_PATH"
+          fi
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Stage and verify Android packages
+        env:
+          ENVOIX_RELEASE_VERSION: ${{ needs.contract.outputs.version }}
+          ENVOIX_RELEASE_BUILD_NUMBER: ${{ needs.contract.outputs.build_number }}
+          ENVOIX_ANDROID_SIGNING_CERT_SHA256: ${{ vars.ENVOIX_ANDROID_SIGNING_CERT_SHA256 }}
+        shell: bash
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          cargo cyclonedx \
+            --manifest-path crates/envoix-ffi/Cargo.toml \
+            --format json --all --all-features --target all --spec-version 1.5
+          git diff --exit-code -- Cargo.lock
+
+          mkdir -p dist-android
+          cp android/app/build/outputs/apk/release/app-release.apk \
+            dist-android/envoix-android.apk
+          cp android/app/build/outputs/bundle/release/app-release.aab \
+            dist-android/envoix-android.aab
+          cp android/app/build/reports/cyclonedx-direct/envoix-android.cdx.json \
+            dist-android/envoix-android.cdx.json
+          cp crates/envoix-ffi/envoix-ffi.cdx.json \
+            dist-android/envoix-android-rust.cdx.json
+
+          apk=dist-android/envoix-android.apk
+          aab=dist-android/envoix-android.aab
+          apksigner_output="$RUNNER_TEMP/envoix-apksigner.txt"
+          apksigner verify --verbose --print-certs "$apk" >"$apksigner_output"
+          mapfile -t apk_certificates < <(
+            sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$apksigner_output"
+          )
+          if [ "${#apk_certificates[@]}" -ne 1 ]; then
+            echo 'expected exactly one Android APK signer' >&2
+            exit 1
+          fi
+          apk_certificate="$(printf '%s' "${apk_certificates[0]}" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          expected_certificate="$(printf '%s' "$ENVOIX_ANDROID_SIGNING_CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          if ! [[ "$expected_certificate" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'ENVOIX_ANDROID_SIGNING_CERT_SHA256 must contain 64 hex digits' >&2
+            exit 1
+          fi
+          if [ "$apk_certificate" != "$expected_certificate" ]; then
+            echo 'Android APK signing certificate does not match the release policy' >&2
+            exit 1
+          fi
+
+          jarsigner -verify "$aab" >/dev/null
+          aab_certificate="$(
+            keytool -J-Duser.language=en -printcert -jarfile "$aab" \
+              | sed -n 's/^[[:space:]]*SHA256: //p' \
+              | tr -d ':' \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+          if [ "$aab_certificate" != "$expected_certificate" ]; then
+            echo 'Android AAB signing certificate does not match the release policy' >&2
+            exit 1
+          fi
+
+          if [ "$(apkanalyzer manifest application-id "$apk")" != 'dev.envoix.app' ] \
+            || [ "$(apkanalyzer manifest version-code "$apk")" != "$ENVOIX_RELEASE_BUILD_NUMBER" ] \
+            || [ "$(apkanalyzer manifest version-name "$apk")" != "$ENVOIX_RELEASE_VERSION" ]; then
+            echo 'Android package identity or version does not match the release contract' >&2
+            exit 1
+          fi
+
+          python3 scripts/android_release_bundle.py \
+            --directory dist-android \
+            --version "$ENVOIX_RELEASE_VERSION" \
+            --build-number "$ENVOIX_RELEASE_BUILD_NUMBER" \
+            --repository "$GITHUB_REPOSITORY" \
+            --revision "$GITHUB_SHA" \
+            --certificate-sha256 "$expected_certificate"
+
+      - name: Attest Android build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          name: envoix-android.apk
-          path: dist/envoix-android.apk
+          subject-path: |
+            dist-android/envoix-android.apk
+            dist-android/envoix-android.aab
+
+      - name: Attest Android runtime SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist-android/envoix-android.apk
+            dist-android/envoix-android.aab
+          sbom-path: dist-android/envoix-android.cdx.json
+
+      - name: Attest embedded Rust SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist-android/envoix-android.apk
+            dist-android/envoix-android.aab
+          sbom-path: dist-android/envoix-android-rust.cdx.json
+
+      - name: Upload verified Android bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: envoix-android-${{ needs.contract.outputs.version }}
+          path: dist-android/*
           if-no-files-found: error
 
-  release:
-    name: publish release
-    needs: [cli, desktop, android]
+  metadata:
+    name: validate and attest release bundle
+    needs: [contract, cli, broker]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      ENVOIX_RELEASE_VERSION: ${{ needs.contract.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref || github.ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
 
-      - name: Generate checksums
+      - name: Set up pinned Rust
         shell: bash
         run: |
-          cd dist
-          sha256sum * > SHA256SUMS
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - name: Generate reproducible CycloneDX SBOMs
+        shell: bash
+        run: |
+          scripts/with-build-cache-guard.sh \
+            cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          cargo cyclonedx --format json --describe binaries --all \
+            --all-features --target all --spec-version 1.5
+          cp apps/envoix-cli/envoix_bin.cdx.json dist/envoix-cli.cdx.json
+          cp apps/envoix-agent/envoix-agent_bin.cdx.json dist/envoix-agent.cdx.json
+          cp apps/envoix-rendezvous-server/envoix-rendezvous-server_bin.cdx.json \
+            dist/envoix-broker.cdx.json
+          git diff --exit-code -- Cargo.lock
+
+      - name: Validate and describe release bundle
+        shell: bash
+        run: >-
+          python3 scripts/release_bundle.py
+          --directory dist
+          --version "$ENVOIX_RELEASE_VERSION"
+          --repository "$GITHUB_REPOSITORY"
+          --revision "$GITHUB_SHA"
+
+      - name: Attest CLI SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/envoix-cli-*
+          sbom-path: dist/envoix-cli.cdx.json
+
+      - name: Attest Agent SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/envoix-agent-*
+          sbom-path: dist/envoix-agent.cdx.json
+
+      - name: Attest broker SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/envoix-broker-linux-x86_64
+          sbom-path: dist/envoix-broker.cdx.json
+
+      - name: Upload verified release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: envoix-release-${{ needs.contract.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: [contract, metadata, android]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download verified release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: envoix-release-${{ needs.contract.outputs.version }}
+          path: dist
+
+      - name: Download verified Android bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: envoix-android-${{ needs.contract.outputs.version }}
+          path: dist
 
       - name: Publish GitHub Release
         env:

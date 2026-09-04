@@ -10,7 +10,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
-/** The demo's design tokens (see envoix-demo CSS: --accent, --bg, --muted, ...). */
+/** Semantic color roles shared by Envoix native presentations. */
 @Immutable
 data class EnvoixColors(
     val bg: Color,
@@ -26,6 +26,8 @@ data class EnvoixColors(
     val successSoft: Color,
     val warning: Color,
     val danger: Color,
+    val dangerStrong: Color,
+    val dangerSoft: Color,
 )
 
 private val LightColors =
@@ -43,6 +45,8 @@ private val LightColors =
         successSoft = Color(0xFFDDF3E7),
         warning = Color(0xFFA05A00),
         danger = Color(0xFFE74C3C),
+        dangerStrong = Color(0xFFB42318),
+        dangerSoft = Color(0xFFFFF4F2),
     )
 
 private val DarkColors =
@@ -60,6 +64,8 @@ private val DarkColors =
         successSoft = Color(0xFF16362A),
         warning = Color(0xFFFFC166),
         danger = Color(0xFFF07167),
+        dangerStrong = Color(0xFFFFB4AA),
+        dangerSoft = Color(0xFF3A2020),
     )
 
 val LocalEnvoixColors = staticCompositionLocalOf { LightColors }

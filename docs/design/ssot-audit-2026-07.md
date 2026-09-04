@@ -94,8 +94,7 @@ report keys — all well under 64. Align defensively; not a live bug.
 
 | Value | Sites | Owner | Fix |
 |---|---|---|---|
-| Broker `…@67.230.187.238:8445` | `envoix-ffi:30-31` · `TransferRepository.kt:104` · `Support.swift:18` (byte-identical incl. pubkey); port also `rendezvous-server/main.rs:29` | ours+flag | one source exported over FFI / shared consts; Kotlin needs a JNI getter or shared file |
-| Relay `https://envoix.chkxwlyh.us:8444` | `envoix-ffi:33` · `TransferRepository.kt:105` · `Support.swift:19` | ours+flag | same |
+| Broker and relay deployment defaults | `envoix-client/configuration.rs`, exported by `envoixDeploymentEndpoints()` to Swift and Kotlin | ours+flag | **Resolved:** Rust is the single compiled-default source; platform settings retain only explicit user overrides |
 | Invite TTL `300s` | `envoix-client/api.rs:114` (`DEFAULT_INVITE_TTL_SECS`) · `envoix-ffi:28` (`INVITE_TTL_SECS`) | flag | FFI should reference the client const |
 | Snapshot/notice JSON keys (~20) | Rust serde (`driver.rs`, `machine.rs`, `types`) vs Kotlin `optString` literals in `TransferService.kt` | ours | type the JNI boundary (serde) or a golden-JSON fixture test — kills the silent-empty-default class |
 | Timeline envelope | schema `1` (`android-jni/lib.rs` + `TransferTimeline.kt`), target `"envoix::timeline"` (const + ~20 bare literals in `driver.rs`/`transfer/lib.rs`), escaping octets + column order — all duplicated Rust↔Kotlin | ours | shared golden line (Rust emits, Kotlin parses) + Kotlin column test |

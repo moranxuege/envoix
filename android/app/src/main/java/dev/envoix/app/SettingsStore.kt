@@ -4,7 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import dev.envoix.app.discovery.DiscoveryPeerRegistry
-import dev.envoix.app.ui.AppText
+import dev.envoix.app.ffi.setLogLevel
+import dev.envoix.app.ui.AppLanguage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,7 +19,7 @@ import java.util.Locale
  *    folder, default role); never sent to the core.
  */
 data class Settings(
-    val language: String = AppText.ENGLISH,
+    val language: String = AppLanguage.ENGLISH,
     // core connection defaults
     val broker: String = Endpoints.BROKER,
     val relay: String = Endpoints.RELAY,
@@ -62,14 +63,15 @@ object SettingsStore {
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("envoix.settings", Context.MODE_PRIVATE)
+        migrateRetiredDeploymentDefaults()
         _settings.value =
             Settings(
                 language =
                     prefs.getString("language", null)
                         ?: if (Locale.getDefault().language == "zh") {
-                            AppText.SIMPLIFIED_CHINESE
+                            AppLanguage.SIMPLIFIED_CHINESE
                         } else {
-                            AppText.ENGLISH
+                            AppLanguage.ENGLISH
                         },
                 broker = prefs.getString("broker", Endpoints.BROKER)!!,
                 relay = prefs.getString("relay", Endpoints.RELAY)!!,
@@ -94,6 +96,24 @@ object SettingsStore {
                 traceIroh = prefs.getBoolean("traceIroh", false),
                 logServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!,
             )
+    }
+
+    private fun migrateRetiredDeploymentDefaults() {
+        val editor = prefs.edit()
+        var changed = false
+        if (prefs.getString("broker", null) == RETIRED_BROKER) {
+            editor.putString("broker", Endpoints.BROKER)
+            changed = true
+        }
+        if (prefs.getString("relay", null) == RETIRED_RELAY) {
+            editor.putString("relay", Endpoints.RELAY)
+            changed = true
+        }
+        if (prefs.getString("logServer", null) in RETIRED_LOG_SERVERS) {
+            editor.putString("logServer", Endpoints.LOG_SERVER)
+            changed = true
+        }
+        if (changed) editor.apply()
     }
 
     private fun readList(key: String): List<String> =
@@ -154,11 +174,21 @@ object SettingsStore {
     private const val LOG_BASELINE = "envoix=debug,iroh=info,warn"
     private const val LOG_VERBOSE = "envoix=trace,iroh=debug,warn"
     private const val LOG_TRACE_IROH = "envoix=trace,iroh=trace,iroh_relay=debug,netwatch=debug,warn"
+    private const val RETIRED_BROKER =
+        "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
+    private const val RETIRED_RELAY = "https://envoix.chkxwlyh.us:8444"
+    private val RETIRED_LOG_SERVERS =
+        setOf(
+            "http://67.230.187.238:8460",
+            "http://envoix.chkxwlyh.us:8460",
+            "https://envoix.chkxwlyh.us:8460",
+            "https://rdz.chkxwlyh.us:8460",
+        )
 
     /** Push the current verbosity down to the native reloadable filter. -vvv (trace
      *  iroh internals) wins over -vv (verbose) wins over the baseline. */
     fun applyLogLevel() =
-        Native.setLogLevel(
+        setLogLevel(
             when {
                 _settings.value.traceIroh -> LOG_TRACE_IROH
                 _settings.value.verboseLog -> LOG_VERBOSE

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.envoix.app.InviteCodec
 import dev.envoix.app.ParsedInvite
+import dev.envoix.app.R
 import dev.envoix.app.Settings
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.TransferActivityGroup
@@ -28,6 +29,8 @@ internal class ConnectionWorkflowViewModel(
         SettingsStore.settings.value
     },
     clockEpochMs: () -> Long = System::currentTimeMillis,
+    private val invitationActivityReference: (String, String, Boolean) -> String =
+        InviteCodec::activityReference,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(ConnectionWorkflowUiState())
     val uiState: StateFlow<ConnectionWorkflowUiState> = _uiState.asStateFlow()
@@ -399,8 +402,15 @@ internal class ConnectionWorkflowViewModel(
         val transferDraft = _uiState.value.transferDraft ?: return
         if (!transferDraft.preparation.ownershipWasTransferred()) return
         val usedPending = transferDraft.usesPendingAction
+        val activityReference =
+            invitationActivityReference(
+                code,
+                transferDraft.roleAdapter,
+                transferDraft.preparation.generatedInvite.value
+                    ?.reference == code,
+            )
         TransferRepository.assignActivityGroupByRoom(
-            roomReference = code,
+            roomReference = activityReference,
             groupId = TransferActivityGroup.oneTime(room.id),
             groupLabel = room.displayName,
             replaceExisting = true,
@@ -411,7 +421,7 @@ internal class ConnectionWorkflowViewModel(
                     room.copy(
                         pairingInput = if (usedPending) null else room.pairingInput,
                         pendingRoleAdapter = if (usedPending) null else room.pendingRoleAdapter,
-                        transferCodes = room.transferCodes + code,
+                        transferCodes = room.transferCodes + activityReference,
                     ),
                 transferDraft = null,
                 pendingShares =
@@ -449,11 +459,7 @@ internal class ConnectionWorkflowViewModel(
         if (invitation == null || transferReference.isNullOrBlank()) {
             rejectUnusableIncomingOffer(
                 offer,
-                AppText.value(
-                    "This file invitation is invalid or expired.",
-                    "此文件邀请无效或已过期。",
-                    currentSettings().language,
-                ),
+                UiMessage.Resource(R.string.room_file_invitation_invalid),
             )
             return
         }
@@ -461,11 +467,7 @@ internal class ConnectionWorkflowViewModel(
         if (roomEndpoint == null) {
             rejectUnusableIncomingOffer(
                 offer,
-                AppText.value(
-                    "The room route is unavailable. Reconnect before receiving files.",
-                    "房间连接地址不可用，请重新连接后再接收文件。",
-                    currentSettings().language,
-                ),
+                UiMessage.Resource(R.string.room_route_unavailable),
             )
             return
         }
@@ -475,11 +477,7 @@ internal class ConnectionWorkflowViewModel(
         if (!belongsToRoom) {
             rejectUnusableIncomingOffer(
                 offer,
-                AppText.value(
-                    "This file offer does not belong to the current room.",
-                    "此文件邀请不属于当前房间。",
-                    currentSettings().language,
-                ),
+                UiMessage.Resource(R.string.room_file_offer_wrong_room),
             )
             return
         }
@@ -494,7 +492,7 @@ internal class ConnectionWorkflowViewModel(
             }
             if (startError != null) {
                 if (receiveId >= 0L) onCancelReceive(receiveId)
-                rejectUnusableIncomingOffer(offer, startError)
+                rejectUnusableIncomingOffer(offer, UiMessage.Dynamic(startError))
                 return@receiveCompletion
             }
             val room = _uiState.value.room
@@ -527,7 +525,7 @@ internal class ConnectionWorkflowViewModel(
             if (!receiveCompletionInvoked && attempt == incomingOfferAttempt) {
                 rejectUnusableIncomingOffer(
                     offer,
-                    error.message ?: "The receiver could not start",
+                    UiMessage.Dynamic(error.message ?: "The receiver could not start"),
                 )
             }
         }
@@ -535,13 +533,15 @@ internal class ConnectionWorkflowViewModel(
 
     private fun rejectUnusableIncomingOffer(
         offer: RoomTransferOffer,
-        message: String,
+        message: UiMessage,
     ) {
         controlWorkflow.respondToOffer(
             offerId = offer.id,
             accept = false,
             completion = { responseError ->
-                controlWorkflow.showError(responseError ?: message)
+                controlWorkflow.showError(
+                    responseError?.let { UiMessage.Dynamic(it) } ?: message,
+                )
             },
         )
     }

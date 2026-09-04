@@ -1,0 +1,393 @@
+{
+  "contract_version": 3,
+  "commands": [
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0001",
+      "command": {
+        "command": "create_room"
+      }
+    },
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0002",
+      "command": {
+        "command": "join_room",
+        "invitation": "envoix://fixture.invalid/expired"
+      }
+    },
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0003",
+      "command": {
+        "command": "verify_pairing",
+        "room_id": "room_fixture_0001",
+        "verification_code": "000000"
+      }
+    },
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0004",
+      "command": {
+        "command": "reconnect_relationship",
+        "relationship_id": "rel_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0005",
+      "command": {
+        "command": "create_transfer",
+        "relationship_id": "rel_fixture_0001",
+        "content_id": "content_fixture_0001",
+        "direction": "send"
+      }
+    },
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0006",
+      "command": {
+        "command": "pause_transfer",
+        "transfer_id": "transfer_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0007",
+      "command": {
+        "command": "resume_transfer",
+        "transfer_id": "transfer_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0008",
+      "command": {
+        "command": "cancel_transfer",
+        "transfer_id": "transfer_fixture_0003"
+      }
+    },
+    {
+      "contract_version": 3,
+      "command_id": "command_fixture_0009",
+      "command": {
+        "command": "revoke_relationship",
+        "relationship_id": "rel_fixture_0001"
+      }
+    }
+  ],
+  "events": [
+    {
+      "contract_version": 3,
+      "sequence": 1,
+      "event": {
+        "event": "capabilities_changed",
+        "capabilities": {
+          "values": {
+            "secure_vault": "available",
+            "file_source": "available",
+            "file_destination": "available",
+            "nearby_discovery": "limited",
+            "clipboard_read": "limited",
+            "clipboard_write": "available",
+            "background_execution": "limited",
+            "notifications": "unavailable"
+          }
+        }
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 2,
+      "event": {
+        "event": "device_observed",
+        "device_id": "dev_fixture_0001",
+        "display_name": "Fixture Device"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 3,
+      "event": {
+        "event": "relationship_trusted",
+        "relationship_id": "rel_fixture_0001",
+        "device_id": "dev_fixture_0001",
+        "generation": 4
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 4,
+      "event": {
+        "event": "room_opened",
+        "room_id": "room_fixture_0001",
+        "relationship_id": "rel_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 5,
+      "event": {
+        "event": "room_peer_admitted",
+        "room_id": "room_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 6,
+      "event": {
+        "event": "room_authenticated",
+        "room_id": "room_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 7,
+      "event": {
+        "event": "transfer_created",
+        "transfer_id": "transfer_fixture_0001",
+        "relationship_id": "rel_fixture_0001",
+        "room_id": "room_fixture_0001",
+        "content_id": "content_fixture_0001",
+        "direction": "send",
+        "total_bytes": 42
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 8,
+      "event": {
+        "event": "transfer_started",
+        "transfer_id": "transfer_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 9,
+      "event": {
+        "event": "transfer_progressed",
+        "transfer_id": "transfer_fixture_0001",
+        "transferred_bytes": 21
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 10,
+      "event": {
+        "event": "transfer_paused",
+        "transfer_id": "transfer_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 11,
+      "event": {
+        "event": "transfer_resumed",
+        "transfer_id": "transfer_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 12,
+      "event": {
+        "event": "transfer_progressed",
+        "transfer_id": "transfer_fixture_0001",
+        "transferred_bytes": 42
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 13,
+      "event": {
+        "event": "transfer_delivered",
+        "transfer_id": "transfer_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 14,
+      "event": {
+        "event": "transfer_created",
+        "transfer_id": "transfer_fixture_0002",
+        "relationship_id": "rel_fixture_0001",
+        "room_id": "room_fixture_0001",
+        "content_id": "content_fixture_0002",
+        "direction": "receive",
+        "total_bytes": 7
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 15,
+      "event": {
+        "event": "transfer_failed",
+        "transfer_id": "transfer_fixture_0002",
+        "failure": {
+          "code": "network_lost",
+          "phase": "connecting",
+          "retryable": true,
+          "recovery_action": "retry"
+        }
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 16,
+      "event": {
+        "event": "transfer_created",
+        "transfer_id": "transfer_fixture_0003",
+        "relationship_id": "rel_fixture_0001",
+        "room_id": "room_fixture_0001",
+        "content_id": "content_fixture_0003",
+        "direction": "send",
+        "total_bytes": 9
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 17,
+      "event": {
+        "event": "transfer_canceled",
+        "transfer_id": "transfer_fixture_0003"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 18,
+      "event": {
+        "event": "room_opened",
+        "room_id": "room_fixture_0002",
+        "relationship_id": "rel_fixture_0001",
+        "replaces_room_id": "room_fixture_0001"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 19,
+      "event": {
+        "event": "room_peer_admitted",
+        "room_id": "room_fixture_0002"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 20,
+      "event": {
+        "event": "room_authenticated",
+        "room_id": "room_fixture_0002"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 21,
+      "event": {
+        "event": "room_closed",
+        "room_id": "room_fixture_0002",
+        "reason": "user_ended"
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 22,
+      "event": {
+        "event": "relationship_rotated",
+        "relationship_id": "rel_fixture_0001",
+        "generation": 5
+      }
+    },
+    {
+      "contract_version": 3,
+      "sequence": 23,
+      "event": {
+        "event": "relationship_revoked",
+        "relationship_id": "rel_fixture_0001"
+      }
+    }
+  ],
+  "snapshot": {
+    "contract_version": 3,
+    "last_sequence": 23,
+    "capabilities": {
+      "values": {
+        "secure_vault": "available",
+        "file_source": "available",
+        "file_destination": "available",
+        "nearby_discovery": "limited",
+        "clipboard_read": "limited",
+        "clipboard_write": "available",
+        "background_execution": "limited",
+        "notifications": "unavailable"
+      }
+    },
+    "devices": {
+      "dev_fixture_0001": {
+        "id": "dev_fixture_0001",
+        "display_name": "Fixture Device"
+      }
+    },
+    "relationships": {
+      "rel_fixture_0001": {
+        "id": "rel_fixture_0001",
+        "device_id": "dev_fixture_0001",
+        "generation": 5,
+        "state": "revoked",
+        "previous_generation": 4
+      }
+    },
+    "rooms": {
+      "room_fixture_0001": {
+        "id": "room_fixture_0001",
+        "relationship_id": "rel_fixture_0001",
+        "state": "closed",
+        "close_reason": "replaced",
+        "replacement_room_id": "room_fixture_0002"
+      },
+      "room_fixture_0002": {
+        "id": "room_fixture_0002",
+        "relationship_id": "rel_fixture_0001",
+        "state": "closed",
+        "close_reason": "user_ended"
+      }
+    },
+    "transfers": {
+      "transfer_fixture_0001": {
+        "id": "transfer_fixture_0001",
+        "relationship_id": "rel_fixture_0001",
+        "room_id": "room_fixture_0001",
+        "content_id": "content_fixture_0001",
+        "direction": "send",
+        "state": "delivered",
+        "transferred_bytes": 42,
+        "total_bytes": 42,
+        "failure": null
+      },
+      "transfer_fixture_0002": {
+        "id": "transfer_fixture_0002",
+        "relationship_id": "rel_fixture_0001",
+        "room_id": "room_fixture_0001",
+        "content_id": "content_fixture_0002",
+        "direction": "receive",
+        "state": "failed",
+        "transferred_bytes": 0,
+        "total_bytes": 7,
+        "failure": {
+          "code": "network_lost",
+          "phase": "connecting",
+          "retryable": true,
+          "recovery_action": "retry"
+        }
+      },
+      "transfer_fixture_0003": {
+        "id": "transfer_fixture_0003",
+        "relationship_id": "rel_fixture_0001",
+        "room_id": "room_fixture_0001",
+        "content_id": "content_fixture_0003",
+        "direction": "send",
+        "state": "canceled",
+        "transferred_bytes": 0,
+        "total_bytes": 9,
+        "failure": null
+      }
+    }
+  }
+}

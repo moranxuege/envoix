@@ -5,14 +5,6 @@ import AppKit
 import UniformTypeIdentifiers
 import EnvoixCore
 
-private final class SelectedResourceAccessGroup {
-    private let resources: [AnyObject]
-
-    init(_ resources: [AnyObject]) {
-        self.resources = resources
-    }
-}
-
 func sendSelectionContainsDirectory(_ urls: [URL]) -> Bool {
     guard urls.count == 1, let url = urls.first else { return false }
     let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
@@ -215,8 +207,12 @@ struct SendView: View {
             primaryButton
                 .padding(.top, 12)
         }
+        .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onAppear(perform: applyInitialPairingInputIfNeeded)
         .onAppear(perform: prepareCurrentSelectionIfNeeded)
+        .onChange(of: model.pendingSendSelection?.id) { _ in
+            adoptSharedSelectionIfAvailable()
+        }
         .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
             adoptPreparedManifestPaths(paths)
         }
@@ -300,7 +296,10 @@ struct SendView: View {
     #if os(macOS)
     private var rememberedPeerSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value("Remembered devices", "已记住的设备", language: uiLanguage))
+            Text(AppText.localized(
+                "transfer.pairing.remembered_devices",
+                language: uiLanguage
+            ))
                 .font(.headline.weight(.semibold))
             ForEach(rememberedPeers) { peer in
                 HStack {
@@ -322,9 +321,8 @@ struct SendView: View {
                         Image(systemName: "trash")
                     }
                     .disabled(viewModel.isBusy)
-                    .accessibilityLabel(AppText.value(
-                        "Forget device",
-                        "忘记设备",
+                    .accessibilityLabel(AppText.localized(
+                        "transfer.pairing.forget_device",
                         language: uiLanguage
                     ))
                 }
@@ -337,13 +335,13 @@ struct SendView: View {
     private var rememberConsentSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle(
-                AppText.value("Remember this device", "记住此设备", language: uiLanguage),
+                AppText.localized("transfer.pairing.remember_device", language: uiLanguage),
                 isOn: $rememberAfterPairing
             )
             .disabled(viewModel.isBusy)
             if rememberAfterPairing {
                 TextField(
-                    AppText.value("Device label", "设备名称", language: uiLanguage),
+                    AppText.localized("transfer.pairing.device_label", language: uiLanguage),
                     text: $rememberLabel
                 )
                 .textFieldStyle(.roundedBorder)
@@ -357,11 +355,7 @@ struct SendView: View {
         #if os(iOS)
         VStack(alignment: .leading, spacing: 14) {
             PairingPanelSelector(selection: $pairingPanel, disabled: viewModel.isBusy)
-            Text(AppText.value(
-                "Show your send QR, or scan the other device's receive QR.",
-                "可以显示本机发送码，也可以扫描另一台设备的接收码。",
-                language: uiLanguage
-            ))
+            Text(TransferPairingText.guidance(direction: .send, language: uiLanguage))
             .font(.footnote)
             .foregroundStyle(Theme.muted)
             .fixedSize(horizontal: false, vertical: true)
@@ -373,13 +367,22 @@ struct SendView: View {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: 48, weight: .medium))
                             .foregroundStyle(Theme.accentStrong)
-                        Text(AppText.value("Scan a receive QR", "扫描接收码", language: uiLanguage))
+                        Text(TransferPairingText.scanPrompt(
+                            direction: .send,
+                            language: uiLanguage
+                        ))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
                         Button {
                             isQRScannerPresented = true
                         } label: {
-                            Label(AppText.value("Open scanner", "打开扫描器", language: uiLanguage), systemImage: "camera")
+                            Label(
+                                AppText.localized(
+                                    "transfer.pairing.open_scanner",
+                                    language: uiLanguage
+                                ),
+                                systemImage: "camera"
+                            )
                                 .frame(maxWidth: .infinity, minHeight: 48)
                         }
                         .buttonStyle(.borderedProminent)
@@ -392,10 +395,16 @@ struct SendView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 42))
                             .foregroundStyle(Theme.success)
-                        Text(AppText.value("InviteV2 link ready", "InviteV2 链接已就绪", language: uiLanguage))
+                        Text(AppText.localized(
+                            "transfer.pairing.link_ready",
+                            language: uiLanguage
+                        ))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
-                        Button(AppText.value("Clear and show my QR", "清除并显示我的二维码", language: uiLanguage)) {
+                        Button(AppText.localized(
+                            "transfer.pairing.clear_show_qr",
+                            language: uiLanguage
+                        )) {
                             invite = ""
                         }
                         .buttonStyle(.bordered)
@@ -405,7 +414,10 @@ struct SendView: View {
                     VStack(spacing: 12) {
                         if let image = roomQRCodeImage {
                             QRCard(image: image, size: 184)
-                                .accessibilityLabel(AppText.value("Send QR code", "发送二维码", language: uiLanguage))
+                                .accessibilityLabel(TransferPairingText.qrAccessibility(
+                                    direction: .send,
+                                    language: uiLanguage
+                                ))
                                 .accessibilityIdentifier("send_room_qr")
                         } else {
                             qrPlaceholder
@@ -413,12 +425,18 @@ struct SendView: View {
                         Button {
                             copyWithToast(
                                 pairingInvite?.payload ?? "",
-                                AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                                AppText.localized(
+                                    "transfer.pairing.link_copied",
+                                    language: uiLanguage
+                                ),
                                 language: uiLanguage
                             )
                         } label: {
                             Label(
-                                AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage),
+                                AppText.localized(
+                                    "transfer.pairing.copy_link",
+                                    language: uiLanguage
+                                ),
                                 systemImage: "doc.on.doc"
                             )
                             .frame(maxWidth: .infinity, minHeight: 40)
@@ -434,7 +452,10 @@ struct SendView: View {
             RoomCodeField(
                 code: inviteBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Or enter a complete InviteV2 link", "或输入完整 InviteV2 链接", language: uiLanguage),
+                title: AppText.localized(
+                    "transfer.pairing.enter_complete_link",
+                    language: uiLanguage
+                ),
                 placeholder: "envoix://invite/v2/…",
                 pasteAction: pastePairingInput,
                 helper: "",
@@ -445,12 +466,14 @@ struct SendView: View {
         #else
         VStack(alignment: .center, spacing: 16) {
             VStack(spacing: 4) {
-                Text(AppText.value("Share this QR or invite link", "分享二维码或邀请链接", language: uiLanguage))
+                Text(AppText.localized(
+                    "transfer.pairing.share_title",
+                    language: uiLanguage
+                ))
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value(
-                    "The receiver can scan this QR or paste the complete InviteV2 link. You can also scan a receiver QR below.",
-                    "接收端可以扫描此二维码或粘贴完整 InviteV2 链接；你也可以在下方扫描接收端二维码。",
+                Text(TransferPairingText.desktopDetail(
+                    direction: .send,
                     language: uiLanguage
                 ))
                 .font(.body)
@@ -460,7 +483,10 @@ struct SendView: View {
 
             if let image = roomQRCodeImage {
                 QRCard(image: image, size: 208)
-                    .accessibilityLabel(AppText.value("Send QR code", "发送二维码", language: uiLanguage))
+                    .accessibilityLabel(TransferPairingText.qrAccessibility(
+                        direction: .send,
+                        language: uiLanguage
+                    ))
                     .accessibilityIdentifier("send_room_qr")
             } else {
                 qrPlaceholder
@@ -470,11 +496,17 @@ struct SendView: View {
                 Button {
                     copyWithToast(
                         pairingInvite?.payload ?? "",
-                        AppText.value("Invite link copied", "邀请链接已复制", language: uiLanguage),
+                        AppText.localized(
+                            "transfer.pairing.link_copied",
+                            language: uiLanguage
+                        ),
                         language: uiLanguage
                     )
                 } label: {
-                    Label(AppText.value("Copy invite link", "复制邀请链接", language: uiLanguage), systemImage: "doc.on.doc")
+                    Label(
+                        AppText.localized("transfer.pairing.copy_link", language: uiLanguage),
+                        systemImage: "doc.on.doc"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -484,7 +516,10 @@ struct SendView: View {
                     invite = ""
                     refreshPairingInvite()
                 } label: {
-                    Label(AppText.value("New", "新建", language: uiLanguage), systemImage: "arrow.clockwise")
+                    Label(
+                        AppText.localized("common.new", language: uiLanguage),
+                        systemImage: "arrow.clockwise"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -495,9 +530,15 @@ struct SendView: View {
             RoomCodeField(
                 code: inviteBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Join receiver instead", "改为加入接收端", language: uiLanguage),
+                title: TransferPairingText.joinOtherTitle(
+                    direction: .send,
+                    language: uiLanguage
+                ),
                 placeholder: "envoix://invite/v2/…",
-                helper: AppText.value("Enter the receiver's complete InviteV2 link, or leave empty to use your QR above.", "输入接收端的完整 InviteV2 链接，或留空使用上方二维码。", language: uiLanguage),
+                helper: AppText.localized(
+                    "transfer.pairing.send.join_receiver_helper",
+                    language: uiLanguage
+                ),
                 accessibilityIdentifier: "send_invite_input"
             )
 
@@ -505,7 +546,10 @@ struct SendView: View {
                 Button {
                     pastePairingInput()
                 } label: {
-                    Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
+                    Label(
+                        AppText.localized("common.paste", language: uiLanguage),
+                        systemImage: "doc.on.clipboard"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -515,7 +559,13 @@ struct SendView: View {
                 Button {
                     isQRScannerPresented = true
                 } label: {
-                    Label(AppText.value("Scan QR", "扫码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                    Label(
+                        TransferPairingText.scanAction(
+                            direction: .send,
+                            language: uiLanguage
+                        ),
+                        systemImage: "qrcode.viewfinder"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -538,7 +588,10 @@ struct SendView: View {
 
     @ViewBuilder private var footerMessage: some View {
         if concurrencyBlocked {
-            Text(AppText.value("Finish receiving before starting a send.", "请先完成接收任务，再开始发送。", language: uiLanguage))
+            Text(AppText.localized(
+                "send.concurrent.finish_receive",
+                language: uiLanguage
+            ))
                 .font(.callout)
                 .foregroundStyle(Theme.muted)
                 .padding(.bottom, 8)
@@ -597,7 +650,7 @@ struct SendView: View {
 
     private var fileSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(AppText.value("Items to send", "要发送的项目", language: uiLanguage))
+            Text(AppText.localized("send.selection.title", language: uiLanguage))
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.text)
             #if os(iOS)
@@ -607,9 +660,9 @@ struct SendView: View {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
-                    Text(AppText.value(
-                        "Preparing photo \(photoImportItemNumber) of \(photoImportItemCount)…",
-                        "正在准备第 \(photoImportItemNumber)/\(photoImportItemCount) 个照片项目…",
+                    Text(SendPresentationText.photoImportProgress(
+                        itemNumber: photoImportItemNumber,
+                        itemCount: photoImportItemCount,
                         language: uiLanguage
                     ))
                     .font(.footnote)
@@ -640,6 +693,16 @@ struct SendView: View {
             .disabled(viewModel.isBusy)
             .accessibilityIdentifier("send_file_picker")
             .accessibilityValue(String(selectedItems.count))
+            Button(action: pasteClipboardSelection) {
+                Label(
+                    AppText.localized("send.selection.clipboard_action", language: uiLanguage),
+                    systemImage: "doc.on.clipboard"
+                )
+                .frame(maxWidth: .infinity, minHeight: 36)
+            }
+            .buttonStyle(.bordered)
+            .disabled(selectionMutationDisabled)
+            .accessibilityIdentifier("send_clipboard_paste")
             preparationState
             preparedItems
             #endif
@@ -676,9 +739,8 @@ struct SendView: View {
             HStack(spacing: 10) {
                 ProgressView()
                     .controlSize(.small)
-                Text(AppText.value(
-                    "Reading and validating the selected items…",
-                    "正在读取并验证所选项目…",
+                Text(AppText.localized(
+                    "send.selection.preparing",
                     language: uiLanguage
                 ))
                 .font(.footnote)
@@ -729,9 +791,8 @@ struct SendView: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(Theme.danger)
                         .disabled(viewModel.isPreparingManifest || viewModel.isBusy)
-                        .accessibilityLabel(AppText.value(
-                            "Remove \(item.name)",
-                            "移除 \(item.name)",
+                        .accessibilityLabel(SendPresentationText.removeItem(
+                            item.name,
                             language: uiLanguage
                         ))
                         .accessibilityIdentifier("remove_prepared_source_\(item.rootItemId)")
@@ -743,9 +804,8 @@ struct SendView: View {
                     .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 9))
                 }
                 if summary.rootCount > 6 {
-                    Text(AppText.value(
-                        "\(summary.rootCount - 6) more top-level items are included.",
-                        "还包含 \(summary.rootCount - 6) 个顶层项目。",
+                    Text(SendPresentationText.additionalTopLevelItems(
+                        Int(summary.rootCount - 6),
                         language: uiLanguage
                     ))
                     .font(.footnote)
@@ -761,7 +821,10 @@ struct SendView: View {
         if !viewModel.pendingSourceSelections.isEmpty {
             Divider().overlay(Theme.line)
             VStack(alignment: .leading, spacing: 10) {
-                Text(AppText.value("Source access decision", "来源访问决定", language: uiLanguage))
+                Text(AppText.localized(
+                    "send.selection.source_access.title",
+                    language: uiLanguage
+                ))
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(Theme.text)
                 ForEach(viewModel.pendingSourceSelections, id: \.rootItemId) { selection in
@@ -770,30 +833,27 @@ struct SendView: View {
                             .font(.body.weight(.semibold))
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Text(AppText.value(
-                            "Some descendants could not be read. Send only accessible content or remove this root.",
-                            "部分子项目无法读取。你可以仅发送可访问内容，或移除此根项目。",
+                        Text(AppText.localized(
+                            "send.selection.source_access.detail",
                             language: uiLanguage
                         ))
                         .font(.footnote)
                         .foregroundStyle(Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
                         HStack {
-                            Button(AppText.value(
-                                "Send accessible content",
-                                "发送可访问内容",
+                            Button(AppText.localized(
+                                "send.selection.source_access.approve",
                                 language: uiLanguage
                             )) {
                                 viewModel.approvePartialManifestSource(rootItemID: selection.rootItemId)
                             }
                             .buttonStyle(.borderedProminent)
-                            Button(AppText.value("Remove", "移除", language: uiLanguage)) {
+                            Button(AppText.localized("common.remove", language: uiLanguage)) {
                                 viewModel.removeManifestSource(rootItemID: selection.rootItemId)
                             }
                             .buttonStyle(.bordered)
-                            .accessibilityLabel(AppText.value(
-                                "Remove \(selection.requestedName)",
-                                "移除 \(selection.requestedName)",
+                            .accessibilityLabel(SendPresentationText.removeItem(
+                                selection.requestedName,
                                 language: uiLanguage
                             ))
                         }
@@ -804,15 +864,12 @@ struct SendView: View {
     }
 
     private func preparedInventorySummaryText(_ summary: FfiInventorySummaryV2) -> String {
-        let base = AppText.value(
-            "\(summary.rootCount) roots · \(summary.fileCount) files · \(summary.directoryCount) folders · \(byteString(summary.totalPlaintextBytes))",
-            "\(summary.rootCount) 个根项目 · \(summary.fileCount) 个文件 · \(summary.directoryCount) 个文件夹 · \(byteString(summary.totalPlaintextBytes))",
-            language: uiLanguage
-        )
-        guard summary.warningCount > 0 else { return base }
-        return base + AppText.value(
-            " · \(summary.warningCount) warnings",
-            " · \(summary.warningCount) 个警告",
+        SendPresentationText.inventorySummary(
+            rootCount: summary.rootCount,
+            fileCount: summary.fileCount,
+            folderCount: summary.directoryCount,
+            warningCount: summary.warningCount,
+            byteDescription: byteString(summary.totalPlaintextBytes),
             language: uiLanguage
         )
     }
@@ -831,15 +888,13 @@ struct SendView: View {
 
     private var selectionGuidance: String {
         #if os(iOS)
-        AppText.value(
-            "Choose Photos, files, or one or more folders. Folder structure is preserved.",
-            "可选择照片、文件或一个或多个文件夹；目录结构会完整保留。",
+        SendPresentationText.guidance(
+            platform: .mobile,
             language: uiLanguage
         )
         #else
-        AppText.value(
-            "Choose one or more files or folders. Folder structure is preserved.",
-            "可选择一个或多个文件或文件夹；目录结构会完整保留。",
+        SendPresentationText.guidance(
+            platform: .desktop,
             language: uiLanguage
         )
         #endif
@@ -871,7 +926,7 @@ struct SendView: View {
     private var selectionSourceActions: some View {
         HStack(spacing: 10) {
             selectionSourceAction(
-                AppText.value("Photos", "照片", language: uiLanguage),
+                AppText.localized("send.selection.source.photos", language: uiLanguage),
                 systemImage: "photo.on.rectangle",
                 identifier: "send_photo_picker"
             ) {
@@ -879,7 +934,7 @@ struct SendView: View {
                 isPhotoPickerPresented = true
             }
             selectionSourceAction(
-                AppText.value("Files", "文件", language: uiLanguage),
+                AppText.localized("send.selection.source.files", language: uiLanguage),
                 systemImage: "doc.badge.plus",
                 identifier: "send_file_picker"
             ) {
@@ -887,7 +942,7 @@ struct SendView: View {
                 isFileImporterPresented = true
             }
             selectionSourceAction(
-                AppText.value("Folder", "文件夹", language: uiLanguage),
+                AppText.localized("send.selection.source.folder", language: uiLanguage),
                 systemImage: "folder.badge.plus",
                 identifier: "send_folder_picker"
             ) {
@@ -988,7 +1043,10 @@ struct SendView: View {
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
-            TextField(AppText.value("Paste an absolute file path here", "在这里粘贴绝对文件路径", language: uiLanguage), text: $filePathInput)
+            TextField(
+                AppText.localized("send.path.placeholder", language: uiLanguage),
+                text: $filePathInput
+            )
                 .textFieldStyle(.plain)
                 .font(.callout.monospaced())
                 .foregroundStyle(Theme.text)
@@ -996,7 +1054,10 @@ struct SendView: View {
                 .disabled(viewModel.isBusy)
 
             Button(action: applyPathInput) {
-                Label(AppText.value("Use Path", "使用路径", language: uiLanguage), systemImage: "checkmark")
+                Label(
+                    AppText.localized("send.path.use", language: uiLanguage),
+                    systemImage: "checkmark"
+                )
                     .labelStyle(.iconOnly)
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
@@ -1004,17 +1065,20 @@ struct SendView: View {
             .buttonStyle(.plain)
             .foregroundStyle(filePathInput.trimmed.isEmpty ? Theme.muted : Theme.accentStrong)
             .disabled(viewModel.isBusy || filePathInput.trimmed.isEmpty)
-            .help(AppText.value("Use pasted path", "使用粘贴的路径", language: uiLanguage))
+            .help(AppText.localized("send.path.use_help", language: uiLanguage))
 
             Button {
                 let paths = selectedItems.map(\.path).joined(separator: "\n")
                 copyWithToast(
                     paths,
-                    AppText.value("Selected paths copied", "已复制所选路径", language: uiLanguage),
+                    AppText.localized("send.path.copied", language: uiLanguage),
                     language: uiLanguage
                 )
             } label: {
-                Label(AppText.value("Copy Selected Paths", "复制已选路径", language: uiLanguage), systemImage: "doc.on.doc")
+                Label(
+                    AppText.localized("send.path.copy", language: uiLanguage),
+                    systemImage: "doc.on.doc"
+                )
                     .labelStyle(.iconOnly)
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
@@ -1022,7 +1086,7 @@ struct SendView: View {
             .buttonStyle(.plain)
             .foregroundStyle(selectedItems.isEmpty ? Theme.muted : Theme.accentStrong)
             .disabled(selectedItems.isEmpty)
-            .help(AppText.value("Copy selected paths", "复制所选路径", language: uiLanguage))
+            .help(AppText.localized("send.path.copy_help", language: uiLanguage))
         }
         .padding(.horizontal, 10)
         .frame(minHeight: 44)
@@ -1037,10 +1101,13 @@ struct SendView: View {
     private var inviteSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(AppText.value("Receiver invite link", "接收端邀请链接", language: uiLanguage))
+                Text(AppText.localized("send.invite.receiver_link_title", language: uiLanguage))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value("Paste the link or QR result from the receiving device.", "粘贴接收端生成的链接或二维码内容。", language: uiLanguage))
+                Text(AppText.localized(
+                    "send.invite.receiver_link_detail",
+                    language: uiLanguage
+                ))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
             }
@@ -1053,7 +1120,10 @@ struct SendView: View {
                 Button {
                     pastePairingInput()
                 } label: {
-                    Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
+                    Label(
+                        AppText.localized("common.paste", language: uiLanguage),
+                        systemImage: "doc.on.clipboard"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -1062,7 +1132,13 @@ struct SendView: View {
                 Button {
                     isQRScannerPresented = true
                 } label: {
-                    Label(AppText.value("Scan", "扫码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                    Label(
+                        TransferPairingText.scanAction(
+                            direction: .send,
+                            language: uiLanguage
+                        ),
+                        systemImage: "qrcode.viewfinder"
+                    )
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -1086,7 +1162,7 @@ struct SendView: View {
             Image(systemName: "qrcode")
                 .font(.system(size: 72, weight: .medium))
                 .foregroundStyle(Theme.muted)
-            Text(AppText.value("QR code", "二维码", language: uiLanguage))
+            Text(AppText.localized("transfer.pairing.qr_placeholder", language: uiLanguage))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
         }
@@ -1110,7 +1186,10 @@ struct SendView: View {
 
     private func pastePairingInput() {
         guard let value = pasteboardString()?.trimmed, !value.isEmpty else {
-            ToastCenter.shared.show(AppText.value("Clipboard is empty", "剪贴板为空", language: uiLanguage))
+            ToastCenter.shared.show(AppText.localized(
+                "transfer.pairing.clipboard_empty",
+                language: uiLanguage
+            ))
             return
         }
         _ = applyPairingInput(value, source: .paste)
@@ -1121,20 +1200,23 @@ struct SendView: View {
         let input = value.trimmed
         do {
             guard input.hasPrefix(inviteV2URLPrefix) else {
-                throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                throw RuntimeSettingsError(AppText.localized(
+                    "transfer.pairing.enter_complete_error",
+                    language: uiLanguage
+                ))
             }
             _ = try parsePairingInviteForRole(input: input, localRole: .send)
             invite = input
             mode = .invite
-            let message = source == .scan
-                ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
-                : AppText.value("Invitation pasted", "邀请已粘贴", language: uiLanguage)
+            let message = TransferPairingText.inputAccepted(
+                scanned: source == .scan,
+                language: uiLanguage
+            )
             ToastCenter.shared.show(message)
             return nil
         } catch {
-            let message = AppText.value(
-                "This is not a valid complete Envoix InviteV2 link.",
-                "这不是有效的完整 Envoix InviteV2 链接。",
+            let message = AppText.localized(
+                "transfer.pairing.invalid_link",
                 language: uiLanguage
             )
             ToastCenter.shared.show(message)
@@ -1213,23 +1295,15 @@ struct SendView: View {
     }
 
     private var primaryLabel: String {
-        if viewModel.isPreparingManifest {
-            return AppText.value("Cancel Preparation", "取消准备", language: uiLanguage)
-        }
-        if nearbyInviteDelivery.isDelivering {
-            return AppText.value("Delivering Invitation…", "正在发送邀请码…", language: uiLanguage)
-        }
-        if pendingRoomOfferID != nil {
-            return AppText.value("Waiting for acceptance…", "正在等待对方接受…", language: uiLanguage)
-        }
-        if isQueueingRememberedRoom {
-            return AppText.value("Adding to room…", "正在加入房间队列…", language: uiLanguage)
-        }
-        if viewModel.isBusy { return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage) }
-        if rememberedRoomRelationshipID != nil {
-            return AppText.value("Add to room", "加入房间队列", language: uiLanguage)
-        }
-        return AppText.value("Send", "发送", language: uiLanguage)
+        SendPresentationText.primaryAction(
+            isPreparingManifest: viewModel.isPreparingManifest,
+            isDeliveringInvitation: nearbyInviteDelivery.isDelivering,
+            isWaitingForAcceptance: pendingRoomOfferID != nil,
+            isAddingToRoom: isQueueingRememberedRoom,
+            isBusy: viewModel.isBusy,
+            canAddToRoom: rememberedRoomRelationshipID != nil,
+            language: uiLanguage
+        )
     }
 
     private var isPhotoImporting: Bool {
@@ -1283,51 +1357,29 @@ struct SendView: View {
     }
 
     private var invalidSelectionMessage: String {
-        AppText.value(
-            "Choose regular files or folders. Links and special items are not supported.",
-            "请选择普通文件或文件夹；暂不支持链接和特殊项目。",
+        AppText.localized("send.selection.error.unsupported_item", language: uiLanguage)
+    }
+
+    private var selectionTitle: String {
+        SendPresentationText.selectionTitle(
+            itemCount: selectedItems.count,
+            singleItemName: selectedItems.first?.lastPathComponent,
             language: uiLanguage
         )
     }
 
-    private var selectionTitle: String {
-        switch selectedItems.count {
-        case 0:
-            return AppText.value("Choose files or folders", "选择文件或文件夹", language: uiLanguage)
-        case 1:
-            return selectedItems[0].lastPathComponent
-        default:
-            return AppText.value(
-                "\(selectedItems.count) items selected",
-                "已选择 \(selectedItems.count) 个项目",
-                language: uiLanguage
-            )
-        }
-    }
-
     private var selectionSubtitle: String {
-        switch selectedItems.count {
-        case 0:
-            #if os(iOS)
-            return AppText.value("Tap to open Files.", "点击打开文件。", language: uiLanguage)
-            #else
-            return AppText.value(
-                "Drop files or folders here, or click to choose.",
-                "把文件或文件夹拖到这里，或点击选择。",
-                language: uiLanguage
-            )
-            #endif
-        case 1 where sendSelectionContainsDirectory(selectedItems):
-            return AppText.value("Folder structure will be preserved.", "将完整保留文件夹结构。", language: uiLanguage)
-        case 1:
-            #if os(iOS)
-            return AppText.value("Ready to send.", "已准备发送。", language: uiLanguage)
-            #else
-            return AppText.value("Ready to send. Click to replace.", "已准备发送，点击可替换。", language: uiLanguage)
-            #endif
-        default:
-            return AppText.value("These items will be sent together.", "这些项目将作为一批发送。", language: uiLanguage)
-        }
+        #if os(iOS)
+        let platform = SendPresentationPlatform.mobile
+        #else
+        let platform = SendPresentationPlatform.desktop
+        #endif
+        return SendPresentationText.selectionSubtitle(
+            itemCount: selectedItems.count,
+            singleItemIsDirectory: sendSelectionContainsDirectory(selectedItems),
+            platform: platform,
+            language: uiLanguage
+        )
     }
 
     private var selectionIcon: String {
@@ -1365,6 +1417,8 @@ struct SendView: View {
             accepted.append(standardized)
         }
         guard !accepted.isEmpty else { return false }
+        let supersededDraftID = viewModel.preparedShareDraftID
+        let supersededDraft = selectedSourceAccess as? ShareDraftLease
         selectedSourceAccess = access
         selectedPendingSelectionID = pendingSelectionID
         selectedItems = accepted
@@ -1373,6 +1427,11 @@ struct SendView: View {
             selectedPaths: accepted.map(\.path),
             sourceAccess: access
         )
+        if let supersededDraftID,
+           supersededDraft?.id == supersededDraftID,
+           supersededDraftID != (access as? ShareDraftLease)?.id {
+            try? supersededDraft?.discard()
+        }
         return true
     }
 
@@ -1400,11 +1459,12 @@ struct SendView: View {
         do {
             guard !urls.isEmpty else { return }
             guard try adoptUserSelectedItems(urls, expectedKind: .folders) else { return }
-            ToastCenter.shared.show(AppText.value(
-                urls.count == 1 ? "Folder ready to upload" : "Folders ready to upload",
-                urls.count == 1 ? "文件夹已准备上传" : "多个文件夹已准备上传",
-                language: uiLanguage
-            ))
+            ToastCenter.shared.show(
+                SendPresentationText.folderImportReady(
+                    count: urls.count,
+                    language: uiLanguage
+                )
+            )
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }
@@ -1413,11 +1473,12 @@ struct SendView: View {
     private func beginPhotoImport(_ providers: [NSItemProvider]) {
         guard !providers.isEmpty else { return }
         guard providers.count <= ShareDraftStore.maxItemCount else {
-            ToastCenter.shared.show(AppText.value(
-                "Select no more than \(ShareDraftStore.maxItemCount) Photos items.",
-                "照片项目不能超过 \(ShareDraftStore.maxItemCount) 个。",
-                language: uiLanguage
-            ))
+            ToastCenter.shared.show(
+                SendPresentationText.photoSelectionLimit(
+                    maximum: ShareDraftStore.maxItemCount,
+                    language: uiLanguage
+                )
+            )
             return
         }
 
@@ -1435,7 +1496,9 @@ struct SendView: View {
             )
         } catch let error as ShareProviderSelectionError {
             photoImporter = nil
-            ToastCenter.shared.show(photoSelectionErrorMessage(error))
+            ToastCenter.shared.show(
+                SendPresentationText.photoSelectionError(error, language: uiLanguage)
+            )
         } catch {
             photoImporter = nil
             ToastCenter.shared.show(error.localizedDescription)
@@ -1462,22 +1525,24 @@ struct SendView: View {
                     try? store.discard(id: draft.descriptor.id)
                     return
                 }
-                ToastCenter.shared.show(AppText.value(
-                    draft.fileURLs.count == 1
-                        ? "Photo ready to send"
-                        : "\(draft.fileURLs.count) Photos items ready to send",
-                    draft.fileURLs.count == 1
-                        ? "照片已准备发送"
-                        : "\(draft.fileURLs.count) 个照片项目已准备发送",
-                    language: uiLanguage
-                ))
+                ToastCenter.shared.show(
+                    SendPresentationText.photoImportReady(
+                        count: draft.fileURLs.count,
+                        language: uiLanguage
+                    )
+                )
             } catch {
                 try? store.discard(id: draft.descriptor.id)
                 ToastCenter.shared.show(error.localizedDescription)
             }
         case .failure(let error):
             if let selectionError = error as? ShareProviderSelectionError {
-                ToastCenter.shared.show(photoSelectionErrorMessage(selectionError))
+                ToastCenter.shared.show(
+                    SendPresentationText.photoSelectionError(
+                        selectionError,
+                        language: uiLanguage
+                    )
+                )
             } else {
                 ToastCenter.shared.show(error.localizedDescription)
             }
@@ -1491,22 +1556,7 @@ struct SendView: View {
         photoImportItemCount = 0
     }
 
-    private func photoSelectionErrorMessage(_ error: ShareProviderSelectionError) -> String {
-        switch error {
-        case .livePhotoUnsupported:
-            return AppText.value(
-                "Paired Live Photos are not supported yet. Choose a still image or video instead.",
-                "暂不支持成对的 Live Photo，请改选静态照片或视频。",
-                language: uiLanguage
-            )
-        case .folderUnsupported, .unsupportedItem:
-            return AppText.value(
-                "Envoix could not read this Photos item as an image or video.",
-                "Envoix 无法将这个照片项目读取为图片或视频。",
-                language: uiLanguage
-            )
-        }
-    }
+    #endif
 
     private func adoptSharedSelectionIfAvailable() {
         guard !selectionMutationDisabled,
@@ -1521,17 +1571,13 @@ struct SendView: View {
             pendingSelectionID: selection.id
         ) else { return }
         model.consumePendingSendSelection(id: selection.id)
-        ToastCenter.shared.show(AppText.value(
-            selection.fileURLs.count == 1
-                ? "Shared item ready to send"
-                : "\(selection.fileURLs.count) shared items ready to send",
-            selection.fileURLs.count == 1
-                ? "分享项目已准备发送"
-                : "\(selection.fileURLs.count) 个分享项目已准备发送",
-            language: uiLanguage
-        ))
+        ToastCenter.shared.show(
+            SendPresentationText.sharedSelectionReady(
+                count: selection.fileURLs.count,
+                language: uiLanguage
+            )
+        )
     }
-    #endif
 
     private func selectedSourceAccessForTransfer() -> AnyObject? {
         return selectedSourceAccess
@@ -1542,7 +1588,9 @@ struct SendView: View {
             let urls = try result.get()
             guard !urls.isEmpty else { return }
             guard try adoptUserSelectedItems(urls, expectedKind: .files) else { return }
-            ToastCenter.shared.show(AppText.value("Files selected", "已选择文件", language: uiLanguage))
+            ToastCenter.shared.show(
+                AppText.localized("send.selection.files_selected", language: uiLanguage)
+            )
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }
@@ -1556,11 +1604,12 @@ struct SendView: View {
         let accesses = urls.map(SecurityScopedResourceAccess.init)
         for (url, access) in zip(urls, accesses) {
             guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
-                throw RuntimeSettingsError(AppText.value(
-                    "Envoix could not access every selected item. Choose them again from Files.",
-                    "Envoix 无法访问全部所选项目。请从 Files 中重新选择。",
-                    language: uiLanguage
-                ))
+                throw RuntimeSettingsError(
+                    AppText.localized(
+                        "send.selection.error.source_access",
+                        language: uiLanguage
+                    )
+                )
             }
         }
         try validateImportedItems(urls, expectedKind: expectedKind)
@@ -1584,19 +1633,21 @@ struct SendView: View {
                 }
             case .files:
                 guard values.isRegularFile == true else {
-                    throw RuntimeSettingsError(AppText.value(
-                        "Use the Folder button to upload a folder.",
-                        "请使用“文件夹”按钮上传文件夹。",
-                        language: uiLanguage
-                    ))
+                    throw RuntimeSettingsError(
+                        AppText.localized(
+                            "send.selection.error.folder_requires_button",
+                            language: uiLanguage
+                        )
+                    )
                 }
             case .folders:
                 guard values.isDirectory == true else {
-                    throw RuntimeSettingsError(AppText.value(
-                        "Choose folders, not files.",
-                        "请选择文件夹，而不是文件。",
-                        language: uiLanguage
-                    ))
+                    throw RuntimeSettingsError(
+                        AppText.localized(
+                            "send.selection.error.folders_only",
+                            language: uiLanguage
+                        )
+                    )
                 }
             }
         }
@@ -1608,12 +1659,12 @@ struct SendView: View {
 
         let path = (raw as NSString).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: path) else {
-            ToastCenter.shared.show(AppText.value("Path not found", "未找到路径", language: uiLanguage))
+            ToastCenter.shared.show(AppText.localized("send.path.not_found", language: uiLanguage))
             return
         }
 
         guard selectItems([URL(fileURLWithPath: path)]) else { return }
-        ToastCenter.shared.show(AppText.value("Path selected", "已选择路径", language: uiLanguage))
+        ToastCenter.shared.show(AppText.localized("send.path.selected", language: uiLanguage))
     }
 
     private func loadDroppedItems(_ providers: [NSItemProvider]) {
@@ -1645,6 +1696,52 @@ struct SendView: View {
     }
 
     #if os(macOS)
+    private func pasteClipboardSelection() {
+        guard let content = clipboardSendContent() else {
+            ToastCenter.shared.show(AppText.localized("send.clipboard.empty", language: uiLanguage))
+            return
+        }
+
+        switch content {
+        case .file(let url):
+            do {
+                guard try adoptUserSelectedItems([url]) else { return }
+                ToastCenter.shared.show(
+                    AppText.localized("send.clipboard.item_ready", language: uiLanguage)
+                )
+            } catch {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        case .image(let payload):
+            do {
+                let store = try ShareDraftStore.live()
+                let draft = try store.stage(
+                    data: payload.data,
+                    contentTypeIdentifier: payload.contentTypeIdentifier,
+                    mediaKind: .image,
+                    preferredFileName: payload.preferredFileName
+                )
+                do {
+                    try store.claim(id: draft.descriptor.id)
+                    store.acknowledgePending(id: draft.descriptor.id)
+                    let lease = ShareDraftLease(id: draft.descriptor.id, store: store)
+                    guard selectItems(draft.fileURLs, access: lease) else {
+                        try? store.discard(id: draft.descriptor.id)
+                        return
+                    }
+                } catch {
+                    try? store.discard(id: draft.descriptor.id)
+                    throw error
+                }
+                ToastCenter.shared.show(
+                    AppText.localized("send.clipboard.image_ready", language: uiLanguage)
+                )
+            } catch {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        }
+    }
+
     private func chooseSendItems() -> [URL] {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -1734,7 +1831,10 @@ struct SendView: View {
             }
             if let roomControlOffer {
                 guard let roomControlEndpoint else {
-                    throw RuntimeSettingsError("The room transfer route is unavailable.")
+                    throw RuntimeSettingsError(AppText.localized(
+                        "send.error.room_route_unavailable",
+                        language: uiLanguage
+                    ))
                 }
                 let settings = try RuntimeSettingsProvider.make(
                     concurrentTransfers: concurrentTransfers,
@@ -1770,11 +1870,12 @@ struct SendView: View {
                         pendingRoomOfferID = nil
                         onRoomOfferPendingChange?(false)
                         guard accepted else {
-                            ToastCenter.shared.show(AppText.value(
-                                "The file offer was declined.",
-                                "对方拒绝了文件邀请。",
-                                language: uiLanguage
-                            ))
+                            ToastCenter.shared.show(
+                                AppText.localized(
+                                    "send.error.room_offer_declined",
+                                    language: uiLanguage
+                                )
+                            )
                             return
                         }
                         startRoomSend(
@@ -1812,7 +1913,10 @@ struct SendView: View {
                     }
                 } else {
                     guard input.hasPrefix(inviteV2URLPrefix) else {
-                        throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                        throw RuntimeSettingsError(AppText.localized(
+                            "transfer.pairing.enter_complete_error",
+                            language: uiLanguage
+                        ))
                     }
                     let parsed = try parsePairingInviteForRole(
                         input: input,
@@ -1827,7 +1931,10 @@ struct SendView: View {
                 }
             case .invite:
                 guard invite.trimmed.hasPrefix(inviteV2URLPrefix) else {
-                    throw RuntimeSettingsError("Enter a complete InviteV2 link.")
+                    throw RuntimeSettingsError(AppText.localized(
+                        "transfer.pairing.enter_complete_error",
+                        language: uiLanguage
+                    ))
                 }
                 let parsed = try parsePairingInviteForRole(input: invite.trimmed, localRole: .send)
                 startInviteSend(
