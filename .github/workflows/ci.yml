@@ -16,6 +16,7 @@ on:
       - 'rust-toolchain.toml'
       - 'apps/envoix-agent/**'
       - 'apps/envoix-cli/**'
+      - 'apps/envoix-windows/**'
       - 'apps/envoix-rendezvous-server/**'
       - 'crates/**'
       - 'vendor/**'
@@ -117,7 +118,7 @@ jobs:
         run: cargo audit --deny unsound
 
   windows:
-    name: Windows CLI + Agent
+    name: Windows GUI + CLI + Agent
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -128,21 +129,23 @@ jobs:
           rustup default "$RUST_VERSION"
           rustc --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Lint Windows CLI and Agent
+      - name: Lint Windows GUI, CLI, and Agent
         shell: bash
         run: >-
           scripts/with-build-cache-guard.sh
-          cargo clippy --locked -p envoix-cli -p envoix-agent --all-targets -- -D warnings
-      - name: Test Windows CLI and Agent
+          cargo clippy --locked -p envoix-windows -p envoix-cli -p envoix-agent
+          --all-targets -- -D warnings
+      - name: Test Windows GUI, CLI, and Agent
         shell: bash
         run: >-
           scripts/with-build-cache-guard.sh
-          cargo test --locked -p envoix-cli -p envoix-agent --all-targets
-      - name: Build Windows lifecycle pair
+          cargo test --locked -p envoix-windows -p envoix-cli -p envoix-agent
+          --all-targets
+      - name: Build Windows application and lifecycle pair
         shell: bash
         run: >-
           scripts/with-build-cache-guard.sh
-          cargo build --locked -p envoix-cli -p envoix-agent
+          cargo build --locked -p envoix-windows -p envoix-cli -p envoix-agent
       - name: Test Windows Agent lifecycle
         shell: pwsh
         run: >-

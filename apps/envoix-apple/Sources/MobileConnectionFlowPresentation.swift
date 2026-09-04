@@ -158,7 +158,7 @@ enum MobileConnectionFlowPresentationText {
         )
         return AppText.localized(
             "mobile_flow.paired.completed",
-            defaultValue: "\(device) is now paired through the background helper.",
+            defaultValue: "\(device) is now securely paired.",
             language: language
         )
     }

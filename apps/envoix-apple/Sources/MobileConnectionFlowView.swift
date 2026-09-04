@@ -1129,6 +1129,8 @@ struct MobileConnectionFlowView: View {
                     showPage(.activity)
                 }
             )
+            .frame(maxWidth: 960)
+            .frame(maxWidth: .infinity)
         } else {
             legacyRoomPage
         }
@@ -1224,6 +1226,8 @@ struct MobileConnectionFlowView: View {
                 .padding(.vertical, 8)
             }
         }
+        .frame(maxWidth: 960)
+        .frame(maxWidth: .infinity)
         .accessibilityIdentifier("activity_page")
         #else
         legacyActivityPage

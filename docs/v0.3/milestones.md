@@ -179,7 +179,7 @@ architecture rewrite.
 - current schema round trips plus frozen legacy-state rejection fixtures;
 - concurrent-controller and peer-credential tests;
 - Agent restart/revoke/resume tests on Linux/WSL;
-- Windows IPC contract tests even if the GUI is not yet implemented.
+- Windows IPC contract tests plus GUI controller presentation tests.
 
 ## M5 — Typed bindings and platform ports
 
@@ -256,7 +256,8 @@ architecture rewrite.
   retry loop;
 - Windows per-user Agent lifecycle and owner-only Named Pipe API;
 - supported Windows CLI build and installation path;
-- decision and prototype evidence for WinUI before a Windows GUI is promoted;
+- Windows graphical shell over the typed Agent API, with no direct Engine or
+  credential ownership;
 - maintained Linux/WSL systemd user service and CLI installation/update path.
 
 ### Exit criteria
@@ -274,7 +275,7 @@ architecture rewrite.
 
 - signed macOS development and notarization dry-run artifacts;
 - clean-user macOS Keychain prompt audit;
-- Windows Agent/CLI automated and real-host tests;
+- Windows GUI/Agent/CLI automated and real-host tests;
 - WSL systemd and NAT-path reference tests.
 
 ## M8 — Release and security closure

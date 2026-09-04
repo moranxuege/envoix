@@ -24,12 +24,13 @@ the desktop and broker bundle and includes signed Android packages only when
 the GitHub Release.
 
 1. Validate versions, build numbers, tag, and pinned actions.
-2. Build CLI/Agent on Linux and Windows, the standalone CLI on macOS arm64 and
-   x86_64, and the Linux broker in the immutable Rust 1.96.0/Bullseye image.
+2. Build CLI/Agent on Linux, GUI/CLI/Agent on Windows, the standalone CLI on
+   macOS arm64 and x86_64, and the Linux broker in the immutable Rust
+   1.96.0/Bullseye image.
 3. In each platform build job, sign GitHub/Sigstore build provenance over the
    staged binaries before upload.
 4. Download all binaries into one metadata job and generate reproducible
-   CycloneDX 1.5 CLI, Agent, and broker SBOMs with pinned
+   CycloneDX 1.5 CLI, Agent, Windows GUI, and broker SBOMs with pinned
    `cargo-cyclonedx 0.5.9`.
 5. Reject missing, extra, empty, undersized, wrong-format, wrong-component, or
    wrong-version artifacts.
@@ -49,7 +50,7 @@ job receives `contents: write`.
 | Artifact | Owner | Required signature/evidence | Installation/update policy | v0.3.0 status |
 | --- | --- | --- | --- | --- |
 | Linux/WSL CLI + Agent | desktop owner | SHA-256, source manifest, CycloneDX, GitHub provenance/SBOM attestations | per-user systemd install; paired atomic update | automated; real WSL evidence passed |
-| Windows CLI + Agent | desktop owner | SHA-256, source manifest, CycloneDX, GitHub provenance/SBOM attestations; document any SmartScreen limitation | per-user Task Scheduler install; paired atomic update | automated CI; real Windows host evidence still required |
+| Windows GUI + CLI + Agent | desktop owner | SHA-256, source manifest, CycloneDX, GitHub provenance/SBOM attestations; document current lack of Authenticode/SmartScreen reputation | GUI-controlled or CLI per-user Task Scheduler install; paired CLI/Agent atomic update | native strict lint/test/release build, real-host lifecycle, accessible projection, and bidirectional Agent transfer passed; foreground GUI picker and signing remain open |
 | macOS application + helper | Apple owner | Developer ID, hardened runtime, stable Team/access groups, notarization, staple, SHA-256 | signed application replacement retaining helper-owned state | path implemented; notarization evidence open |
 | iOS/iPadOS application | Apple owner | App Store/TestFlight distribution signing and archive validation | TestFlight/App Store update retaining Engine schema 2 | signing evidence open |
 | Android application | Android owner | production keystore signing, `apksigner` verification, version check, artifact digest/SBOM/provenance | package-manager update with stable application id/key | tag path and local test-key rehearsal pass; production key custody and signed evidence remain open |

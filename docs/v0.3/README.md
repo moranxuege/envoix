@@ -33,7 +33,7 @@ creates a Transfer rather than selecting a separate protocol mode.
 | iPhone | embedded engine | SwiftUI compact presentation |
 | iPad | embedded engine, native multi-window presentation | SwiftUI iPad presentation shell |
 | Android | embedded engine plus OS-managed background work | Jetpack Compose and native Android adapters |
-| Windows | Agent and CLI first; graphical shell designed after the control API | Rust Agent/CLI, WinUI candidate |
+| Windows | graphical shell plus persistent per-user Agent and CLI | Rust/egui shell and Rust Agent/CLI |
 | Linux/WSL | persistent per-user Agent and CLI | Rust |
 
 All six hosts are first-class maintenance targets. Feature availability may
@@ -48,6 +48,7 @@ as typed capabilities, not inferred by a frontend.
 - [Compatibility and breaking-upgrade policy](compatibility.md)
 - [Engineering standard](engineering.md)
 - [Native presentation contract](presentation.md)
+- [Experience remediation and legacy-removal gate](ux-remediation.md)
 - [Typed binding contract](bindings.md)
 - [Desktop host evidence](desktop-host-evidence.md)
 - [Dependency security baseline](dependency-security.md)
@@ -72,8 +73,9 @@ release guarantee.
    rename or further crate split.
 3. Share product state and policy in Rust; keep operating-system effects in
    platform adapters.
-4. Keep native presentation: SwiftUI for Apple, Compose for Android, and a
-   native Windows shell if a Windows GUI is promoted.
+4. Keep platform presentation: SwiftUI for Apple, Compose for Android, and a
+   Windows-native executable that remains a typed Agent client rather than an
+   additional Engine owner.
 5. Use one Apple universal iPhone/iPad application with an independent iPad
    presentation shell. Do not stretch the phone root view onto iPad.
 6. Keep the CLI as a supported presentation and administration surface. A
@@ -95,8 +97,8 @@ release guarantee.
   stable.
 - Making mobile applications behave like unrestricted always-on daemons.
 - Preserving every internal v0.2 JSON shape or unused public function.
-- Shipping a replacement Windows GUI before the Engine control contract is
-  stable.
+- Reusing the retired direct-Engine desktop demo or creating a second Windows
+  product state machine inside the GUI.
 
 ## Definition of done
 
@@ -112,7 +114,8 @@ v0.3.0 is complete only when:
   reset requirement, while lifecycle cleanup never deletes received files;
 - Apple secrets use stable signed Keychain access without prompt loops;
 - Android secrets continue to use Android Keystore;
-- Windows and Linux/WSL have supported Agent and CLI lifecycle paths;
+- Windows has a supported GUI/Agent/CLI path, and Linux/WSL has a supported
+  Agent/CLI lifecycle path;
 - iPad has native adaptive navigation, resizing, drag/drop, and scene-state
   ownership rather than an enlarged phone layout;
 - every release artifact is produced by a reproducible, audited, signed release

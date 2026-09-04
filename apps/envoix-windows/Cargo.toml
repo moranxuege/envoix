@@ -1,0 +1,24 @@
+[package]
+name = "envoix-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "envoix-windows"
+path = "src/main.rs"
+
+[dependencies]
+envoix-client.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "glow"] }
+egui = { version = "0.35", default-features = false }
+rfd = "0.17"
+tokio.workspace = true
+
+[dev-dependencies]
+egui = { version = "0.35", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"

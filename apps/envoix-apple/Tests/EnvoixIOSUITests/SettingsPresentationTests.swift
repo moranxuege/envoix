@@ -75,6 +75,29 @@ final class SettingsPresentationTests: XCTestCase {
         XCTAssertEqual(protectedStatus("1 MB", language: "zh-Hans"), "受保护：1 MB")
     }
 
+    func testOrdinarySettingsCopyDoesNotExposeImplementationTerms() {
+        let keys = [
+            "settings.background.enable_detail",
+            "settings.background.status.helper_missing",
+            "settings.background.status.incompatible",
+            "settings.background.status.unavailable",
+            "settings.compression.detail",
+        ]
+        let forbiddenTerms = [
+            "helper", "agent", "engine", "credential", "dpapi", "keychain",
+            "zstandard", "凭据", "协议", "密钥链",
+        ]
+
+        for key in keys {
+            for language in ["en", "zh-Hans"] {
+                let value = AppText.localized(key, language: language).lowercased()
+                for term in forbiddenTerms {
+                    XCTAssertFalse(value.contains(term), "\(key) exposed \(term) in \(language)")
+                }
+            }
+        }
+    }
+
     private func readyStatus(_ count: Int64, language: String) -> String {
         AppText.localized(
             "settings.background.status.ready",

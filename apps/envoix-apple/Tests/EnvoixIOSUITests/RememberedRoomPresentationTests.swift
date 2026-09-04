@@ -55,6 +55,23 @@ final class RememberedRoomPresentationTests: XCTestCase {
         }
     }
 
+    func testPairedDeviceCopyDoesNotExposeItsProcessOwner() {
+        let values = [
+            RememberedRoomPresentationText.value(.helperUnavailable, language: "en"),
+            RememberedRoomPresentationText.value(.helperKeepsRoom, language: "en"),
+            RememberedRoomPresentationText.value(.helperRefreshUnavailable, language: "en"),
+            RememberedRoomPresentationText.value(.noHelperTransfers, language: "en"),
+            RememberedRoomPresentationText.value(.loadingHelperActivity, language: "en"),
+            AgentTransferPresentationText.detail(.paused, language: "en"),
+            AgentTransferPresentationText.detail(.queued, language: "en"),
+        ]
+
+        for value in values {
+            XCTAssertFalse(value.lowercased().contains("helper"), value)
+            XCTAssertFalse(value.lowercased().contains("agent"), value)
+        }
+    }
+
     func testRoomStateProjectionPreservesEveryExistingLabel() {
         let activityStates: [(TransferActivityState, String, String)] = [
             (.preparing, "Preparing", "正在准备"),
@@ -133,7 +150,7 @@ final class RememberedRoomPresentationTests: XCTestCase {
                 hasLoadedSnapshot: false,
                 language: "en"
             ),
-            "Loading helper activity…"
+            "Loading transfer activity…"
         )
         XCTAssertEqual(
             RememberedRoomPresentationText.agentTransferTitle(

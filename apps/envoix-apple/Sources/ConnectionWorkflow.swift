@@ -824,7 +824,7 @@ final class ConnectionWorkflowState: ObservableObject {
                     beforeConnected: { [rememberedStore] authenticatedGeneration in
                         guard authenticatedGeneration < UInt64.max else {
                             throw RuntimeSettingsError(
-                                "Remembered-room credential generation is exhausted."
+                                "Could not renew this secure device connection."
                             )
                         }
                         let rotationMaterial = try rememberedStore.sessionMaterial(
@@ -1242,7 +1242,7 @@ final class ConnectionWorkflowState: ObservableObject {
                     durablePairingCompletedLabel = device.label
                 } catch {
                     handleControlFailure(
-                        "Background helper pairing failed: \(error.localizedDescription)",
+                        "Secure pairing failed: \(error.localizedDescription)",
                         generation: generation
                     )
                 }

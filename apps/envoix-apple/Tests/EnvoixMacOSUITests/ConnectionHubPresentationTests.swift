@@ -4,19 +4,19 @@ import XCTest
 
 final class ConnectionHubPresentationTests: XCTestCase {
     func testRoomActionsAndQRCodeUseTheSameSquareFootprint() {
-        XCTAssertEqual(RoomInvitationLayout.viewportHeight, 240)
-        XCTAssertEqual(RoomInvitationLayout.contentSide(availableWidth: 320), 240)
+        XCTAssertEqual(RoomInvitationLayout.viewportHeight, 152)
+        XCTAssertEqual(RoomInvitationLayout.contentSide(availableWidth: 320), 176)
         XCTAssertEqual(
-            RoomInvitationLayout.qrImageSide(contentSide: 240)
+            RoomInvitationLayout.qrImageSide(contentSide: 176)
                 + QRCard.contentPadding * 2,
-            240
+            176
         )
     }
 
     func testWholeRoomCardKeepsOneContentHeightAcrossInvitationStates() {
         XCTAssertEqual(RoomInvitationLayout.headerHeight, 44)
         XCTAssertEqual(RoomInvitationLayout.cardSpacing, 14)
-        XCTAssertEqual(RoomInvitationLayout.cardContentHeight, 298)
+        XCTAssertEqual(RoomInvitationLayout.cardContentHeight, 210)
     }
 
     func testRevealedQRCodeReplacesSupportedConnectionMethods() {
