@@ -107,6 +107,10 @@ struct SettingsStageView: View {
                 }
             }
             .padding(.vertical, 12)
+            #if os(macOS)
+            .frame(maxWidth: 960)
+            .frame(maxWidth: .infinity)
+            #endif
         }
         .onAppear {
             migrateLogServerIfNeeded()

@@ -4,6 +4,8 @@
 
 #[cfg(any(windows, test))]
 mod presentation;
+#[cfg(any(windows, test))]
+mod theme;
 
 #[cfg(windows)]
 mod app;

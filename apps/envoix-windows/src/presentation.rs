@@ -1,6 +1,7 @@
 #[cfg(windows)]
 use envoix_client::model::TransferDirection;
 use envoix_client::model::TransferState;
+use envoix_client::product::AgentPathKind;
 
 pub(crate) fn transfer_state_text(state: TransferState) -> &'static str {
     match state {
@@ -22,6 +23,16 @@ pub(crate) fn direction_text(direction: TransferDirection) -> &'static str {
     match direction {
         TransferDirection::Send => "发送",
         TransferDirection::Receive => "接收",
+    }
+}
+
+pub(crate) fn transfer_path_text(path: AgentPathKind) -> &'static str {
+    match path {
+        AgentPathKind::Lan => "局域网",
+        AgentPathKind::Direct => "直接连接",
+        AgentPathKind::Relay => "中继",
+        AgentPathKind::WifiAware => "Wi-Fi Aware",
+        AgentPathKind::Other => "网络连接",
     }
 }
 
@@ -58,5 +69,14 @@ mod tests {
         assert_eq!(human_bytes(0), "0 B");
         assert_eq!(human_bytes(1024), "1.0 KB");
         assert_eq!(human_bytes(1_572_864), "1.5 MB");
+    }
+
+    #[test]
+    fn connection_paths_use_product_language() {
+        assert_eq!(transfer_path_text(AgentPathKind::Lan), "局域网");
+        assert_eq!(transfer_path_text(AgentPathKind::Direct), "直接连接");
+        assert_eq!(transfer_path_text(AgentPathKind::Relay), "中继");
+        assert_eq!(transfer_path_text(AgentPathKind::WifiAware), "Wi-Fi Aware");
+        assert_eq!(transfer_path_text(AgentPathKind::Other), "网络连接");
     }
 }

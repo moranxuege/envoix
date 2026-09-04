@@ -8,8 +8,13 @@ import AppKit
 #endif
 
 enum RoomInvitationLayout {
+    #if os(macOS)
+    static let maximumContentSide: CGFloat = 176
+    static let viewportHeight: CGFloat = 152
+    #else
     static let maximumContentSide: CGFloat = 240
     static let viewportHeight: CGFloat = 240
+    #endif
     static let headerHeight: CGFloat = 44
     static let cardSpacing: CGFloat = 14
 
@@ -151,6 +156,10 @@ struct ConnectionHubView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
+            #if os(macOS)
+            .frame(maxWidth: 960)
+            .frame(maxWidth: .infinity)
+            #endif
         }
         .background(Theme.bg)
         .accessibilityIdentifier("connection_hub")

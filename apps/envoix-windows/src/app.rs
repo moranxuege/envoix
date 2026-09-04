@@ -10,7 +10,11 @@ use crate::controller::{
     AgentController, ControllerCommand, ControllerEvent, Dashboard, Operation, join_request,
     offer_decision_request,
 };
-use crate::presentation::{direction_text, human_bytes, transfer_state_text};
+use crate::presentation::{direction_text, human_bytes, transfer_path_text, transfer_state_text};
+use crate::theme::{
+    ACCENT, ACCENT_DARK, ACCENT_SOFT, BACKGROUND, BORDER, DANGER, DANGER_SOFT, MUTED, SUCCESS,
+    SUCCESS_SOFT, SURFACE, SURFACE_RAISED, TEXT, WARNING, WARNING_SOFT,
+};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const TOAST_DURATION: Duration = Duration::from_secs(4);
@@ -23,22 +27,6 @@ const BMP_BYTES_PER_PIXEL: u32 = 4;
 const BMP_PLANES: u16 = 1;
 const BMP_BITS_PER_PIXEL: u16 = 32;
 const BMP_PIXELS_PER_METER: i32 = 2_835;
-
-const BACKGROUND: Color32 = Color32::from_rgb(244, 247, 250);
-const SURFACE: Color32 = Color32::from_rgb(255, 255, 255);
-const SURFACE_TINT: Color32 = Color32::from_rgb(236, 248, 244);
-const TEXT: Color32 = Color32::from_rgb(22, 31, 45);
-const MUTED: Color32 = Color32::from_rgb(101, 112, 130);
-const BORDER: Color32 = Color32::from_rgb(226, 232, 239);
-const ACCENT: Color32 = Color32::from_rgb(22, 132, 96);
-const ACCENT_DARK: Color32 = Color32::from_rgb(14, 105, 76);
-const SUCCESS: Color32 = Color32::from_rgb(18, 139, 91);
-const WARNING: Color32 = Color32::from_rgb(190, 116, 17);
-const DANGER: Color32 = Color32::from_rgb(211, 55, 55);
-const SIDEBAR: Color32 = Color32::from_rgb(15, 25, 41);
-const SIDEBAR_SELECTED: Color32 = Color32::from_rgb(30, 49, 70);
-const SIDEBAR_TEXT: Color32 = Color32::from_rgb(229, 237, 244);
-const SIDEBAR_MUTED: Color32 = Color32::from_rgb(143, 159, 177);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Page {
@@ -241,13 +229,13 @@ impl EnvoixWindowsApp {
             ) =>
             {
                 self.show_toast(match operation {
-                    Operation::InstallAgent => "Agent 已安装并启动",
-                    Operation::StartAgent => "Agent 已启动",
-                    Operation::RestartAgent => "Agent 已重新启动",
+                    Operation::InstallAgent => "后台传输已安装并启动",
+                    Operation::StartAgent => "后台传输已启动",
+                    Operation::RestartAgent => "后台传输已重新启动",
                     _ => unreachable!(),
                 });
             }
-            _ => self.error = Some("Agent 返回了与当前操作不匹配的响应".to_owned()),
+            _ => self.error = Some("后台服务返回了无法识别的结果".to_owned()),
         }
     }
 
@@ -324,16 +312,11 @@ impl EnvoixWindowsApp {
                         match &self.dashboard {
                             Some(dashboard) => status_pill(
                                 ui,
-                                &format!("●  Agent 在线 · {}", dashboard.status.device_name),
+                                &format!("●  后台传输已就绪 · {}", dashboard.status.device_name),
                                 SUCCESS,
-                                Color32::from_rgb(229, 246, 238),
+                                SUCCESS_SOFT,
                             ),
-                            None => status_pill(
-                                ui,
-                                "●  Agent 未连接",
-                                DANGER,
-                                Color32::from_rgb(253, 235, 235),
-                            ),
+                            None => status_pill(ui, "●  后台传输未就绪", DANGER, DANGER_SOFT),
                         }
                     });
                 });
@@ -345,92 +328,69 @@ impl EnvoixWindowsApp {
             .exact_size(SIDEBAR_WIDTH)
             .frame(
                 egui::Frame::new()
-                    .fill(SIDEBAR)
+                    .fill(SURFACE)
+                    .stroke(egui::Stroke::new(1.0, BORDER))
                     .inner_margin(egui::Margin::symmetric(18, 20)),
             )
             .show(root, |ui| {
                 ui.horizontal(|ui| {
                     brand_mark(ui);
                     ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("Envoix")
-                                .size(21.0)
-                                .strong()
-                                .color(Color32::WHITE),
-                        );
-                        ui.label(
-                            RichText::new("Private transfer")
-                                .size(11.0)
-                                .color(SIDEBAR_MUTED),
-                        );
+                        ui.label(RichText::new("Envoix").size(21.0).strong().color(TEXT));
+                        ui.label(RichText::new("安全文件传输").size(11.0).color(MUTED));
                     });
                 });
                 ui.add_space(34.0);
-                ui.label(
-                    RichText::new("WORKSPACE")
-                        .size(10.0)
-                        .strong()
-                        .color(SIDEBAR_MUTED),
-                );
+                ui.label(RichText::new("传输").size(10.0).strong().color(MUTED));
                 ui.add_space(8.0);
                 nav_button(ui, &mut self.page, Page::Devices, "01", "设备");
                 nav_button(ui, &mut self.page, Page::Activity, "02", "传输活动");
                 nav_button(ui, &mut self.page, Page::Inbox, "03", "收件箱");
                 ui.add_space(18.0);
-                ui.label(
-                    RichText::new("SYSTEM")
-                        .size(10.0)
-                        .strong()
-                        .color(SIDEBAR_MUTED),
-                );
+                ui.label(RichText::new("应用").size(10.0).strong().color(MUTED));
                 ui.add_space(8.0);
-                nav_button(ui, &mut self.page, Page::Settings, "04", "设置与诊断");
+                nav_button(ui, &mut self.page, Page::Settings, "04", "设置");
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     egui::Frame::new()
-                        .fill(Color32::from_rgb(22, 38, 57))
+                        .fill(ACCENT_SOFT)
+                        .stroke(egui::Stroke::new(1.0, BORDER))
                         .corner_radius(14)
                         .inner_margin(12.0)
                         .show(ui, |ui| {
                             ui.label(
-                                RichText::new("凭据由 Agent 保护")
+                                RichText::new("后台传输已启用")
                                     .size(12.0)
                                     .strong()
-                                    .color(SIDEBAR_TEXT),
+                                    .color(ACCENT_DARK),
                             );
                             ui.label(
-                                RichText::new("DPAPI · owner-only IPC")
+                                RichText::new("关闭窗口后仍会继续发送")
                                     .size(10.5)
-                                    .color(SIDEBAR_MUTED),
+                                    .color(MUTED),
                             );
                         });
-                    ui.add_space(10.0);
-                    ui.label(
-                        RichText::new("v0.3 · protocol 12")
-                            .small()
-                            .color(SIDEBAR_MUTED),
-                    );
                 });
             });
     }
 
     fn render_unavailable(&mut self, ui: &mut egui::Ui) {
-        empty_state(ui, "!", "后台 Agent 尚未连接", |ui| {
-            ui.label(RichText::new(
-                "安装并启动当前用户的 Agent 后，设备、房间和传输会自动恢复。图形界面不会接触设备凭据。",
-            ).color(MUTED));
+        empty_state(ui, "!", "后台传输尚未就绪", |ui| {
+            ui.label(
+                RichText::new("启动后台传输后，已配对设备和传输记录会自动恢复。").color(MUTED),
+            );
             if let Some(error) = &self.error {
                 ui.colored_label(DANGER, error);
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!self.busy(), primary_button("安装并启动 Agent"))
+                    .add_enabled(!self.busy(), primary_button("安装并启动"))
                     .clicked()
                 {
                     self.start_lifecycle(Operation::InstallAgent);
                 }
                 if ui
-                    .add_enabled(!self.busy(), quiet_button("启动已有 Agent"))
+                    .add_enabled(!self.busy(), quiet_button("重新连接"))
                     .clicked()
                 {
                     self.start_lifecycle(Operation::StartAgent);
@@ -518,7 +478,7 @@ impl EnvoixWindowsApp {
                     if ui.add(danger_quiet_button("忘记设备")).clicked() {
                         self.revoke_device = Some(device.id.clone());
                     }
-                    status_pill(ui, "●  房间就绪", SUCCESS, Color32::from_rgb(229, 246, 238));
+                    status_pill(ui, "●  房间就绪", SUCCESS, SUCCESS_SOFT);
                 });
             });
             ui.add_space(18.0);
@@ -526,7 +486,7 @@ impl EnvoixWindowsApp {
             let hovering_files = ui.input(|input| !input.raw.hovered_files.is_empty());
             egui::Frame::new()
                 .fill(if hovering_files {
-                    SURFACE_TINT
+                    ACCENT_SOFT
                 } else {
                     BACKGROUND
                 })
@@ -633,7 +593,7 @@ impl EnvoixWindowsApp {
             ui.add_space(16.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("Agent 会在窗口关闭后继续完成发送")
+                    RichText::new("关闭窗口后仍会继续发送")
                         .size(11.5)
                         .color(MUTED),
                 );
@@ -785,7 +745,7 @@ impl EnvoixWindowsApp {
             ui.label(RichText::new("最近传输").size(16.0).strong().color(TEXT));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    RichText::new("“已送达” = 接收方已落盘并返回证明")
+                    RichText::new("“已送达”表示接收方已经安全保存")
                         .size(11.5)
                         .color(MUTED),
                 );
@@ -855,7 +815,10 @@ impl EnvoixWindowsApp {
                     .iter()
                     .find(|path| path.transfer_id == transfer.id.to_string())
                 {
-                    ui.label(RichText::new(format!("当前路径：{:?}", path.path)).color(MUTED));
+                    ui.label(
+                        RichText::new(format!("连接方式：{}", transfer_path_text(path.path)))
+                            .color(MUTED),
+                    );
                 }
                 if let Some(failure) = &transfer.failure {
                     ui.colored_label(
@@ -985,34 +948,20 @@ impl EnvoixWindowsApp {
         let diagnostics = dashboard.diagnostics.clone();
         ui.columns(2, |columns| {
             card(&mut columns[0], |ui| {
-                ui.label(RichText::new("安全边界").size(16.0).strong().color(TEXT));
+                ui.label(RichText::new("隐私与安全").size(16.0).strong().color(TEXT));
                 ui.add_space(8.0);
-                security_line(ui, "●", "凭据由 Windows DPAPI 保护");
-                security_line(ui, "●", "GUI 不读取设备 credential");
-                security_line(ui, "●", "控制通道仅限当前用户");
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{:?} · {:?}",
-                        diagnostics.credential_protection, diagnostics.control_transport
-                    ))
-                    .size(10.5)
-                    .color(MUTED),
-                );
+                security_line(ui, "●", "设备连接信息由 Windows 安全存储保护");
+                security_line(ui, "●", "只有当前 Windows 用户可以访问");
+                security_line(ui, "●", "界面不会读取或显示连接密钥");
             });
             card(&mut columns[1], |ui| {
-                ui.label(RichText::new("后台 Agent").size(16.0).strong().color(TEXT));
+                ui.label(RichText::new("后台传输").size(16.0).strong().color(TEXT));
                 ui.add_space(8.0);
                 key_value(ui, "设备", &status.device_name);
-                key_value(ui, "协议", &format!("v{}", status.protocol_version));
-                key_value(
-                    ui,
-                    "Engine",
-                    &format!("schema {}", diagnostics.engine_schema_version),
-                );
+                key_value(ui, "状态", "运行中");
                 ui.add_space(8.0);
                 if ui
-                    .add_enabled(!self.busy(), quiet_button("重新启动 Agent"))
+                    .add_enabled(!self.busy(), quiet_button("重新启动后台传输"))
                     .clicked()
                 {
                     self.start_lifecycle(Operation::RestartAgent);
@@ -1023,14 +972,31 @@ impl EnvoixWindowsApp {
         card(ui, |ui| {
             ui.label(RichText::new("连接与存储").size(16.0).strong().color(TEXT));
             ui.label(
-                RichText::new("这些地址由 Agent 使用；普通发送不需要修改。")
+                RichText::new("一般情况下无需修改这些地址。")
                     .size(11.5)
                     .color(MUTED),
             );
             ui.add_space(10.0);
-            key_value(ui, "Broker", &status.broker);
-            key_value(ui, "Relay", status.relay.as_deref().unwrap_or("未启用"));
-            key_value(ui, "Inbox", &status.inbox_directory);
+            key_value(ui, "协调服务", &status.broker);
+            key_value(ui, "中继服务", status.relay.as_deref().unwrap_or("未启用"));
+            key_value(ui, "接收文件夹", &status.inbox_directory);
+            ui.add_space(8.0);
+            ui.collapsing("技术信息", |ui| {
+                key_value(ui, "后台接口版本", &format!("v{}", status.protocol_version));
+                key_value(
+                    ui,
+                    "数据版本",
+                    &format!("v{}", diagnostics.engine_schema_version),
+                );
+                key_value(
+                    ui,
+                    "系统保护",
+                    &format!(
+                        "{:?} · {:?}",
+                        diagnostics.credential_protection, diagnostics.control_transport
+                    ),
+                );
+            });
         });
     }
 
@@ -1141,7 +1107,9 @@ impl EnvoixWindowsApp {
             .collapsible(false)
             .resizable(false)
             .show(context, |ui| {
-                ui.label("这会撤销双方关系，并删除此设备对应的本地凭据。已接收文件不会被删除。");
+                ui.label(
+                    "这会撤销双方关系，并删除此设备对应的本地连接信息。已接收文件不会被删除。",
+                );
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(!self.busy(), danger_button("确认忘记"))
@@ -1260,11 +1228,11 @@ fn configure_style(context: &egui::Context) {
         style.visuals.widgets.inactive.bg_fill = SURFACE;
         style.visuals.widgets.inactive.weak_bg_fill = SURFACE;
         style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER);
-        style.visuals.widgets.hovered.bg_fill = SURFACE_TINT;
-        style.visuals.widgets.hovered.weak_bg_fill = SURFACE_TINT;
+        style.visuals.widgets.hovered.bg_fill = ACCENT_SOFT;
+        style.visuals.widgets.hovered.weak_bg_fill = ACCENT_SOFT;
         style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
-        style.visuals.widgets.active.bg_fill = SURFACE_TINT;
-        style.visuals.widgets.active.weak_bg_fill = SURFACE_TINT;
+        style.visuals.widgets.active.bg_fill = ACCENT_SOFT;
+        style.visuals.widgets.active.weak_bg_fill = ACCENT_SOFT;
         style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT_DARK);
         style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(9);
         style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(9);
@@ -1330,14 +1298,10 @@ fn nav_button(ui: &mut egui::Ui, page: &mut Page, target: Page, icon: &str, labe
             RichText::new(format!("{icon}    {label}"))
                 .size(13.5)
                 .strong()
-                .color(if selected {
-                    Color32::WHITE
-                } else {
-                    SIDEBAR_TEXT
-                }),
+                .color(if selected { ACCENT_DARK } else { TEXT }),
         )
         .fill(if selected {
-            SIDEBAR_SELECTED
+            ACCENT_SOFT
         } else {
             Color32::TRANSPARENT
         })
@@ -1366,8 +1330,8 @@ fn card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
 
 fn room_card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(SURFACE)
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(207, 225, 218)))
+        .fill(SURFACE_RAISED)
+        .stroke(egui::Stroke::new(1.0, BORDER))
         .corner_radius(24)
         .inner_margin(26.0)
         .shadow(egui::epaint::Shadow {
@@ -1399,7 +1363,7 @@ fn page_heading(page: Page) -> (&'static str, &'static str) {
         Page::Devices => ("你的设备", "选择一个私人房间，发送文件或文件夹"),
         Page::Activity => ("传输活动", "清楚区分排队、传输和真正送达"),
         Page::Inbox => ("收件箱", "查看已经校验并保存到此电脑的内容"),
-        Page::Settings => ("设置与诊断", "Agent、安全边界和连接状态"),
+        Page::Settings => ("设置", "偏好、后台传输与存储位置"),
     }
 }
 
@@ -1465,13 +1429,13 @@ fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32, fill: Color32) {
 
 fn state_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     let fill = if color == SUCCESS {
-        Color32::from_rgb(229, 246, 238)
+        SUCCESS_SOFT
     } else if color == DANGER {
-        Color32::from_rgb(253, 235, 235)
+        DANGER_SOFT
     } else if color == WARNING {
-        Color32::from_rgb(253, 244, 225)
+        WARNING_SOFT
     } else {
-        Color32::from_rgb(231, 241, 251)
+        ACCENT_SOFT
     };
     status_pill(ui, text, color, fill);
 }
@@ -1502,7 +1466,7 @@ fn device_button(
                 .strong()
                 .color(if selected { ACCENT_DARK } else { TEXT }),
         )
-        .fill(if selected { SURFACE_TINT } else { SURFACE })
+        .fill(if selected { ACCENT_SOFT } else { SURFACE })
         .stroke(egui::Stroke::new(
             if selected { 1.5 } else { 1.0 },
             if selected { ACCENT } else { BORDER },

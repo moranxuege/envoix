@@ -130,7 +130,7 @@ final class MobileConnectionFlowPresentationTests: XCTestCase {
                 label: " ",
                 language: "en"
             ),
-            "Device is now paired through the background helper."
+            "Device is now securely paired."
         )
         XCTAssertEqual(
             MobileConnectionFlowPresentationText.queuedForDevice(

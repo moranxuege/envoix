@@ -78,7 +78,7 @@ impl AgentController {
     pub fn send(&self, command: ControllerCommand) -> Result<(), String> {
         self.commands
             .send(command)
-            .map_err(|_| "Agent 控制线程已经停止".to_owned())
+            .map_err(|_| "后台传输控制已经停止".to_owned())
     }
 
     pub fn try_event(&self) -> Option<ControllerEvent> {
@@ -98,7 +98,7 @@ fn run_worker(
         Ok(runtime) => runtime,
         Err(error) => {
             let _ = events.send(ControllerEvent::Dashboard(Err(format!(
-                "无法启动 Agent 控制运行时：{error}"
+                "无法启动后台传输控制：{error}"
             ))));
             context.request_repaint();
             return;
@@ -128,11 +128,11 @@ fn run_worker(
 
 async fn call_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let client = AgentControlClient::for_current_user()
-        .map_err(|error| format!("无法确定 Agent 本机接口：{error}"))?;
+        .map_err(|error| format!("无法确定后台服务接口：{error}"))?;
     client
         .call(request)
         .await
-        .map_err(|error| format!("Agent 请求失败：{error}"))
+        .map_err(|error| format!("后台服务请求失败：{error}"))
 }
 
 async fn load_dashboard() -> Result<Dashboard, String> {
@@ -166,9 +166,9 @@ async fn load_dashboard() -> Result<Dashboard, String> {
 fn unexpected_response(operation: &str, response: &AgentResponse) -> String {
     match response {
         AgentResponse::Error { code, message } => {
-            format!("Agent {operation} 失败（{code}）：{message}")
+            format!("后台服务 {operation} 失败（{code}）：{message}")
         }
-        _ => format!("Agent {operation} 返回了不兼容的响应"),
+        _ => format!("后台服务 {operation} 返回了不兼容的响应"),
     }
 }
 
@@ -203,7 +203,7 @@ fn run_lifecycle(operation: Operation) -> Result<(), String> {
         Operation::RestartAgent => {
             process.arg("restart");
         }
-        _ => return Err("不支持的 Agent 生命周期操作".to_owned()),
+        _ => return Err("不支持的后台服务操作".to_owned()),
     }
     let output = process
         .output()
@@ -215,9 +215,9 @@ fn run_lifecycle(operation: Operation) -> Result<(), String> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let detail = if stderr.is_empty() { stdout } else { stderr };
     if detail.is_empty() {
-        Err(format!("Agent 生命周期命令失败：{}", output.status))
+        Err(format!("后台服务命令失败：{}", output.status))
     } else {
-        Err(format!("Agent 生命周期命令失败：{detail}"))
+        Err(format!("后台服务命令失败：{detail}"))
     }
 }
 

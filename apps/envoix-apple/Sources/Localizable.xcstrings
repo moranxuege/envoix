@@ -451,8 +451,8 @@
     },
     "connection.nearby.macos_note" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Discovery uses Bluetooth and the local network. Wi‑Fi Aware and NFC phone scanning are not available on macOS." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "通过蓝牙和局域网发现设备；macOS 暂不支持 Wi‑Fi Aware 和手机 NFC 扫描。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Envoix on another device to discover it nearby." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "在另一台设备上打开 Envoix，即可在这里发现它。" } }
       }
     },
     "connection.nearby.open_bluetooth_settings" : {
@@ -721,14 +721,14 @@
     },
     "mobile_flow.activity.background_helper" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Background helper" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后台 helper" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paired devices" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已配对设备" } }
       }
     },
     "mobile_flow.activity.one_time_transfers" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "One-time transfers" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "一次性传输" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Temporary rooms" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "临时房间" } }
       }
     },
     "mobile_flow.connection_input.invalid" : {
@@ -919,8 +919,8 @@
     },
     "mobile_flow.paired.completed" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ is now paired through the background helper." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已通过后台 helper 与 %@ 完成配对。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ is now securely paired." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已与 %@ 完成安全配对。" } }
       }
     },
     "mobile_flow.paired.queued" : {
@@ -1603,20 +1603,20 @@
     },
     "remembered_room.agent.activity.empty" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "No helper transfers yet" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无 helper 传输" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No paired-device transfers yet" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无已配对设备传输" } }
       }
     },
     "remembered_room.agent.activity.loading" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Loading helper activity…" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在载入 helper 活动…" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Loading transfer activity…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在载入传输记录…" } }
       }
     },
     "remembered_room.agent.connection.preparing" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing files in the background helper…" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在后台 helper 中准备文件…" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing files…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备文件…" } }
       }
     },
     "remembered_room.agent.connection.ready" : {
@@ -1639,14 +1639,14 @@
     },
     "remembered_room.agent.helper_unavailable" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "The helper is temporarily unavailable. Showing the last known status." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "helper 暂时不可用，当前显示上次已知状态。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Background transfers are temporarily unavailable. Showing the last known status." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后台传输暂时不可用，当前显示上次已知状态。" } }
       }
     },
     "remembered_room.agent.keeps_room" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "The helper keeps this secure room available when the window closes." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "窗口关闭后，helper 仍会维护这个安全房间。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This secure room stays available after the window closes." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭窗口后，这个安全房间仍会保持可用。" } }
       }
     },
     "remembered_room.agent.paired_device" : {
@@ -1663,14 +1663,14 @@
     },
     "remembered_room.agent.refresh_unavailable" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not refresh the helper. Showing the last known status." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法刷新 helper，当前显示上次已知状态。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not refresh background transfers. Showing the last known status." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法刷新后台传输状态，当前显示上次已知状态。" } }
       }
     },
     "remembered_room.agent.room.empty" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "No transfers yet. Files added here are owned by the background helper and remain queued while the other device is offline." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无传输。在这里添加的文件由后台 helper 管理；另一台设备离线时会保留在队列中。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No transfers yet. New files remain queued while the other device is offline." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无传输。另一台设备离线时，新文件会保留在发送队列中。" } }
       }
     },
     "remembered_room.agent.transfer.detail.awaiting_delivery_proof" : {
@@ -1699,14 +1699,14 @@
     },
     "remembered_room.agent.transfer.detail.paused" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "This transfer is paused and remains in the helper queue." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此传输已暂停，并保留在 helper 队列中。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This transfer is paused and remains in the send queue." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此传输已暂停，并保留在发送队列中。" } }
       }
     },
     "remembered_room.agent.transfer.detail.queued" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for the paired device. The helper will retry in the background." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待已配对设备；helper 会在后台继续重试。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for the paired device. Envoix will retry in the background." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在等待已配对设备；Envoix 会在后台自动重试。" } }
       }
     },
     "remembered_room.agent.transfer.detail.unsupported_content" : {
@@ -2746,8 +2746,8 @@
     },
     "settings.background.enable_detail" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "The signed helper owns persistent state and credentials. Turning it off keeps existing state, credentials, Outbox data, and received files." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "签名 helper 独占持久状态和凭据。关闭后台服务不会删除已有状态、凭据、发件箱数据或已接收文件。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keep device connections and transfers available after closing the window. Turning this off does not delete paired devices or received files." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭窗口后仍可保持设备连接并继续传输。关闭此功能不会删除已配对设备或接收文件。" } }
       }
     },
     "settings.background.refresh" : {
@@ -2770,14 +2770,14 @@
     },
     "settings.background.status.helper_missing" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "The embedded helper is missing" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "内嵌 helper 缺失" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Background service needs repair" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后台服务需要修复" } }
       }
     },
     "settings.background.status.incompatible" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Helper version is incompatible" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Helper 版本不兼容" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Background service needs an update" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后台服务需要更新" } }
       }
     },
     "settings.background.status.off" : {
@@ -2819,8 +2819,8 @@
     },
     "settings.background.status.unavailable" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Helper unavailable" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Helper 不可用" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Background service is temporarily unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "后台服务暂时不可用" } }
       }
     },
     "settings.background.title" : {
@@ -2861,8 +2861,8 @@
     },
     "settings.compression.detail" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Smart uses a conservative, case-insensitive final file-extension list. It does not read a sample or probe the network. “Never” keeps the original bytes; “Always” applies Zstandard. The selected policy is fixed when a new transfer job is created." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "智能模式仅按大小写不敏感的最终文件后缀白名单判断，不读取样本，也不探测网络。从不模式发送原始字节；始终模式应用 Zstandard。新建传输任务时会固定当前策略。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Smart automatically chooses whether compression is useful. The selected setting applies to new transfers." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "智能模式会自动判断是否适合压缩。所选设置会应用于新建传输。" } }
       }
     },
     "settings.compression.never" : {

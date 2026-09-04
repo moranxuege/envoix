@@ -48,6 +48,7 @@ as typed capabilities, not inferred by a frontend.
 - [Compatibility and breaking-upgrade policy](compatibility.md)
 - [Engineering standard](engineering.md)
 - [Native presentation contract](presentation.md)
+- [Experience remediation and legacy-removal gate](ux-remediation.md)
 - [Typed binding contract](bindings.md)
 - [Desktop host evidence](desktop-host-evidence.md)
 - [Dependency security baseline](dependency-security.md)
