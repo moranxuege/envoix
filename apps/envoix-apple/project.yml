@@ -104,6 +104,10 @@ targets:
           CODE_SIGN_ENTITLEMENTS: Helper/EnvoixEngineHelper.entitlements
         Release:
           CODE_SIGN_ENTITLEMENTS: Helper/EnvoixEngineHelper.entitlements
+          # Only this target carries a restricted entitlement, so only it needs a
+          # named profile. macos-release supplies the value; every other build
+          # leaves it empty and keeps signing locally.
+          PROVISIONING_PROFILE_SPECIFIER: "$(ENVOIX_MACOS_HELPER_PROFILE)"
 
   Envoix-iOS:
     type: application

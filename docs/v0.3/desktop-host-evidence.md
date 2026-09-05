@@ -22,7 +22,7 @@ coverage and real-host coverage are separate.
 | Windows graphical shell and real-host Agent | pass | On 2026-09-04, the candidate `envoix-windows` shell, CLI, and Agent were built natively on the reference Windows 11 x86_64 host with Rust 1.96.0. Strict Clippy passed with zero warnings, GUI tests passed 2/2, and the release executable launched a responsive `Envoix` window. UI Automation/AccessKit read the paired-device Room card and send controls, the `delivered` activity with exact byte progress, the saved Inbox item, and settings diagnostics. Native 2240x1440 framebuffer captures of the Devices, Activity, and Inbox pages were inspected without activating the application or interrupting the foreground desktop; the final pass found no unsupported-glyph placeholders. The current-user install reported protocol 12, application contract 6, Engine schema 2, `windows_named_pipe`, and `windows_dpapi`. The host had Microsoft YaHei and SimSun available; the rebuilt shell loads either as a CJK fallback. No invitation, credential, or stable host identifier is retained here. |
 | Windows and macOS Agent transfer | pass | The physical Windows and Mac hosts completed protocol-12 verification and one remembered Transfer in each direction over the configured production broker/relay. Windows-to-Mac delivered 55 bytes and Mac-to-Windows delivered 63 bytes. In both cases the sender reached `delivered`, the receiver Inbox recorded one saved root and the exact byte count, and the source/destination SHA-256 values matched. The Windows GUI projected the completed outgoing activity and incoming Inbox item from that same Agent. Transfer creation used the CLI control client, so this does not claim automated coverage of the native file-picker gesture. |
 | macOS clean-user Keychain prompt audit | not run | The current signed-in account is not a clean-user environment. No claim is made from the non-interactive unit contract alone. |
-| Developer ID notarization and staple | not run | `macos-release` requires a Developer ID Application identity and notarytool profile. A successful signed Debug build is not notarization evidence. |
+| Developer ID notarization and staple | pass | On 2026-09-05 at `9b7e5fc7`, `scripts/apple-dev.sh macos-release` archived, signed, notarized, and stapled the universal app. The Apple notary service returned `Accepted` for submission `a032b8c5-9cad-49c4-8040-824d20272a5e`, `stapler validate` succeeded, and an independent `spctl --assess --type execute` reported `accepted` with `source=Notarized Developer ID`. `lipo` reported `x86_64 arm64`; the app and its nested `EnvoixEngineHelper.app` login item both signed as `Developer ID Application: Jinbin Zhang (6638TTB2SF)` with `flags=0x10000(runtime)`, a secure timestamp, and a chain to Apple Root CA. The credential boundary held: the helper carries `keychain-access-groups` for `6638TTB2SF.com.envoix.engine.credentials` while the GUI ships no entitlements at all. `Envoix-0.3.0-macos-notarized.zip` hashed to `d8642d8c720162372f5a891614ae02e074027aded31899fed857a7fe6144987e`. This is notarization evidence only; it claims no clean-user Keychain audit and no App Store/TestFlight distribution. |
 
 ## Windows GUI decision
 
@@ -40,17 +40,26 @@ Authenticode/SmartScreen reputation instead of implying platform signing.
 
 1. Run the signed helper from a clean macOS user and record the Keychain prompt
    count across first start, app restart, helper restart, and in-place upgrade.
-2. Run `macos-release` with release signing/notary inputs and retain the
-   notarization, staple, Gatekeeper, entitlement, and checksum outputs.
-3. Complete the foreground Windows proof defined in
+2. Complete the foreground Windows proof defined in
    `apps/envoix-windows/README.md`: picker selection visible in the Room,
    final Send gesture, transfer ID, sender `delivered`, receiver Inbox root,
    size/SHA-256 equality, and one GUI-close continuation run. Background UI
    Automation verified the shell's accessible controls and post-transfer
    projections, but the modal picker correctly rejected synthetic background
    file selection.
-4. Sign the release EXE with the intended Windows publisher identity and an
+3. Sign the release EXE with the intended Windows publisher identity and an
    RFC 3161 timestamp. Retain successful `signtool verify /pa /all /v` and
    `Get-AuthenticodeSignature` (`Valid`) output, then download the exact
    checksummed asset over HTTPS on a clean Windows environment and record the
    separate SmartScreen reputation result.
+
+## macOS release signing inputs
+
+`macos-release` signs manually, so it never invents signing assets. It requires
+a `Developer ID Application` identity for Team `6638TTB2SF`, a `notarytool`
+Keychain profile, and one installed `Developer ID` provisioning profile for
+`com.envoix.app.engine-helper` named by `ENVOIX_MACOS_HELPER_PROFILE`. Only the
+helper needs a profile, because only the helper carries a restricted
+entitlement; the GUI ships none. The script rejects a profile whose name it
+cannot resolve to that bundle identifier and Developer ID audience, so a
+mismatched or renamed profile fails before any signing occurs.

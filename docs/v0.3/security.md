@@ -173,7 +173,7 @@ The tunable values and semantics are in
 
 | ID | Severity | Status | Required closure |
 | --- | --- | --- | --- |
-| V03-SEC-01 | high for public distribution | open | Run the Android tag path with an approved production key and retain evidence; complete Developer ID/notarization for the macOS app; define the iOS/TestFlight signing evidence. Never publish a debug, ad-hoc, test-key, or unlabeled unsigned app as v0.3.0. |
+| V03-SEC-01 | high for public distribution | open, macOS notarization closed | macOS Developer ID signing and notarization are closed by the 2026-09-05 run recorded in the desktop host evidence. Still required: run the Android tag path with an approved production key and retain evidence; define the iOS/TestFlight signing evidence. Never publish a debug, ad-hoc, test-key, or unlabeled unsigned app as v0.3.0. |
 | V03-SEC-02 | high for support claims | open | Complete the physical iPhone, iPad, Android, Windows, macOS, and Linux/WSL reference matrix, including revoke, reconnect, resume, and legacy-state rejection. |
 | V03-SEC-03 | medium | accepted for RC, recheck at tag | The Rust `spake2` backend is not independently audited. InviteV2 adds transcript and exporter binding but does not replace a cryptographic audit. Keep the experimental statement in user-facing technical documentation. |
 | V03-SEC-04 | low/medium | accepted with restriction | Human Room Codes have about 41.4 hidden bits, not the 256 bits of a complete InviteV2 ticket. The five-minute lifetime, six-attempt budget, tombstone, and source limits are mandatory; prefer QR/NFC/full invitation for unattended or high-risk use. |

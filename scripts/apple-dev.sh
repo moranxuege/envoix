@@ -108,6 +108,7 @@ Environment:
                                 Set to 1 to let Xcode register this Mac for Debug signing
   ENVOIX_MACOS_DEVELOPER_ID     Full Developer ID Application identity for Team 6638TTB2SF
   ENVOIX_MACOS_NOTARY_PROFILE   notarytool Keychain profile name
+  ENVOIX_MACOS_HELPER_PROFILE   Developer ID profile name for the engine helper
   ENVOIX_MACOS_RELEASE_DIR      New absolute output directory (default: dist/macos/<timestamp>)
   ENVOIX_BUILD_CACHE_MIN_FREE_GIB
                                 Hard free-space minimum (default: 32)
@@ -472,6 +473,40 @@ validate_macos_debug_signing_authorization() {
   exit 2
 }
 
+# Manual Developer ID signing resolves a profile by name only, so confirm the
+# installed profile really carries the expected Team, application identifier,
+# and Developer ID audience before xcodebuild trusts the name.
+require_installed_provisioning_profile() {
+  local wanted_name="$1"
+  local wanted_bundle_id="$2"
+  local profile plist name application_id all_devices
+
+  for profile in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"/*.provisionprofile; do
+    [[ -e "$profile" ]] || continue
+    plist="$(security cms -D -i "$profile" 2>/dev/null)" || continue
+    name="$(printf '%s' "$plist" | plutil -extract Name raw - 2>/dev/null || true)"
+    [[ "$name" == "$wanted_name" ]] || continue
+    # macOS profiles key this as com.apple.application-identifier; iOS omits the prefix.
+    application_id="$(printf '%s' "$plist" | plutil -extract 'Entitlements.com\.apple\.application-identifier' raw - 2>/dev/null || true)"
+    if [[ -z "$application_id" ]]; then
+      application_id="$(printf '%s' "$plist" | plutil -extract Entitlements.application-identifier raw - 2>/dev/null || true)"
+    fi
+    all_devices="$(printf '%s' "$plist" | plutil -extract ProvisionsAllDevices raw - 2>/dev/null || true)"
+    if [[ "$application_id" != "$macos_release_team_id.$wanted_bundle_id" ]]; then
+      echo "error: provisioning profile '$wanted_name' does not target $wanted_bundle_id" >&2
+      exit 2
+    fi
+    if [[ "$all_devices" != "true" ]]; then
+      echo "error: provisioning profile '$wanted_name' is not a Developer ID profile" >&2
+      exit 2
+    fi
+    return
+  done
+
+  echo "error: provisioning profile '$wanted_name' is not installed" >&2
+  exit 2
+}
+
 build_macos_signed_debug() {
   require_command codesign
   require_command plutil
@@ -532,6 +567,7 @@ build_macos_release() {
 
   local identity="${ENVOIX_MACOS_DEVELOPER_ID:-}"
   local notary_profile="${ENVOIX_MACOS_NOTARY_PROFILE:-}"
+  local helper_profile="${ENVOIX_MACOS_HELPER_PROFILE:-}"
   local release_stamp release_directory archive_path application submission_zip artifact_zip
   [[ -n "$identity" ]] || {
     echo "error: set ENVOIX_MACOS_DEVELOPER_ID to the full Developer ID Application identity" >&2
@@ -541,6 +577,12 @@ build_macos_release() {
     echo "error: set ENVOIX_MACOS_NOTARY_PROFILE to a notarytool Keychain profile" >&2
     exit 2
   }
+  [[ -n "$helper_profile" ]] || {
+    echo "error: set ENVOIX_MACOS_HELPER_PROFILE to the engine helper's Developer ID profile" >&2
+    echo "error: manual Developer ID signing names its reviewed profile explicitly" >&2
+    exit 2
+  }
+  require_installed_provisioning_profile "$helper_profile" "com.envoix.app.engine-helper"
   case "$identity" in
     "Developer ID Application:"*"($macos_release_team_id)") ;;
     *)
@@ -586,6 +628,7 @@ build_macos_release() {
     CODE_SIGNING_ALLOWED=YES \
     CODE_SIGNING_REQUIRED=YES \
     CODE_SIGN_IDENTITY="$identity" \
+    ENVOIX_MACOS_HELPER_PROFILE="$helper_profile" \
     CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
     ENABLE_HARDENED_RUNTIME=YES \
     OTHER_CODE_SIGN_FLAGS=--timestamp \
