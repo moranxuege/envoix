@@ -482,6 +482,7 @@ impl From<&RoomTransferOffer> for TransferContentSummary {
 }
 
 impl LiveTransferTelemetry {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         transfer_id: String,
         relationship_id: String,

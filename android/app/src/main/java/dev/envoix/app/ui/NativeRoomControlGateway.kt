@@ -433,6 +433,13 @@ internal class NativeRoomControlGateway internal constructor(
                 FfiRoomControlEventKind.VERIFICATION_REQUESTED,
                 FfiRoomControlEventKind.VERIFICATION_SUCCEEDED,
                 FfiRoomControlEventKind.VERIFICATION_FAILED,
+                FfiRoomControlEventKind.RELATIONSHIP_UPGRADE_REQUESTED,
+                FfiRoomControlEventKind.RELATIONSHIP_UPGRADE_ACCEPTED,
+                FfiRoomControlEventKind.RELATIONSHIP_UPGRADE_REJECTED,
+                FfiRoomControlEventKind.RELATIONSHIP_UPGRADE_PREPARED,
+                FfiRoomControlEventKind.RELATIONSHIP_UPGRADE_COMMITTED,
+                FfiRoomControlEventKind.RELATIONSHIP_CONFIRMATION_REQUESTED,
+                FfiRoomControlEventKind.RELATIONSHIP_CONFIRMATION_ACKNOWLEDGED,
                 FfiRoomControlEventKind.PONG,
                 -> Unit
                 FfiRoomControlEventKind.INCOMING_OFFER -> {

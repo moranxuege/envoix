@@ -158,7 +158,7 @@ impl EnvoixWindowsApp {
                 ControllerEvent::Dashboard(result) => {
                     self.refresh_pending = false;
                     self.last_refresh = Instant::now();
-                    match result {
+                    match *result {
                         Ok(dashboard) => {
                             self.error = None;
                             if self.selected_device.as_ref().is_none_or(|selected| {
@@ -943,19 +943,17 @@ impl EnvoixWindowsApp {
                             if transfer
                                 .failure
                                 .as_ref()
-                                .is_some_and(|failure| failure.retryable) =>
+                                .is_some_and(|failure| failure.retryable)
+                                && ui
+                                    .add_enabled(!self.busy(), primary_button("重试"))
+                                    .clicked() =>
                         {
-                            if ui
-                                .add_enabled(!self.busy(), primary_button("重试"))
-                                .clicked()
-                            {
-                                self.start_agent_operation(
-                                    Operation::RetryTransfer,
-                                    AgentRequest::RecoverTransfer {
-                                        transfer_id: transfer_id.clone(),
-                                    },
-                                );
-                            }
+                            self.start_agent_operation(
+                                Operation::RetryTransfer,
+                                AgentRequest::RecoverTransfer {
+                                    transfer_id: transfer_id.clone(),
+                                },
+                            );
                         }
                         _ => {}
                     }

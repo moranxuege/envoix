@@ -57,7 +57,7 @@ pub(crate) enum ControllerCommand {
 }
 
 pub(crate) enum ControllerEvent {
-    Dashboard(Result<Dashboard, String>),
+    Dashboard(Box<Result<Dashboard, String>>),
     Operation {
         operation: Operation,
         result: Result<Option<AgentResponse>, String>,
@@ -105,9 +105,9 @@ fn run_worker(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = events.send(ControllerEvent::Dashboard(Err(format!(
+            let _ = events.send(ControllerEvent::Dashboard(Box::new(Err(format!(
                 "无法启动后台传输控制：{error}"
-            ))));
+            )))));
             context.request_repaint();
             return;
         }
@@ -116,7 +116,7 @@ fn run_worker(
     while let Ok(command) = commands.recv() {
         let event = match command {
             ControllerCommand::Refresh => {
-                ControllerEvent::Dashboard(runtime.block_on(load_dashboard()))
+                ControllerEvent::Dashboard(Box::new(runtime.block_on(load_dashboard())))
             }
             ControllerCommand::Agent { operation, request } => ControllerEvent::Operation {
                 operation,
