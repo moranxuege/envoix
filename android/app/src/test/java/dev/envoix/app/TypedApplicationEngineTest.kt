@@ -117,6 +117,17 @@ class TypedApplicationEngineTest {
             assertTrue(runCatching { engine.snapshot() }.exceptionOrNull() is IllegalStateException)
         }
 
+    // Every other assertion compares the constant with itself, so a core that
+    // moved ahead of Android still looked valid here and only failed when the
+    // app launched on a device. Pin the literal the way the Apple contract
+    // test does, so raising the core version fails this suite first.
+    @Test
+    fun `expected binding versions match the current core contract`() {
+        assertEquals(29u, EXPECTED_FFI_API_VERSION)
+        assertEquals(1u, EXPECTED_APPLICATION_BINDING_VERSION)
+        assertEquals(6.toUShort(), EXPECTED_APPLICATION_CONTRACT_VERSION)
+    }
+
     private fun coreInfo() =
         FfiCoreInfo(
             ffiApiVersion = EXPECTED_FFI_API_VERSION,
