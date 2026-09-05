@@ -616,6 +616,12 @@ fn acquire_owner_lock(directory: &Path) -> Result<File, EngineStoreError> {
         Err(fs::TryLockError::WouldBlock) => Err(EngineStoreError::AlreadyOwned {
             directory: directory.to_path_buf(),
         }),
+        // Android keeps app data on f2fs, which refuses advisory locks outright.
+        // Only that refusal is tolerated, and only because an embedded Engine is
+        // the single writer on those hosts; a real lock failure still aborts.
+        Err(fs::TryLockError::Error(error)) if error.kind() == io::ErrorKind::Unsupported => {
+            Ok(file)
+        }
         Err(fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
@@ -1017,5 +1023,20 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    // Tolerating an unsupported advisory lock must not weaken the case the lock
+    // exists for: a second owner on a filesystem that does support locking is
+    // still refused.
+    #[test]
+    fn a_second_owner_is_refused_where_locking_works() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = EngineStore::open(directory.path()).unwrap();
+        assert!(matches!(
+            EngineStore::open(directory.path()),
+            Err(EngineStoreError::AlreadyOwned { .. })
+        ));
+        drop(first);
+        EngineStore::open(directory.path()).unwrap();
     }
 }
