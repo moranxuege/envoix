@@ -380,6 +380,9 @@ private fun snapshot(
     peerName = peerName,
     creator = true,
     rememberedGeneration = rememberedGeneration,
+    supportsRelationshipUpgrade = false,
+    supportsRelationshipRepair = false,
+    supportsRouteMigration = false,
     lifetime = lifetime(),
 )
 
