@@ -31,10 +31,10 @@ use crate::ports::{PlatformPortError, SecretBytes, SecureVaultPort};
 use crate::snapshot::{ApplyOutcome, EngineSnapshot};
 use crate::storage::{
     DurableRelationship, EngineState, EngineStore, EngineStoreError, MAX_DURABLE_ENTITIES,
-    RelationshipConfirmation, VaultReference,
+    PreviousRelationshipRoute, RelationshipConfirmation, VaultReference,
 };
 
-pub const AGENT_PROTOCOL_VERSION: u16 = 15;
+pub const AGENT_PROTOCOL_VERSION: u16 = 16;
 pub const AGENT_SETTINGS_VERSION: u16 = 2;
 pub const AGENT_PREFERENCES_VERSION: u16 = 1;
 pub const MAX_AGENT_REQUEST_BYTES: u64 = 64 * 1024;
@@ -875,6 +875,10 @@ pub struct DeviceSummary {
     pub relay: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub needs_repair: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub route_revision: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub route_needs_repair: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1001,6 +1005,10 @@ pub struct RememberedDeviceRecord {
     broker: String,
     relay: Option<String>,
     confirmation: RelationshipConfirmation,
+    route_revision: u64,
+    previous_route: Option<PreviousRelationshipRoute>,
+    route_confirmation: RelationshipConfirmation,
+    last_route_transaction_id: Option<String>,
 }
 
 impl std::fmt::Debug for RememberedDeviceRecord {
@@ -1015,6 +1023,10 @@ impl std::fmt::Debug for RememberedDeviceRecord {
             .field("broker", &self.broker)
             .field("relay", &self.relay)
             .field("confirmation", &self.confirmation)
+            .field("route_revision", &self.route_revision)
+            .field("previous_route", &self.previous_route)
+            .field("route_confirmation", &self.route_confirmation)
+            .field("last_route_transaction_id", &self.last_route_transaction_id)
             .finish()
     }
 }
@@ -1045,11 +1057,35 @@ impl RememberedDeviceRecord {
     }
 
     pub fn needs_repair(&self) -> bool {
+        self.confirmation.needs_repair() || self.route_confirmation.needs_repair()
+    }
+
+    pub fn confirmation_needs_repair(&self) -> bool {
         self.confirmation.needs_repair()
     }
 
     pub fn pending_confirmation_transaction_id(&self) -> Option<&str> {
         self.confirmation.transaction_id()
+    }
+
+    pub fn route_revision(&self) -> u64 {
+        self.route_revision
+    }
+
+    pub fn route_needs_repair(&self) -> bool {
+        self.route_confirmation.needs_repair()
+    }
+
+    pub fn pending_route_transaction_id(&self) -> Option<&str> {
+        self.route_confirmation.transaction_id()
+    }
+
+    pub fn last_route_transaction_id(&self) -> Option<&str> {
+        self.last_route_transaction_id.as_deref()
+    }
+
+    pub fn previous_route(&self) -> Option<&PreviousRelationshipRoute> {
+        self.previous_route.as_ref()
     }
 
     pub fn summary(&self) -> DeviceSummary {
@@ -1061,6 +1097,8 @@ impl RememberedDeviceRecord {
             broker: self.broker.clone(),
             relay: self.relay.clone(),
             needs_repair: self.needs_repair(),
+            route_revision: self.route_revision,
+            route_needs_repair: self.route_needs_repair(),
         }
     }
 }
@@ -1117,6 +1155,10 @@ impl ProductStore {
             broker: prepared.broker.clone(),
             relay: prepared.relay.clone(),
             confirmation: RelationshipConfirmation::Confirmed,
+            route_revision: 0,
+            previous_route: None,
+            route_confirmation: RelationshipConfirmation::Confirmed,
+            last_route_transaction_id: None,
         };
         durable.validate(RelationshipState::Trusted)?;
         Ok(prepared)
@@ -1206,6 +1248,10 @@ impl ProductStore {
                 broker: prepared.broker,
                 relay: prepared.relay,
                 confirmation,
+                route_revision: 0,
+                previous_route: None,
+                route_confirmation: RelationshipConfirmation::Confirmed,
+                last_route_transaction_id: None,
             },
         );
 
@@ -1396,6 +1442,10 @@ impl ProductStore {
                     broker: durable.broker.clone(),
                     relay: durable.relay.clone(),
                     confirmation: durable.confirmation.clone(),
+                    route_revision: durable.route_revision,
+                    previous_route: durable.previous_route.clone(),
+                    route_confirmation: durable.route_confirmation.clone(),
+                    last_route_transaction_id: durable.last_route_transaction_id.clone(),
                 })
             })
             .collect()
@@ -1461,17 +1511,63 @@ impl ProductStore {
         Ok(record.summary())
     }
 
-    pub fn update_device_route(
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_device_route_awaiting_peer(
         &mut self,
         selector: &str,
+        old_revision: u64,
+        new_revision: u64,
         broker: &str,
         relay: Option<&str>,
+        transaction_id: &str,
+        recovery_until_unix_seconds: u64,
     ) -> Result<DeviceSummary, EngineStoreError> {
         crate::api::parse_broker_addr(broker, relay)
             .map_err(|error| EngineStoreError::InvalidState(error.to_string()))?;
+        let confirmation = RelationshipConfirmation::AwaitingPeerCommit {
+            transaction_id: transaction_id.to_string(),
+        };
+        confirmation.validate()?;
+        let expected_revision = old_revision.checked_add(1).ok_or_else(|| {
+            EngineStoreError::InvalidState("Relationship route revision is exhausted".into())
+        })?;
+        if new_revision != expected_revision {
+            return Err(EngineStoreError::InvalidState(
+                "Relationship route revision must increase by exactly one".into(),
+            ));
+        }
+        if recovery_until_unix_seconds == 0 {
+            return Err(EngineStoreError::InvalidState(
+                "Relationship route migration needs a recovery deadline".into(),
+            ));
+        }
         let record = self.resolve_device(selector)?;
-        if record.broker == broker && record.relay() == relay {
+        if record.route_revision == new_revision
+            && record.broker == broker
+            && record.relay() == relay
+            && record.pending_route_transaction_id() == Some(transaction_id)
+        {
             return Ok(record.summary());
+        }
+        if record.confirmation.needs_repair() {
+            return Err(EngineStoreError::InvalidState(
+                "Relationship must be confirmed before migrating its route".into(),
+            ));
+        }
+        if record.route_confirmation.needs_repair() {
+            return Err(EngineStoreError::InvalidState(
+                "another Relationship route migration needs repair".into(),
+            ));
+        }
+        if record.route_revision != old_revision {
+            return Err(EngineStoreError::InvalidState(
+                "Relationship route revision changed before commit".into(),
+            ));
+        }
+        if record.broker == broker && record.relay() == relay {
+            return Err(EngineStoreError::InvalidState(
+                "Relationship route migration does not change the route".into(),
+            ));
         }
         let relationship_id =
             RelationshipId::parse(record.id.clone()).expect("stored device ID was validated");
@@ -1480,11 +1576,69 @@ impl ProductStore {
             .durable_relationships
             .get_mut(&relationship_id)
             .ok_or_else(|| EngineStoreError::InvalidState("device route is missing".into()))?;
+        durable.previous_route = Some(PreviousRelationshipRoute {
+            broker: durable.broker.clone(),
+            relay: durable.relay.clone(),
+            revision: durable.route_revision,
+            usable_until_unix_seconds: recovery_until_unix_seconds,
+        });
         durable.broker = broker.to_string();
         durable.relay = relay.map(str::to_string);
+        durable.route_revision = new_revision;
+        durable.route_confirmation = confirmation;
+        durable.last_route_transaction_id = Some(transaction_id.to_string());
         self.engine.replace(state)?;
         self.device_record(&record.id)
             .ok_or_else(|| EngineStoreError::InvalidState("updated device is missing".into()))
+            .map(|device| device.summary())
+    }
+
+    pub fn confirm_device_route(
+        &mut self,
+        selector: &str,
+        revision: u64,
+        transaction_id: &str,
+    ) -> Result<DeviceSummary, EngineStoreError> {
+        let record = self.resolve_device(selector)?;
+        if record.route_revision != revision {
+            return Err(EngineStoreError::InvalidState(
+                "Relationship route confirmation revision does not match".into(),
+            ));
+        }
+        let relationship_id =
+            RelationshipId::parse(record.id.clone()).expect("stored device ID was validated");
+        let mut state = self.engine.state().clone();
+        let durable = state
+            .durable_relationships
+            .get_mut(&relationship_id)
+            .ok_or_else(|| EngineStoreError::InvalidState("device route is missing".into()))?;
+        match &durable.route_confirmation {
+            RelationshipConfirmation::Confirmed
+                if durable.last_route_transaction_id.as_deref() == Some(transaction_id) =>
+            {
+                return Ok(record.summary());
+            }
+            RelationshipConfirmation::Confirmed => {
+                return Err(EngineStoreError::InvalidState(
+                    "Relationship route confirmation transaction does not match".into(),
+                ));
+            }
+            RelationshipConfirmation::AwaitingPeerCommit {
+                transaction_id: pending,
+            } if pending == transaction_id => {
+                durable.route_confirmation = RelationshipConfirmation::Confirmed;
+            }
+            RelationshipConfirmation::AwaitingPeerCommit { .. } => {
+                return Err(EngineStoreError::InvalidState(
+                    "Relationship route confirmation transaction does not match".into(),
+                ));
+            }
+        }
+        self.engine.replace(state)?;
+        self.device_record(&record.id)
+            .ok_or_else(|| {
+                EngineStoreError::InvalidState("confirmed device route is missing".into())
+            })
             .map(|device| device.summary())
     }
 
@@ -2160,6 +2314,12 @@ fn validate_agent_device(device: &DeviceSummary) -> io::Result<()> {
             "Agent Device has an inconsistent credential generation",
         ));
     }
+    if device.route_needs_repair && !device.needs_repair {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent Device route repair must also mark the Relationship as needing repair",
+        ));
+    }
     for (name, endpoint) in std::iter::once(("broker", device.broker.as_str()))
         .chain(device.relay.as_deref().map(|relay| ("relay", relay)))
     {
@@ -2178,6 +2338,10 @@ fn validate_agent_device(device: &DeviceSummary) -> io::Result<()> {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 fn validate_complete_room_invitation(invitation: &str) -> io::Result<()> {
@@ -2829,7 +2993,7 @@ mod tests {
     }
 
     #[test]
-    fn device_route_update_preserves_credential_and_generation() {
+    fn negotiated_route_commit_preserves_credential_and_recovery_route() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = ProductStore::open(directory.path()).unwrap();
         let credential = opaque_credential();
@@ -2848,10 +3012,14 @@ mod tests {
         store.commit_device(pending, &credential, 7).unwrap();
 
         let updated = store
-            .update_device_route(
+            .commit_device_route_awaiting_peer(
                 &id,
+                0,
+                1,
                 crate::DEFAULT_RENDEZVOUS_BROKER,
                 Some(crate::DEFAULT_RELAY_URL),
+                "route_transaction_1",
+                4_102_444_800,
             )
             .unwrap();
 
@@ -2859,18 +3027,52 @@ mod tests {
         assert_eq!(updated.previous_generation, None);
         assert_eq!(updated.broker, crate::DEFAULT_RENDEZVOUS_BROKER);
         assert_eq!(updated.relay.as_deref(), Some(crate::DEFAULT_RELAY_URL));
+        assert_eq!(updated.route_revision, 1);
+        assert!(updated.needs_repair);
+        assert!(updated.route_needs_repair);
         assert_eq!(store.device_credential(&id).unwrap().expose(), credential);
-        assert!(store.update_device_route(&id, "invalid", None).is_err());
+        assert!(
+            store
+                .commit_device_route_awaiting_peer(
+                    &id,
+                    1,
+                    2,
+                    "invalid",
+                    None,
+                    "route_transaction_2",
+                    4_102_444_800,
+                )
+                .is_err()
+        );
         drop(store);
 
-        let reopened = ProductStore::open(directory.path()).unwrap();
+        let mut reopened = ProductStore::open(directory.path()).unwrap();
         let device = reopened.device_record(&id).unwrap();
+        assert!(device.needs_repair());
+        assert!(device.route_needs_repair());
+        assert_eq!(
+            device.pending_route_transaction_id(),
+            Some("route_transaction_1")
+        );
         assert_eq!(device.broker(), crate::DEFAULT_RENDEZVOUS_BROKER);
         assert_eq!(device.relay(), Some(crate::DEFAULT_RELAY_URL));
+        assert_eq!(device.route_revision(), 1);
+        let previous = device.previous_route().unwrap();
+        assert_eq!(previous.broker, old_broker);
+        assert_eq!(
+            previous.relay.as_deref(),
+            Some("https://old-relay.example.test")
+        );
+        assert_eq!(previous.revision, 0);
         assert_eq!(
             reopened.device_credential(&id).unwrap().expose(),
             credential
         );
+        let confirmed = reopened
+            .confirm_device_route(&id, 1, "route_transaction_1")
+            .unwrap();
+        assert!(!confirmed.needs_repair);
+        assert!(!confirmed.route_needs_repair);
     }
 
     #[test]
@@ -3280,7 +3482,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 4);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 16);
         assert!(
             fixture["requests"]
                 .as_array()
@@ -3305,7 +3507,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 5);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 16);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 8);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -3325,7 +3527,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 6);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 16);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 12);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 15);
         assert!(
@@ -3343,7 +3545,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 7);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 16);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 15);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 18);
         assert!(
@@ -3361,7 +3563,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 8);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 16);
         assert_eq!(fixture["requests"].as_array().unwrap().len(), 16);
         assert_eq!(fixture["responses"].as_array().unwrap().len(), 19);
         assert_eq!(
@@ -3378,7 +3580,7 @@ mod tests {
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
         assert_eq!(fixture["protocol_version"], 9);
-        assert_eq!(AGENT_PROTOCOL_VERSION, 15);
+        assert_eq!(AGENT_PROTOCOL_VERSION, 16);
 
         let settings: AgentSettings = serde_json::from_value(fixture["settings"].clone()).unwrap();
         settings.validate().unwrap();
@@ -3845,21 +4047,21 @@ mod tests {
     }
 
     #[test]
-    fn agent_wire_v15_fixture_covers_complete_pairing_invitation_and_repair_state() {
+    fn agent_wire_v15_fixture_remains_frozen() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/v0.3/agent-control-v15.json"
         ))
         .unwrap();
         assert_eq!(fixture["fixture_version"], 1);
-        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+        assert_eq!(fixture["protocol_version"], 15);
 
         let request: AgentRequestEnvelope =
             serde_json::from_value(fixture["request"].clone()).unwrap();
-        request.validate().unwrap();
+        assert!(request.validate().is_err());
 
         let response: AgentResponseEnvelope =
             serde_json::from_value(fixture["response"].clone()).unwrap();
-        response.validate_for(&request.request_id).unwrap();
+        assert!(response.validate_for(&request.request_id).is_err());
         let AgentResponse::Pairing { pairing } = &response.response else {
             panic!("fixture must contain a pairing response");
         };
@@ -3870,6 +4072,38 @@ mod tests {
             serde_json::from_value(fixture["device_needing_repair"].clone()).unwrap();
         validate_agent_device(&device).unwrap();
         assert!(device.needs_repair);
+    }
+
+    #[test]
+    fn agent_wire_v16_fixture_covers_negotiated_route_migration() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/v0.3/agent-control-v16.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["fixture_version"], 1);
+        assert_eq!(fixture["protocol_version"], AGENT_PROTOCOL_VERSION);
+
+        let request: AgentRequestEnvelope =
+            serde_json::from_value(fixture["request"].clone()).unwrap();
+        request.validate().unwrap();
+        assert!(matches!(
+            request.request,
+            AgentRequest::UpdateDeviceRoute { .. }
+        ));
+
+        let response: AgentResponseEnvelope =
+            serde_json::from_value(fixture["response"].clone()).unwrap();
+        response.validate_for(&request.request_id).unwrap();
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            fixture["response"]
+        );
+        let AgentResponse::DeviceRouteUpdated { device } = response.response else {
+            panic!("fixture must contain a route migration response");
+        };
+        assert_eq!(device.route_revision, 1);
+        assert!(!device.route_needs_repair);
+        assert!(!device.needs_repair);
     }
 
     #[test]
@@ -3920,6 +4154,8 @@ mod tests {
             broker: "127.0.0.1:4000".into(),
             relay: None,
             needs_repair: false,
+            route_revision: 0,
+            route_needs_repair: false,
         };
         let paired = AgentResponseEnvelope::new(
             "request_1",

@@ -42,6 +42,35 @@ pub enum RelationshipConfirmation {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviousRelationshipRoute {
+    pub broker: String,
+    pub relay: Option<String>,
+    pub revision: u64,
+    pub usable_until_unix_seconds: u64,
+}
+
+impl PreviousRelationshipRoute {
+    fn validate(&self, current_revision: u64) -> Result<(), EngineStoreError> {
+        validate_endpoint("previous relationship broker", &self.broker)?;
+        if let Some(relay) = &self.relay {
+            validate_endpoint("previous relationship relay", relay)?;
+        }
+        if self.revision >= current_revision {
+            return Err(invalid(
+                "previous Relationship route revision must precede the active revision",
+            ));
+        }
+        if self.usable_until_unix_seconds == 0 {
+            return Err(invalid(
+                "previous Relationship route needs a bounded recovery deadline",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl RelationshipConfirmation {
     pub fn needs_repair(&self) -> bool {
         matches!(self, Self::AwaitingPeerCommit { .. })
@@ -149,6 +178,14 @@ pub struct DurableRelationship {
     pub relay: Option<String>,
     #[serde(default)]
     pub confirmation: RelationshipConfirmation,
+    #[serde(default)]
+    pub route_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_route: Option<PreviousRelationshipRoute>,
+    #[serde(default)]
+    pub route_confirmation: RelationshipConfirmation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_route_transaction_id: Option<String>,
 }
 
 impl DurableRelationship {
@@ -158,6 +195,43 @@ impl DurableRelationship {
             validate_endpoint("relationship relay", relay)?;
         }
         self.confirmation.validate()?;
+        self.route_confirmation.validate()?;
+        if let Some(transaction_id) = &self.last_route_transaction_id {
+            RelationshipConfirmation::AwaitingPeerCommit {
+                transaction_id: transaction_id.clone(),
+            }
+            .validate()?;
+        }
+        if let Some(previous) = &self.previous_route {
+            previous.validate(self.route_revision)?;
+        }
+        if self.route_confirmation.needs_repair() && self.previous_route.is_none() {
+            return Err(invalid(
+                "unconfirmed Relationship route has no recovery route",
+            ));
+        }
+        if self.route_revision == 0
+            && (self.previous_route.is_some() || self.last_route_transaction_id.is_some())
+        {
+            return Err(invalid(
+                "initial Relationship route cannot contain migration recovery state",
+            ));
+        }
+        if self.route_revision > 0
+            && (self.previous_route.is_none() || self.last_route_transaction_id.is_none())
+        {
+            return Err(invalid(
+                "migrated Relationship route is missing recovery metadata",
+            ));
+        }
+        if let RelationshipConfirmation::AwaitingPeerCommit { transaction_id } =
+            &self.route_confirmation
+            && self.last_route_transaction_id.as_deref() != Some(transaction_id)
+        {
+            return Err(invalid(
+                "Relationship route repair transaction does not match its migration",
+            ));
+        }
         match state {
             RelationshipState::Trusted if self.vault_reference.is_none() => {
                 Err(invalid("trusted relationship has no vault reference"))
@@ -719,6 +793,10 @@ mod tests {
                 broker: "broker.invalid:8445".into(),
                 relay: Some("https://relay.invalid".into()),
                 confirmation: RelationshipConfirmation::Confirmed,
+                route_revision: 0,
+                previous_route: None,
+                route_confirmation: RelationshipConfirmation::Confirmed,
+                last_route_transaction_id: None,
             },
         );
         state.snapshot.transfers.insert(

@@ -451,6 +451,8 @@ pub struct FfiAgentDeviceSummary {
     pub broker: String,
     pub relay: Option<String>,
     pub needs_repair: bool,
+    pub route_revision: u64,
+    pub route_needs_repair: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -928,6 +930,8 @@ fn ffi_device_summary(device: DeviceSummary) -> FfiAgentDeviceSummary {
         broker: device.broker,
         relay: device.relay,
         needs_repair: device.needs_repair,
+        route_revision: device.route_revision,
+        route_needs_repair: device.route_needs_repair,
     }
 }
 
@@ -1273,13 +1277,13 @@ mod tests {
     }
 
     #[test]
-    fn api_v28_advertises_the_agent_host_control_capability() {
+    fn api_v29_advertises_the_agent_host_control_capability() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 28);
+        assert_eq!(info.ffi_api_version, 29);
         assert!(
             info.capabilities
                 .iter()
-                .any(|capability| capability == "agent_host_control_v5")
+                .any(|capability| capability == "agent_host_control_v6")
         );
     }
 
@@ -1312,7 +1316,10 @@ mod tests {
             FfiAgentRequest::JoinPairing {
                 pairing: FfiAgentPairingInput {
                     label: "Fixture WSL".into(),
-                    invitation: "123456-fixture-room".into(),
+                    invitation: format!(
+                        "envoix://room/123456-a1b2-c3d4?broker={}",
+                        envoix_client::DEFAULT_RENDEZVOUS_BROKER.replace('@', "%40")
+                    ),
                     verification_code: "654321".into(),
                 },
             },

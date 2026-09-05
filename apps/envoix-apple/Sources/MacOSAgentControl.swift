@@ -105,6 +105,23 @@ final class MacOSAgentPairingCoordinator: DurablePairingCoordinating {
 struct MacOSAgentDevice: Equatable, Identifiable {
     let id: String
     let label: String
+    let needsRepair: Bool
+    let routeRevision: UInt64
+    let routeNeedsRepair: Bool
+
+    init(
+        id: String,
+        label: String,
+        needsRepair: Bool = false,
+        routeRevision: UInt64 = 0,
+        routeNeedsRepair: Bool = false
+    ) {
+        self.id = id
+        self.label = label
+        self.needsRepair = needsRepair
+        self.routeRevision = routeRevision
+        self.routeNeedsRepair = routeNeedsRepair
+    }
 }
 
 enum MacOSAgentTransferError: LocalizedError, Equatable {
@@ -182,7 +199,15 @@ final class MacOSAgentTransferController: ObservableObject {
                 throw MacOSAgentTransferError.unexpectedResponse
             }
             devices = agentDevices
-                .map { MacOSAgentDevice(id: $0.id, label: $0.label) }
+                .map {
+                    MacOSAgentDevice(
+                        id: $0.id,
+                        label: $0.label,
+                        needsRepair: $0.needsRepair,
+                        routeRevision: $0.routeRevision,
+                        routeNeedsRepair: $0.routeNeedsRepair
+                    )
+                }
                 .sorted {
                     $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
                 }

@@ -479,6 +479,8 @@ pub struct FfiRememberedRelationship {
     pub broker: String,
     pub relay: String,
     pub needs_repair: bool,
+    pub route_revision: u64,
+    pub route_needs_repair: bool,
 }
 
 /// Trusted-operation result; callers must not retain or log its credential.
@@ -696,6 +698,8 @@ impl FfiApplicationEngine {
             broker: renamed.broker,
             relay: renamed.relay.unwrap_or_default(),
             needs_repair: renamed.needs_repair,
+            route_revision: renamed.route_revision,
+            route_needs_repair: renamed.route_needs_repair,
         })
     }
 
@@ -715,6 +719,8 @@ impl FfiApplicationEngine {
             broker: revoked.broker,
             relay: revoked.relay.unwrap_or_default(),
             needs_repair: revoked.needs_repair,
+            route_revision: revoked.route_revision,
+            route_needs_repair: revoked.route_needs_repair,
         })
     }
 }
@@ -767,6 +773,8 @@ fn ffi_remembered_relationship(record: &RememberedDeviceRecord) -> FfiRemembered
         broker: record.broker().to_string(),
         relay: record.relay().unwrap_or_default().to_string(),
         needs_repair: record.needs_repair(),
+        route_revision: record.route_revision(),
+        route_needs_repair: record.route_needs_repair(),
     }
 }
 

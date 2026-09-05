@@ -90,6 +90,16 @@ commit that has not observed the peer commit remains durable but is projected as
 remembered Room exchanges the persisted transaction identifier and clears that
 state only after the peer acknowledges its commit.
 
+Agent protocol v16 and FFI API 29 add `agent_host_control_v6` and
+`room_route_migration_v1`. The existing `update_device_route` local command now
+queues a migration on an online authenticated remembered Room instead of
+mutating Engine state immediately. The wire exchange binds a random transaction
+ID, old revision, exactly-next revision, broker, and optional relay.
+`route_revision`, `route_needs_repair`, and the aggregate `needs_repair`
+projection let hosts disable sending without reading Engine files. Each Engine
+retains the previous route for seven days and tries it after the active route
+while an interrupted migration is repaired.
+
 `FfiApplicationEngine` owns one ordered application snapshot. Its no-argument
 constructor is limited to contract tests and transient previews; product hosts
 open the persistent constructor. It accepts typed event envelopes, returns

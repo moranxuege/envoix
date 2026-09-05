@@ -1,0 +1,30 @@
+{
+  "fixture_version": 1,
+  "protocol_version": 16,
+  "request": {
+    "protocol_version": 16,
+    "request_id": "request_route_migration_fixture",
+    "request": {
+      "command": "update_device_route",
+      "device": "relationship_fixture",
+      "broker": "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@47.237.15.48:8445",
+      "relay": "https://relay.envoix.cc:8444"
+    }
+  },
+  "response": {
+    "protocol_version": 16,
+    "request_id": "request_route_migration_fixture",
+    "response": {
+      "kind": "device_route_updated",
+      "device": {
+        "id": "relationship_fixture",
+        "label": "Fixture WSL",
+        "generation": 0,
+        "previous_generation": null,
+        "broker": "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@47.237.15.48:8445",
+        "relay": "https://relay.envoix.cc:8444",
+        "route_revision": 1
+      }
+    }
+  }
+}

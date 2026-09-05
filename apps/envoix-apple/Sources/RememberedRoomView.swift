@@ -770,7 +770,7 @@ struct MacOSAgentRoomView: View {
                 }
             }
             .buttonStyle(PrimaryActionButtonStyle())
-            .disabled(isPreparing)
+            .disabled(isPreparing || device.needsRepair)
             .accessibilityIdentifier("agent_room_add_files")
 
             Label(
@@ -804,6 +804,9 @@ struct MacOSAgentRoomView: View {
     }
 
     private var connectionText: String {
+        if device.needsRepair {
+            return agentConnectionText(.needsRepair)
+        }
         if isPreparing {
             return agentConnectionText(.preparing)
         }
@@ -817,12 +820,14 @@ struct MacOSAgentRoomView: View {
     }
 
     private var connectionIcon: String {
+        if device.needsRepair { return "exclamationmark.triangle.fill" }
         if hasActivePath { return "checkmark.circle.fill" }
         if isPreparing || hasPendingTransfer { return "arrow.triangle.2.circlepath" }
         return "paperplane.circle.fill"
     }
 
     private var connectionTint: Color {
+        if device.needsRepair { return Theme.danger }
         if hasActivePath { return Theme.success }
         if isPreparing || hasPendingTransfer { return Theme.accentStrong }
         return Theme.success

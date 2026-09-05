@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn core_info_advertises_typed_staged_provider_jobs_in_current_ffi() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 28);
+        assert_eq!(info.ffi_api_version, 29);
         assert!(
             info.capabilities
                 .contains(&"typed_staged_provider_job_v1".to_string())

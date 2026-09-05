@@ -754,7 +754,12 @@ final class LiveRoomControlGateway: RoomControlGateway {
              .relationshipUpgradePrepared,
              .relationshipUpgradeCommitted,
              .relationshipConfirmationRequested,
-             .relationshipConfirmationAcknowledged:
+             .relationshipConfirmationAcknowledged,
+             .routeMigrationRequested,
+             .routeMigrationAccepted,
+             .routeMigrationRejected,
+             .routeMigrationPrepared,
+             .routeMigrationCommitted:
             return nil
         case .incomingOffer:
             guard let offer = event.offer else { return nil }

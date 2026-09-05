@@ -234,6 +234,37 @@ fn relationship_upgrade_state_requires_acceptance_and_both_prepared_peers() {
 }
 
 #[test]
+fn route_migration_state_rejects_rollback_and_handles_simultaneous_repair() {
+    let transaction_id = "route_tx_1";
+    let route = RelationshipRoute {
+        broker: "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@127.0.0.1:443"
+            .into(),
+        relay: Some("https://relay.example.test".into()),
+        revision: 8,
+    };
+    assert!(route.validate(7).is_ok());
+    assert!(route.validate(8).is_err());
+
+    let mut initiator = RouteMigrationState::default();
+    initiator
+        .begin_local(transaction_id.into(), 7, route.clone())
+        .unwrap();
+    assert_eq!(
+        initiator
+            .begin_remote(transaction_id.into(), 7, route)
+            .unwrap(),
+        RemoteRouteMigrationStart::Simultaneous
+    );
+    initiator.mark_local_prepared(transaction_id).unwrap();
+    initiator.mark_remote_prepared(transaction_id).unwrap();
+    assert!(initiator.can_commit(transaction_id).unwrap());
+    initiator.mark_local_committed(transaction_id).unwrap();
+    initiator.mark_remote_committed(transaction_id).unwrap();
+    assert!(initiator.is_complete(transaction_id).unwrap());
+    assert!(!initiator.blocks_transfers());
+}
+
+#[test]
 fn remembered_hello_rejects_protocol_and_session_mode_mismatches() {
     let mode = RoomControlSessionMode::Remembered { generation: 7 };
     let binding = [0x42; 32];
@@ -1025,6 +1056,8 @@ async fn remembered_room_control_is_equal_and_bidirectional_after_authentication
     assert!(!responder.supports_relationship_upgrade());
     assert!(responder.supports_relationship_repair());
     assert!(connector.supports_relationship_repair());
+    assert!(responder.supports_route_migration());
+    assert!(connector.supports_route_migration());
     assert_eq!(responder.remembered_generation(), Some(7));
     assert_eq!(connector.remembered_generation(), Some(7));
     assert_eq!(responder.lifetime_state(), RoomLifetimeState::remembered());
@@ -1061,6 +1094,76 @@ async fn remembered_room_control_is_equal_and_bidirectional_after_authentication
         RoomControlEvent::RelationshipConfirmationAcknowledged {
             transaction_id: "relationship_transaction_1".into(),
         }
+    );
+
+    let route = RelationshipRoute {
+        broker: format!("{}@127.0.0.1:9445", broker_text.split('@').next().unwrap()),
+        relay: None,
+        revision: 1,
+    };
+    connector
+        .request_route_migration("route_transaction_1", 0, route.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        responder.next_event().await.unwrap(),
+        RoomControlEvent::RouteMigrationRequested {
+            transaction_id: "route_transaction_1".into(),
+            old_revision: 0,
+            route,
+        }
+    );
+    responder
+        .accept_route_migration("route_transaction_1")
+        .await
+        .unwrap();
+    assert_eq!(
+        connector.next_event().await.unwrap(),
+        RoomControlEvent::RouteMigrationAccepted {
+            transaction_id: "route_transaction_1".into(),
+        }
+    );
+    connector
+        .mark_route_migration_prepared("route_transaction_1")
+        .await
+        .unwrap();
+    responder
+        .mark_route_migration_prepared("route_transaction_1")
+        .await
+        .unwrap();
+    assert!(matches!(
+        connector.next_event().await.unwrap(),
+        RoomControlEvent::RouteMigrationPrepared { .. }
+    ));
+    assert!(matches!(
+        responder.next_event().await.unwrap(),
+        RoomControlEvent::RouteMigrationPrepared { .. }
+    ));
+    connector
+        .mark_route_migration_committed("route_transaction_1")
+        .await
+        .unwrap();
+    responder
+        .mark_route_migration_committed("route_transaction_1")
+        .await
+        .unwrap();
+    assert!(matches!(
+        connector.next_event().await.unwrap(),
+        RoomControlEvent::RouteMigrationCommitted { .. }
+    ));
+    assert!(matches!(
+        responder.next_event().await.unwrap(),
+        RoomControlEvent::RouteMigrationCommitted { .. }
+    ));
+    assert!(
+        connector
+            .route_migration_is_complete("route_transaction_1")
+            .unwrap()
+    );
+    assert!(
+        responder
+            .route_migration_is_complete("route_transaction_1")
+            .unwrap()
     );
 
     assert!(

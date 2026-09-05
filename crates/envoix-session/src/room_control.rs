@@ -316,6 +316,36 @@ pub enum RelationshipUpgradeRejection {
     AlreadyRelated,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteMigrationRejection {
+    Busy,
+    InvalidRoute,
+    StaleRevision,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RelationshipRoute {
+    pub broker: String,
+    pub relay: Option<String>,
+    pub revision: u64,
+}
+
+impl RelationshipRoute {
+    fn validate(&self, old_revision: u64) -> Result<(), SessionError> {
+        let expected_revision = old_revision.checked_add(1).ok_or_else(|| {
+            CoreError::InvalidInput("Relationship route revision is exhausted".into())
+        })?;
+        if self.revision != expected_revision {
+            return Err(CoreError::InvalidInput(
+                "Relationship route revision must increase by exactly one".into(),
+            ));
+        }
+        parse_broker_addr(&self.broker, self.relay.as_deref())?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RoomTransferOffer {
     pub offer_id: String,
@@ -424,6 +454,24 @@ pub enum RoomControlEvent {
     RelationshipConfirmationAcknowledged {
         transaction_id: String,
     },
+    RouteMigrationRequested {
+        transaction_id: String,
+        old_revision: u64,
+        route: RelationshipRoute,
+    },
+    RouteMigrationAccepted {
+        transaction_id: String,
+    },
+    RouteMigrationRejected {
+        transaction_id: String,
+        reason: RouteMigrationRejection,
+    },
+    RouteMigrationPrepared {
+        transaction_id: String,
+    },
+    RouteMigrationCommitted {
+        transaction_id: String,
+    },
     IncomingOffer(RoomTransferOffer),
     OfferAccepted {
         offer_id: String,
@@ -480,6 +528,24 @@ enum ControlMessage {
     RelationshipConfirmationAcknowledged {
         transaction_id: String,
     },
+    RouteMigrationRequest {
+        transaction_id: String,
+        old_revision: u64,
+        route: RelationshipRoute,
+    },
+    RouteMigrationAccepted {
+        transaction_id: String,
+    },
+    RouteMigrationRejected {
+        transaction_id: String,
+        reason: RouteMigrationRejection,
+    },
+    RouteMigrationPrepared {
+        transaction_id: String,
+    },
+    RouteMigrationCommitted {
+        transaction_id: String,
+    },
     TransferOffer(RoomTransferOffer),
     OfferAccepted {
         offer_id: String,
@@ -515,6 +581,7 @@ enum ControlSessionKind {
 enum RoomControlCapability {
     VerificationV1,
     RelationshipUpgradeV1,
+    RouteMigrationV1,
     #[serde(other)]
     Unknown,
 }
@@ -547,6 +614,31 @@ struct RelationshipUpgradeTransaction {
 #[derive(Default)]
 struct RelationshipUpgradeState {
     transaction: Option<RelationshipUpgradeTransaction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouteMigrationTransaction {
+    transaction_id: String,
+    old_revision: u64,
+    route: RelationshipRoute,
+    initiated_locally: bool,
+    accepted: bool,
+    local_prepared: bool,
+    remote_prepared: bool,
+    local_committed: bool,
+    remote_committed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteRouteMigrationStart {
+    New,
+    Duplicate,
+    Simultaneous,
+}
+
+#[derive(Default)]
+struct RouteMigrationState {
+    transaction: Option<RouteMigrationTransaction>,
 }
 
 impl RelationshipUpgradeState {
@@ -721,6 +813,209 @@ impl RelationshipUpgradeState {
         if !transaction.accepted {
             return Err(CoreError::InvalidInput(
                 "Relationship upgrade has not been accepted".into(),
+            ));
+        }
+        Ok(transaction)
+    }
+}
+
+impl RouteMigrationState {
+    fn begin_local(
+        &mut self,
+        transaction_id: String,
+        old_revision: u64,
+        route: RelationshipRoute,
+    ) -> Result<(), SessionError> {
+        if self.transaction.is_some() {
+            return Err(CoreError::InvalidInput(
+                "another Relationship route migration is already active".into(),
+            ));
+        }
+        self.transaction = Some(RouteMigrationTransaction {
+            transaction_id,
+            old_revision,
+            route,
+            initiated_locally: true,
+            accepted: false,
+            local_prepared: false,
+            remote_prepared: false,
+            local_committed: false,
+            remote_committed: false,
+        });
+        Ok(())
+    }
+
+    fn begin_remote(
+        &mut self,
+        transaction_id: String,
+        old_revision: u64,
+        route: RelationshipRoute,
+    ) -> Result<RemoteRouteMigrationStart, SessionError> {
+        match &mut self.transaction {
+            None => {
+                self.transaction = Some(RouteMigrationTransaction {
+                    transaction_id,
+                    old_revision,
+                    route,
+                    initiated_locally: false,
+                    accepted: false,
+                    local_prepared: false,
+                    remote_prepared: false,
+                    local_committed: false,
+                    remote_committed: false,
+                });
+                Ok(RemoteRouteMigrationStart::New)
+            }
+            Some(transaction)
+                if transaction.transaction_id == transaction_id
+                    && transaction.old_revision == old_revision
+                    && transaction.route == route =>
+            {
+                if transaction.initiated_locally {
+                    transaction.accepted = true;
+                    Ok(RemoteRouteMigrationStart::Simultaneous)
+                } else {
+                    Ok(RemoteRouteMigrationStart::Duplicate)
+                }
+            }
+            Some(_) => Err(CoreError::InvalidInput(
+                "another Relationship route migration is already active".into(),
+            )),
+        }
+    }
+
+    fn accept_remote(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.remote_transaction_mut(transaction_id)?;
+        transaction.accepted = true;
+        Ok(())
+    }
+
+    fn receive_acceptance(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.local_transaction_mut(transaction_id)?;
+        transaction.accepted = true;
+        Ok(())
+    }
+
+    fn reject_remote(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        self.remote_transaction_mut(transaction_id)?;
+        self.transaction = None;
+        Ok(())
+    }
+
+    fn receive_rejection(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        self.local_transaction_mut(transaction_id)?;
+        self.transaction = None;
+        Ok(())
+    }
+
+    fn mark_local_prepared(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.accepted_transaction_mut(transaction_id)?;
+        transaction.local_prepared = true;
+        Ok(())
+    }
+
+    fn mark_remote_prepared(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.accepted_transaction_mut(transaction_id)?;
+        transaction.remote_prepared = true;
+        Ok(())
+    }
+
+    fn can_commit(&self, transaction_id: &str) -> Result<bool, SessionError> {
+        let transaction = self.transaction(transaction_id)?;
+        Ok(transaction.local_prepared && transaction.remote_prepared)
+    }
+
+    fn mark_local_committed(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if !transaction.local_prepared || !transaction.remote_prepared {
+            return Err(CoreError::InvalidInput(
+                "Relationship route cannot commit before both peers are prepared".into(),
+            ));
+        }
+        transaction.local_committed = true;
+        Ok(())
+    }
+
+    fn mark_remote_committed(&mut self, transaction_id: &str) -> Result<(), SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if !transaction.local_prepared || !transaction.remote_prepared {
+            return Err(CoreError::Protocol(
+                "peer committed a Relationship route before both peers were prepared".into(),
+            ));
+        }
+        transaction.remote_committed = true;
+        Ok(())
+    }
+
+    fn is_complete(&self, transaction_id: &str) -> Result<bool, SessionError> {
+        let transaction = self.transaction(transaction_id)?;
+        Ok(transaction.local_committed && transaction.remote_committed)
+    }
+
+    fn blocks_transfers(&self) -> bool {
+        self.transaction.as_ref().is_some_and(|transaction| {
+            !(transaction.local_committed && transaction.remote_committed)
+        })
+    }
+
+    fn transaction(
+        &self,
+        transaction_id: &str,
+    ) -> Result<&RouteMigrationTransaction, SessionError> {
+        self.transaction
+            .as_ref()
+            .filter(|transaction| transaction.transaction_id == transaction_id)
+            .ok_or_else(|| {
+                CoreError::InvalidInput("Relationship route transaction is not active".into())
+            })
+    }
+
+    fn transaction_mut(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<&mut RouteMigrationTransaction, SessionError> {
+        self.transaction
+            .as_mut()
+            .filter(|transaction| transaction.transaction_id == transaction_id)
+            .ok_or_else(|| {
+                CoreError::InvalidInput("Relationship route transaction is not active".into())
+            })
+    }
+
+    fn local_transaction_mut(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<&mut RouteMigrationTransaction, SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if !transaction.initiated_locally {
+            return Err(CoreError::Protocol(
+                "peer responded to a Relationship route migration it initiated".into(),
+            ));
+        }
+        Ok(transaction)
+    }
+
+    fn remote_transaction_mut(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<&mut RouteMigrationTransaction, SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if transaction.initiated_locally {
+            return Err(CoreError::InvalidInput(
+                "local peer cannot decide its own Relationship route migration".into(),
+            ));
+        }
+        Ok(transaction)
+    }
+
+    fn accepted_transaction_mut(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<&mut RouteMigrationTransaction, SessionError> {
+        let transaction = self.transaction_mut(transaction_id)?;
+        if !transaction.accepted {
+            return Err(CoreError::InvalidInput(
+                "Relationship route migration has not been accepted".into(),
             ));
         }
         Ok(transaction)
@@ -950,8 +1245,10 @@ pub struct RoomControlSession {
     pairing_authorized: AtomicBool,
     peer_supports_verification: bool,
     peer_supports_relationship_upgrade: bool,
+    peer_supports_route_migration: bool,
     verification: std::sync::Mutex<VerificationState>,
     relationship_upgrade: std::sync::Mutex<RelationshipUpgradeState>,
+    route_migration: std::sync::Mutex<RouteMigrationState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1082,6 +1379,10 @@ impl RoomControlSession {
 
     pub fn supports_relationship_repair(&self) -> bool {
         self.mode.is_remembered() && self.peer_supports_relationship_upgrade
+    }
+
+    pub fn supports_route_migration(&self) -> bool {
+        self.mode.is_remembered() && self.peer_supports_route_migration
     }
 
     /// Proposes turning this temporary Room's authenticated peer into a
@@ -1245,6 +1546,125 @@ impl RoomControlSession {
         .await
     }
 
+    pub async fn request_route_migration(
+        &self,
+        transaction_id: &str,
+        old_revision: u64,
+        route: RelationshipRoute,
+    ) -> Result<(), SessionError> {
+        self.ensure_route_migration_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        route.validate(old_revision)?;
+        self.ensure_no_pending_offer()?;
+        self.route_migration
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship route state unavailable".into()))?
+            .begin_local(transaction_id.to_string(), old_revision, route.clone())?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::RouteMigrationRequest {
+            transaction_id: transaction_id.to_string(),
+            old_revision,
+            route,
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    pub async fn accept_route_migration(&self, transaction_id: &str) -> Result<(), SessionError> {
+        self.ensure_route_migration_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        self.ensure_no_pending_offer()?;
+        self.route_migration
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship route state unavailable".into()))?
+            .accept_remote(transaction_id)?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::RouteMigrationAccepted {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    pub async fn reject_route_migration(
+        &self,
+        transaction_id: &str,
+        reason: RouteMigrationRejection,
+    ) -> Result<(), SessionError> {
+        self.ensure_route_migration_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        self.route_migration
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship route state unavailable".into()))?
+            .reject_remote(transaction_id)?;
+        self.send_offer_response(ControlMessage::RouteMigrationRejected {
+            transaction_id: transaction_id.to_string(),
+            reason,
+        })
+        .await
+    }
+
+    pub async fn mark_route_migration_prepared(
+        &self,
+        transaction_id: &str,
+    ) -> Result<(), SessionError> {
+        self.ensure_route_migration_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        self.route_migration
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship route state unavailable".into()))?
+            .mark_local_prepared(transaction_id)?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::RouteMigrationPrepared {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    pub fn route_migration_ready_to_commit(
+        &self,
+        transaction_id: &str,
+    ) -> Result<bool, SessionError> {
+        self.ensure_route_migration_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        self.route_migration
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship route state unavailable".into()))?
+            .can_commit(transaction_id)
+    }
+
+    pub async fn mark_route_migration_committed(
+        &self,
+        transaction_id: &str,
+    ) -> Result<(), SessionError> {
+        self.ensure_route_migration_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        self.route_migration
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship route state unavailable".into()))?
+            .mark_local_committed(transaction_id)?;
+        let mut mutation = CloseOnIncompleteMutation::new(&self.connection);
+        self.send(ControlMessage::RouteMigrationCommitted {
+            transaction_id: transaction_id.to_string(),
+        })
+        .await?;
+        mutation.disarm();
+        Ok(())
+    }
+
+    pub fn route_migration_is_complete(&self, transaction_id: &str) -> Result<bool, SessionError> {
+        self.ensure_route_migration_supported()?;
+        validate_relationship_transaction_id(transaction_id)?;
+        self.route_migration
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship route state unavailable".into()))?
+            .is_complete(transaction_id)
+    }
+
     pub fn lifetime_state(&self) -> RoomLifetimeState {
         self.lifetime
             .lock()
@@ -1258,7 +1678,7 @@ impl RoomControlSession {
         offer: RoomTransferOffer,
     ) -> Result<Option<RoomLifetimeState>, SessionError> {
         offer.validate(&self.broker, self.relay.as_deref())?;
-        if self.relationship_upgrade_blocks_transfers()? {
+        if self.migration_blocks_transfers()? {
             return Err(CoreError::InvalidInput(
                 "file offers are paused while saving this device".into(),
             ));
@@ -1648,8 +2068,137 @@ impl RoomControlSession {
                         transaction_id,
                     });
                 }
+                ControlMessage::RouteMigrationRequest {
+                    transaction_id,
+                    old_revision,
+                    route,
+                } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    if !self.supports_route_migration() {
+                        return Err(CoreError::Protocol(
+                            "Relationship route migration is not available in this Room".into(),
+                        ));
+                    }
+                    if route.validate(old_revision).is_err() {
+                        self.send(ControlMessage::RouteMigrationRejected {
+                            transaction_id,
+                            reason: RouteMigrationRejection::InvalidRoute,
+                        })
+                        .await?;
+                        continue;
+                    }
+                    let offer_pending = {
+                        let offers = self.offers.lock().map_err(|_| {
+                            CoreError::Transport("room offer state unavailable".into())
+                        })?;
+                        offers.pending_local.is_some() || offers.pending_remote.is_some()
+                    };
+                    if offer_pending {
+                        self.send(ControlMessage::RouteMigrationRejected {
+                            transaction_id,
+                            reason: RouteMigrationRejection::Busy,
+                        })
+                        .await?;
+                        continue;
+                    }
+                    let start = self
+                        .route_migration
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship route state unavailable".into())
+                        })?
+                        .begin_remote(transaction_id.clone(), old_revision, route.clone());
+                    match start {
+                        Ok(RemoteRouteMigrationStart::New) => {
+                            return Ok(RoomControlEvent::RouteMigrationRequested {
+                                transaction_id,
+                                old_revision,
+                                route,
+                            });
+                        }
+                        Ok(RemoteRouteMigrationStart::Duplicate) => continue,
+                        Ok(RemoteRouteMigrationStart::Simultaneous) => {
+                            self.send(ControlMessage::RouteMigrationAccepted { transaction_id })
+                                .await?;
+                            continue;
+                        }
+                        Err(_) => {
+                            self.send(ControlMessage::RouteMigrationRejected {
+                                transaction_id,
+                                reason: RouteMigrationRejection::Busy,
+                            })
+                            .await?;
+                        }
+                    }
+                }
+                ControlMessage::RouteMigrationAccepted { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    self.route_migration
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship route state unavailable".into())
+                        })?
+                        .receive_acceptance(&transaction_id)
+                        .map_err(|_| {
+                            CoreError::Protocol(
+                                "peer accepted an unknown Relationship route transaction".into(),
+                            )
+                        })?;
+                    return Ok(RoomControlEvent::RouteMigrationAccepted { transaction_id });
+                }
+                ControlMessage::RouteMigrationRejected {
+                    transaction_id,
+                    reason,
+                } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    self.route_migration
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship route state unavailable".into())
+                        })?
+                        .receive_rejection(&transaction_id)
+                        .map_err(|_| {
+                            CoreError::Protocol(
+                                "peer rejected an unknown Relationship route transaction".into(),
+                            )
+                        })?;
+                    return Ok(RoomControlEvent::RouteMigrationRejected {
+                        transaction_id,
+                        reason,
+                    });
+                }
+                ControlMessage::RouteMigrationPrepared { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    self.route_migration
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship route state unavailable".into())
+                        })?
+                        .mark_remote_prepared(&transaction_id)
+                        .map_err(|_| {
+                            CoreError::Protocol(
+                                "peer prepared an invalid Relationship route transaction".into(),
+                            )
+                        })?;
+                    return Ok(RoomControlEvent::RouteMigrationPrepared { transaction_id });
+                }
+                ControlMessage::RouteMigrationCommitted { transaction_id } => {
+                    validate_peer_relationship_transaction_id(&transaction_id)?;
+                    self.route_migration
+                        .lock()
+                        .map_err(|_| {
+                            CoreError::Transport("Relationship route state unavailable".into())
+                        })?
+                        .mark_remote_committed(&transaction_id)
+                        .map_err(|_| {
+                            CoreError::Protocol(
+                                "peer committed an invalid Relationship route transaction".into(),
+                            )
+                        })?;
+                    return Ok(RoomControlEvent::RouteMigrationCommitted { transaction_id });
+                }
                 ControlMessage::TransferOffer(offer) => {
-                    if self.relationship_upgrade_blocks_transfers()? {
+                    if self.migration_blocks_transfers()? {
                         self.send(ControlMessage::OfferRejected {
                             offer_id: offer.offer_id,
                             reason: RoomOfferRejection::Busy,
@@ -1811,12 +2360,18 @@ impl RoomControlSession {
         Ok(())
     }
 
-    fn relationship_upgrade_blocks_transfers(&self) -> Result<bool, SessionError> {
-        Ok(self
+    fn migration_blocks_transfers(&self) -> Result<bool, SessionError> {
+        let relationship_upgrade = self
             .relationship_upgrade
             .lock()
             .map_err(|_| CoreError::Transport("Relationship upgrade state unavailable".into()))?
-            .blocks_transfers())
+            .blocks_transfers();
+        let route_migration = self
+            .route_migration
+            .lock()
+            .map_err(|_| CoreError::Transport("Relationship route state unavailable".into()))?
+            .blocks_transfers();
+        Ok(relationship_upgrade || route_migration)
     }
 
     fn ensure_relationship_repair_supported(&self) -> Result<(), SessionError> {
@@ -1828,6 +2383,20 @@ impl RoomControlSession {
         if !self.peer_supports_relationship_upgrade {
             return Err(CoreError::InvalidInput(
                 "the remembered peer does not support Relationship repair".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_route_migration_supported(&self) -> Result<(), SessionError> {
+        if !self.mode.is_remembered() {
+            return Err(CoreError::InvalidInput(
+                "Relationship route migration requires a remembered Room".into(),
+            ));
+        }
+        if !self.peer_supports_route_migration {
+            return Err(CoreError::InvalidInput(
+                "the remembered peer does not support Relationship route migration".into(),
             ));
         }
         Ok(())
@@ -2147,6 +2716,7 @@ async fn connect_room_control_inner(
         capabilities: vec![
             RoomControlCapability::VerificationV1,
             RoomControlCapability::RelationshipUpgradeV1,
+            RoomControlCapability::RouteMigrationV1,
         ],
         display_name,
         creator: request.mode.is_creator(),
@@ -2197,11 +2767,14 @@ async fn connect_room_control_inner(
             .contains(&RoomControlCapability::VerificationV1),
         peer_supports_relationship_upgrade: peer_capabilities
             .contains(&RoomControlCapability::RelationshipUpgradeV1),
+        peer_supports_route_migration: peer_capabilities
+            .contains(&RoomControlCapability::RouteMigrationV1),
         verification: std::sync::Mutex::new(VerificationState::new(
             request.mode,
             pairing_authorized,
         )),
         relationship_upgrade: std::sync::Mutex::new(RelationshipUpgradeState::default()),
+        route_migration: std::sync::Mutex::new(RouteMigrationState::default()),
     })
 }
 

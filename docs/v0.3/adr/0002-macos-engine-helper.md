@@ -226,6 +226,14 @@ state with a matching confirmation request and acknowledgement. Pairing shares
 the complete Room invitation, making the creator's broker and relay route
 authoritative even when the peers use different local deployment defaults.
 
+API 29 adds `agent_host_control_v6`, `room_route_migration_v1`, and Agent
+protocol v16. `update_device_route` is now negotiated over an online,
+authenticated remembered Room: both peers validate the old revision, prepare,
+and commit the same next revision. A post-commit interruption is projected as
+`route_needs_repair`, blocks sending, and retries through the active or retained
+previous route for a seven-day recovery window. An offline peer is rejected
+with an actionable result; the helper never silently edits only one side.
+
 The Apple stage-B implementation embeds `EnvoixEngineHelper.app` at
 `Contents/Library/LoginItems`, registers it only after an explicit Settings
 action through `SMAppService`, and gives only that helper the production

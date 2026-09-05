@@ -379,7 +379,7 @@ mod tests {
     fn core_info_advertises_platform_destination_in_current_ffi() {
         let info = crate::envoix_core_info();
 
-        assert_eq!(info.ffi_api_version, 28);
+        assert_eq!(info.ffi_api_version, 29);
         assert!(
             info.capabilities
                 .iter()

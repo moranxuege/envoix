@@ -41,7 +41,9 @@ selected/cleared path events without rewriting v4-v7.
 v8. `agent-control-v10.json` adds Apple Keychain diagnostics, v11 moves pairing
 into the Agent boundary, v12 adds pinned route migration, and v13 adds durable
 Transfer controls. `agent-control-v14.json` adds an Agent-owned Inbox preference
-plus ephemeral, bounded Transfer telemetry. `agent-control-v15.json` is the
-current contract and makes the complete Room invitation authoritative across
-different deployments while exposing an unconfirmed Relationship as requiring
-repair, without rewriting v9-v14.
+plus ephemeral, bounded Transfer telemetry. `agent-control-v15.json` makes the
+complete Room invitation authoritative across different deployments while
+exposing an unconfirmed Relationship as requiring repair.
+`agent-control-v16.json` is the current contract and freezes the nonzero route
+revision returned only after both authenticated peers confirm a negotiated
+broker/relay migration, without rewriting v9-v15.

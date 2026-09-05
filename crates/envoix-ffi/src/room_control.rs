@@ -2,10 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use envoix_client::api::{
-    Client, IdentityConfig, RelationshipUpgradeRejection, RememberedCredentialRef,
-    RememberedRoomControlConnectError, RememberedRoomControlRole, RendezvousCause, RoomCloseReason,
-    RoomControlEvent, RoomControlInvite, RoomControlSession, RoomLifetimePolicy, RoomLifetimeState,
-    RoomOfferRejection, RoomTransferOffer, SessionError, TransferCancelToken, TransferOptions,
+    Client, IdentityConfig, RelationshipRoute, RelationshipUpgradeRejection,
+    RememberedCredentialRef, RememberedRoomControlConnectError, RememberedRoomControlRole,
+    RendezvousCause, RoomCloseReason, RoomControlEvent, RoomControlInvite, RoomControlSession,
+    RoomLifetimePolicy, RoomLifetimeState, RoomOfferRejection, RoomTransferOffer,
+    RouteMigrationRejection, SessionError, TransferCancelToken, TransferOptions,
     acquire_remembered_credential, connect_remembered_room_control, connect_room_control,
 };
 use envoix_error::CoreError;
@@ -106,6 +107,20 @@ pub enum FfiRelationshipUpgradeRejection {
     AlreadyRelated,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiRouteMigrationRejection {
+    Busy,
+    InvalidRoute,
+    StaleRevision,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiRelationshipRoute {
+    pub broker: String,
+    pub relay: Option<String>,
+    pub revision: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiRoomTransferOffer {
     pub offer_id: String,
@@ -128,6 +143,11 @@ pub enum FfiRoomControlEventKind {
     RelationshipUpgradeCommitted,
     RelationshipConfirmationRequested,
     RelationshipConfirmationAcknowledged,
+    RouteMigrationRequested,
+    RouteMigrationAccepted,
+    RouteMigrationRejected,
+    RouteMigrationPrepared,
+    RouteMigrationCommitted,
     IncomingOffer,
     OfferAccepted,
     OfferRejected,
@@ -144,6 +164,9 @@ pub struct FfiRoomControlEvent {
     pub rejection: Option<FfiRoomOfferRejection>,
     pub relationship_transaction_id: String,
     pub relationship_rejection: Option<FfiRelationshipUpgradeRejection>,
+    pub route_old_revision: u64,
+    pub route: Option<FfiRelationshipRoute>,
+    pub route_rejection: Option<FfiRouteMigrationRejection>,
     pub lifetime: Option<FfiRoomLifetimeState>,
     pub close_reason: Option<FfiRoomCloseReason>,
     pub nonce: u64,
@@ -156,6 +179,7 @@ pub struct FfiRoomControlSnapshot {
     pub remembered_generation: Option<u64>,
     pub supports_relationship_upgrade: bool,
     pub supports_relationship_repair: bool,
+    pub supports_route_migration: bool,
     pub lifetime: FfiRoomLifetimeState,
 }
 
@@ -196,6 +220,7 @@ impl FfiRoomControlSession {
             remembered_generation: self.session.remembered_generation(),
             supports_relationship_upgrade: self.session.supports_relationship_upgrade(),
             supports_relationship_repair: self.session.supports_relationship_repair(),
+            supports_route_migration: self.session.supports_route_migration(),
             lifetime: ffi_lifetime(self.session.lifetime_state()),
         }
     }
@@ -365,6 +390,101 @@ impl FfiRoomControlSession {
                 .map_err(room_control_err)
         })
         .await
+    }
+
+    pub async fn request_route_migration(
+        &self,
+        transaction_id: String,
+        old_revision: u64,
+        route: FfiRelationshipRoute,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .request_route_migration(
+                    &transaction_id,
+                    old_revision,
+                    core_relationship_route(route),
+                )
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub async fn accept_route_migration(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .accept_route_migration(&transaction_id)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub async fn reject_route_migration(
+        &self,
+        transaction_id: String,
+        reason: FfiRouteMigrationRejection,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .reject_route_migration(&transaction_id, core_route_rejection(reason))
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub async fn mark_route_migration_prepared(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .mark_route_migration_prepared(&transaction_id)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub fn route_migration_ready_to_commit(
+        &self,
+        transaction_id: String,
+    ) -> Result<bool, FfiRoomControlError> {
+        self.session
+            .route_migration_ready_to_commit(&transaction_id)
+            .map_err(room_control_err)
+    }
+
+    pub async fn mark_route_migration_committed(
+        &self,
+        transaction_id: String,
+    ) -> Result<(), FfiRoomControlError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .mark_route_migration_committed(&transaction_id)
+                .await
+                .map_err(room_control_err)
+        })
+        .await
+    }
+
+    pub fn route_migration_is_complete(
+        &self,
+        transaction_id: String,
+    ) -> Result<bool, FfiRoomControlError> {
+        self.session
+            .route_migration_is_complete(&transaction_id)
+            .map_err(room_control_err)
     }
 
     pub async fn offer_transfer(
@@ -708,6 +828,9 @@ fn project_event(event: RoomControlEvent) -> FfiRoomControlEvent {
         rejection: None,
         relationship_transaction_id: String::new(),
         relationship_rejection: None,
+        route_old_revision: 0,
+        route: None,
+        route_rejection: None,
         lifetime: None,
         close_reason: None,
         nonce: 0,
@@ -752,6 +875,36 @@ fn project_event(event: RoomControlEvent) -> FfiRoomControlEvent {
         }
         RoomControlEvent::RelationshipConfirmationAcknowledged { transaction_id } => {
             projected.kind = FfiRoomControlEventKind::RelationshipConfirmationAcknowledged;
+            projected.relationship_transaction_id = transaction_id;
+        }
+        RoomControlEvent::RouteMigrationRequested {
+            transaction_id,
+            old_revision,
+            route,
+        } => {
+            projected.kind = FfiRoomControlEventKind::RouteMigrationRequested;
+            projected.relationship_transaction_id = transaction_id;
+            projected.route_old_revision = old_revision;
+            projected.route = Some(ffi_relationship_route(route));
+        }
+        RoomControlEvent::RouteMigrationAccepted { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RouteMigrationAccepted;
+            projected.relationship_transaction_id = transaction_id;
+        }
+        RoomControlEvent::RouteMigrationRejected {
+            transaction_id,
+            reason,
+        } => {
+            projected.kind = FfiRoomControlEventKind::RouteMigrationRejected;
+            projected.relationship_transaction_id = transaction_id;
+            projected.route_rejection = Some(ffi_route_rejection(reason));
+        }
+        RoomControlEvent::RouteMigrationPrepared { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RouteMigrationPrepared;
+            projected.relationship_transaction_id = transaction_id;
+        }
+        RoomControlEvent::RouteMigrationCommitted { transaction_id } => {
+            projected.kind = FfiRoomControlEventKind::RouteMigrationCommitted;
             projected.relationship_transaction_id = transaction_id;
         }
         RoomControlEvent::IncomingOffer(offer) => {
@@ -811,6 +964,38 @@ fn ffi_relationship_rejection(
         RelationshipUpgradeRejection::AlreadyRelated => {
             FfiRelationshipUpgradeRejection::AlreadyRelated
         }
+    }
+}
+
+fn core_relationship_route(route: FfiRelationshipRoute) -> RelationshipRoute {
+    RelationshipRoute {
+        broker: route.broker,
+        relay: route.relay,
+        revision: route.revision,
+    }
+}
+
+fn ffi_relationship_route(route: RelationshipRoute) -> FfiRelationshipRoute {
+    FfiRelationshipRoute {
+        broker: route.broker,
+        relay: route.relay,
+        revision: route.revision,
+    }
+}
+
+fn core_route_rejection(rejection: FfiRouteMigrationRejection) -> RouteMigrationRejection {
+    match rejection {
+        FfiRouteMigrationRejection::Busy => RouteMigrationRejection::Busy,
+        FfiRouteMigrationRejection::InvalidRoute => RouteMigrationRejection::InvalidRoute,
+        FfiRouteMigrationRejection::StaleRevision => RouteMigrationRejection::StaleRevision,
+    }
+}
+
+fn ffi_route_rejection(rejection: RouteMigrationRejection) -> FfiRouteMigrationRejection {
+    match rejection {
+        RouteMigrationRejection::Busy => FfiRouteMigrationRejection::Busy,
+        RouteMigrationRejection::InvalidRoute => FfiRouteMigrationRejection::InvalidRoute,
+        RouteMigrationRejection::StaleRevision => FfiRouteMigrationRejection::StaleRevision,
     }
 }
 
@@ -970,6 +1155,28 @@ mod tests {
     }
 
     #[test]
+    fn route_migration_events_cross_the_ffi_boundary() {
+        let projected = project_event(RoomControlEvent::RouteMigrationRequested {
+            transaction_id: "route_transaction_1".into(),
+            old_revision: 4,
+            route: RelationshipRoute {
+                broker: "fixture-broker".into(),
+                relay: Some("https://relay.fixture.invalid".into()),
+                revision: 5,
+            },
+        });
+        assert_eq!(
+            projected.kind,
+            FfiRoomControlEventKind::RouteMigrationRequested
+        );
+        assert_eq!(projected.relationship_transaction_id, "route_transaction_1");
+        assert_eq!(projected.route_old_revision, 4);
+        let route = projected.route.unwrap();
+        assert_eq!(route.revision, 5);
+        assert_eq!(route.broker, "fixture-broker");
+    }
+
+    #[test]
     fn offer_projection_preserves_directory_count() {
         let offer = FfiRoomTransferOffer {
             offer_id: "opaque_7".into(),
@@ -1094,7 +1301,7 @@ mod tests {
     #[test]
     fn core_info_advertises_room_control_v5_in_current_ffi() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 28);
+        assert_eq!(info.ffi_api_version, 29);
         assert!(
             info.capabilities
                 .iter()
@@ -1129,6 +1336,11 @@ mod tests {
             info.capabilities
                 .iter()
                 .any(|capability| capability == "room_relationship_upgrade_v1")
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == "room_route_migration_v1")
         );
     }
 }

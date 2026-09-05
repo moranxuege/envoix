@@ -16,9 +16,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::Parser;
 use envoix_client::api::{
     self, DataPath, DestinationDecisionV2, DestinationRequestV2, EventSink,
-    PendingManifestV2Receive, RememberedCredential, RememberedRoomControlRole, RoomControlEvent,
-    RoomControlInvite, RoomControlSession, RoomOfferRejection, RoomTransferOffer, TransferEvent,
-    TransferOptions, TransferRole,
+    PendingManifestV2Receive, RelationshipRoute, RememberedCredential, RememberedRoomControlRole,
+    RoomControlEvent, RoomControlInvite, RoomControlSession, RoomOfferRejection, RoomTransferOffer,
+    RouteMigrationRejection, TransferEvent, TransferOptions, TransferRole,
 };
 use envoix_client::model::{
     ContentId, FailureCode, FailureOutcome, FailurePhase, RecoveryAction, RememberedAttemptOutcome,
@@ -62,6 +62,8 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const MAX_RETAINED_AGENT_EVENTS: usize = 1_024;
 const OUTGOING_PROGRESS_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
 const TELEMETRY_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+const ROUTE_MIGRATION_TIMEOUT: Duration = Duration::from_secs(60);
+const ROUTE_RECOVERY_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const AGENT_PREFERENCES_FILE: &str = "preferences-v1.json";
 
 #[derive(Debug, Parser)]
@@ -438,7 +440,7 @@ struct AgentRuntime {
     store: Mutex<ProductStore>,
     credential_protection: AgentCredentialProtection,
     active_receivers: Mutex<HashMap<String, TransferCancelToken>>,
-    active_rooms: Mutex<HashMap<String, Arc<Notify>>>,
+    active_rooms: Mutex<HashMap<String, Arc<ActiveRoomControl>>>,
     active_outgoing: Mutex<HashMap<String, ActiveOutgoingTransfer>>,
     active_incoming: Mutex<HashSet<String>>,
     active_pairings: Mutex<HashSet<String>>,
@@ -453,6 +455,41 @@ struct AgentRuntime {
 struct ActiveOutgoingTransfer {
     relationship_id: String,
     cancel: TransferCancelToken,
+}
+
+struct ActiveRoomControl {
+    wake: Notify,
+    route_migration: Mutex<Option<PendingLocalRouteMigration>>,
+}
+
+impl ActiveRoomControl {
+    fn new() -> Self {
+        Self {
+            wake: Notify::new(),
+            route_migration: Mutex::new(None),
+        }
+    }
+}
+
+struct PendingLocalRouteMigration {
+    plan: RouteMigrationPlan,
+    completion: oneshot::Sender<Result<DeviceSummary>>,
+    cancel: TransferCancelToken,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouteMigrationPlan {
+    transaction_id: String,
+    old_revision: u64,
+    route: RelationshipRoute,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RememberedConnectAttempt {
+    generation: u64,
+    broker: String,
+    relay: Option<String>,
+    route_revision: u64,
 }
 
 struct LiveTransferTelemetry {
@@ -1222,9 +1259,9 @@ fn prepare_inbox_destination(runtime: &AgentRuntime) -> Result<(PathBuf, u64)> {
 }
 
 fn wake_active_room(runtime: &AgentRuntime, relationship_id: &str) -> Result<bool> {
-    let wake = lock(&runtime.active_rooms)?.get(relationship_id).cloned();
-    if let Some(wake) = wake {
-        wake.notify_one();
+    let control = lock(&runtime.active_rooms)?.get(relationship_id).cloned();
+    if let Some(control) = control {
+        control.wake.notify_one();
         return Ok(true);
     }
     Ok(false)
@@ -1931,38 +1968,7 @@ async fn handle_request_result(
             device,
             broker,
             relay,
-        } => {
-            let current = lock(&runtime.store)?.resolve_device(&device)?;
-            if relationship_has_active_transfer(&runtime, current.id())? {
-                bail!(
-                    "device route cannot change while it has an active transfer or pending offer"
-                );
-            }
-            let unchanged = current.broker() == broker && current.relay() == relay.as_deref();
-            let updated = lock(&runtime.store)?.update_device_route(
-                current.id(),
-                &broker,
-                relay.as_deref(),
-            )?;
-            tracing::info!(
-                relationship_id = %updated.id,
-                device = %updated.label,
-                broker = %updated.broker,
-                relay = updated.relay.as_deref().unwrap_or("disabled"),
-                "remembered device route updated"
-            );
-            if !unchanged {
-                restart_remembered_receiver(runtime.clone(), updated.id.clone())?;
-                record_agent_event(
-                    &runtime,
-                    AgentEvent::RelationshipChanged {
-                        relationship_id: updated.id.clone(),
-                        change: AgentRelationshipChange::RouteUpdated,
-                    },
-                )?;
-            }
-            Ok(AgentResponse::DeviceRouteUpdated { device: updated })
-        }
+        } => migrate_device_route(runtime, device, broker, relay).await,
         AgentRequest::CreateTransfer { device, paths } => {
             create_agent_transfer(runtime, device, paths).await
         }
@@ -2011,6 +2017,71 @@ async fn handle_request_result(
         AgentRequest::Pair { label } => begin_pairing(runtime, label).await,
         AgentRequest::JoinPairing { pairing } => join_pairing(runtime, pairing).await,
     }
+}
+
+async fn migrate_device_route(
+    runtime: Arc<AgentRuntime>,
+    device: String,
+    broker: String,
+    relay: Option<String>,
+) -> Result<AgentResponse> {
+    api::parse_broker_addr(&broker, relay.as_deref())?;
+    let current = lock(&runtime.store)?.resolve_device(&device)?;
+    if current.broker() == broker && current.relay() == relay.as_deref() {
+        return Ok(AgentResponse::DeviceRouteUpdated {
+            device: current.summary(),
+        });
+    }
+    if current.needs_repair() {
+        bail!("device must finish Relationship repair before migrating its route");
+    }
+    if relationship_has_active_transfer(&runtime, current.id())? {
+        bail!("device route cannot change while it has an active transfer or pending offer");
+    }
+    let new_revision = current
+        .route_revision()
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("Relationship route revision is exhausted"))?;
+    let plan = RouteMigrationPlan {
+        transaction_id: generate_route_transaction_id()?,
+        old_revision: current.route_revision(),
+        route: RelationshipRoute {
+            broker,
+            relay,
+            revision: new_revision,
+        },
+    };
+    let control = lock(&runtime.active_rooms)?
+        .get(current.id())
+        .cloned()
+        .ok_or_else(|| anyhow!("saved device must be online before changing its network route"))?;
+    let (completion, result) = oneshot::channel();
+    let cancel = TransferCancelToken::new();
+    {
+        let mut pending = lock(&control.route_migration)?;
+        if pending.is_some() {
+            bail!("another route migration is already waiting for this device");
+        }
+        *pending = Some(PendingLocalRouteMigration {
+            plan: plan.clone(),
+            completion,
+            cancel: cancel.clone(),
+        });
+    }
+    control.wake.notify_one();
+    drop(control);
+
+    let result = match tokio::time::timeout(ROUTE_MIGRATION_TIMEOUT, result).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(anyhow!("saved device disconnected during route migration")),
+        Err(_) => {
+            cancel.cancel();
+            Err(anyhow!(
+                "route migration timed out; the old route remains available for recovery"
+            ))
+        }
+    }?;
+    Ok(AgentResponse::DeviceRouteUpdated { device: result })
 }
 
 fn pause_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<AgentResponse> {
@@ -2557,6 +2628,11 @@ async fn establish_initial_room(
                 | RoomControlEvent::RelationshipUpgradeCommitted { .. }
                 | RoomControlEvent::RelationshipConfirmationRequested { .. }
                 | RoomControlEvent::RelationshipConfirmationAcknowledged { .. }
+                | RoomControlEvent::RouteMigrationRequested { .. }
+                | RoomControlEvent::RouteMigrationAccepted { .. }
+                | RoomControlEvent::RouteMigrationRejected { .. }
+                | RoomControlEvent::RouteMigrationPrepared { .. }
+                | RoomControlEvent::RouteMigrationCommitted { .. }
                 | RoomControlEvent::VerificationSucceeded => {
                     bail!("peer advanced an unexpected Relationship upgrade transaction");
                 }
@@ -2654,7 +2730,12 @@ async fn establish_joined_room(
                 | RoomControlEvent::RelationshipUpgradePrepared { .. }
                 | RoomControlEvent::RelationshipUpgradeCommitted { .. }
                 | RoomControlEvent::RelationshipConfirmationRequested { .. }
-                | RoomControlEvent::RelationshipConfirmationAcknowledged { .. } => {
+                | RoomControlEvent::RelationshipConfirmationAcknowledged { .. }
+                | RoomControlEvent::RouteMigrationRequested { .. }
+                | RoomControlEvent::RouteMigrationAccepted { .. }
+                | RoomControlEvent::RouteMigrationRejected { .. }
+                | RoomControlEvent::RouteMigrationPrepared { .. }
+                | RoomControlEvent::RouteMigrationCommitted { .. } => {
                     bail!("peer advanced an unexpected Relationship upgrade transaction");
                 }
             }
@@ -2995,7 +3076,6 @@ async fn connect_remembered_room(
     receiver_cancel: &TransferCancelToken,
 ) -> Result<(Arc<RoomControlSession>, u64)> {
     let credential = RememberedCredential::from_opaque(opaque)?;
-    let relay = record.relay();
     let generation_role = match role {
         RememberedRoomControlRole::Connector => RememberedGenerationRole::Connector,
         RememberedRoomControlRole::Responder => RememberedGenerationRole::Responder,
@@ -3005,20 +3085,22 @@ async fn connect_remembered_room(
         record.previous_generation(),
         generation_role,
     )?;
-    let last_index = generations.len() - 1;
+    let attempts = remembered_connect_attempts(record, &generations, unix_seconds()?);
+    let last_index = attempts.len() - 1;
     let mut last_error = None;
-    for (index, generation) in generations.into_iter().enumerate() {
-        let next_generation = generation
+    for (index, attempt) in attempts.into_iter().enumerate() {
+        let next_generation = attempt
+            .generation
             .checked_add(1)
             .ok_or_else(|| anyhow!("remembered credential generation is exhausted"))?;
         let attempt_cancel = TransferCancelToken::new();
         let connect = api::connect_remembered_room_control(
-            credential.derive_session(generation),
-            record.broker().to_string(),
-            relay.map(str::to_string),
+            credential.derive_session(attempt.generation),
+            attempt.broker,
+            attempt.relay.clone(),
             runtime.config.device_name.clone(),
             role,
-            runtime.session_config(relay),
+            runtime.session_config(attempt.relay.as_deref()),
             &attempt_cancel,
         );
         tokio::pin!(connect);
@@ -3075,7 +3157,14 @@ async fn connect_remembered_room(
             }
         };
         match result {
-            Ok(session) => return Ok((Arc::new(session), next_generation)),
+            Ok(session) => {
+                tracing::debug!(
+                    device = record.label(),
+                    route_revision = attempt.route_revision,
+                    "remembered Room connected through Relationship route"
+                );
+                return Ok((Arc::new(session), next_generation));
+            }
             Err(error)
                 if (RememberedAttemptOutcome {
                     succeeded: false,
@@ -3090,6 +3179,44 @@ async fn connect_remembered_room(
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow!("remembered device has no usable generation")))
+}
+
+fn remembered_connect_attempts(
+    record: &RememberedDeviceRecord,
+    generations: &[u64],
+    now_unix_seconds: u64,
+) -> Vec<RememberedConnectAttempt> {
+    let mut routes = vec![(
+        record.broker().to_string(),
+        record.relay().map(str::to_string),
+        record.route_revision(),
+    )];
+    if let Some(previous) = record.previous_route()
+        && now_unix_seconds < previous.usable_until_unix_seconds
+        && (previous.broker != record.broker() || previous.relay.as_deref() != record.relay())
+    {
+        routes.push((
+            previous.broker.clone(),
+            previous.relay.clone(),
+            previous.revision,
+        ));
+    }
+    generations
+        .iter()
+        .flat_map(|generation| {
+            routes
+                .iter()
+                .cloned()
+                .map(
+                    move |(broker, relay, route_revision)| RememberedConnectAttempt {
+                        generation: *generation,
+                        broker,
+                        relay,
+                        route_revision,
+                    },
+                )
+        })
+        .collect()
 }
 
 async fn cancel_and_drain_remembered_connect<F>(
@@ -3125,15 +3252,15 @@ async fn run_room_session(
     device_label: &str,
     receiver_cancel: &TransferCancelToken,
 ) -> Result<()> {
-    let wake = Arc::new(Notify::new());
+    let room_control = Arc::new(ActiveRoomControl::new());
     {
         let mut rooms = lock(&runtime.active_rooms)?;
         if rooms.contains_key(device_id) {
             bail!("remembered device already has an active room");
         }
-        rooms.insert(device_id.to_string(), wake.clone());
+        rooms.insert(device_id.to_string(), room_control.clone());
     }
-    wake.notify_one();
+    room_control.wake.notify_one();
 
     let result = async {
         let mut pending_outgoing = None;
@@ -3150,6 +3277,24 @@ async fn run_room_session(
                 );
             }
         }
+        if let Some(plan) = pending_route_repair_plan(runtime, device_id)? {
+            if session.supports_route_migration() {
+                execute_local_route_migration(
+                    runtime,
+                    session.as_ref(),
+                    device_id,
+                    device_label,
+                    &plan,
+                    receiver_cancel,
+                )
+                .await?;
+                return Ok(());
+            }
+            tracing::warn!(
+                device = device_label,
+                "Relationship route needs confirmation but the peer does not support migration repair"
+            );
+        }
         loop {
             if pending_outgoing.is_none()
                 && pending_relationship_confirmation(runtime, device_id)?.is_none()
@@ -3161,7 +3306,7 @@ async fn run_room_session(
 
             let input = tokio::select! {
                 event = session.next_event() => RoomSessionInput::Control(event?),
-                _ = wake.notified() => RoomSessionInput::Wake,
+                _ = room_control.wake.notified() => RoomSessionInput::Wake,
                 decision = wait_for_pending_offer_decision(&mut pending_incoming) => {
                     RoomSessionInput::PendingDecision(decision)
                 }
@@ -3169,7 +3314,32 @@ async fn run_room_session(
                 _ = receiver_cancel.cancelled() => return Ok(()),
             };
             match input {
-                RoomSessionInput::Wake => continue,
+                RoomSessionInput::Wake => {
+                    let pending = lock(&room_control.route_migration)?.take();
+                    let Some(pending) = pending else {
+                        continue;
+                    };
+                    let result = execute_local_route_migration(
+                        runtime,
+                        session.as_ref(),
+                        device_id,
+                        device_label,
+                        &pending.plan,
+                        &pending.cancel,
+                    )
+                    .await;
+                    match result {
+                        Ok(device) => {
+                            let _ = pending.completion.send(Ok(device));
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            let reason = format!("{error:#}");
+                            let _ = pending.completion.send(Err(error));
+                            bail!("Relationship route migration failed: {reason}");
+                        }
+                    }
+                }
                 RoomSessionInput::PendingDecision(decision) => {
                     let pending = pending_incoming
                         .take()
@@ -3335,6 +3505,35 @@ async fn run_room_session(
                 ) => {
                     confirm_relationship_if_pending(runtime, device_id, &transaction_id)?;
                 }
+                RoomSessionInput::Control(RoomControlEvent::RouteMigrationRequested {
+                    transaction_id,
+                    old_revision,
+                    route,
+                }) => {
+                    let plan = RouteMigrationPlan {
+                        transaction_id,
+                        old_revision,
+                        route,
+                    };
+                    handle_incoming_route_migration(
+                        runtime,
+                        session.as_ref(),
+                        device_id,
+                        device_label,
+                        &plan,
+                        receiver_cancel,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                RoomSessionInput::Control(
+                    RoomControlEvent::RouteMigrationAccepted { .. }
+                    | RoomControlEvent::RouteMigrationRejected { .. }
+                    | RoomControlEvent::RouteMigrationPrepared { .. }
+                    | RoomControlEvent::RouteMigrationCommitted { .. },
+                ) => {
+                    bail!("peer advanced an unexpected Relationship route migration");
+                }
             }
         }
     }
@@ -3343,7 +3542,7 @@ async fn run_room_session(
     let cleanup = lock(&runtime.active_rooms).map(|mut rooms| {
         if rooms
             .get(device_id)
-            .is_some_and(|registered| Arc::ptr_eq(registered, &wake))
+            .is_some_and(|registered| Arc::ptr_eq(registered, &room_control))
         {
             rooms.remove(device_id);
         }
@@ -3387,6 +3586,253 @@ fn confirm_relationship_if_pending(
     )?;
     tracing::info!(relationship_id = device_id, "Relationship repair completed");
     Ok(true)
+}
+
+fn pending_route_repair_plan(
+    runtime: &AgentRuntime,
+    device_id: &str,
+) -> Result<Option<RouteMigrationPlan>> {
+    let record = lock(&runtime.store)?
+        .device_record(device_id)
+        .ok_or_else(|| anyhow!("remembered device is missing"))?;
+    let Some(transaction_id) = record.pending_route_transaction_id() else {
+        return Ok(None);
+    };
+    let previous = record
+        .previous_route()
+        .ok_or_else(|| anyhow!("route repair is missing its previous route"))?;
+    Ok(Some(RouteMigrationPlan {
+        transaction_id: transaction_id.to_string(),
+        old_revision: previous.revision,
+        route: RelationshipRoute {
+            broker: record.broker().to_string(),
+            relay: record.relay().map(str::to_string),
+            revision: record.route_revision(),
+        },
+    }))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RouteMigrationCheckpoint {
+    Accepted,
+    Prepared,
+    Committed,
+}
+
+async fn execute_local_route_migration(
+    runtime: &Arc<AgentRuntime>,
+    session: &RoomControlSession,
+    device_id: &str,
+    device_label: &str,
+    plan: &RouteMigrationPlan,
+    cancel: &TransferCancelToken,
+) -> Result<DeviceSummary> {
+    if cancel.is_cancelled() {
+        bail!("Relationship route migration was cancelled");
+    }
+    if !session.supports_route_migration() {
+        bail!("the saved device does not support negotiated route migration");
+    }
+    session
+        .request_route_migration(&plan.transaction_id, plan.old_revision, plan.route.clone())
+        .await?;
+    wait_for_route_migration_checkpoint(
+        runtime,
+        session,
+        device_id,
+        &plan.transaction_id,
+        RouteMigrationCheckpoint::Accepted,
+        cancel,
+    )
+    .await?;
+    complete_route_migration(runtime, session, device_id, device_label, plan, cancel).await
+}
+
+async fn handle_incoming_route_migration(
+    runtime: &Arc<AgentRuntime>,
+    session: &RoomControlSession,
+    device_id: &str,
+    device_label: &str,
+    plan: &RouteMigrationPlan,
+    cancel: &TransferCancelToken,
+) -> Result<DeviceSummary> {
+    let record = lock(&runtime.store)?
+        .device_record(device_id)
+        .ok_or_else(|| anyhow!("remembered device is missing"))?;
+    if relationship_has_active_transfer(runtime, device_id)? || record.confirmation_needs_repair() {
+        session
+            .reject_route_migration(&plan.transaction_id, RouteMigrationRejection::Busy)
+            .await?;
+        bail!("Relationship route migration was rejected while the device was busy");
+    }
+    let targets_current_revision = record.route_revision() == plan.old_revision
+        && (record.broker() != plan.route.broker || record.relay() != plan.route.relay.as_deref());
+    let repairs_matching_revision = record.route_revision() == plan.route.revision
+        && record.broker() == plan.route.broker
+        && record.relay() == plan.route.relay.as_deref()
+        && record.last_route_transaction_id() == Some(plan.transaction_id.as_str());
+    if !targets_current_revision && !repairs_matching_revision {
+        session
+            .reject_route_migration(&plan.transaction_id, RouteMigrationRejection::StaleRevision)
+            .await?;
+        bail!("Relationship route proposal does not match the active revision");
+    }
+    session.accept_route_migration(&plan.transaction_id).await?;
+    complete_route_migration(runtime, session, device_id, device_label, plan, cancel).await
+}
+
+async fn complete_route_migration(
+    runtime: &Arc<AgentRuntime>,
+    session: &RoomControlSession,
+    device_id: &str,
+    device_label: &str,
+    plan: &RouteMigrationPlan,
+    cancel: &TransferCancelToken,
+) -> Result<DeviceSummary> {
+    session
+        .mark_route_migration_prepared(&plan.transaction_id)
+        .await?;
+    wait_for_route_migration_checkpoint(
+        runtime,
+        session,
+        device_id,
+        &plan.transaction_id,
+        RouteMigrationCheckpoint::Prepared,
+        cancel,
+    )
+    .await?;
+    if !session.route_migration_ready_to_commit(&plan.transaction_id)? {
+        bail!("Relationship route was not prepared by both peers");
+    }
+    if relationship_has_active_transfer(runtime, device_id)? {
+        bail!("a Transfer became active before the route migration commit");
+    }
+    commit_route_if_needed(runtime, device_id, plan)?;
+    session
+        .mark_route_migration_committed(&plan.transaction_id)
+        .await?;
+    wait_for_route_migration_checkpoint(
+        runtime,
+        session,
+        device_id,
+        &plan.transaction_id,
+        RouteMigrationCheckpoint::Committed,
+        cancel,
+    )
+    .await?;
+    if !session.route_migration_is_complete(&plan.transaction_id)? {
+        bail!("Relationship route did not receive both commit confirmations");
+    }
+    let updated = lock(&runtime.store)?.confirm_device_route(
+        device_id,
+        plan.route.revision,
+        &plan.transaction_id,
+    )?;
+    record_agent_event(
+        runtime,
+        AgentEvent::RelationshipChanged {
+            relationship_id: device_id.to_string(),
+            change: AgentRelationshipChange::RouteUpdated,
+        },
+    )?;
+    tracing::info!(
+        relationship_id = device_id,
+        device = device_label,
+        route_revision = updated.route_revision,
+        broker = %updated.broker,
+        relay = updated.relay.as_deref().unwrap_or("disabled"),
+        "remembered device route migration confirmed"
+    );
+    Ok(updated)
+}
+
+fn commit_route_if_needed(
+    runtime: &AgentRuntime,
+    device_id: &str,
+    plan: &RouteMigrationPlan,
+) -> Result<DeviceSummary> {
+    let record = lock(&runtime.store)?
+        .device_record(device_id)
+        .ok_or_else(|| anyhow!("remembered device is missing"))?;
+    if record.route_revision() == plan.route.revision
+        && record.broker() == plan.route.broker
+        && record.relay() == plan.route.relay.as_deref()
+        && record.last_route_transaction_id() == Some(plan.transaction_id.as_str())
+    {
+        return Ok(record.summary());
+    }
+    let recovery_until = unix_seconds()?.saturating_add(ROUTE_RECOVERY_WINDOW.as_secs());
+    lock(&runtime.store)?
+        .commit_device_route_awaiting_peer(
+            device_id,
+            plan.old_revision,
+            plan.route.revision,
+            &plan.route.broker,
+            plan.route.relay.as_deref(),
+            &plan.transaction_id,
+            recovery_until,
+        )
+        .map_err(Into::into)
+}
+
+async fn wait_for_route_migration_checkpoint(
+    runtime: &AgentRuntime,
+    session: &RoomControlSession,
+    device_id: &str,
+    transaction_id: &str,
+    expected: RouteMigrationCheckpoint,
+    cancel: &TransferCancelToken,
+) -> Result<()> {
+    loop {
+        let event = tokio::select! {
+            event = session.next_event() => event?,
+            _ = cancel.cancelled() => bail!("Relationship route migration was cancelled"),
+            _ = runtime.shutdown.cancelled() => bail!("Agent is shutting down"),
+        };
+        match event {
+            RoomControlEvent::RouteMigrationAccepted {
+                transaction_id: peer_transaction,
+            } if expected == RouteMigrationCheckpoint::Accepted
+                && peer_transaction == transaction_id =>
+            {
+                return Ok(());
+            }
+            RoomControlEvent::RouteMigrationPrepared {
+                transaction_id: peer_transaction,
+            } if expected == RouteMigrationCheckpoint::Prepared
+                && peer_transaction == transaction_id =>
+            {
+                return Ok(());
+            }
+            RoomControlEvent::RouteMigrationCommitted {
+                transaction_id: peer_transaction,
+            } if expected == RouteMigrationCheckpoint::Committed
+                && peer_transaction == transaction_id =>
+            {
+                return Ok(());
+            }
+            RoomControlEvent::RouteMigrationRejected {
+                transaction_id: peer_transaction,
+                reason,
+            } if peer_transaction == transaction_id => {
+                bail!("the peer rejected route migration: {reason:?}");
+            }
+            RoomControlEvent::RelationshipConfirmationRequested { transaction_id } => {
+                confirm_relationship_if_pending(runtime, device_id, &transaction_id)?;
+                session
+                    .acknowledge_relationship_confirmation(&transaction_id)
+                    .await?;
+            }
+            RoomControlEvent::RelationshipConfirmationAcknowledged { transaction_id } => {
+                confirm_relationship_if_pending(runtime, device_id, &transaction_id)?;
+            }
+            RoomControlEvent::LifetimeChanged(_) | RoomControlEvent::Pong { .. } => {}
+            RoomControlEvent::PeerClosed(reason) => {
+                bail!("peer closed the Room during route migration: {reason:?}");
+            }
+            _ => bail!("peer advanced an unexpected Relationship route migration"),
+        }
+    }
 }
 
 fn take_pending_outgoing(
@@ -4338,6 +4784,13 @@ fn generate_relationship_transaction_id() -> Result<String> {
     Ok(format!("relationship_{}", URL_SAFE_NO_PAD.encode(random)))
 }
 
+fn generate_route_transaction_id() -> Result<String> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|error| anyhow!("generate route migration transaction id: {error}"))?;
+    Ok(format!("route_{}", URL_SAFE_NO_PAD.encode(random)))
+}
+
 fn unix_millis() -> Result<u64> {
     u64::try_from(
         SystemTime::now()
@@ -4552,7 +5005,7 @@ mod tests {
     }
 
     #[test]
-    fn request_decoder_accepts_a_valid_v15_envelope() {
+    fn request_decoder_accepts_a_valid_v16_envelope() {
         let envelope = AgentRequestEnvelope::new("request_test", AgentRequest::Status).unwrap();
         let bytes = serde_json::to_vec(&envelope).unwrap();
         assert_eq!(decode_request(&bytes).unwrap(), envelope);
@@ -5779,7 +6232,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_socket_round_trips_a_v15_envelope() {
+    async fn local_socket_round_trips_a_v16_envelope() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let runtime = Arc::new(AgentRuntime {
@@ -5829,7 +6282,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_named_pipe_round_trips_a_v15_envelope_for_its_owner() {
+    async fn windows_named_pipe_round_trips_a_v16_envelope_for_its_owner() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let directory = tempfile::tempdir().unwrap();
@@ -6003,7 +6456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_update_is_persisted_and_emits_a_typed_event() {
+    async fn route_update_requires_an_online_authenticated_peer() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
         let mut store = ProductStore::open(&state_directory).unwrap();
@@ -6063,22 +6516,65 @@ mod tests {
         )
         .await;
 
-        let AgentResponse::DeviceRouteUpdated { device } = response else {
-            panic!("unexpected response")
+        let AgentResponse::Error { code, message } = response else {
+            panic!("offline migration must be rejected")
         };
-        assert_eq!(device.id, device_id);
-        assert_eq!(device.broker, DEFAULT_RENDEZVOUS_BROKER);
-        assert_eq!(device.relay.as_deref(), Some(DEFAULT_RELAY_URL));
-        assert!(matches!(
-            lock(&runtime.events).unwrap().events.back(),
-            Some(AgentEventEnvelope {
-                event: AgentEvent::RelationshipChanged {
-                    relationship_id,
-                    change: AgentRelationshipChange::RouteUpdated,
-                },
-                ..
-            }) if relationship_id == &device_id
-        ));
+        assert_eq!(code, "operation_failed");
+        assert!(message.contains("must be online"));
+        let unchanged = lock(&runtime.store)
+            .unwrap()
+            .device_record(&device_id)
+            .unwrap();
+        assert_eq!(unchanged.broker(), old_broker);
+        assert_eq!(unchanged.route_revision(), 0);
+        assert!(lock(&runtime.events).unwrap().events.is_empty());
+    }
+
+    #[test]
+    fn remembered_connect_uses_the_previous_route_only_inside_recovery_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ProductStore::open(directory.path()).unwrap();
+        let old_broker = format!(
+            "{}@127.0.0.1:8555",
+            DEFAULT_RENDEZVOUS_BROKER.split('@').next().unwrap()
+        );
+        let pending = store
+            .prepare_device(
+                "MacBook",
+                &old_broker,
+                Some("https://old-relay.example.test"),
+            )
+            .unwrap();
+        let device_id = pending.id().to_string();
+        store
+            .commit_device(pending, &opaque_credential(), 4)
+            .unwrap();
+        store
+            .commit_device_route_awaiting_peer(
+                &device_id,
+                0,
+                1,
+                DEFAULT_RENDEZVOUS_BROKER,
+                Some(DEFAULT_RELAY_URL),
+                "route_transaction_1",
+                200,
+            )
+            .unwrap();
+        let record = store.device_record(&device_id).unwrap();
+
+        let attempts = remembered_connect_attempts(&record, &[4, 3], 199);
+        assert_eq!(attempts.len(), 4);
+        assert_eq!(attempts[0].route_revision, 1);
+        assert_eq!(attempts[0].generation, 4);
+        assert_eq!(attempts[1].route_revision, 0);
+        assert_eq!(attempts[1].broker, old_broker);
+        assert_eq!(attempts[2].route_revision, 1);
+        assert_eq!(attempts[2].generation, 3);
+        assert_eq!(attempts[3].route_revision, 0);
+
+        let expired = remembered_connect_attempts(&record, &[4, 3], 200);
+        assert_eq!(expired.len(), 2);
+        assert!(expired.iter().all(|attempt| attempt.route_revision == 1));
     }
 
     #[cfg(unix)]

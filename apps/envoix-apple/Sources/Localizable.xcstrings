@@ -1613,6 +1613,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在载入传输记录…" } }
       }
     },
+    "remembered_room.agent.connection.needs_repair" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connection needs repair · sending is paused until both devices confirm it" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接需要修复 · 两台设备确认完成前已暂停发送" } }
+      }
+    },
     "remembered_room.agent.connection.preparing" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing files…" } },

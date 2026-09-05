@@ -78,7 +78,10 @@ the SwiftUI process receives only these secret-free projections. API 28 and
 Agent protocol v15 move durable pairing to a four-phase Relationship upgrade,
 carry the creator's complete Room route across different deployments, and mark
 an interrupted post-commit Relationship as needing repair instead of presenting
-it as ready.
+it as ready. API 29 and Agent protocol v16 replace the old unilateral route
+edit with an authenticated, revisioned migration. Both peers commit the same
+broker/relay route, retain the previous route for a seven-day repair window,
+and pause sending while route confirmation is incomplete.
 
 A distributable build must use `scripts/apple-dev.sh
 macos-release` with `ENVOIX_MACOS_DEVELOPER_ID` and

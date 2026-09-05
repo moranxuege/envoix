@@ -502,16 +502,28 @@ impl EnvoixWindowsApp {
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&device.label).size(21.0).strong().color(TEXT));
                     ui.label(
-                        RichText::new("已验证的私人房间 · 离线时也可以排队")
-                            .size(12.5)
-                            .color(MUTED),
+                        RichText::new(if device.needs_repair {
+                            "连接需要修复 · 两台设备确认完成前已暂停发送"
+                        } else {
+                            "已验证的私人房间 · 离线时也可以排队"
+                        })
+                        .size(12.5)
+                        .color(if device.needs_repair {
+                            DANGER
+                        } else {
+                            MUTED
+                        }),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(danger_quiet_button("忘记设备")).clicked() {
                         self.revoke_device = Some(device.id.clone());
                     }
-                    status_pill(ui, "●  房间就绪", SUCCESS, SUCCESS_SOFT);
+                    if device.needs_repair {
+                        status_pill(ui, "●  需要修复", DANGER, DANGER_SOFT);
+                    } else {
+                        status_pill(ui, "●  房间就绪", SUCCESS, SUCCESS_SOFT);
+                    }
                 });
             });
             ui.add_space(18.0);
@@ -631,7 +643,8 @@ impl EnvoixWindowsApp {
                         .color(MUTED),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_send = !self.selected_paths.is_empty() && !self.busy();
+                    let can_send =
+                        !self.selected_paths.is_empty() && !self.busy() && !device.needs_repair;
                     if ui
                         .add_enabled(can_send, primary_button("发送到这台设备  →"))
                         .clicked()

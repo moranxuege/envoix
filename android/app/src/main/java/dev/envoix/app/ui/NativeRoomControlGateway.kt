@@ -440,6 +440,11 @@ internal class NativeRoomControlGateway internal constructor(
                 FfiRoomControlEventKind.RELATIONSHIP_UPGRADE_COMMITTED,
                 FfiRoomControlEventKind.RELATIONSHIP_CONFIRMATION_REQUESTED,
                 FfiRoomControlEventKind.RELATIONSHIP_CONFIRMATION_ACKNOWLEDGED,
+                FfiRoomControlEventKind.ROUTE_MIGRATION_REQUESTED,
+                FfiRoomControlEventKind.ROUTE_MIGRATION_ACCEPTED,
+                FfiRoomControlEventKind.ROUTE_MIGRATION_REJECTED,
+                FfiRoomControlEventKind.ROUTE_MIGRATION_PREPARED,
+                FfiRoomControlEventKind.ROUTE_MIGRATION_COMMITTED,
                 FfiRoomControlEventKind.PONG,
                 -> Unit
                 FfiRoomControlEventKind.INCOMING_OFFER -> {

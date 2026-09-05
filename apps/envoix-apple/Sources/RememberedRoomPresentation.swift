@@ -69,6 +69,7 @@ enum RememberedRoomConnectionCopy: String, CaseIterable {
 }
 
 enum AgentRoomConnectionCopy: String, CaseIterable {
+    case needsRepair = "needs_repair"
     case preparing
     case transferring
     case waiting
