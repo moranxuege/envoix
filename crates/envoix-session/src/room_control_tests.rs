@@ -265,6 +265,74 @@ fn route_migration_state_rejects_rollback_and_handles_simultaneous_repair() {
 }
 
 #[test]
+fn route_migration_state_blocks_transfers_and_rejects_illegal_transitions() {
+    let transaction_id = "route_tx_2";
+    let route = RelationshipRoute {
+        broker: "6de87065a13b786177e37cd039ad8ff2b32ac9a78fb8f248ac919a9fcbe67b92@127.0.0.1:443"
+            .into(),
+        relay: None,
+        revision: 1,
+    };
+    assert!(route.validate(0).is_ok());
+    assert!(route.validate(u64::MAX).is_err());
+    assert!(
+        RelationshipRoute {
+            broker: "not-a-broker".into(),
+            relay: None,
+            revision: 1,
+        }
+        .validate(0)
+        .is_err()
+    );
+
+    let mut responder = RouteMigrationState::default();
+    assert!(!responder.blocks_transfers());
+    assert_eq!(
+        responder
+            .begin_remote(transaction_id.into(), 0, route.clone())
+            .unwrap(),
+        RemoteRouteMigrationStart::New
+    );
+    assert!(responder.blocks_transfers());
+    assert_eq!(
+        responder
+            .begin_remote(transaction_id.into(), 0, route.clone())
+            .unwrap(),
+        RemoteRouteMigrationStart::Duplicate
+    );
+    assert!(
+        responder
+            .begin_local("route_tx_other".into(), 0, route.clone())
+            .is_err()
+    );
+    assert!(responder.mark_local_prepared("route_tx_unknown").is_err());
+    assert!(responder.receive_acceptance(transaction_id).is_err());
+    assert!(responder.mark_local_prepared(transaction_id).is_err());
+    responder.accept_remote(transaction_id).unwrap();
+    responder.mark_local_prepared(transaction_id).unwrap();
+    assert!(!responder.can_commit(transaction_id).unwrap());
+    assert!(responder.mark_local_committed(transaction_id).is_err());
+    assert!(responder.mark_remote_committed(transaction_id).is_err());
+    responder.mark_remote_prepared(transaction_id).unwrap();
+    responder.mark_local_committed(transaction_id).unwrap();
+    // The local commit alone is the repairable state: it keeps blocking
+    // Transfers until the peer commit is observed.
+    assert!(responder.blocks_transfers());
+    responder.mark_remote_committed(transaction_id).unwrap();
+    assert!(!responder.blocks_transfers());
+
+    let mut initiator = RouteMigrationState::default();
+    initiator
+        .begin_local(transaction_id.into(), 0, route)
+        .unwrap();
+    assert!(initiator.accept_remote(transaction_id).is_err());
+    assert!(initiator.reject_remote(transaction_id).is_err());
+    initiator.receive_rejection(transaction_id).unwrap();
+    assert!(!initiator.blocks_transfers());
+    assert!(initiator.is_complete(transaction_id).is_err());
+}
+
+#[test]
 fn remembered_hello_rejects_protocol_and_session_mode_mismatches() {
     let mode = RoomControlSessionMode::Remembered { generation: 7 };
     let binding = [0x42; 32];
