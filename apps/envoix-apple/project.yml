@@ -34,7 +34,7 @@ targets:
         ENVOIX_APPLICATION_BUNDLE_IDENTIFIER: com.envoix.app
         PRODUCT_BUNDLE_IDENTIFIER: "$(ENVOIX_APPLICATION_BUNDLE_IDENTIFIER)"
         MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "7"
+        CURRENT_PROJECT_VERSION: "8"
         ENVOIX_BUILD_TIMESTAMP: "unavailable"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
@@ -80,7 +80,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: "$(ENVOIX_ENGINE_HELPER_BUNDLE_IDENTIFIER)"
         PRODUCT_NAME: EnvoixEngineHelper
         MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "7"
+        CURRENT_PROJECT_VERSION: "8"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Helper/Info.plist
@@ -131,7 +131,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios
         MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "7"
+        CURRENT_PROJECT_VERSION: "8"
         ENVOIX_BUILD_TIMESTAMP: "unavailable"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
@@ -171,7 +171,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.share
         PRODUCT_NAME: EnvoixShare
         MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "7"
+        CURRENT_PROJECT_VERSION: "8"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: ShareExtension/Info.plist
