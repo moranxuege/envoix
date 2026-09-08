@@ -5,6 +5,33 @@ Status: active evidence registry
 This registry records reproducible release-path checks without treating a
 development or test signature as a production release approval.
 
+## Full production-Android and desktop rehearsal — 2026-09-08
+
+- Run [34207922558](https://github.com/moranxuege/envoix/actions/runs/34207922558)
+  passed at immutable source `2cdce5f5a75c729a81477cc4476fed87195857b1`.
+- All eight jobs passed: release contract, four desktop builds, compatible
+  broker build, signed Android build, and desktop bundle metadata/attestations.
+  Tag-only publication was skipped; no release was published.
+- Desktop bundle: eight binaries, four CycloneDX SBOMs, source manifest, and
+  checksums. Android bundle: APK/AAB, runtime and embedded-Rust SBOMs, signed
+  certificate policy in its source manifest, and checksums.
+- Independent download verification passed 18/18 checksum entries and 20/20
+  provenance/SBOM checks. Every check pinned the repository, exact source
+  digest and expected workflow, and denied self-hosted runners.
+- APK SHA-256: `db6dcf52bb568e7ce30381b840b8e58f1ffeea99a9d5f47162c421701f2bef72`.
+- AAB SHA-256: `f818e5d82f52ce7f7e425c710f82b24d9a8046fe34ae06ad1f702868621514f7`.
+- Both packages use the approved production certificate
+  `31395b806e89f3892ff62b852455d6f7f8b57346917e40693a7724e52a7876b6`,
+  application ID `dev.envoix.app`, version `0.3.0`, build `5`.
+- The preceding run failed because Bullseye security metadata expired after
+  Debian 11 LTS ended. The successful run uses already-bundled tools in the
+  same pinned image; the maximum glibc requirement check remains in place.
+
+This closes the production Android signing/pipeline gap. It does not close
+Windows Authenticode, latest macOS app notarization, TestFlight distribution,
+or real-device/upgrade acceptance. See the
+[current readiness record](release-readiness-2026-09-08.md).
+
 ## Desktop and broker bundle rehearsal 33792965105
 
 | Field | Evidence |
