@@ -24,13 +24,13 @@ jobs:
     container:
       image: rust:1.96.0-bullseye@sha256:5ebdedce38fc37fb279c5b35b2832298e769ccf3385240846ab4fc983f00fa0f
     steps:
-      - name: Install build tools
+      # The digest-pinned buildpack-deps image already supplies these tools.
+      # Avoid refreshing Bullseye package indexes after its LTS end of life.
+      - name: Verify build tools
         run: |
-          apt-get update
-          apt-get install -y \
-            binutils \
-            file \
-            pkg-config
+          command -v readelf
+          command -v file
+          command -v pkg-config
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
