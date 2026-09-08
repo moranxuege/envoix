@@ -3,6 +3,15 @@
 Status: active release-candidate procedure; v0.3.0 tagging is blocked by the
 open items below.
 
+## Release owner
+
+The maintained repository and only push/release destination is
+`moranxuege/envoix`. The organization repository is historical upstream.
+The release page is prepared for `https://envoix.cc` with GitHub Pages from
+`dev:/docs`; the relay remains on its independent `relay.envoix.cc` hostname.
+See [the current readiness record](release-readiness-2026-09-08.md) before
+running a release rehearsal or creating a tag.
+
 ## Immutable release contract
 
 `scripts/release_contract.py` is the release entry gate. It requires one

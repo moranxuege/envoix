@@ -262,7 +262,8 @@ jobs:
           apk=dist-android/envoix-android.apk
           aab=dist-android/envoix-android.aab
           apksigner_output="$RUNNER_TEMP/envoix-apksigner.txt"
-          apksigner verify --verbose --print-certs "$apk" >"$apksigner_output"
+          "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" \
+            verify --verbose --print-certs "$apk" >"$apksigner_output"
           mapfile -t apk_certificates < <(
             sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$apksigner_output"
           )
@@ -352,9 +353,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download all binaries
+      - name: Download desktop and broker binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          # Android may finish before this job: never mix its bundle into the
+          # strict desktop manifest, which accepts only these five build outputs.
+          pattern: 'envoix-{linux-x86_64,cli-macos-aarch64,cli-macos-x86_64,windows-x86_64,broker-linux-x86_64}'
           path: dist
           merge-multiple: true
 

@@ -10,7 +10,7 @@ policy, engineering rules, and milestone gates are documented in the
 [v0.3 architecture index](docs/v0.3/README.md). The v0.2.2 download page
 remains the current public release until those gates are complete.
 
-**[Download Envoix / 下载 Envoix](https://ece4410j-nuub.github.io/envoix/)**
+**[Download Envoix / 下载 Envoix](https://envoix.cc)**
 
 ## Core behavior
 

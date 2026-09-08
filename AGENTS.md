@@ -80,3 +80,10 @@ Coding style:
 * Write proper documentations for what you have done. 
 * (Rust) Use as little `unsafe` as possible. If you use it, you must state clearly why `unsafe` is the only choice. 
 * Write proper unit tests (especially for some uncommon inputs/boundary conditions) wherever possible.
+
+## Repository ownership
+
+- Push Envoix changes only to `moranxuege/envoix`.
+- `ECE4410J-NUUB/envoix` is historical upstream, not a push or release target.
+- The maintained integration branch is `dev`; use the existing checkout rather
+  than retaining duplicate local worktrees or regenerable build caches.
