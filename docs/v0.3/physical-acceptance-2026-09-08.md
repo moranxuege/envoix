@@ -19,20 +19,39 @@ policy checks. No stable tag was created.
 | WSL → Windows single file | Passed | 65,536 bytes; received SHA-256 matched. |
 | Windows → WSL nested directory | Passed | Three files including Unicode names and an empty file; all hashes matched. |
 | macOS notarization | Passed | Strict codesign, stapler and Gatekeeper accepted build 8; evidence under candidate-build8/macos. |
-| macOS installed helper startup | **Blocked** | System killed the helper before app code ran: CODESIGNING 4 Launch Constraint Violation, AMFI c[5]p[1]m[1]e[0]. |
+| macOS installed helper startup | Passed after scoped registration repair | Unchanged notarized build 8 runs with protocol 16 and both original pairings; registered-service restart also passed. |
 
-The Mac application was restored to its previous working build 5 after the failed
-upgrade check. The old helper is ready with both pairings, and all 11 Inbox files
-match pre-upgrade hashes. Build 8 and the original app/state backups are retained.
-A stale system registration is a hypothesis, not an established cause. No global
-background-item reset, system security bypass, or computer restart was performed.
-Apple's [launch-constraint diagnostics](https://developer.apple.com/documentation/security/applying-launch-environment-and-library-constraints)
-identify constraint type 5 as a spawn constraint; notarization alone does not prove
-that a registered helper can launch on an upgraded machine.
+The initial Mac upgrade failed with CODESIGNING 4 / AMFI c[5]p[1]m[1]e[0], and
+the old application was temporarily restored. Follow-up diagnosis found 84 historical
+Envoix main/helper Launch Services records (55 paths no longer existed). Only these
+Envoix records were unregistered with the documented `lsregister -u` operation; no
+application or user data was deleted. Reinstalling the unchanged notarized build 8
+at `/Applications/Envoix.app`, force-registering that path and enabling its helper
+resolved the failure. No global BTM reset, system restart or security bypass occurred.
+This demonstrates a local registration repair; it does not identify which individual
+old record caused the mismatch.
 
-iOS build 7 finished App Store Connect processing and belongs to the existing
-internal test group. Build 8 iOS upload is deliberately paused until core acceptance
-is assessed; no additional build number is needed for the now-passing desktop fixes.
+The installed build 8 helper now answers protocol 16 with both original pairings,
+and all 11 original Inbox files match their pre-upgrade hashes. A registered-service
+restart replaced the PID and returned ready with both pairings. A real GUI file picker
+queued a 256 MiB file to the original WSL pairing; after closing the send window and
+exiting the GUI, the transfer was Delivered and its receiver SHA-256 matched. WSL →
+Mac background reception also delivered 286,720 bytes with an exact hash match.
+Evidence: `dist/physical-20260908/macos/build8-registration-repair-and-transfer.json`.
+
+The source also fixes a separate first-enable UI issue: after enabling or refreshing
+the service, Settings refreshes the helper's device list and transfer/inbox snapshot.
+The targeted macOS Release compile passed. This small macOS-only UI correction is
+not yet included in the installed, already-notarized a7da56a5 binary; collect remaining
+acceptance fixes before the next distribution packaging pass. No build number changed.
+
+iOS build 8 archived and uploaded successfully, finished App Store Connect processing,
+and is assigned to the existing Envoix-Internal-Test group. No new testers were added.
+The connected iPad still has 0.2.2 (4); the owner was asked to update via TestFlight
+and verify preserved files. Android remains physically connected per the owner, but
+current adb and USB registry queries enumerate no Android device; owner-side unlock,
+USB mode and accessory/debug authorization checks are pending.
+
 Physical TestFlight installation/retention, Android production-key migration and the
 remaining mobile/foreground UI matrix are still pending. Windows Authenticode remains
 unsigned by the owner's explicit decision.

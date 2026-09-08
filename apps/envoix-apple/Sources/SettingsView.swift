@@ -201,7 +201,10 @@ struct SettingsStageView: View {
                 isOn: Binding(
                     get: { agentService.isRequestedEnabled },
                     set: { enabled in
-                        Task { await agentService.setEnabled(enabled) }
+                        Task {
+                            await agentService.setEnabled(enabled)
+                            await helperTransfers.refresh()
+                        }
                     }
                 )
             )
@@ -215,7 +218,10 @@ struct SettingsStageView: View {
                     .foregroundStyle(agentServiceStatusColor)
                 Spacer()
                 Button(AppText.localized("settings.background.refresh", language: language)) {
-                    Task { await agentService.refresh() }
+                    Task {
+                        await agentService.refresh()
+                        await helperTransfers.refresh()
+                    }
                 }
                 .buttonStyle(.borderless)
             }

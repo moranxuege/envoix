@@ -161,3 +161,13 @@ build 8 upload is paused. Android and iPad physical acceptance remain pending.
 Windows remains unsigned by the owner's decision. No stable release is approved.
 The earlier preview-stage notarization/profile and disconnected-device statements
 are historical checkpoints, superseded by this linked report where explicitly verified.
+
+## Follow-up: Mac registration repaired, TestFlight build 8 available
+
+The unchanged notarized macOS build 8 now launches after Envoix-only Launch Services
+registration cleanup. Helper restart, original data preservation, GUI-picker send
+after window closure, and reverse background reception passed. iOS build 8 is uploaded,
+processed and available to the existing internal group. Android USB enumeration and
+physical TestFlight installation/transfer validation still need completion. A macOS
+first-enable UI refresh correction passed targeted compilation and awaits the next
+packaging pass; the installed notarized binary remains the verified a7da56a5 build.
