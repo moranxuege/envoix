@@ -148,3 +148,16 @@ Website verification: both languages passed at 320px/390px phone and 1440px
 desktop viewports without horizontal overflow; all three logo images load.
 All ten bilingual download links match uploaded assets. All twelve GitHub
 asset SHA-256 digests match the local verified files.
+
+## Latest physical checkpoint: build 8
+
+See [physical acceptance](physical-acceptance-2026-09-08.md) for exact evidence.
+Build 8 source `a7da56a5` passed CI, signed release rehearsal, 18 checksum and 20
+provenance/SBOM checks, and Windows/WSL retained-data upgrade and bidirectional
+256 MiB pause/restart/resume checks. macOS build 8 passed notarization, but its
+installed helper was rejected by a system spawn constraint; the previous working
+Mac application was restored with all data. iOS build 7 is processed in TestFlight;
+build 8 upload is paused. Android and iPad physical acceptance remain pending.
+Windows remains unsigned by the owner's decision. No stable release is approved.
+The earlier preview-stage notarization/profile and disconnected-device statements
+are historical checkpoints, superseded by this linked report where explicitly verified.

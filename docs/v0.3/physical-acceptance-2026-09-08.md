@@ -2,6 +2,49 @@
 
 Status: in progress; no stable-release approval.
 
+## Current checkpoint: build 8
+
+Candidate source: `a7da56a5414f635ac580242474e26d2f960203b4`, version 0.3.0 (8).
+[CI](https://github.com/moranxuege/envoix/actions/runs/34225697498) and the
+[full signed release rehearsal](https://github.com/moranxuege/envoix/actions/runs/34225295953)
+passed. Independent verification passed all 18 checksums and 20 provenance/SBOM
+policy checks. No stable tag was created.
+
+| Physical build 8 check | Result | Evidence boundary |
+| --- | --- | --- |
+| Windows upgrade/start/restart | Passed | Original pairs/settings and all 18 Inbox files retained; immediate Status ready. |
+| WSL upgrade/start/restart/stop | Passed | Original pairs/settings and all 74 Inbox files retained; restart changed PID. |
+| Windows → WSL pause/restart/resume | Passed | 256 MiB, paused state persisted, delivered SHA-256 matched; 59.72 s including reconnection. |
+| WSL → Windows pause/restart/resume | Passed | 256 MiB, paused state persisted, delivered SHA-256 matched; 19.69 s. |
+| WSL → Windows single file | Passed | 65,536 bytes; received SHA-256 matched. |
+| Windows → WSL nested directory | Passed | Three files including Unicode names and an empty file; all hashes matched. |
+| macOS notarization | Passed | Strict codesign, stapler and Gatekeeper accepted build 8; evidence under candidate-build8/macos. |
+| macOS installed helper startup | **Blocked** | System killed the helper before app code ran: CODESIGNING 4 Launch Constraint Violation, AMFI c[5]p[1]m[1]e[0]. |
+
+The Mac application was restored to its previous working build 5 after the failed
+upgrade check. The old helper is ready with both pairings, and all 11 Inbox files
+match pre-upgrade hashes. Build 8 and the original app/state backups are retained.
+A stale system registration is a hypothesis, not an established cause. No global
+background-item reset, system security bypass, or computer restart was performed.
+Apple's [launch-constraint diagnostics](https://developer.apple.com/documentation/security/applying-launch-environment-and-library-constraints)
+identify constraint type 5 as a spawn constraint; notarization alone does not prove
+that a registered helper can launch on an upgraded machine.
+
+iOS build 7 finished App Store Connect processing and belongs to the existing
+internal test group. Build 8 iOS upload is deliberately paused until core acceptance
+is assessed; no additional build number is needed for the now-passing desktop fixes.
+Physical TestFlight installation/retention, Android production-key migration and the
+remaining mobile/foreground UI matrix are still pending. Windows Authenticode remains
+unsigned by the owner's explicit decision.
+
+Release workflow correction: finish targeted runtime regression and physical desktop
+checks before another Apple distribution cycle. Local rebuilds and test retries do
+not by themselves require a new build number; immutable uploaded distribution builds
+do. Android and Apple numbers remain aligned by the repository release contract.
+
+The following sections retain earlier checkpoints and explain the fixes; their pending
+statements are superseded only where the build 8 table above supplies new evidence.
+
 ## Candidate identities
 
 - Core / build 6 candidate: `a24b209bda2221e00ff55969872347e83c2c7ac1`.
