@@ -3978,6 +3978,29 @@ async fn prepare_outgoing_transfer(
     result.map_err(|error| (transfer_id, error))
 }
 
+fn settle_outgoing_attempt(
+    store: &mut ProductStore,
+    transfer_id: &TransferId,
+    failure: Option<TransferFailure>,
+) -> Result<Transfer> {
+    let current = store
+        .transfer(transfer_id.as_str())?
+        .ok_or_else(|| anyhow!("active outgoing Transfer disappeared before settlement"))?;
+    if matches!(
+        current.state,
+        TransferState::Paused | TransferState::Canceled
+    ) {
+        return Ok(current);
+    }
+    match failure {
+        Some(failure) if failure.outcome() == FailureOutcome::Canceled => {
+            Ok(store.cancel_outgoing_transfer(transfer_id)?)
+        }
+        Some(failure) => Ok(store.fail_outgoing_transfer(transfer_id, failure)?),
+        None => Ok(store.complete_outgoing_transfer(transfer_id)?),
+    }
+}
+
 fn start_outgoing_transfer(
     runtime: &Arc<AgentRuntime>,
     session: Arc<RoomControlSession>,
@@ -4083,68 +4106,37 @@ async fn run_outgoing_transfer(
         tracing::debug!(transfer_id = %transfer_id, %error, "room activity cleanup failed");
     }
 
+    let projection_error = events.projection_error();
+    let failure_phase = events.failure_phase();
     let settlement = if runtime.shutdown.is_cancelled() {
         Ok(None)
-    } else if let Some(error) = events.projection_error() {
-        tracing::error!(transfer_id = %transfer_id, %error, "outgoing Transfer projection failed");
-        lock(&runtime.store).and_then(|mut store| {
-            store
-                .fail_outgoing_transfer(
-                    &transfer_id,
-                    TransferFailure {
-                        code: FailureCode::InternalError,
-                        phase: events.failure_phase(),
-                        retryable: true,
-                        recovery_action: RecoveryAction::Retry,
-                    },
-                )
-                .map(Some)
-                .map_err(Into::into)
-        })
     } else {
-        match result {
-            Ok(_) => lock(&runtime.store).and_then(|mut store| {
-                store
-                    .complete_outgoing_transfer(&transfer_id)
-                    .map(Some)
-                    .map_err(Into::into)
-            }),
-            Err(error) => {
-                let projection = envoix_client::failure::project_session_failure(
+        let failure = if projection_error.is_some() {
+            Some(TransferFailure {
+                code: FailureCode::InternalError,
+                phase: failure_phase,
+                retryable: true,
+                recovery_action: RecoveryAction::Retry,
+            })
+        } else {
+            result.err().map(|error| {
+                envoix_client::failure::project_session_failure(
                     &error,
                     envoix_client::model::TransferDirection::Send,
-                    events.failure_phase(),
-                );
-                lock(&runtime.store).and_then(|mut store| {
-                    if projection.failure.outcome() == FailureOutcome::Canceled {
-                        let current = store.transfer(transfer_id.as_str())?;
-                        match current {
-                            Some(transfer)
-                                if matches!(
-                                    transfer.state,
-                                    TransferState::Paused | TransferState::Canceled
-                                ) =>
-                            {
-                                Ok(Some(transfer))
-                            }
-                            Some(_) => store
-                                .cancel_outgoing_transfer(&transfer_id)
-                                .map(Some)
-                                .map_err(Into::into),
-                            None => Err(anyhow!(
-                                "active outgoing Transfer disappeared before settlement"
-                            )),
-                        }
-                    } else {
-                        store
-                            .fail_outgoing_transfer(&transfer_id, projection.failure)
-                            .map(Some)
-                            .map_err(Into::into)
-                    }
-                })
-            }
-        }
+                    failure_phase,
+                )
+                .failure
+            })
+        };
+        lock(&runtime.store)
+            .and_then(|mut store| settle_outgoing_attempt(&mut store, &transfer_id, failure))
+            .map(Some)
     };
+    if matches!(&settlement, Ok(Some(transfer)) if transfer.state == TransferState::Failed)
+        && let Some(error) = projection_error
+    {
+        tracing::error!(transfer_id = %transfer_id, %error, "outgoing Transfer projection failed");
+    }
 
     if let Ok(mut active) = runtime.active_outgoing.lock() {
         active.remove(transfer_id.as_str());
@@ -4453,6 +4445,9 @@ impl AgentOutgoingEvents {
     }
 
     fn project_progress(&self, bytes_transferred: u64, total_bytes: u64) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
         let mut projection = match self.projection.lock() {
             Ok(projection) => projection,
             Err(_) => {
@@ -4491,16 +4486,30 @@ impl AgentOutgoingEvents {
             return;
         }
         let persisted = lock(&self.runtime.store).and_then(|mut store| {
+            let current = store
+                .transfer(self.transfer_id.as_str())?
+                .ok_or_else(|| anyhow!("active outgoing Transfer disappeared during progress"))?;
+            if matches!(
+                current.state,
+                TransferState::Paused | TransferState::Canceled
+            ) {
+                return Ok(None);
+            }
             store
                 .progress_outgoing_transfer(&self.transfer_id, bytes_transferred)
+                .map(Some)
                 .map_err(Into::into)
         });
-        if let Err(error) = persisted {
-            self.fail_projection(
-                &mut projection,
-                format!("persist Transfer progress: {error}"),
-            );
-            return;
+        match persisted {
+            Ok(None) => return,
+            Ok(Some(_)) => {}
+            Err(error) => {
+                self.fail_projection(
+                    &mut projection,
+                    format!("persist Transfer progress: {error}"),
+                );
+                return;
+            }
         }
         projection.persisted_bytes = bytes_transferred;
         drop(projection);
@@ -5788,6 +5797,59 @@ mod tests {
     }
 
     #[test]
+    fn late_attempt_results_preserve_durable_pause_and_cancel() {
+        for canceled in [false, true] {
+            for failure_code in [
+                None,
+                Some(FailureCode::InternalError),
+                Some(FailureCode::NetworkLost),
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let mut store = ProductStore::open(directory.path()).unwrap();
+                let pending = store.prepare_device("peer", "broker", None).unwrap();
+                let relationship = pending.id().to_string();
+                store
+                    .commit_device(pending, &opaque_credential(), 0)
+                    .unwrap();
+                let id = TransferId::parse("transfer_late_result").unwrap();
+                store
+                    .create_transfer(
+                        &relationship,
+                        id.clone(),
+                        ContentId::parse("content_late_result").unwrap(),
+                        16,
+                    )
+                    .unwrap();
+                store.start_outgoing_transfer(&id).unwrap();
+                let expected = if canceled {
+                    store.cancel_outgoing_transfer(&id).unwrap().state
+                } else {
+                    store.pause_transfer(&id).unwrap().state
+                };
+                let failure = failure_code.map(|code| TransferFailure {
+                    code,
+                    phase: FailurePhase::Transferring,
+                    retryable: true,
+                    recovery_action: RecoveryAction::Retry,
+                });
+                let settled = settle_outgoing_attempt(&mut store, &id, failure).unwrap();
+                assert_eq!(settled.state, expected);
+                assert!(settled.failure.is_none());
+                drop(store);
+                assert_eq!(
+                    ProductStore::open(directory.path())
+                        .unwrap()
+                        .transfer(id.as_str())
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
     fn outgoing_progress_is_coalesced_until_a_checkpoint_or_completion() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
@@ -5871,6 +5933,23 @@ mod tests {
                 .last_sequence,
             initial_sequence
         );
+        lock(&runtime.store)
+            .unwrap()
+            .pause_transfer(&transfer_id)
+            .unwrap();
+        events.project_progress(16, 16);
+        assert!(events.projection_error().is_none());
+        let paused = lock(&runtime.store)
+            .unwrap()
+            .transfer(transfer_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(paused.state, TransferState::Paused);
+        assert_eq!(paused.transferred_bytes, 0);
+        lock(&runtime.store)
+            .unwrap()
+            .resume_transfer(&transfer_id)
+            .unwrap();
         events.project_progress(16, 16);
         let transfer = lock(&runtime.store)
             .unwrap()
@@ -5887,7 +5966,7 @@ mod tests {
                 .unwrap()
                 .engine_snapshot()
                 .last_sequence,
-            initial_sequence + 1
+            initial_sequence + 3
         );
         events.project_progress(8, 16);
         assert!(events.projection_error().is_none());

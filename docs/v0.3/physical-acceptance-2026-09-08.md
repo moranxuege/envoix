@@ -96,3 +96,26 @@ Outstanding: fresh recovery-fix validation, final-candidate macOS notarization,
 physical Android signing migration/upgrade, iPad TestFlight upgrade/launch,
 mobile cross-device transfers/recovery, and remaining GUI/foreground integration
 checks. Keep `v0.3.0` unpublished while product correctness gates remain open.
+
+## Build 7 follow-up and build 8 correction
+
+Build 7 (`75855ddc5f0e1b1cf24d9e11a5e6a3156c9ebe35`) passed CI and the full
+signed release rehearsal (runs 34221543456 and 34221543678). Independent artifact
+verification passed 18 checksums and 20 provenance/SBOM checks. Its macOS app
+passed notarization, stapling and Gatekeeper; its iOS archive uploaded successfully.
+Physical TestFlight installation is still pending.
+
+Windows and WSL retained-state upgrades and immediate startup readiness passed.
+Both single-file and nested-directory transfers passed with received SHA-256
+verification. WSL → Windows 256 MiB pause/restart/resume passed without a workaround.
+The reverse Windows → WSL case failed: a late attempt event replaced the persisted
+Paused state with Failed/InternalError after restart. This is a release blocker.
+
+Build 8 preserves durable Paused/Canceled states when late progress or attempt
+results arrive. Settlement reads and updates the state under the same store lock.
+Regression coverage exercises success, internal error and network loss after both
+controls, persistence across reopen, and late progress after pause. All 31 Agent
+tests and Clippy with warnings denied passed locally. Fresh candidate CI, Apple
+distribution and both physical recovery directions must pass before this fix is
+considered accepted. Android signing migration still awaits permission to uninstall
+the old debug-key app; the verified backup does not preserve Android Keystore keys.
