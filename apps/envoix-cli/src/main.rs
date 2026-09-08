@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+mod agent_readiness;
 mod agent_service;
 mod args;
 
@@ -116,14 +117,18 @@ async fn run(cli: Cli) -> CliResult<()> {
                 agent_binary,
                 broker,
                 relay,
-            } => install_agent(inbox, device_name, agent_binary, broker, relay, json),
-            AgentCommand::Configure { broker, relay } => configure_agent(broker, relay, json),
-            AgentCommand::Start => manage_agent_service("started", agent_service::start, json),
-            AgentCommand::Stop => manage_agent_service("stopped", agent_service::stop, json),
-            AgentCommand::Restart => {
-                manage_agent_service("restarted", agent_service::restart, json)
+            } => install_agent(inbox, device_name, agent_binary, broker, relay, json).await,
+            AgentCommand::Configure { broker, relay } => configure_agent(broker, relay, json).await,
+            AgentCommand::Start => {
+                manage_agent_service("started", agent_service::start, json, true).await
             }
-            AgentCommand::Update { agent_binary } => update_agent(agent_binary, json),
+            AgentCommand::Stop => {
+                manage_agent_service("stopped", agent_service::stop, json, false).await
+            }
+            AgentCommand::Restart => {
+                manage_agent_service("restarted", agent_service::restart, json, true).await
+            }
+            AgentCommand::Update { agent_binary } => update_agent(agent_binary, json).await,
             AgentCommand::Uninstall {
                 delete_state,
                 yes: _,
@@ -300,7 +305,7 @@ async fn call_agent(endpoint: Option<PathBuf>, request: AgentRequest) -> CliResu
     Ok(client.call(request).await?)
 }
 
-fn install_agent(
+async fn install_agent(
     inbox: Option<PathBuf>,
     device_name: String,
     agent_binary: Option<PathBuf>,
@@ -315,6 +320,7 @@ fn install_agent(
         broker,
         relay: parse_relay_argument(&relay),
     })?;
+    agent_readiness::wait_for_current_user().await?;
     if json {
         println!(
             "{}",
@@ -336,11 +342,12 @@ fn install_agent(
     Ok(())
 }
 
-fn configure_agent(broker: String, relay: String, json: bool) -> CliResult<()> {
+async fn configure_agent(broker: String, relay: String, json: bool) -> CliResult<()> {
     let configured = agent_service::configure(agent_service::ConfigureOptions {
         broker,
         relay: parse_relay_argument(&relay),
     })?;
+    agent_readiness::wait_for_current_user().await?;
     if json {
         println!(
             "{}",
@@ -363,8 +370,9 @@ fn parse_relay_argument(value: &str) -> Option<String> {
     }
 }
 
-fn update_agent(agent_binary: Option<PathBuf>, json: bool) -> CliResult<()> {
+async fn update_agent(agent_binary: Option<PathBuf>, json: bool) -> CliResult<()> {
     let installed = agent_service::update(agent_service::UpdateOptions { agent_binary })?;
+    agent_readiness::wait_for_current_user().await?;
     if json {
         println!(
             "{}",
@@ -410,12 +418,16 @@ fn uninstall_agent(delete_state: bool, json: bool) -> CliResult<()> {
     Ok(())
 }
 
-fn manage_agent_service(
+async fn manage_agent_service(
     completed: &str,
     operation: impl FnOnce() -> io::Result<()>,
     json: bool,
+    wait_for_ready: bool,
 ) -> CliResult<()> {
     operation()?;
+    if wait_for_ready {
+        agent_readiness::wait_for_current_user().await?;
+    }
     if json {
         println!(
             "{}",
