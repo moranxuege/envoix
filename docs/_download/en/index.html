@@ -1,84 +1,80 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Send files and folders across platforms. Verify a device once, then choose it and send. Delivery is confirmed only after the receiver has safely saved your content.">
-<title>Envoix · Files, safely delivered</title>
-<link rel="stylesheet" href="../style.css">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#080c12">
+<meta name="description" content="Envoix lets your files flow between devices. Open-source cross-platform file transfer, native clients, and persistent background transfers.">
+<title>Envoix — Your files. In flow.</title>
+<link rel="icon" href="../icon.png"><link rel="stylesheet" href="../style.css">
+<script src="../page.js" defer></script>
 </head>
 <body>
-<main>
-<nav aria-label="Envoix">
-<a class="brand" href="https://envoix.cc">envoix</a>
-<a href="../">中文</a>
-</nav>
-<header class="hero">
-<p class="eyebrow">ENVOIX / v0.3</p>
-<h1>Your devices.<br>Files, safely delivered.</h1>
-<p class="lede">Send files and folders across platforms. Verify a device once, then choose it and send. Delivery is confirmed only after the receiver has safely saved your content.</p>
-<div class="actions">
-<a class="button primary" href="https://github.com/moranxuege/envoix/releases">View releases</a>
-<a class="button" href="https://github.com/moranxuege/envoix/tree/dev">Explore the source</a>
-</div>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="ambient" aria-hidden="true"></div>
+<header class="site-header wrap">
+  <a class="brand" href="../" aria-label="Envoix"><img src="../icon.png" width="28" height="28" alt=""><span>envoix<span class="brand-dot">.</span></span></a>
+  <nav aria-label="Main navigation"><a href="#experience">Experience</a><a href="#downloads">Platforms</a><a class="language" href="../" lang="zh-CN">中文</a><a class="nav-github" href="https://github.com/moranxuege/envoix/tree/dev" aria-label="GitHub"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 19c-4 1-4-2-6-2m12 5v-4a3 3 0 0 0-.8-2.3c3-.3 5.8-1.5 5.8-6.7a5.2 5.2 0 0 0-1.4-3.6A4.8 4.8 0 0 0 18.5 2S17.4 1.7 15 3.4a12.3 12.3 0 0 0-6 0C6.6 1.7 5.5 2 5.5 2a4.8 4.8 0 0 0-.1 3.4A5.2 5.2 0 0 0 4 9c0 5.2 2.8 6.4 5.8 6.7A3 3 0 0 0 9 18v4"/></svg></a></nav>
 </header>
-<aside class="notice">
-<strong>v0.3 is being prepared for release</strong>
-<p>Final download packages are not published yet. Releases will come from the maintainer’s personal repository; source and verification progress are available on GitHub.</p>
-</aside>
-<section>
-<h2>A native experience on every device.</h2>
-<div class="grid">
-<article class="card">
-<h3>macOS</h3>
-<span class="status">Notarization flow verified</span>
-<p>SwiftUI app with background transfers. Developer ID signing, notarization and stapling have recorded evidence; the latest candidate still needs complete validation.</p>
-</article>
-<article class="card">
-<h3>Windows</h3>
-<span class="status">Publisher signing pending</span>
-<p>The graphical client, background service and CLI are integrated. Authenticode signing and a separate SmartScreen check remain open.</p>
-</article>
-<article class="card">
-<h3>Android</h3>
-<span class="status">Production signing in preparation</span>
-<p>A native Jetpack Compose client. A long-term release key has been created; complete signed APK/AAB release verification is in progress.</p>
-</article>
-<article class="card">
-<h3>iPhone and iPad</h3>
-<span class="status">Distribution verification pending</span>
-<p>A universal SwiftUI app with device and simulator development coverage. TestFlight distribution still needs verification.</p>
-</article>
-<article class="card">
-<h3>Linux / WSL</h3>
-<span class="status">CLI and background service</span>
-<p>Transfers for terminals and automation, with persistent operation, restart recovery and received-file management.</p>
-</article>
-</div>
+<main id="main">
+<section class="hero wrap">
+  <div class="hero-copy">
+    <a class="release-pill" href="#downloads"><span class="pulse-dot"></span>v0.3 · A new connection is coming <svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
+    <h1>Your files.<br><span>In flow.</span></h1>
+    <p class="hero-description">From this device to the next.<br>Give your photos, ideas, and entire folders<br class="desktop-break"> a simpler way to get there.</p>
+    <div class="hero-actions"><a class="button button-primary" href="#downloads">Find your platform<svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a><a class="text-link" href="https://github.com/moranxuege/envoix/tree/dev">Explore the source <span>↗</span></a></div>
+    <div class="hero-footnote"><span class="tiny-line"></span>OPEN SOURCE / NATIVE BY DESIGN / CROSS-PLATFORM</div>
+  </div>
+  <div class="transfer-scene" aria-label="Interactive illustration of a cross-device file transfer">
+    <div class="scene-grid" aria-hidden="true"></div><div class="orbit orbit-one" aria-hidden="true"></div><div class="orbit orbit-two" aria-hidden="true"></div>
+    <div class="scene-coordinate coordinate-top" aria-hidden="true">CONNECTION / 001</div>
+    <div class="scene-coordinate coordinate-bottom" aria-hidden="true">YOUR DEVICES. ONE FLOW.</div>
+    <svg class="connection-line" viewBox="0 0 600 500" fill="none" aria-hidden="true"><path d="M190 156C440 156 190 355 430 355" stroke="url(#line-gradient)" stroke-width="1.5"/><path class="moving-dash" d="M190 156C440 156 190 355 430 355" stroke="#acebff" stroke-width="3"/><defs><linearGradient id="line-gradient"><stop stop-color="#4f8fff" stop-opacity=".2"/><stop offset=".5" stop-color="#9bdcf7"/><stop offset="1" stop-color="#71e9c8" stop-opacity=".2"/></linearGradient></defs></svg>
+    <div class="device device-mac"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span>MacBook Pro<small>Trusted device</small></span><span class="device-dot"></span></div>
+    <div class="file-tile" aria-hidden="true"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6"/><path d="M8 13h8m-8 4h5"/></svg><span>weekend.zip</span></div>
+    <div class="transfer-card">
+      <div class="transfer-card-top"><span class="mini-logo">e</span><span>Device transfer</span><span class="three-dots">•••</span></div>
+      <div class="transfer-file"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6"/><path d="M8 13h8m-8 4h5"/></svg><div><strong>weekend.zip</strong><small>Photos, memories, and the next adventure.</small></div><span class="file-size">24.8 MB</span></div>
+      <div class="progress-track"><span id="transfer-progress"></span></div>
+      <div class="progress-meta"><span id="transfer-state" data-sending="Transferring securely" data-complete="Delivered · saved on receiving device">Delivered · saved on receiving device</span><span id="transfer-percent">100%</span></div>
+    </div>
+    <div class="device device-phone"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></svg><span>Pixel 9<small>Trusted device</small></span><span class="device-dot"></span></div>
+    <div class="scene-controls"><span>Illustration · no local files accessed</span><button id="replay" type="button" data-label="Replay transfer" data-running="Transferring…">Replay transfer ↗</button></div>
+  </div>
 </section>
-<section class="facts">
-<div>
-<h3>Verify before connecting</h3>
-<p>Device authentication and durable trust establish an explicit security boundary for reconnection.</p>
-</div>
-<div>
-<h3>Saved before delivered</h3>
-<p>The sender reports delivery only after receiver verification and durable-save confirmation.</p>
-</div>
-<div>
-<h3>Independent of the window</h3>
-<p>A desktop background service owns persistent work, so transfers can continue after the graphical window closes.</p>
-</div>
+<div class="platform-ribbon wrap" aria-label="Supported platforms"><span>Every device belongs.</span><div><span><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>macOS</span><span><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 5 8-1v7H3zm10-1 8-1v8h-8zM3 13h8v7l-8-1zm10 0h8v8l-8-1z"/></svg>Windows</span><span><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 4-2-2m12 2 2-2M4 11a8 8 0 0 1 16 0Zm0 3v5h16v-5M8 19v3m8-3v3"/><path d="M8 7h.01M16 7h.01"/></svg>Android</span><span><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></svg>iOS</span><span><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m6 9 3 3-3 3m6 0h5"/></svg>Linux</span></div></div>
+<section id="experience" class="experience wrap">
+  <div class="section-heading"><div><p class="eyebrow">01 / MADE TO CONNECT</p><h2>Less friction.<br><span>More flow.</span></h2></div><p>From the first hello to the final receipt.<br>Considered at every step of the connection.</p></div>
+  <div class="feature-grid">
+    <article class="feature feature-trust"><div class="feature-visual trust-visual" aria-hidden="true"><span class="trust-node"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg></span><span class="trust-line"></span><span class="trust-shield"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 4v6c0 5-9 10-9 10S3 17 3 12V6Z"/><path d="m8 12 3 3 5-6"/></svg></span><span class="trust-line"></span><span class="trust-node"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></svg></span></div><span class="feature-label">BUILT ON TRUST</span><h3>Familiar devices. A trusted connection.</h3><p>Verify device identity once and keep that trust. Your next transfer starts by choosing a device.</p></article>
+    <article class="feature"><div class="feature-visual receipt-visual" aria-hidden="true"><div><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6"/><path d="M8 13h8m-8 4h5"/></svg>weekend.zip<span><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></span></div><small>RECEIVED. VERIFIED. SAVED.</small></div><span class="feature-label">DELIVERY THAT MEANS IT</span><h3>Delivered means saved.</h3><p>A transfer completes after the receiver verifies and saves it. A receipt you can rely on.</p></article>
+    <article class="feature"><div class="feature-visual background-visual" aria-hidden="true"><div class="mini-window"><i></i><i></i><i></i><span>envoix</span></div><div class="wave-bars"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></div></div><span class="feature-label">QUIETLY IN THE BACKGROUND</span><h3>Close the window. Keep the flow.</h3><p>A desktop background service owns persistent tasks. Your transfer keeps going beyond the app window.</p></article>
+  </div>
 </section>
-<section class="notice">
-<strong>Upgrading to v0.3</strong>
-<p>v0.3 uses a new local state format. Keep received files and back up old state, then follow the recovery guide to reset legacy product state and pair devices again. Android’s new signing identity may require uninstalling a test-signed version first; uninstalling clears its application data.</p>
-<a href="https://github.com/moranxuege/envoix/blob/dev/docs/v0.3/operations.md">Read the upgrade and recovery guide</a>
+<section id="downloads" class="downloads wrap">
+  <div class="section-heading"><div><p class="eyebrow">02 / PICK YOUR PLATFORM</p><h2>Your devices.<br><span>Your Envoix.</span></h2></div><div class="release-note"><span class="release-state">v0.3 is getting ready</span><p>Public downloads are not available yet.<br>Packages will follow signing and distribution checks.</p><a class="text-link" href="https://github.com/moranxuege/envoix/releases">View GitHub releases ↗</a></div></div>
+  <div class="platform-grid"><article class="platform-card" data-platform="macOS">
+      <div class="platform-top"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span class="platform-index">01</span></div>
+      <h3>macOS</h3><p class="platform-tagline">Right at home on your Mac.</p><p class="platform-description">A SwiftUI interface. Transfers that keep going.</p>
+      <div class="platform-status"><span></span>Notarization proven · candidate review pending</div>
+    </article><article class="platform-card" data-platform="Windows">
+      <div class="platform-top"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 5 8-1v7H3zm10-1 8-1v8h-8zM3 13h8v7l-8-1zm10 0h8v8l-8-1z"/></svg><span class="platform-index">02</span></div>
+      <h3>Windows</h3><p class="platform-tagline">Working beyond the window.</p><p class="platform-description">Desktop app, command line, and background service.</p>
+      <div class="platform-status"><span></span>Publisher signing pending</div>
+    </article><article class="platform-card" data-platform="Android">
+      <div class="platform-top"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 4-2-2m12 2 2-2M4 11a8 8 0 0 1 16 0Zm0 3v5h16v-5M8 19v3m8-3v3"/><path d="M8 7h.01M16 7h.01"/></svg><span class="platform-index">03</span></div>
+      <h3>Android</h3><p class="platform-tagline">Take your files with you.</p><p class="platform-description">A native Compose client. APK and AAB packages.</p>
+      <div class="platform-status"><span></span>Production signing verified</div>
+    </article><article class="platform-card" data-platform="iPhone & iPad">
+      <div class="platform-top"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></svg><span class="platform-index">04</span></div>
+      <h3>iPhone & iPad</h3><p class="platform-tagline">Small screen. Big possibilities.</p><p class="platform-description">A universal SwiftUI app with system sharing.</p>
+      <div class="platform-status"><span></span>TestFlight verification pending</div>
+    </article><article class="platform-card" data-platform="Linux / WSL">
+      <div class="platform-top"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m6 9 3 3-3 3m6 0h5"/></svg><span class="platform-index">05</span></div>
+      <h3>Linux / WSL</h3><p class="platform-tagline">Speaks fluent command line.</p><p class="platform-description">CLI and background Agent for your terminal workflow.</p>
+      <div class="platform-status"><span></span>Release builds verified</div>
+    </article><a class="platform-card source-card" href="https://github.com/moranxuege/envoix/tree/dev"><div class="platform-top"><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 19c-4 1-4-2-6-2m12 5v-4a3 3 0 0 0-.8-2.3c3-.3 5.8-1.5 5.8-6.7a5.2 5.2 0 0 0-1.4-3.6A4.8 4.8 0 0 0 18.5 2S17.4 1.7 15 3.4a12.3 12.3 0 0 0-6 0C6.6 1.7 5.5 2 5.5 2a4.8 4.8 0 0 0-.1 3.4A5.2 5.2 0 0 0 4 9c0 5.2 2.8 6.4 5.8 6.7A3 3 0 0 0 9 18v4"/></svg><svg class="icon " viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></div><h3>Built in the open.</h3><p>Open code. Visible progress.<br>Come see what’s next.</p><span class="source-link">moranxuege / envoix ↗</span></a></div>
 </section>
+<section class="upgrade wrap"><details><summary><span>Coming from an older version?</span><span class="details-label">Migration & recovery <b>+</b></span></summary><div><p>v0.3 uses a new local state format. Keep received files, back up old state, and follow the operations guide to reset old product state and pair devices again. Moving from an old Android test signature to the production key may require uninstalling the old app, which clears its app data.</p><a class="text-link" href="https://github.com/moranxuege/envoix/blob/dev/docs/v0.3/operations.md">Read the full guide ↗</a></div></details></section>
 </main>
-<footer>
-<span>Envoix · Maintained by moranxuege</span>
-<a href="mailto:moranxuege@outlook.com">Contact the maintainer</a>
-</footer>
-</body>
-</html>
+<footer class="wrap"><div class="footer-top"><a class="brand" href="../">envoix<span class="brand-dot">.</span></a><span>Connection, naturally.</span><a href="mailto:moranxuege@outlook.com">Say hello ↗</a></div><div class="footer-bottom"><span>© 2026 Envoix · Maintained by moranxuege</span><span>MADE FOR THE SPACE BETWEEN DEVICES.</span></div></footer>
+</body></html>
