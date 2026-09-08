@@ -2,8 +2,8 @@
 
 Status: active preparation record; not a release approval.
 
-The only release destination is `moranxuege/envoix`. No v0.3.0 tag or public
-binary release was created by this preparation.
+The only release destination is `moranxuege/envoix`. The stable `v0.3.0` tag remains blocked. A separately labeled experimental
+preview distributes the unchanged verified rehearsal binaries.
 
 ## Candidate validation
 
@@ -73,8 +73,19 @@ transfer, native-platform cards, and a collapsible migration guide. Desktop,
 language switching and replay/guide interactions verified, and browser error
 logs were empty. Reduced-motion preferences disable animation.
 
-The page links only to the personal repository and labels v0.3 as not yet
-published. Unavailable binaries are not advertised as downloads.
+The page now links directly to five platform downloads in personal-repository
+[preview-0.3.0-20260908](https://github.com/moranxuege/envoix/releases/tag/preview-0.3.0-20260908):
+Android APK, a complete Windows GUI/CLI/Agent ZIP, Linux/WSL CLI/Agent ZIP,
+and separate Apple Silicon/Intel macOS CLI ZIPs. Windows is explicitly
+unsigned; macOS CLI is not a signed/notarized graphical app. iOS and the macOS
+graphical app remain unavailable. Both languages use the owner-selected refined
+Send Across logo in the header, footer, transfer illustration and favicon.
+
+The ZIPs preserve the original attested binary bytes and include per-package
+checksums, SBOMs, source manifests and usage instructions. ZIP containers have
+separate download hashes and are not claimed to be CI-attested. Android APK/AAB
+retain their original production signatures. The 12 release assets are
+allowlisted packages and public metadata; no signing material is included.
 
 ## Local consolidation
 
@@ -95,3 +106,37 @@ was placed in this checkout.
 V03-SEC-01 and V03-SEC-02 remain open. Do not create `v0.3.0` until the exact
 candidate passes the release checklist in [release.md](release.md), including
 platform signatures and the required real-device/upgrade evidence.
+
+## Current-candidate recheck for preview distribution
+
+- Runtime/build sources remain byte-identical between rehearsal source
+  `2cdce5f5a75c729a81477cc4476fed87195857b1` and pre-website-update HEAD
+  `bfe989719d9604c94e0ef967b6d4467e4478a47a`; intervening changes only touch docs.
+- Rechecked all 18 original artifact checksums before packaging; ZIP contents
+  and executable mode bits passed round-trip verification.
+- `python3 scripts/release_contract.py --tag v0.3.0` passed: 0.3.0, build 5,
+  41 pinned Action references. This validates metadata, not release approval.
+- `scripts/cross-device-transfer-matrix.sh --validate` passed the 22-case,
+  six-profile registry and runner syntax. No physical matrix execution is
+  claimed: adb has no connected device; the paired iPad is unavailable.
+- Current Agent protocol is **16** (`crates/envoix-client/src/product.rs`).
+  September 3/4 host evidence used protocol 12 and small payloads, so it cannot
+  close the current cross-platform, foreground picker, recovery or upgrade gate.
+  The operations guide's stale protocol-14 instruction is corrected to 16.
+- Fresh `cargo audit --json` passed with zero vulnerabilities and zero unsound
+  warnings. RustSec database revision:
+  `b266fb89baa88c73c6aaa53e0e87509c80bdf962` (2026-09-08).
+  Warnings: `paste 1.0.15` unmaintained; `spin 0.10.0` and newly observed
+  `der 0.8.0` yanked. The upstream der changelog attributes the yank to its
+  minimal-versions CI check. Preview evidence keeps the tested lockfile;
+  update/review der and rerun relevant validation before the stable release.
+
+Conclusion: preview downloads are available with explicit limitations;
+**v0.3.0 is not approved for stable release**. Remaining evidence is exact-
+candidate macOS app notarization, iOS export/TestFlight, Windows publisher
+signing (owner-deferred), and the protocol-16 physical/recovery/upgrade matrix.
+
+Website verification: both languages passed at 320px/390px phone and 1440px
+desktop viewports without horizontal overflow; all three logo images load.
+All ten bilingual download links match uploaded assets. All twelve GitHub
+asset SHA-256 digests match the local verified files.

@@ -130,3 +130,14 @@ Milestone and release evidence records:
 - the dependency path and decision for every remaining warning.
 
 An audit that cannot refresh its advisory database is not release evidence.
+
+## 2026-09-08 preview audit refresh
+
+Current audit database: `b266fb89baa88c73c6aaa53e0e87509c80bdf962`.
+Zero vulnerabilities and zero unsound warnings; the previous paste/spin
+warnings remain, with a newly reported `der 0.8.0` yank.
+The [upstream changelog](https://github.com/RustCrypto/formats/blob/master/der/CHANGELOG.md#080-2026-02-13-yanked)
+attributes this yank to fixing the upstream minimal-versions CI check.
+This preview retains the already tested and attested lockfile. Stable release
+requires reviewing/updating der and rerunning dependent tests and this audit;
+this entry does not grant permanent stable-release acceptance.

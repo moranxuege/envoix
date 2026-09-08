@@ -88,6 +88,9 @@ a:focus-visible,button:focus-visible,summary:focus-visible {
   line-height:1
 }
 .brand img {
+  width:60px;
+  height:48px;
+  object-fit:contain;
   border-radius:8px
 }
 .brand-dot {
@@ -379,16 +382,10 @@ nav a:hover {
   color:#b7c6d5
 }
 .mini-logo {
-  display:grid;
-  place-content:center;
-  width:18px;
-  height:18px;
-  background:#7ab0df24;
-  color:#afd4f3;
-  border-radius:5px;
-  font-weight:800;
-  font-size:15px;
-  line-height:1
+  width:36px;
+  height:29px;
+  object-fit:contain;
+  border-radius:5px
 }
 .three-dots {
   margin-left:auto;
@@ -1225,4 +1222,30 @@ footer {
     animation:none!important;
     transition:none!important
   }
+}
+
+/* Real preview downloads remain usable without JavaScript. */
+.download-actions {
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:20px
+}
+.download-button {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:44px;
+  padding:10px 15px;
+  border:1px solid #619abc66;
+  border-radius:8px;
+  background:#152838;
+  color:#d3f5f0;
+  font-size:12px;
+  font-weight:600;
+  transition:background .2s,border-color .2s
+}
+.download-button:hover {
+  background:#1d3b4d;
+  border-color:var(--mint)
 }

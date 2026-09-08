@@ -2,9 +2,9 @@
 
 Status: active release review; open release blockers are listed below.
 
-Reviewed baseline: 2026-09-04
+Reviewed baseline: 2026-09-08
 
-This document describes the implementation on `refactor/v0.3`. It replaces the
+This document describes the implementation on the personal repository’s `dev` branch. It replaces the
 2026-07-19 security-review work draft as the source for current claims. It does
 not claim that an untagged development build is ready for public distribution.
 
@@ -173,12 +173,12 @@ The tunable values and semantics are in
 
 | ID | Severity | Status | Required closure |
 | --- | --- | --- | --- |
-| V03-SEC-01 | high for public distribution | open, macOS notarization closed | macOS Developer ID signing and notarization are closed by the 2026-09-05 run recorded in the desktop host evidence. Still required: run the Android tag path with an approved production key and retain evidence; define the iOS/TestFlight signing evidence. Never publish a debug, ad-hoc, test-key, or unlabeled unsigned app as v0.3.0. |
+| V03-SEC-01 | high for stable public distribution | open; Android production signing verified | Full rehearsal 34207922558 verifies approved Android signing. September 5 macOS notarization covers an older source only; notarize the exact final app. iOS export/TestFlight evidence and Windows publisher signing remain outstanding. Preview downloads explicitly label unsigned/CLI limitations; never publish a debug, test-key, or unlabeled unsigned app as stable v0.3.0. |
 | V03-SEC-02 | high for support claims | open | Complete the physical iPhone, iPad, Android, Windows, macOS, and Linux/WSL reference matrix, including revoke, reconnect, resume, and legacy-state rejection. |
 | V03-SEC-03 | medium | accepted for RC, recheck at tag | The Rust `spake2` backend is not independently audited. InviteV2 adds transcript and exporter binding but does not replace a cryptographic audit. Keep the experimental statement in user-facing technical documentation. |
 | V03-SEC-04 | low/medium | accepted with restriction | Human Room Codes have about 41.4 hidden bits, not the 256 bits of a complete InviteV2 ticket. The five-minute lifetime, six-attempt budget, tombstone, and source limits are mandatory; prefer QR/NFC/full invitation for unattended or high-risk use. |
 | V03-SEC-05 | low/medium | accepted for WSL | The WSL fallback vault is protected by owner-only filesystem permissions, not hardware-backed storage. A multi-user or weakly administered WSL host needs an external secret store. |
-| V03-SEC-06 | low | accepted, recheck at tag | `paste 1.0.15` is unmaintained and `spin 0.10.0` is yanked through upstream iroh dependencies. Neither has a current RustSec vulnerability in the reviewed lockfile. |
+| V03-SEC-06 | low | preview warning reviewed; recheck before stable tag | Fresh audit has zero vulnerabilities/unsound warnings. `paste 1.0.15` is unmaintained; `spin 0.10.0` and `der 0.8.0` are yanked. Upstream attributes the der yank to minimal-versions CI. Review/update der and refresh all dependency evidence before stable tagging. |
 | V03-SEC-07 | availability/privacy | operational restriction | A relay or broker can deny service and observe metadata. End-to-end authentication protects content and peer admission, not availability or traffic-analysis resistance. |
 
 No open high-severity item in this table is accepted for the v0.3.0 public tag.

@@ -45,7 +45,7 @@ envoix inbox latest
 envoix inbox set-directory /absolute/path
 ```
 
-Status must report Agent protocol 14 and Engine schema 2. A CLI/Agent protocol
+Status must report Agent protocol 16 and Engine schema 2. A CLI/Agent protocol
 mismatch is an installation error, not a recoverable network timeout.
 
 ## Change and rollout order
