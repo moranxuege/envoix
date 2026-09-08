@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
@@ -35,6 +36,9 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.security.MessageDigest
 import java.util.Collections
+
+private const val MATRIX_EVIDENCE_STATUS = 2
+private const val MAX_MATRIX_EVIDENCE_BYTES = 256 * 1024
 
 /** Scenario-driven physical coverage for the Android Manifest-v2 surface,
  * including its typed platform destination/result gate. */
@@ -1234,13 +1238,14 @@ private class AndroidMatrixEndpointEvidence(
                         .put("plaintext_bytes", fixture.totalBytes)
                         .put("elapsed_ms", finishedAt - startedAt),
                 )
-        val directory = File(context.filesDir, "envoix-matrix/$runId/$caseId")
-        check(directory.mkdirs() || directory.isDirectory)
-        val output = File(directory, "$role.json")
-        val temporary = File(directory, ".$role.json.tmp")
-        temporary.writeText(result.toString())
-        if (output.exists()) check(output.delete())
-        check(temporary.renameTo(output)) { "could not publish Android endpoint evidence" }
+        val encoded = result.toString().toByteArray(Charsets.UTF_8)
+        check(encoded.size <= MAX_MATRIX_EVIDENCE_BYTES) { "Android endpoint evidence is too large" }
+        InstrumentationRegistry.getInstrumentation().sendStatus(
+            MATRIX_EVIDENCE_STATUS,
+            Bundle().apply {
+                putString("envoixMatrixEvidence", Base64.encodeToString(encoded, Base64.NO_WRAP))
+            },
+        )
     }
 
     private fun publishedDisplayName(uri: Uri): String =

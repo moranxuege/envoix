@@ -40,6 +40,10 @@ SENSITIVE_TEXT_PATTERNS = {
 }
 REDACTIONS = (
     (
+        re.compile(r"(?m)^INSTRUMENTATION_STATUS: envoixMatrixEvidence=.*$"),
+        "[REDACTED_ANDROID_ENDPOINT_EVIDENCE]",
+    ),
+    (
         re.compile(r"(?i)(?<![a-z0-9])\d{6}-[a-z0-9]{4,8}-[a-z0-9]{4,8}(?![a-z0-9])"),
         "[REDACTED_ROOM_CODE]",
     ),

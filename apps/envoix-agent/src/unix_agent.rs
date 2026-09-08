@@ -1267,6 +1267,14 @@ fn wake_active_room(runtime: &AgentRuntime, relationship_id: &str) -> Result<boo
     Ok(false)
 }
 
+fn schedule_outgoing_work(runtime: &Arc<AgentRuntime>, relationship_id: &str) -> Result<()> {
+    if !wake_active_room(runtime, relationship_id)? {
+        // A parked responder must reconnect as a connector once work becomes dispatchable.
+        restart_remembered_receiver(runtime.clone(), relationship_id.to_string())?;
+    }
+    Ok(())
+}
+
 fn relationship_has_active_outgoing(runtime: &AgentRuntime, relationship_id: &str) -> Result<bool> {
     Ok(lock(&runtime.active_outgoing)?
         .values()
@@ -2100,7 +2108,7 @@ fn pause_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<Age
     Ok(AgentResponse::Transfer { transfer })
 }
 
-fn resume_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<AgentResponse> {
+fn resume_agent_transfer(runtime: &Arc<AgentRuntime>, transfer_id: &str) -> Result<AgentResponse> {
     let transfer_id = TransferId::parse(transfer_id.to_string())?;
     if lock(&runtime.active_outgoing)?.contains_key(transfer_id.as_str()) {
         bail!("Transfer is still stopping; retry resume after its active attempt closes");
@@ -2112,12 +2120,12 @@ fn resume_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<Ag
             transfer_id: transfer_id.to_string(),
         },
     )?;
-    wake_active_room(runtime, transfer.relationship_id.as_str())?;
+    schedule_outgoing_work(runtime, transfer.relationship_id.as_str())?;
     tracing::info!(transfer_id = %transfer_id, "Transfer resumed by local control client");
     Ok(AgentResponse::Transfer { transfer })
 }
 
-fn recover_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<AgentResponse> {
+fn recover_agent_transfer(runtime: &Arc<AgentRuntime>, transfer_id: &str) -> Result<AgentResponse> {
     let transfer_id = TransferId::parse(transfer_id.to_string())?;
     if lock(&runtime.active_outgoing)?.contains_key(transfer_id.as_str()) {
         bail!("Transfer still has an active attempt");
@@ -2129,7 +2137,7 @@ fn recover_agent_transfer(runtime: &AgentRuntime, transfer_id: &str) -> Result<A
             transfer_id: transfer_id.to_string(),
         },
     )?;
-    wake_active_room(runtime, transfer.relationship_id.as_str())?;
+    schedule_outgoing_work(runtime, transfer.relationship_id.as_str())?;
     tracing::info!(transfer_id = %transfer_id, "Transfer recovery requested by local control client");
     Ok(AgentResponse::Transfer { transfer })
 }
@@ -2243,9 +2251,7 @@ async fn create_agent_transfer(
             transfer_id: transfer_id.to_string(),
         },
     )?;
-    if !wake_active_room(&runtime, transfer.relationship_id.as_str())? {
-        restart_remembered_receiver(runtime.clone(), transfer.relationship_id.to_string())?;
-    }
+    schedule_outgoing_work(&runtime, transfer.relationship_id.as_str())?;
     Ok(AgentResponse::TransferCreated { transfer })
 }
 
@@ -5347,7 +5353,7 @@ mod tests {
             active_outgoing: Mutex::new(HashMap::from([(
                 transfer_id.to_string(),
                 ActiveOutgoingTransfer {
-                    relationship_id,
+                    relationship_id: relationship_id.clone(),
                     cancel: active_cancel.clone(),
                 },
             )])),
@@ -5392,6 +5398,14 @@ mod tests {
             .unwrap()
             .remove(transfer_id.as_str());
 
+        let parked_receiver = TransferCancelToken::new();
+        lock(&runtime.active_receivers)
+            .unwrap()
+            .insert(relationship_id.clone(), parked_receiver.clone());
+        assert_eq!(
+            remembered_connection_role(&lock(&runtime.store).unwrap(), &relationship_id).unwrap(),
+            RememberedRoomControlRole::Responder
+        );
         let resumed = handle_request(
             runtime.clone(),
             AgentRequest::ResumeTransfer {
@@ -5408,6 +5422,14 @@ mod tests {
                 }
             }
         ));
+        assert!(
+            parked_receiver.is_cancelled(),
+            "resume must unpark the responder"
+        );
+        assert_eq!(
+            remembered_connection_role(&lock(&runtime.store).unwrap(), &relationship_id).unwrap(),
+            RememberedRoomControlRole::Connector
+        );
         assert!(matches!(
             handle_request(
                 runtime.clone(),

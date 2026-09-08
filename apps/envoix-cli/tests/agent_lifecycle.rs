@@ -108,7 +108,7 @@ impl Harness {
                 request.validate().unwrap();
                 assert!(matches!(request.request, AgentRequest::Status));
                 let response = AgentResponseEnvelope::new(
-                    request.request_id,
+                    request.request_id.clone(),
                     AgentResponse::Status {
                         status: AgentStatus {
                             protocol_version: AGENT_PROTOCOL_VERSION,
@@ -116,7 +116,7 @@ impl Harness {
                             device_name: "Fixture Agent".into(),
                             state_directory: "/fixture/state".into(),
                             inbox_directory: "/fixture/inbox".into(),
-                            broker: "broker".into(),
+                            broker: envoix_client::DEFAULT_RENDEZVOUS_BROKER.into(),
                             relay: None,
                             paired_devices: 0,
                             active_receivers: 0,
@@ -127,6 +127,7 @@ impl Harness {
                     },
                 )
                 .unwrap();
+                response.validate_for(&request.request_id).unwrap();
                 writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
             })
         });

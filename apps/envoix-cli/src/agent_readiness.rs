@@ -37,6 +37,17 @@ where
     loop {
         match timeout_at(deadline, probe()).await {
             Ok(Ok(())) => return Ok(()),
+            Ok(Err(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::InvalidData
+                        | io::ErrorKind::InvalidInput
+                        | io::ErrorKind::PermissionDenied
+                        | io::ErrorKind::Unsupported
+                ) =>
+            {
+                return Err(error);
+            }
             Ok(Err(_)) if Instant::now() < deadline => {
                 sleep_until((Instant::now() + interval).min(deadline)).await;
             }
@@ -75,6 +86,23 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(attempts.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn reports_invalid_protocol_data_without_hiding_it_as_a_timeout() {
+        let attempts = Cell::new(0);
+        let error = wait_until_ready(Duration::from_secs(1), POLL_INTERVAL, || {
+            attempts.set(attempts.get() + 1);
+            std::future::ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid status",
+            )))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "invalid status");
+        assert_eq!(attempts.get(), 1);
     }
 
     #[tokio::test]

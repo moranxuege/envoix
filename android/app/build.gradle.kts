@@ -222,7 +222,7 @@ android {
         applicationId = "dev.envoix.app"
         minSdk = 29 // Android 10: scoped storage + MediaStore.Downloads
         targetSdk = 34
-        versionCode = 6
+        versionCode = 7
         versionName = "0.3.0"
         buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -336,6 +336,7 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("com.google.errorprone:error_prone_annotations:2.47.0")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 
     // JVM unit tests (the report byte-budget / head-tail logic is pure).

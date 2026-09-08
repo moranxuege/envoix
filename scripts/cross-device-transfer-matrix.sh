@@ -596,16 +596,15 @@ collect_android_evidence() {
   local repetition="$4"
   local private_case_dir="$5"
   local endpoint_role="sender"
-  local app_path private_path public_path
-  local read_status=0 validation_status=0 cleanup_status=0
+  local private_path public_path
+  local read_status=0 validation_status=0
 
   [[ "$role" == "receive" ]] && endpoint_role="receiver"
-  app_path="files/envoix-matrix/$run_id/$case_id/$endpoint_role.json"
   private_path="$private_case_dir/android-$endpoint_role.json"
   public_path="$output_dir/cases/$case_id/r$repetition/$endpoint_role.json"
 
-  adb_command exec-out run-as dev.envoix.app cat "$app_path" \
-    > "$private_path" 2>/dev/null || read_status=$?
+  python3 "$repo_root/scripts/android_matrix_evidence.py" \
+    "$private_case_dir/$endpoint_role.log" "$private_path" || read_status=$?
   if [[ "$read_status" -ne 0 || ! -s "$private_path" ]]; then
     ENDPOINT_EVIDENCE_ERROR="missing_android_endpoint_result"
     validation_status=1
@@ -622,19 +621,6 @@ collect_android_evidence() {
     rm -f "$private_path"
   fi
 
-  adb_command shell run-as dev.envoix.app \
-    rm -f "$app_path" "files/envoix-matrix/$run_id/$case_id/.$endpoint_role.json.tmp" \
-    >/dev/null 2>&1 || cleanup_status=1
-  adb_command shell run-as dev.envoix.app \
-    rmdir "files/envoix-matrix/$run_id/$case_id" \
-    >/dev/null 2>&1 || true
-  adb_command shell run-as dev.envoix.app \
-    rmdir "files/envoix-matrix/$run_id" \
-    >/dev/null 2>&1 || true
-  if [[ "$cleanup_status" -ne 0 ]]; then
-    ENDPOINT_EVIDENCE_ERROR="android_endpoint_cleanup_failed"
-    return 1
-  fi
   return "$validation_status"
 }
 
@@ -699,23 +685,6 @@ collect_apple_evidence() {
   return "$validation_status"
 }
 
-remove_android_evidence_files() {
-  local run_id="$1"
-  local case_id="$2"
-  local directory="files/envoix-matrix/$run_id/$case_id"
-
-  adb_command shell run-as dev.envoix.app rm -f \
-    "$directory/sender.json" \
-    "$directory/receiver.json" \
-    "$directory/.sender.json.tmp" \
-    "$directory/.receiver.json.tmp" \
-    >/dev/null 2>&1 || true
-  adb_command shell run-as dev.envoix.app rmdir "$directory" \
-    >/dev/null 2>&1 || true
-  adb_command shell run-as dev.envoix.app rmdir "files/envoix-matrix/$run_id" \
-    >/dev/null 2>&1 || true
-}
-
 remove_endpoint_patch() {
   local platform="$1"
   local role="$2"
@@ -776,9 +745,6 @@ cleanup_runner() {
     remove_endpoint_patch \
       "$ACTIVE_RECEIVER_PLATFORM" receive "$ACTIVE_RECEIVER_RUN_ID" \
       "$ACTIVE_RECEIVER_TEST_LAYER"
-  fi
-  if [[ -n "$ACTIVE_RECEIVER_RUN_ID" && -n "$ACTIVE_CASE_ID" ]]; then
-    remove_android_evidence_files "$ACTIVE_RECEIVER_RUN_ID" "$ACTIVE_CASE_ID"
   fi
   stop_android_tests
   stop_android_logcat
@@ -857,7 +823,6 @@ run_pair() {
     remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
-    remove_android_evidence_files "$run_id" "$case_id"
     ACTIVE_CASE_ID=""
     sanitize_log "$sender_log"
     sanitize_log "$receiver_log"
@@ -876,7 +841,6 @@ run_pair() {
     remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
-    remove_android_evidence_files "$run_id" "$case_id"
     ACTIVE_CASE_ID=""
     sanitize_log "$sender_log"
     sanitize_log "$receiver_log"
@@ -897,7 +861,6 @@ run_pair() {
     remove_endpoint_patch "$receiver" receive "$run_id" "$test_layer"
     stop_android_tests
     stop_android_logcat
-    remove_android_evidence_files "$run_id" "$case_id"
     ACTIVE_CASE_ID=""
     sanitize_log "$sender_log"
     sanitize_log "$receiver_log"

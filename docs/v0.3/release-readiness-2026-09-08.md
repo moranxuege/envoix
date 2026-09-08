@@ -5,6 +5,14 @@ Status: active preparation record; not a release approval.
 The only release destination is `moranxuege/envoix`. The stable `v0.3.0` tag remains blocked. A separately labeled experimental
 preview distributes the unchanged verified rehearsal binaries.
 
+## Current physical acceptance
+
+See [the ongoing physical acceptance record](physical-acceptance-2026-09-08.md)
+for build 6 notarization, successful TestFlight upload, desktop upgrade/transfer
+results, the reproduced restart/resume defect, and mobile migration prerequisites.
+The Windows unsigned limitation is explicitly owner-accepted. The older rehearsal
+evidence below remains historical evidence for its exact source, not final approval.
+
 ## Candidate validation
 
 The hybrid Wi-Fi Aware/IP migration fixture now supplies its bound loopback
@@ -34,9 +42,9 @@ of self-hosted runners. This is CLI evidence for macOS, not app notarization.
 | Platform | Prepared | Remaining |
 | --- | --- | --- |
 | Android | A new 4096-bit RSA production identity is retained outside Git with its password in macOS Keychain. APK/AAB production signing rejects incomplete configuration. | Signed APK/AAB and the full cloud rehearsal passed with the approved certificate. Confirm upgrade behavior from old test signatures on devices. |
-| macOS | Developer ID identity and helper profile remain valid. Signing/notarization/stapling passed at `9b7e5fc7` on September 5. | Recover or recreate the notarytool Keychain credential profile, then rebuild/notarize the exact final candidate and complete clean-user Keychain/upgrade checks. Downloads contained valid provisioning profiles but no notarization credential configuration. |
-| iOS/iPadOS | Apple Distribution identity and App Store profiles for the app and Share extension are installed and valid. | Archive/export the exact candidate and retain TestFlight distribution evidence plus physical-device matrix results. |
-| Windows | GUI, CLI, Agent and lifecycle CI are available. | No publisher certificate or signing service is configured. The owner explicitly deferred Authenticode setup; retain this blocker, and separately test SmartScreen and foreground picker/send behavior. |
+| macOS | Developer ID identity and helper profile remain valid. Signing/notarization/stapling passed at `9b7e5fc7` on September 5. | Build 6 passed notarization, stapling and Gatekeeper through the Xcode account. Repeat for any newer runtime candidate and complete clean-user Keychain/upgrade checks. |
+| iOS/iPadOS | Apple Distribution identity and App Store profiles for the app and Share extension are installed and valid. | Build 6 archived, uploaded and processed in TestFlight. Physical TestFlight upgrade/launch and device matrix evidence remain pending. |
+| Windows | GUI, CLI, Agent and lifecycle CI are available. | No publisher certificate or signing service is configured. The owner explicitly accepts unsigned Windows distribution for now; disclose the limitation, and separately test SmartScreen and foreground picker/send behavior. |
 | Linux/WSL | CLI/Agent/broker release bundle, checksums, SBOM and provenance pipeline are implemented. | Full release rehearsal passed. Complete retained-state upgrade and cross-device coverage at the final candidate. |
 
 Approved Android certificate SHA-256:
