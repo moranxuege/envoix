@@ -2,9 +2,18 @@
 
 use std::env;
 use std::fs;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use envoix_client::product::{
+    AGENT_PROTOCOL_VERSION, AgentRequest, AgentRequestEnvelope, AgentResponse,
+    AgentResponseEnvelope, AgentStatus,
+};
 
 use tempfile::TempDir;
 
@@ -66,7 +75,66 @@ impl Harness {
     }
 
     fn assert_success(&self, arguments: &[&str]) {
+        let readiness = matches!(arguments.get(1), Some(&"install" | &"update" | &"restart"));
+        let endpoint = self.state().join("agent.sock");
+        let server = readiness.then(|| {
+            fs::create_dir_all(self.state()).unwrap();
+            if endpoint.exists() {
+                fs::remove_file(&endpoint).unwrap();
+            }
+            let listener = UnixListener::bind(&endpoint).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "CLI did not probe Agent readiness"
+                            );
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("fixture endpoint failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: AgentRequestEnvelope = serde_json::from_str(&line).unwrap();
+                request.validate().unwrap();
+                assert!(matches!(request.request, AgentRequest::Status));
+                let response = AgentResponseEnvelope::new(
+                    request.request_id,
+                    AgentResponse::Status {
+                        status: AgentStatus {
+                            protocol_version: AGENT_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            device_name: "Fixture Agent".into(),
+                            state_directory: "/fixture/state".into(),
+                            inbox_directory: "/fixture/inbox".into(),
+                            broker: "broker".into(),
+                            relay: None,
+                            paired_devices: 0,
+                            active_receivers: 0,
+                            active_pairings: 0,
+                            active_paths: 0,
+                            pending_offers: 0,
+                        },
+                    },
+                )
+                .unwrap();
+                writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+            })
+        });
         let output = self.run(arguments);
+        if let Some(server) = server {
+            server.join().unwrap();
+            fs::remove_file(endpoint).unwrap();
+        }
         assert!(
             output.status.success(),
             "command failed: {}",
