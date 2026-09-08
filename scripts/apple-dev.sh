@@ -84,6 +84,7 @@ Build commands:
   macos-test-rerun [...]         Rerun the built macOS App-hosted tests
   macos-clipboard-test [...]     Run unhosted macOS clipboard and local credential tests
   macos-helper-test [...]        Run isolated Agent helper host/control tests
+  macos-archive                  Archive and verify Developer ID signing for Xcode distribution
   macos-release                  Archive, notarize, staple, and verify a Developer ID build
   core-force                     Force regeneration of the Rust-to-Swift package
 
@@ -573,7 +574,7 @@ build_macos_release() {
     echo "error: set ENVOIX_MACOS_DEVELOPER_ID to the full Developer ID Application identity" >&2
     exit 2
   }
-  [[ -n "$notary_profile" ]] || {
+  [[ "$command_name" == "macos-archive" || -n "$notary_profile" ]] || {
     echo "error: set ENVOIX_MACOS_NOTARY_PROFILE to a notarytool Keychain profile" >&2
     exit 2
   }
@@ -639,6 +640,10 @@ build_macos_release() {
     archive
 
   verify_macos_release_bundle "$application" "$release_directory"
+  if [[ "$command_name" == "macos-archive" ]]; then
+    echo "Signed macOS archive (not yet notarized): $archive_path"
+    return
+  fi
   ditto -c -k --keepParent "$application" "$submission_zip"
   xcrun notarytool submit "$submission_zip" \
     --keychain-profile "$notary_profile" \
@@ -658,7 +663,7 @@ if [[ "$#" -gt 0 ]]; then
 fi
 
 case "$command_name" in
-  prepare|ios-build|ios-test-build|ios-test|ios-device-build|macos-build|macos-debug-signed|macos-test-build|macos-test|macos-clipboard-test|macos-helper-test|macos-release|core-force)
+  prepare|ios-build|ios-test-build|ios-test|ios-device-build|macos-build|macos-debug-signed|macos-test-build|macos-test|macos-clipboard-test|macos-helper-test|macos-archive|macos-release|core-force)
     if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" == "1" \
           && "${ENVOIX_BUILD_LEASE_MODE:-writer}" == "reader" ]]; then
       echo "error: $command_name cannot mutate products under a reader lease" >&2
@@ -841,9 +846,9 @@ case "$command_name" in
       test \
       "$@"
     ;;
-  macos-release)
+  macos-archive|macos-release)
     [[ "$#" -eq 0 ]] || {
-      echo "error: macos-release accepts configuration through environment variables only" >&2
+      echo "error: $command_name accepts configuration through environment variables only" >&2
       exit 2
     }
     prepare_project
