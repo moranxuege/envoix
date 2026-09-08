@@ -1152,9 +1152,20 @@ mod tests {
             .bind()
             .await
             .unwrap();
+        // This test exercises path migration, not asynchronous address discovery.
+        // Seed the bound loopback backup explicitly: a custom-only ticket can race
+        // address advertisement and leave CI with no IP path to migrate onto.
+        let server_ip = server_endpoint
+            .bound_sockets()
+            .into_iter()
+            .next()
+            .expect("the fixture binds an IPv4 loopback socket");
         let server_addr = EndpointAddr::from_parts(
             server_id,
-            [TransportAddr::Custom(server_custom_addr.clone())],
+            [
+                TransportAddr::Custom(server_custom_addr.clone()),
+                TransportAddr::Ip(server_ip),
+            ],
         );
         let (server_connection_tx, server_connection_rx) = tokio::sync::oneshot::channel();
 
